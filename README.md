@@ -1,6 +1,6 @@
 # JobOS local-first MVP
 
-JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, deterministic degraded-mode fit scoring, evidence-grounded Markdown artifact drafts, application tracking, weekly review automation, a local web dashboard, and REST API scaffolding for agent integrations.
+JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, provider-backed LLM fit scoring/tailoring with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking, weekly review automation, a local web dashboard, and REST API scaffolding for agent integrations.
 
 The implementation deliberately does **not** auto-apply to jobs, submit forms, send outreach, scrape private accounts, or require paid APIs.
 
@@ -9,7 +9,7 @@ The implementation deliberately does **not** auto-apply to jobs, submit forms, s
 - Node.js 22+
 - `sql.js` for a file-backed SQLite database at `.jobos/jobos.sqlite`
 - `cheerio` for human-initiated HTML/job-page parsing
-- Provider SDK dependencies for future LLM adapters: `openai` and `@anthropic-ai/sdk`
+- Provider-backed LLM calls through OpenAI-compatible, Ollama Cloud, or Anthropic chat APIs
 - YAML/Markdown/JSONL workspace mirror at `jobos-workspace/`
 - Node `http` local dashboard; no build step
 - Node's built-in test runner
@@ -22,7 +22,7 @@ The implementation deliberately does **not** auto-apply to jobs, submit forms, s
 npm install
 ```
 
-No API keys or cloud accounts are required for the core flow. LLM provider environment variables are scaffolded for future intelligent modules (`JOBOS_LLM_PROVIDER`, `JOBOS_LLM_MODEL`, `JOBOS_LLM_API_KEY`), but Sprint 1 still runs in deterministic degraded mode when no key is configured.
+No API keys or cloud accounts are required for the offline core flow. To enable LLM scoring and tailoring, set `JOBOS_LLM_PROVIDER` (`openai`, `ollama-cloud`, or `anthropic`), `JOBOS_LLM_MODEL`, and `JOBOS_LLM_API_KEY`. `JOBOS_LLM_BASE_URL` is optional for OpenAI-compatible local/fake/test endpoints. Without credentials, JobOS clearly marks scoring and tailoring as deterministic degraded mode.
 
 Optional workspace selection:
 
@@ -135,8 +135,8 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 ## Architecture notes
 
 - `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/tracking.js`, `src/analytics.js`, `src/api.js`, and `src/web.js`.
-- The scoring engine is deterministic degraded mode until Sprint 2 replaces it with structured LLM scoring. It calculates role fit, domain fit, seniority, location/work model, compensation, mission/interest, red flags, overall score, reasoning, and confidence.
-- Tailoring only uses stored proof points. If no proof points match, the generated Markdown includes evidence warnings and refuses to invent accomplishments.
+- The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
+- Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
 - Research commands create structured worksheets for future adapters. They do not claim facts that were not imported or verified.
 - The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks.
 
@@ -146,7 +146,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - Generated resumes and cover letters are marked `draft_needs_human_review`.
 - Application status `applied` is manual; JobOS does not capture or fake confirmation.
 - URL import is human-initiated. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment instead of failing the whole workspace.
-- No telemetry or cloud sync exist in the MVP. LLM adapter configuration is present, but no external model call is made unless a later sprint wires an explicit provider-backed command.
+- No telemetry or cloud sync exist in the MVP. External LLM calls happen only when the user explicitly configures provider credentials through environment variables.
 
 ## Tests and smoke checks
 
@@ -161,7 +161,7 @@ Current smoke coverage verifies:
 2. `jobos init` creates DB/workspace.
 3. Profile creation with local proof import.
 4. Job text import.
-5. Deterministic scoring JSON.
+5. Scoring JSON, including degraded-mode fallback in smoke and provider-backed LLM behavior in tests.
 6. Resume and cover-letter Markdown artifacts.
 7. Application create/update and due task listing.
 8. Weekly review export.
@@ -180,8 +180,8 @@ Implemented:
 - REST API scaffold with local CRUD-style routes for core entities.
 - Structured proof-point import with metrics, skills, source, and metadata fields.
 - Expanded profile preferences.
-- Deterministic degraded-mode fit scoring.
-- Evidence-grounded resume and cover-letter drafts.
+- Provider-backed LLM fit scoring with deterministic degraded-mode fallback.
+- Provider-backed, proof-grounded resume and cover-letter drafts with deterministic degraded-mode fallback.
 - Company/stakeholder research worksheets.
 - Manual application tracking.
 - Weekly review automation command.
@@ -190,11 +190,11 @@ Implemented:
 
 Next steps:
 
-- Replace deterministic degraded-mode scoring/tailoring with LLM-powered structured output and eval cases.
+- Extend scoring/tailoring evals against live configured providers, not only OpenAI-compatible fake provider tests.
 - Add richer profile preference editing and answer-bank commands.
 - Add artifact approval/diff commands.
 - Add explicit export archive command; current data is already portable as files plus SQLite.
-- Add optional LLM hooks only after preserving the deterministic no-key flow.
+- Add LLM-powered research, outreach, and interview prep while preserving the deterministic no-key flow.
 - Add discovery adapters and scheduler runner with rate limits and approval queues.
 - Add browser extension/autofill dry-run only after approval model and answer bank mature.
 

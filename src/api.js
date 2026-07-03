@@ -10,14 +10,15 @@ function send(res,status,obj){ res.writeHead(status,{'content-type':'application
 function safeWriteOrigin(req){ const origin=req.headers.origin; if(!origin) return true; try { const host=new URL(origin).hostname; return ['127.0.0.1','localhost','::1'].includes(host); } catch { return false; } }
 const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders'};
 const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id'};
+function publicRow(resource,row){ if(resource==='jobs' && row) return {...row,url:String(row.url||'').startsWith('jobos:text:')?'':row.url}; return row; }
 export async function handleApi(s,req,res,u){
   try{
     reload(s);
     if(u.pathname==='/api/state' && req.method==='GET') return send(res,200,state(s));
     const m=u.pathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/); if(!m) return false;
     const [,resource,rid]=m; if(!tables[resource]) return false;
-    if(req.method==='GET' && !rid) return send(res,200,all(s,`SELECT * FROM ${tables[resource]} ORDER BY ${pk[resource]}`));
-    if(req.method==='GET' && rid){ const row=one(s,`SELECT * FROM ${tables[resource]} WHERE ${pk[resource]}=?`,[rid]); return row?send(res,200,row):send(res,404,{error:'not found'}); }
+    if(req.method==='GET' && !rid) return send(res,200,all(s,`SELECT * FROM ${tables[resource]} ORDER BY ${pk[resource]}`).map(row=>publicRow(resource,row)));
+    if(req.method==='GET' && rid){ const row=one(s,`SELECT * FROM ${tables[resource]} WHERE ${pk[resource]}=?`,[rid]); return row?send(res,200,publicRow(resource,row)):send(res,404,{error:'not found'}); }
     if(['POST','PATCH','PUT','DELETE'].includes(req.method) && !safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
     const data=await body(req);
     if(req.method==='POST' && resource==='profiles'){ const r=createProfile(s,data.name||data.id||'Untitled Profile',{}); return send(res,201,{id:r.profile.id,created:r.created}); }

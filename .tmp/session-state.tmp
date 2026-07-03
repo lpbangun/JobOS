@@ -1,62 +1,90 @@
 # Session State — JobOS Rebuild Loop
 
 ## Current phase
-Sprint 1: Foundation rebuild — COMPLETE
+Sprint 2: LLM scoring + tailoring — COMPLETE
 
 ## Repo
 - Path: /home/logani/projects/Job App
 - Branch: main
-- Current git status: Sprint 1 code/docs/test changes staged for local commit after final conductor approval in this turn; `.tmp/` loop artifacts remain untracked unless intentionally added.
-- Baseline before Sprint 1: `npm test` passed (2/2 tests).
+- Sprint 1 commit: 71829fb Rebuild JobOS foundation modules
+- Sprint 2 changes are ready for local commit after final verification.
 
 ## Tmux / worker status
 - Tmux session: jobos-rebuild
-- Windows observed: conductor, opencode, omp, omp-review, codex, claude, dev, goal
-- OMP interactive window existed, but OMP noninteractive implementation attempt failed because the Fireworks/GLM API key was not available to `omp -p` (`No API key found for fireworks`). Conductor implemented Sprint 1 directly, then used Codex and Claude for review.
-- Codex review: ran repeatedly with `codex review --uncommitted -c model='gpt-5.5' -c sandbox_mode='danger-full-access'`; earlier findings were fixed; final Codex review reported no blocking correctness bugs.
-- Claude architecture review: completed with `claude -p`; verdict: Sprint 1 is a real architecture improvement, but Sprint 2 must avoid polishing heuristics and implement real LLM scoring first.
+- Windows: conductor, opencode, droid, omp-review, codex, claude, dev, goal
+- OMP was replaced by Droid as Implementer 1 (GLM 5.2 via Droid subscription). Droid config at ~/.config/droid/settings.json with {"model":"glm-5.2"}.
+- OMP-review (grok-composer-2.5-fast) is still available as Reviewer 2 in the omp-review window.
+- Earlier OMP noninteractive implementation attempt failed because the Fireworks/GLM API key was not available to `omp -p` (`No API key found for fireworks`). Conductor implemented Sprint 1 directly, then used Codex and Claude for review.
+- Sprint 2 was implemented directly by conductor using TDD-style failing tests first. No external mutating worker was used for Sprint 2.
+- For Sprint 3+, delegate implementation to Droid (window: droid, model: GLM 5.2) or OpenCode (window: opencode, model: DeepSeek V4 Pro).
 
 ## Sprint progress
 - Sprint 1 (Foundation rebuild): COMPLETE
   - Refactored `src/cli.js` into modules under `src/`.
   - Added dependencies: `cheerio`, `openai`, `@anthropic-ai/sdk`.
-  - Added provider-agnostic LLM config scaffold in `src/llm.js`; no network LLM calls yet.
-  - Added structured proof-point fields: skills, metrics, source, metadata.
-  - Expanded default profile preferences: role families, industries, stages, locations, salary, dealbreakers, work model, communication style, strategy, automation policy.
-  - Added REST API scaffold with local CRUD-style routes for profiles, proofs, jobs, applications, tasks, artifacts, companies, stakeholders, plus `/api/state`.
-  - Added local API write protections: rejects non-local `Origin` writes and reloads the sql.js DB before API requests to avoid stale server snapshots overwriting newer CLI changes.
-  - README updated for modular architecture, dependencies, LLM scaffold, REST examples, and deterministic degraded-mode status.
-  - Tests expanded from 2 to 3 subtests covering REST proof/task creation, CSRF/origin guard, stale-DB protection, and parsed API state.
-- Sprint 2 (LLM scoring + tailoring): NOT STARTED — NEXT
-- Sprint 3 (Research + outreach): NOT STARTED
+  - Added structured proof-point fields and expanded profile preferences.
+  - Added REST API scaffold with local CRUD-style routes for core entities.
+  - Added local API write protections and sql.js reload-on-request protection.
+  - README updated for modular architecture and local-first REST examples.
+- Sprint 2 (LLM scoring + tailoring): COMPLETE
+  - Implemented provider-backed `src/llm.js.generateJson`.
+  - Supported providers/config:
+    - `JOBOS_LLM_PROVIDER=openai` via OpenAI-compatible `/chat/completions`.
+    - `JOBOS_LLM_PROVIDER=ollama-cloud` via OpenAI-compatible `/chat/completions` defaulting to `https://ollama.com/v1`.
+    - `JOBOS_LLM_PROVIDER=anthropic` via `/messages`.
+    - `JOBOS_LLM_MODEL`, `JOBOS_LLM_API_KEY`, optional `JOBOS_LLM_BASE_URL`.
+  - Replaced scoring with LLM-powered structured JSON output when credentials are configured.
+  - Preserved deterministic degraded-mode fallback with explicit `mode: deterministic-degraded` and LLM error capture if provider calls fail.
+  - Scoring dimensions now include roleFit, domainFit, seniority, locationWorkModel, compensation, missionInterest, networkAccess, and redFlags with explainable reasoning.
+  - Implemented LLM-powered resume/cover-letter tailoring when credentials are configured.
+  - Tailoring validates LLM proof mappings against stored proof point IDs and refuses unsupported mappings.
+  - Created 5 real-ish eval job fixtures in `tests/eval/jobs/` plus `tests/eval/scoring-cases.json` and `tests/eval/profile-proof-points.md`.
+  - Added `tests/sprint2-llm.test.js` covering provider call wiring, authorization header, ≥30 point score differentiation, and proof-grounded tailoring.
+  - README updated to document provider-backed LLM scoring/tailoring and degraded-mode fallback.
+- Sprint 3 (Research + outreach): NOT STARTED — NEXT
 - Sprint 4 (Interview prep + analytics + dashboard): NOT STARTED
 - Sprint 5 (Integration + polish + eval): NOT STARTED
 
 ## Verification evidence
-- `npm test` passed after Sprint 1 changes: 3/3 tests passing.
-- `npm run smoke` passed after Sprint 1 changes with end-to-end CLI/dashboard smoke output: `ok: true`, score 64, dashboard API jobs 1, route hardening true.
-- Module import check passed: `node -e "import('./src/cli.js').then(()=>console.log('cli module loads'))"` printed `cli module loads`.
-- Manual structured output inspection passed: generated `profiles/pm-edtech.yaml` includes expanded preferences and proof points with metrics/source/metadata.
-- Manual REST check passed: `GET /api/profiles` returned one profile; `POST /api/tasks` returned a `task_...` ID.
-- Migration safety check passed: an old-schema `proof_points` table migrated correctly, and `addProof` preserved `source: manual`, ISO-ish `created_at`, metrics JSON, and metadata.
-- Codex final review: no discrete introduced bug blocking correctness.
-- Claude sprint-boundary review: real foundation improvement; highest-leverage Sprint 2 step is implementing `llm.js` for structured scoring first.
+- `node --test tests/sprint2-llm.test.js` passed: 3/3 Sprint 2 tests.
+- `npm run test` passed after Sprint 2 changes: 6/6 tests passing.
+- `npm run smoke` passed after Sprint 2 changes with degraded-mode no-key flow:
+  - `ok: true`
+  - profile: `pm-edtech`
+  - job: `job_bbe74731a917`
+  - score: 73
+  - dashboard API jobs: 1
+  - route hardening: true
+- Manual provider-backed eval using a local OpenAI-compatible fake provider made 2 provider requests and produced:
+  - Good-fit job `Curriculum Product Manager`: score 88, mode `llm`.
+  - Poor-fit job `Backend Payments Engineer`: score 38, mode `llm`.
+  - Gap: 50 points, exceeding the ≥30 point Sprint 2 bar.
+  - Inspected roleFit reasoning: provider-backed reasoning compared product discovery/learning-platform work against backend infrastructure ownership and candidate proof points, not keyword counts.
+- Tailoring test inspected generated Markdown and verified:
+  - It contains a `Requirement-to-proof map`.
+  - It includes at least 3 stored `proof_...` IDs.
+  - It writes an artifact requiring human review.
+- Codex review after fixes: no discrete correctness issues found.
 
-## Known limitations / Sprint 2 warnings
-- Scoring remains deterministic degraded mode and is still not the usability target.
-- Tailoring remains deterministic proof-point templating and is still not the usability target.
+## Known limitations / Sprint 3 warnings
+- No live external provider eval was run because this shell has no `JOBOS_LLM_PROVIDER`, `JOBOS_LLM_MODEL`, or API key configured. Provider behavior was verified against a local OpenAI-compatible fake provider that exercises the same HTTP code path.
 - Research remains worksheet scaffolding and is still not the usability target.
+- Outreach is not implemented yet.
+- Interview prep is not implemented yet.
 - Dashboard is still mostly read-only HTML; REST routes exist but UI create/edit is not fully wired.
 - MCP server is not implemented yet.
-- `sql.js` whole-file writes are acceptable for solo MVP but remain a concurrency risk; the API now reloads before requests, but a native SQLite binding should be revisited before scheduler/automation work.
-- Code modules are functionally split but still dense in places; reformatting/readability cleanup should be considered before large Sprint 2 additions.
+- `sql.js` whole-file writes remain a concurrency risk for future scheduler/automation work.
 
 ## Next action
-Start Sprint 2 only after committing Sprint 1 locally. Sprint 2 first slice: implement real provider-backed `llm.js.generateJson`, create scoring eval fixtures, replace `score()` with structured LLM output plus deterministic fallback, and verify a good-fit vs poor-fit score gap of at least 30 points.
+Start Sprint 3: implement web-search-backed company research and stakeholder/outreach drafting. The first slice should make `research company --job <id>` produce a company dossier with at least 5 verified facts and source URLs, then inspect the generated dossier for a real company before moving on.
 
 ## Key files
 - .tmp/jobos-rebuild-loop-plan.md — loop plan
-- .tmp/agent-prompts/jobos-sprint1-omp-implementation.md — attempted OMP implementation prompt
 - .tmp/session-state.tmp — this file
+- src/llm.js — provider-backed JSON generation
+- src/scoring.js — LLM scoring with fallback
+- src/tailoring.js — LLM proof-grounded tailoring with fallback
+- tests/sprint2-llm.test.js — Sprint 2 provider/scoring/tailoring tests
+- tests/eval/ — Sprint 2 eval fixtures
 - ideal-agent-native-job-application-app.md — canonical spec
 - AGENTS.md — project conventions

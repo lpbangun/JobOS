@@ -5,7 +5,7 @@ import { spawnSync, spawn } from 'node:child_process';
 import http from 'node:http';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
-const env = { ...process.env, JOBOS_HOME: root };
+const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
 function run(args, raw = false) {
   const result = spawnSync(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${args.join(' ')} failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);

@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 
 function makeRunner() {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-test-'));
-  const env = { ...process.env, JOBOS_HOME: root };
+  const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
   const run = (args) => {
     const result = spawnSync(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
     assert.equal(result.status, 0, `${args.join(' ')}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
@@ -74,6 +74,8 @@ test('REST API scaffold exposes local CRUD-style task creation', async () => {
     assert.ok(tasks.some(t => t.title === 'Review API scaffold'));
     const jobs = JSON.parse(run(['jobs', 'list', '--json']));
     assert.ok(jobs.some(j => j.id === job.id));
+    const apiJobs = await fetch(`http://127.0.0.1:${port}/api/jobs`).then(r => r.json());
+    assert.equal(apiJobs.find(j => j.id === job.id)?.url, '');
     const apiState = await fetch(`http://127.0.0.1:${port}/api/state`).then(r => r.json());
     assert.ok(apiState.jobs.some(j => j.id === job.id && Array.isArray(j.requirements)));
     assert.deepEqual(apiState.artifacts, []);

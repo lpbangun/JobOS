@@ -145,12 +145,21 @@ Every sprint ends with:
 - MCP server exposes all core operations
 - Architecture reviewer (Claude) confirms: "this is usable, not a skeleton"
 
+## Final report gate
+
+When all stop conditions are met, write `.tmp/final-report.md` before yielding. The report must summarize:
+
+- What was built across all five sprints.
+- Which modules are genuinely usable, with evidence from inspected real output.
+- Verification commands and results.
+- Remaining limitations, risks, and recommended next steps.
+
 ## Role assignments
 
 | Role | Agent | Model | Windows |
 |------|-------|-------|---------|
 | Conductor | Hermes /goal | GPT-5.5 (Ollama Cloud) | goal |
-| Implementer 1 | OMP | GLM 5.2 (Ollama Cloud) | omp |
+| Implementer 1 | Droid | GLM 5.2 (Droid subscription) | droid |
 | Implementer 2 | OpenCode | DeepSeek V4 Pro | opencode |
 | Reviewer 1 (code quality) | Codex | GPT-5.5 | codex |
 | Reviewer 2 (high-level functionality) | OMP agent | grok-composer-2.5-fast | omp-review |

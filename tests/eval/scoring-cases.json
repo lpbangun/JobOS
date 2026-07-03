@@ -1,0 +1,32 @@
+[
+  {
+    "id": "good-fit-curriculum-pm",
+    "file": "jobs/good-fit-curriculum-pm.md",
+    "expectedRange": [80, 95],
+    "rationale": "Direct PM + EdTech + educator discovery + analytics alignment."
+  },
+  {
+    "id": "poor-fit-backend-payments",
+    "file": "jobs/poor-fit-backend-payments.md",
+    "expectedRange": [25, 50],
+    "rationale": "Backend payments engineering stack and onsite constraint are far from PM/EdTech profile."
+  },
+  {
+    "id": "medium-fit-people-ops",
+    "file": "jobs/medium-fit-people-ops.md",
+    "expectedRange": [60, 78],
+    "rationale": "People Ops and startup systems fit secondary targets but less direct than PM EdTech."
+  },
+  {
+    "id": "good-fit-learning-designer",
+    "file": "jobs/good-fit-learning-designer.md",
+    "expectedRange": [75, 92],
+    "rationale": "Learning design, career mobility, research, and product collaboration fit the profile."
+  },
+  {
+    "id": "poor-fit-enterprise-ae",
+    "file": "jobs/poor-fit-enterprise-ae.md",
+    "expectedRange": [30, 55],
+    "rationale": "Enterprise sales quota role is outside target role families despite some communication overlap."
+  }
+]
