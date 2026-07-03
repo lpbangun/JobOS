@@ -1,6 +1,6 @@
 # JobOS local-first MVP
 
-JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, deterministic fit scoring, evidence-grounded Markdown artifact drafts, application tracking, weekly review automation, and a minimal local web dashboard.
+JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, deterministic degraded-mode fit scoring, evidence-grounded Markdown artifact drafts, application tracking, weekly review automation, a local web dashboard, and REST API scaffolding for agent integrations.
 
 The implementation deliberately does **not** auto-apply to jobs, submit forms, send outreach, scrape private accounts, or require paid APIs.
 
@@ -8,6 +8,8 @@ The implementation deliberately does **not** auto-apply to jobs, submit forms, s
 
 - Node.js 22+
 - `sql.js` for a file-backed SQLite database at `.jobos/jobos.sqlite`
+- `cheerio` for human-initiated HTML/job-page parsing
+- Provider SDK dependencies for future LLM adapters: `openai` and `@anthropic-ai/sdk`
 - YAML/Markdown/JSONL workspace mirror at `jobos-workspace/`
 - Node `http` local dashboard; no build step
 - Node's built-in test runner
@@ -20,7 +22,7 @@ The implementation deliberately does **not** auto-apply to jobs, submit forms, s
 npm install
 ```
 
-No API keys or cloud accounts are required for the core flow.
+No API keys or cloud accounts are required for the core flow. LLM provider environment variables are scaffolded for future intelligent modules (`JOBOS_LLM_PROVIDER`, `JOBOS_LLM_MODEL`, `JOBOS_LLM_API_KEY`), but Sprint 1 still runs in deterministic degraded mode when no key is configured.
 
 Optional workspace selection:
 
@@ -67,6 +69,10 @@ npm run jobos -- review weekly --profile pm-edtech --output markdown
 npm run web -- --port 4317
 # open http://127.0.0.1:4317
 # machine-readable state: http://127.0.0.1:4317/api/state
+# REST scaffold examples:
+#   GET  /api/profiles
+#   GET  /api/jobs
+#   POST /api/tasks {"title":"Follow up","priority":"high"}
 ```
 
 You can also run the CLI directly after install:
@@ -128,8 +134,8 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 
 ## Architecture notes
 
-- `src/cli.js` contains the MVP domain logic, CLI parser, SQLite schema/migrations, workspace sync, deterministic scoring, artifact generation, research worksheets, weekly review automation, and web server.
-- The scoring engine is deterministic and local. It calculates role fit, domain fit, seniority, location/work model, compensation, mission/interest, red flags, overall score, reasoning, and confidence.
+- `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/tracking.js`, `src/analytics.js`, `src/api.js`, and `src/web.js`.
+- The scoring engine is deterministic degraded mode until Sprint 2 replaces it with structured LLM scoring. It calculates role fit, domain fit, seniority, location/work model, compensation, mission/interest, red flags, overall score, reasoning, and confidence.
 - Tailoring only uses stored proof points. If no proof points match, the generated Markdown includes evidence warnings and refuses to invent accomplishments.
 - Research commands create structured worksheets for future adapters. They do not claim facts that were not imported or verified.
 - The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks.
@@ -140,7 +146,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - Generated resumes and cover letters are marked `draft_needs_human_review`.
 - Application status `applied` is manual; JobOS does not capture or fake confirmation.
 - URL import is human-initiated. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment instead of failing the whole workspace.
-- No telemetry, cloud sync, or LLM calls exist in the MVP.
+- No telemetry or cloud sync exist in the MVP. LLM adapter configuration is present, but no external model call is made unless a later sprint wires an explicit provider-backed command.
 
 ## Tests and smoke checks
 
@@ -170,7 +176,11 @@ Implemented:
 - Local SQLite + workspace mirror.
 - Core entities: profiles, proof points, companies, jobs, stakeholders schema, applications, artifacts, tasks, automation runs, audit log.
 - CLI JSON surfaces for the required MVP commands.
-- Deterministic fit scoring.
+- Modular code foundation under `src/`.
+- REST API scaffold with local CRUD-style routes for core entities.
+- Structured proof-point import with metrics, skills, source, and metadata fields.
+- Expanded profile preferences.
+- Deterministic degraded-mode fit scoring.
 - Evidence-grounded resume and cover-letter drafts.
 - Company/stakeholder research worksheets.
 - Manual application tracking.
@@ -180,7 +190,7 @@ Implemented:
 
 Next steps:
 
-- Split `src/cli.js` into modules as the codebase grows.
+- Replace deterministic degraded-mode scoring/tailoring with LLM-powered structured output and eval cases.
 - Add richer profile preference editing and answer-bank commands.
 - Add artifact approval/diff commands.
 - Add explicit export archive command; current data is already portable as files plus SQLite.
