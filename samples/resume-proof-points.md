@@ -1,0 +1,3 @@
+- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.
+- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.
+- Built dashboards and weekly operating reviews that connected adoption data to roadmap decisions.
