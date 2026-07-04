@@ -57,9 +57,10 @@ npm run jobos -- tailor cover-letter --job <job-id> --profile pm-edtech --output
 npm run jobos -- applications create --job <job-id> --status materials-ready --json
 npm run jobos -- applications update <application-id> --status applied --json
 
-# Research worksheet stubs with explicit no-fabrication language
+# Public web-search-backed research and human-gated outreach drafts
 npm run jobos -- research company --job <job-id> --json
 npm run jobos -- research stakeholders --job <job-id> --json
+npm run jobos -- outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile pm-edtech --json
 
 # Due tasks and weekly review
 npm run jobos -- tasks due --json
@@ -96,6 +97,7 @@ npx jobos init --json
 - `jobos applications update <application-id> --status <status>`
 - `jobos research company --job <job-id>`
 - `jobos research stakeholders --job <job-id>`
+- `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational]`
 - `jobos tasks due --json`
 - `jobos review weekly --profile <profile> --output markdown`
 - `jobos web [--port 4317]`
@@ -126,6 +128,8 @@ jobos-workspace/
     artifacts/
       resume-tailored.md
       cover-letter.md
+    outreach/
+      <stakeholder-id>-informational.md
   exports/
     weekly-review-<profile-id>-<date>.md
 ```
@@ -137,7 +141,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/tracking.js`, `src/analytics.js`, `src/api.js`, and `src/web.js`.
 - The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
 - Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
-- Research commands create structured worksheets for future adapters. They do not claim facts that were not imported or verified.
+- Research commands use public web-search results when available, write source URLs into company/stakeholder dossiers, and avoid claiming facts without a source.
 - The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks.
 
 ## Human-gating and safety policy
@@ -182,7 +186,8 @@ Implemented:
 - Expanded profile preferences.
 - Provider-backed LLM fit scoring with deterministic degraded-mode fallback.
 - Provider-backed, proof-grounded resume and cover-letter drafts with deterministic degraded-mode fallback.
-- Company/stakeholder research worksheets.
+- Web-search-backed company dossiers and stakeholder research with source URLs.
+- Human-gated outreach draft artifacts connected to researched stakeholders.
 - Manual application tracking.
 - Weekly review automation command.
 - Minimal local web dashboard.
@@ -194,7 +199,7 @@ Next steps:
 - Add richer profile preference editing and answer-bank commands.
 - Add artifact approval/diff commands.
 - Add explicit export archive command; current data is already portable as files plus SQLite.
-- Add LLM-powered research, outreach, and interview prep while preserving the deterministic no-key flow.
+- Add LLM-powered research synthesis and interview prep while preserving the deterministic no-key flow.
 - Add discovery adapters and scheduler runner with rate limits and approval queues.
 - Add browser extension/autofill dry-run only after approval model and answer bank mature.
 
