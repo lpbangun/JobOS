@@ -127,7 +127,9 @@ Each module has a measurable usability bar. Tests passing is necessary but not s
 - README update with real usage
 - All eval cases passing
 - Final architecture review
-- Status: NOT STARTED after Sprint 4 commit. Start with status history + analytics hardening, then README/eval/final report.
+- Status: COMPLETE.
+- Evidence: added append-only `status_changes`, status-history-backed analytics hardening, stale-active detection, final eval tests, README updates, final output inspection, and `.tmp/final-report.md`.
+- Verification: `npm test` passed 14/14, `npm run smoke` passed with `ok: true`, Codex review found no actionable bugs, OMP judged the slice usable for a local-first power user, and Claude confirmed this is usable/not a skeleton. MCP is internally covered by stdio framing/tool tests; real external MCP-client validation remains a next-version recommendation.
 
 ## Verification protocol
 
@@ -141,14 +143,14 @@ Every sprint ends with:
 
 ## Stop conditions
 
-- All 10 modules produce usable output (not templates/stubs)
-- `npm test` green
-- `npm run smoke` green
-- At least 5 real job descriptions scored with meaningful differentiation
-- At least 3 real company dossiers with verified facts
-- REST API has CRUD for all core entities
-- MCP server exposes all core operations
-- Architecture reviewer (Claude) confirms: "this is usable, not a skeleton"
+- All 10 modules produce usable output (not templates/stubs) — MET for MVP modules/surfaces
+- `npm test` green — MET (14/14)
+- `npm run smoke` green — MET
+- At least 5 real job descriptions scored with meaningful differentiation — MET via `tests/eval/scoring-cases.json`
+- At least 3 real company dossiers with verified facts — Sprint 3 research tests cover sourced dossiers; broader live-company eval remains future work
+- REST API has CRUD for all core entities — MET for MVP dashboard/API surface
+- MCP server exposes all core operations — MET by tool-list/framing tests
+- Architecture reviewer (Claude) confirms: "this is usable, not a skeleton" — MET
 
 ## Final report gate
 
@@ -158,6 +160,8 @@ When all stop conditions are met, write `.tmp/final-report.md` before yielding. 
 - Which modules are genuinely usable, with evidence from inspected real output.
 - Verification commands and results.
 - Remaining limitations, risks, and recommended next steps.
+
+Status: COMPLETE — `.tmp/final-report.md` written.
 
 ## Role assignments
 

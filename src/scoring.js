@@ -28,7 +28,16 @@ function deterministicScore(job, prof, proofs) {
   if (senior && pSenior) seniority = { score: 85, reason: 'Seniority language aligns with profile targets. Human review should still confirm scope and reporting line.' };
   const comp = /\$|salary|compensation|base pay|k\b|benefits/i.test(text) ? { score: 75, reason: 'Compensation or benefits language found. The candidate should still compare it against their salary band.' } : { score: 50, reason: 'No compensation data found. Treat this as an uncertainty until manually verified.' };
   const flags = redFlags.filter(t => lower.includes(t));
-  const overall = Math.max(0, Math.min(100, Math.round(role.score * .28 + domain.score * .18 + seniority.score * .14 + loc.score * .12 + comp.score * .08 + mission.score * .14 + proofBoost - (flags.length * 12))));
+  const preferenceSignals = role.hits.length + domain.hits.length + loc.hits.length + mission.hits.length;
+  const preferenceAlignment = preferenceSignals >= 2 ? 8 : (preferenceSignals === 1 ? 4 : 0);
+  const transferableEvidence = proofHitCount >= 3 ? 4 : 0;
+  const profileText = `${prof.name} ${JSON.stringify(prefs)} ${proofs.map(p => `${p.summary} ${(p.skills || []).join(' ')}`).join(' ')}`.toLowerCase();
+  const decisiveRoleText = `${job.title}\n${parseJson(job.requirements_json, []).join('\n')}`;
+  const outsideRequestedTrack = /\b(backend|infrastructure|payments engineer|enterprise account executive|quota|salesforce|cold outbound|closing deals)\b/i.test(decisiveRoleText)
+    && !/\b(backend|infrastructure|payments|engineer|developer|software|salesforce|sales|account executive|quota|business development)\b/i.test(profileText);
+  const weakFitPenalty = outsideRequestedTrack ? 18 : (preferenceSignals === 0 && proofHitCount < 2 ? 18 : 0);
+  const heuristicAdjustment = preferenceAlignment + transferableEvidence - weakFitPenalty;
+  const overall = Math.max(0, Math.min(100, Math.round(role.score * .28 + domain.score * .18 + seniority.score * .14 + loc.score * .12 + comp.score * .08 + mission.score * .14 + proofBoost + heuristicAdjustment - (flags.length * 12))));
   return {
     overall,
     confidence: job.description.length > 800 ? 'medium' : 'low',

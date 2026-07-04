@@ -10,8 +10,8 @@ import path from 'node:path';
 async function body(req){ let b=''; for await (const c of req) b+=c; return b?JSON.parse(b):{}; }
 function send(res,status,obj){ res.writeHead(status,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(obj,null,2)); }
 function safeWriteOrigin(req){ const origin=req.headers.origin; if(!origin) return true; try { const host=new URL(origin).hostname; return ['127.0.0.1','localhost','::1'].includes(host); } catch { return false; } }
-const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders'};
-const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id'};
+const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',status_changes:'status_changes',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders'};
+const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',status_changes:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id'};
 function publicRow(resource,row){ if(resource==='jobs' && row) return {...row,url:String(row.url||'').startsWith('jobos:text:')?'':row.url}; return row; }
 export async function handleApi(s,req,res,u){
   try{

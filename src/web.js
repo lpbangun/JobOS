@@ -49,7 +49,8 @@ export function web(s, { port = 4317, host = '127.0.0.1', onReady = null } = {})
     const api = await handleApi(s, req, res, u); if (api !== false) return;
     if (u.pathname.startsWith('/workspace/')) {
       const rel = u.pathname.replace(/^\/workspace\//, ''), abs = path.resolve(s.p.ws, rel);
-      if (!abs.startsWith(s.p.ws) || !fs.existsSync(abs) || fs.statSync(abs).isDirectory()) { res.writeHead(404); res.end('Not found'); return; }
+      const wsRoot = path.resolve(s.p.ws);
+      if (!(abs === wsRoot || abs.startsWith(wsRoot + path.sep)) || !fs.existsSync(abs) || fs.statSync(abs).isDirectory()) { res.writeHead(404); res.end('Not found'); return; }
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end(fs.readFileSync(abs)); return;
     }
     if (u.pathname !== '/') { res.writeHead(404); res.end('Not found'); return; }

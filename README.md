@@ -1,6 +1,6 @@
 # JobOS local-first MVP
 
-JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, provider-backed LLM fit scoring/tailoring with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking, weekly review automation, a local web dashboard, and REST API scaffolding for agent integrations.
+JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, provider-backed LLM fit scoring/tailoring/interview prep with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking with status history, funnel analytics, weekly review automation, an interactive local web dashboard, REST API endpoints, and an MCP stdio server for agent integrations.
 
 The implementation deliberately does **not** auto-apply to jobs, submit forms, send outreach, scrape private accounts, or require paid APIs.
 
@@ -64,16 +64,22 @@ npm run jobos -- outreach draft --job <job-id> --stakeholder <stakeholder-id> --
 
 # Due tasks and weekly review
 npm run jobos -- tasks due --json
+npm run jobos -- interview prep --application <application-id> --stage hiring-manager --output markdown
+npm run jobos -- analytics funnel --profile pm-edtech --since 30 --output markdown
 npm run jobos -- review weekly --profile pm-edtech --output markdown
 
-# Local dashboard
+# Local interactive dashboard
 npm run web -- --port 4317
 # open http://127.0.0.1:4317
+# The dashboard includes a kanban board, create/edit forms, and artifact approve/reject UI.
 # machine-readable state: http://127.0.0.1:4317/api/state
 # REST scaffold examples:
 #   GET  /api/profiles
 #   GET  /api/jobs
 #   POST /api/tasks {"title":"Follow up","priority":"high"}
+
+# MCP server for agents that speak stdio JSON-RPC/MCP framing
+npm run jobos -- mcp
 ```
 
 You can also run the CLI directly after install:
@@ -98,8 +104,11 @@ npx jobos init --json
 - `jobos research company --job <job-id>`
 - `jobos research stakeholders --job <job-id>`
 - `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational]`
+- `jobos interview prep --application <application-id> --stage <stage> [--output markdown]`
+- `jobos analytics funnel --profile <profile-id> [--since 30] [--output markdown]`
 - `jobos tasks due --json`
 - `jobos review weekly --profile <profile> --output markdown`
+- `jobos mcp`
 - `jobos web [--port 4317]`
 
 Most successful commands can emit parseable JSON with `--json`. Validation errors exit non-zero and print a clear `jobos:` error message.
@@ -122,12 +131,14 @@ jobos-workspace/
     score.md
     application.yaml
     tasks.yaml
+    status history is stored in SQLite and exposed via /api/status_changes
     company-dossier.md
     stakeholders.md
     audit.log.jsonl
     artifacts/
       resume-tailored.md
       cover-letter.md
+      interview-prep-<stage>.md
     outreach/
       <stakeholder-id>-informational.md
   exports/
@@ -138,16 +149,19 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 
 ## Architecture notes
 
-- `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/tracking.js`, `src/analytics.js`, `src/api.js`, and `src/web.js`.
+- `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/outreach.js`, `src/tracking.js`, `src/interview.js`, `src/analytics.js`, `src/api.js`, `src/mcp.js`, and `src/web.js`.
 - The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
 - Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
 - Research commands use public web-search results when available, write source URLs into company/stakeholder dossiers, and avoid claiming facts without a source.
-- The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks.
+- Interview prep creates role/stage-specific packets with likely questions, proof-linked STAR story prompts, questions to ask, company/role refresh, and a human gate. LLM-generated interview packets render stored proof summaries/metrics rather than freeform accomplishment details.
+- Analytics uses application status history for stages reached, conversion, source/role-family performance, and stale active-application warnings.
+- The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks. It now supports local create/edit forms, kanban status movement, and artifact approve/reject review.
+- The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, create_application, update_application_status, list_tasks, interview_prep, and weekly_review.
 
 ## Human-gating and safety policy
 
 - No command submits applications, sends messages, posts to job boards, or performs account actions.
-- Generated resumes and cover letters are marked `draft_needs_human_review`.
+- Generated resumes, cover letters, outreach drafts, and interview prep packets are marked `draft_needs_human_review` unless explicitly approved in local state.
 - Application status `applied` is manual; JobOS does not capture or fake confirmation.
 - URL import is human-initiated. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment instead of failing the whole workspace.
 - No telemetry or cloud sync exist in the MVP. External LLM calls happen only when the user explicitly configures provider credentials through environment variables.
@@ -168,10 +182,11 @@ Current smoke coverage verifies:
 5. Scoring JSON, including degraded-mode fallback in smoke and provider-backed LLM behavior in tests.
 6. Resume and cover-letter Markdown artifacts.
 7. Application create/update and due task listing.
-8. Weekly review export.
-9. Web dashboard startup and `/api/state` reading the same local data.
-10. Dashboard shell navigation render.
-11. Route hardening for unknown and traversal-style workspace paths.
+8. Interview prep packet creation.
+9. Status-history-backed analytics and weekly review export.
+10. Web dashboard startup, interactive shell render, and `/api/state` reading the same local data.
+11. MCP tool-list/framing coverage.
+12. Route hardening for unknown and traversal-style workspace paths.
 
 ## Implemented vs. next steps
 
@@ -189,17 +204,21 @@ Implemented:
 - Web-search-backed company dossiers and stakeholder research with source URLs.
 - Human-gated outreach draft artifacts connected to researched stakeholders.
 - Manual application tracking.
+- Append-only application status history for stage-reached analytics.
+- Interview prep packets grounded in stored proof points.
+- Funnel analytics and weekly review insights.
 - Weekly review automation command.
-- Minimal local web dashboard.
+- Interactive local web dashboard with kanban board, create/edit forms, and artifact approval UI.
+- MCP stdio server exposing core operations for agents.
 - Targeted tests and end-to-end smoke script.
 
 Next steps:
 
 - Extend scoring/tailoring evals against live configured providers, not only OpenAI-compatible fake provider tests.
 - Add richer profile preference editing and answer-bank commands.
-- Add artifact approval/diff commands.
+- Add artifact approval/diff CLI commands; dashboard/API approval already exists.
 - Add explicit export archive command; current data is already portable as files plus SQLite.
-- Add LLM-powered research synthesis and interview prep while preserving the deterministic no-key flow.
+- Validate `jobos mcp` against a real external MCP client in addition to stdio framing tests.
 - Add discovery adapters and scheduler runner with rate limits and approval queues.
 - Add browser extension/autofill dry-run only after approval model and answer bank mature.
 

@@ -9,6 +9,7 @@ export function state(s) {
     profiles: all(s, 'SELECT id,name,preferences_json,created_at,updated_at FROM profiles ORDER BY created_at'),
     jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: parseJson(x.score_json, null), requirements: parseJson(x.requirements_json, []) })),
     applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
+    statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
     artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
@@ -54,19 +55,39 @@ export function funnel(s, profileId, days = 30) {
   const cutoff = sinceCutoff(days);
   const apps = all(s, `SELECT applications.*, jobs.title, jobs.company, jobs.source, jobs.fit_score, jobs.created_at AS job_created_at
     FROM applications JOIN jobs ON jobs.id=applications.job_id
-    WHERE applications.profile_id=? AND applications.created_at>=?
-    ORDER BY applications.updated_at DESC`, [profileId, cutoff]);
-  const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=? AND created_at>=? ORDER BY created_at DESC', [profileId, cutoff]);
+    WHERE applications.profile_id=? AND (applications.created_at>=? OR applications.id IN (SELECT application_id FROM status_changes WHERE profile_id=? AND created_at>=?))
+    ORDER BY applications.updated_at DESC`, [profileId, cutoff, profileId, cutoff]);
+  const changes = all(s, `SELECT status_changes.*, jobs.title, jobs.company, jobs.source
+    FROM status_changes JOIN jobs ON jobs.id=status_changes.job_id
+    WHERE status_changes.profile_id=? AND status_changes.created_at>=?
+    ORDER BY status_changes.created_at`, [profileId, cutoff]);
+  const jobs = all(s, `SELECT DISTINCT jobs.* FROM jobs
+    LEFT JOIN applications ON applications.job_id=jobs.id
+    WHERE jobs.profile_id=? AND (jobs.created_at>=? OR applications.id IN (SELECT application_id FROM status_changes WHERE profile_id=? AND created_at>=?))
+    ORDER BY jobs.created_at DESC`, [profileId, cutoff, profileId, cutoff]);
   const stageOrder = ['saved', 'researching', 'materials-ready', 'applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'];
   const byStage = stageOrder.map(stage => ({ stage, count: apps.filter(a => a.status === stage).length })).filter(x => x.count || stageOrder.includes(x.stage));
-  const positive = new Set(['recruiter-screen', 'interview', 'offer']);
-  const terminal = new Set(['offer', 'rejected', 'withdrawn', 'ghosted']);
-  const applied = apps.filter(a => ['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'].includes(a.status)).length;
-  const interviews = apps.filter(a => ['interview', 'offer'].includes(a.status)).length;
-  const responses = apps.filter(a => positive.has(a.status) || terminal.has(a.status)).length;
-  const bySource = groupCount(apps, a => a.source || 'manual').map(x => ({ source: x.key, applications: x.count, interviews: apps.filter(a => (a.source || 'manual') === x.key && ['interview', 'offer'].includes(a.status)).length }));
-  const byRoleFamily = groupCount(apps, a => roleFamily(a.title)).map(x => ({ roleFamily: x.key, applications: x.count, interviews: apps.filter(a => roleFamily(a.title) === x.key && ['interview', 'offer'].includes(a.status)).length }));
+  const reached = (stages) => new Set(changes.filter(c => stages.includes(c.to_status)).map(c => c.application_id));
+  const appliedIds = reached(['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
+  const interviewIds = reached(['interview', 'offer']);
+  const offerIds = reached(['offer']);
+  const responseIds = reached(['recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
+  for (const app of apps) {
+    if (['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'].includes(app.status)) appliedIds.add(app.id);
+    if (['interview', 'offer'].includes(app.status)) interviewIds.add(app.id);
+    if (app.status === 'offer') offerIds.add(app.id);
+    if (['recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'].includes(app.status)) responseIds.add(app.id);
+  }
+  const applied = appliedIds.size;
+  const interviews = interviewIds.size;
+  const responses = responseIds.size;
+  const bySource = groupCount(apps, a => a.source || 'manual').map(x => ({ source: x.key, applications: x.count, interviews: apps.filter(a => (a.source || 'manual') === x.key && interviewIds.has(a.id)).length }));
+  const byRoleFamily = groupCount(apps, a => roleFamily(a.title)).map(x => ({ roleFamily: x.key, applications: x.count, interviews: apps.filter(a => roleFamily(a.title) === x.key && interviewIds.has(a.id)).length }));
   const byStageAndSource = bySource.map(src => ({ source: src.source, stages: stageOrder.reduce((acc, st) => ({ ...acc, [st]: apps.filter(a => (a.source || 'manual') === src.source && a.status === st).length }), {}) }));
+  const stageReached = stageOrder.map(stage => ({ stage, count: reached([stage]).size })).filter(x => x.count);
+  const staleCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  const stale = all(s, `SELECT COUNT(*) AS count FROM applications
+    WHERE profile_id=? AND status IN ('saved','researching','materials-ready','applied','recruiter-screen','interview') AND updated_at<?`, [profileId, staleCutoff])[0]?.count || 0;
   const insights = [];
   if (!apps.length) insights.push('No applications in this window yet; import jobs and create application records to build a funnel.');
   else {
@@ -76,15 +97,17 @@ export function funnel(s, profileId, days = 30) {
     if (interviews > 0) insights.push(`Interview conversion is ${pct(interviews, applied || apps.length)}%; inspect the role families and sources that produced those interviews.`);
     const stuck = byStage.find(x => ['saved', 'researching', 'materials-ready'].includes(x.stage) && x.count > 0);
     if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next human-gated action for each.`);
+    if (stale) insights.push(`${stale} active application(s) have not moved in 14+ days; schedule follow-up, prep for the next touchpoint, or mark them withdrawn/ghosted.`);
   }
   return {
     profileId,
     profileName: prof.name,
     sinceDays: Number(days || 30),
     cutoff,
-    totals: { jobs: jobs.length, applications: apps.length, applied, responses, interviews, offers: apps.filter(a => a.status === 'offer').length },
-    conversion: { applyRateFromImportedJobs: pct(applied, jobs.length), responseRateFromApplied: pct(responses, applied), interviewRateFromApplied: pct(interviews, applied), offerRateFromInterview: pct(apps.filter(a => a.status === 'offer').length, interviews) },
+    totals: { jobs: jobs.length, applications: apps.length, applied, responses, interviews, offers: offerIds.size || apps.filter(a => a.status === 'offer').length, staleActive: stale },
+    conversion: { applyRateFromImportedJobs: pct(applied, jobs.length), responseRateFromApplied: pct(responses, applied), interviewRateFromApplied: pct(interviews, applied), offerRateFromInterview: pct((offerIds.size || apps.filter(a => a.status === 'offer').length), interviews) },
     byStage,
+    stageReached,
     bySource,
     byRoleFamily,
     byStageAndSource,
@@ -98,7 +121,8 @@ function table(rows, columns) {
 }
 
 export function renderFunnelMarkdown(metrics) {
-  return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews: ${metrics.totals.interviews}\n- Offers: ${metrics.totals.offers}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
+  const reached = metrics.stageReached?.length ? metrics.stageReached.map(x => `- ${x.stage}: ${x.count}`).join('\n') : '- No stage history recorded in this window.';
+  return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
 }
 
 export function weekly(s, pid) {
