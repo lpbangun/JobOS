@@ -116,6 +116,10 @@ Each module has a measurable usability bar. Tests passing is necessary but not s
 - Analytics: funnel metrics, source performance
 - Dashboard: kanban, create/edit forms, artifact review UI
 - MCP server: stdio transport, tools for all core operations
+- Status: COMPLETE in Sprint 4 implementation.
+- Evidence: `src/interview.js`, `src/analytics.js`, `src/web.js`, `src/mcp.js`, extended `src/api.js` and `src/cli.js`, `tests/sprint4-interview-analytics-mcp.test.js`, and `scripts/smoke.js`.
+- Verification: `npm test` passed 12/12, `npm run smoke` passed with `interviewPrep: true`, `interactiveDashboard: true`, and MCP tool-list/framing coverage. Codex found no discrete issues after fixes. OMP judged the sprint a functional local MVP slice. Claude judged it a real improvement, not a skeleton.
+- Sprint 5 carry-forward: add append-only application status history so analytics can report stages reached, time-in-stage, and stale/ghost detection rather than current-status snapshots only; validate MCP against a real MCP client.
 
 ### Sprint 5: Integration + polish + eval
 - End-to-end smoke: profile → import → score → research → tailor → track → interview prep
@@ -123,6 +127,7 @@ Each module has a measurable usability bar. Tests passing is necessary but not s
 - README update with real usage
 - All eval cases passing
 - Final architecture review
+- Status: NOT STARTED after Sprint 4 commit. Start with status history + analytics hardening, then README/eval/final report.
 
 ## Verification protocol
 

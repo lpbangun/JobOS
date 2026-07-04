@@ -1,22 +1,24 @@
 # Session State — JobOS Rebuild Loop
 
 ## Current phase
-Sprint 2: LLM scoring + tailoring — COMPLETE
+Sprint 4: Interview prep + analytics + dashboard + MCP — COMPLETE
+Next: Sprint 5 integration + polish + eval.
 
 ## Repo
 - Path: /home/logani/projects/Job App
 - Branch: main
 - Sprint 1 commit: 71829fb Rebuild JobOS foundation modules
-- Sprint 2 changes are ready for local commit after final verification.
+- Sprint 2 commit: 33d432a Add provider-backed LLM scoring and tailoring
+- Sprint 3 commit: 3e3d42f Add web-backed research and outreach drafting (Sprint 3)
+- Sprint 4 changes are implemented and ready for local commit after this state update.
 
 ## Tmux / worker status
 - Tmux session: jobos-rebuild
-- Windows: conductor, opencode, droid, omp-review, codex, claude, dev, goal
-- OMP was replaced by Droid as Implementer 1 (GLM 5.2 via Droid subscription). Droid config at ~/.config/droid/settings.json with {"model":"glm-5.2"}.
-- OMP-review (grok-composer-2.5-fast) is still available as Reviewer 2 in the omp-review window.
-- Earlier OMP noninteractive implementation attempt failed because the Fireworks/GLM API key was not available to `omp -p` (`No API key found for fireworks`). Conductor implemented Sprint 1 directly, then used Codex and Claude for review.
-- Sprint 2 was implemented directly by conductor using TDD-style failing tests first. No external mutating worker was used for Sprint 2.
-- For Sprint 3+, delegate implementation to Droid (window: droid, model: GLM 5.2) or OpenCode (window: opencode, model: DeepSeek V4 Pro).
+- Windows observed: conductor, opencode, droid, omp-review, codex-, claude, dev, goal.
+- Droid/OpenCode were available but Sprint 4 was implemented directly by conductor because the slice touched many shared surfaces and required tight integration.
+- Codex review was run with `codex review --uncommitted -c sandbox_mode='danger-full-access'` after fixes; final verdict: no discrete correctness issues.
+- OMP high-level functionality review was run with `omp --model grok-composer-2.5-fast -p --max-time 120 --no-tools`; verdict: functional local MVP slice, not a bare skeleton, with recommendation for a golden-path E2E test.
+- Claude architecture critique was run with `claude -p`; verdict: real improvement, not skeleton. Highest-leverage Sprint 5 recommendation: add append-only application status history and rebuild analytics on it; also validate MCP against a real client.
 
 ## Sprint progress
 - Sprint 1 (Foundation rebuild): COMPLETE
@@ -28,63 +30,67 @@ Sprint 2: LLM scoring + tailoring — COMPLETE
   - README updated for modular architecture and local-first REST examples.
 - Sprint 2 (LLM scoring + tailoring): COMPLETE
   - Implemented provider-backed `src/llm.js.generateJson`.
-  - Supported providers/config:
-    - `JOBOS_LLM_PROVIDER=openai` via OpenAI-compatible `/chat/completions`.
-    - `JOBOS_LLM_PROVIDER=ollama-cloud` via OpenAI-compatible `/chat/completions` defaulting to `https://ollama.com/v1`.
-    - `JOBOS_LLM_PROVIDER=anthropic` via `/messages`.
-    - `JOBOS_LLM_MODEL`, `JOBOS_LLM_API_KEY`, optional `JOBOS_LLM_BASE_URL`.
-  - Replaced scoring with LLM-powered structured JSON output when credentials are configured.
-  - Preserved deterministic degraded-mode fallback with explicit `mode: deterministic-degraded` and LLM error capture if provider calls fail.
-  - Scoring dimensions now include roleFit, domainFit, seniority, locationWorkModel, compensation, missionInterest, networkAccess, and redFlags with explainable reasoning.
-  - Implemented LLM-powered resume/cover-letter tailoring when credentials are configured.
+  - Supported `JOBOS_LLM_PROVIDER`, `JOBOS_LLM_MODEL`, `JOBOS_LLM_API_KEY`, optional `JOBOS_LLM_BASE_URL` for OpenAI-compatible, Ollama Cloud, and Anthropic flows.
+  - Replaced scoring/tailoring with provider-backed paths when configured and deterministic degraded-mode fallbacks when not.
   - Tailoring validates LLM proof mappings against stored proof point IDs and refuses unsupported mappings.
-  - Created 5 real-ish eval job fixtures in `tests/eval/jobs/` plus `tests/eval/scoring-cases.json` and `tests/eval/profile-proof-points.md`.
-  - Added `tests/sprint2-llm.test.js` covering provider call wiring, authorization header, ≥30 point score differentiation, and proof-grounded tailoring.
-  - README updated to document provider-backed LLM scoring/tailoring and degraded-mode fallback.
-- Sprint 3 (Research + outreach): NOT STARTED — NEXT
-- Sprint 4 (Interview prep + analytics + dashboard): NOT STARTED
-- Sprint 5 (Integration + polish + eval): NOT STARTED
+  - Added scoring eval fixtures and Sprint 2 tests.
+- Sprint 3 (Research + outreach): COMPLETE
+  - Implemented web-search-backed company dossier creation with source-backed facts and citations.
+  - Implemented stakeholder discovery from public search results with affiliation filtering.
+  - Implemented proof/company/stakeholder-aware outreach drafts that are draft-only and never sent.
+  - Added Sprint 3 tests with a fake search server and outreach safety checks.
+- Sprint 4 (Interview prep + analytics + dashboard + MCP): COMPLETE
+  - Added `src/interview.js` and CLI command `jobos interview prep --application <id> --stage <stage>`.
+  - Interview prep packets include role-specific likely questions, proof-linked STAR story prompts, interviewer questions, company/role refresh, warnings, and a human gate. LLM path validates proof IDs and renders stored proof summaries/metrics rather than freeform accomplishment details.
+  - Rebuilt `src/analytics.js` with `analytics funnel --profile <id> --since <days>`, conversion metrics, grouping by source/stage/role family, and weekly review insights.
+  - Upgraded `src/web.js` dashboard from read-only to interactive: kanban board, job/application/proof/task create/edit forms, artifact approve/reject UI, and local API wiring.
+  - Extended `src/api.js` with dashboard/API job create/edit and artifact review endpoints; preserves internal `jobos:text:` URLs on manual-job round trips.
+  - Added `src/mcp.js` stdio JSON-RPC/MCP server and `jobos mcp`, exposing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, create_application, update_application_status, list_tasks, interview_prep, weekly_review.
+  - Added `tests/sprint4-interview-analytics-mcp.test.js` covering interview prep, analytics, dashboard/API approval and job creation, MCP tool list/framing, Unicode framing, and manual URL preservation.
+  - Extended smoke to cover profile → import → score → tailor → track → interview prep → analytics → dashboard.
+- Sprint 5 (Integration + polish + eval): NOT STARTED — NEXT
 
 ## Verification evidence
-- `node --test tests/sprint2-llm.test.js` passed: 3/3 Sprint 2 tests.
-- `npm run test` passed after Sprint 2 changes: 6/6 tests passing.
-- `npm run smoke` passed after Sprint 2 changes with degraded-mode no-key flow:
+- `npm test` passed after Sprint 4: 12/12 tests passing.
+- `npm run smoke` passed after Sprint 4:
   - `ok: true`
   - profile: `pm-edtech`
   - job: `job_bbe74731a917`
   - score: 73
-  - dashboard API jobs: 1
-  - route hardening: true
-- Manual provider-backed eval using a local OpenAI-compatible fake provider made 2 provider requests and produced:
-  - Good-fit job `Curriculum Product Manager`: score 88, mode `llm`.
-  - Poor-fit job `Backend Payments Engineer`: score 38, mode `llm`.
-  - Gap: 50 points, exceeding the ≥30 point Sprint 2 bar.
-  - Inspected roleFit reasoning: provider-backed reasoning compared product discovery/learning-platform work against backend infrastructure ownership and candidate proof points, not keyword counts.
-- Tailoring test inspected generated Markdown and verified:
-  - It contains a `Requirement-to-proof map`.
-  - It includes at least 3 stored `proof_...` IDs.
-  - It writes an artifact requiring human review.
-- Codex review after fixes: no discrete correctness issues found.
+  - application: `app_7797aae63eba`
+  - `interviewPrep: true`
+  - `interviews: 1`
+  - `dashboardShell: true`
+  - `interactiveDashboard: true`
+  - `routeHardening: true`
+- Manual output inspection after Sprint 4:
+  - Interview packet for Product Manager, Learning Platform at Acme Learning included role-specific 30/60/90, metrics, tradeoff, roadmap, and user/team-constraint questions.
+  - STAR story bank cited stored `proof_...` IDs and included only stored summaries/metrics with rehearsal prompts.
+  - Analytics funnel showed imported jobs, applications, applied, responses, interviews, source and role-family breakdown, and insights.
+  - MCP `tools/list` returned all 10 required core tools.
+- Codex review final result: no discrete correctness issues after fixes.
+- OMP functionality review: Sprint 4 is a functional local MVP slice, not a bare skeleton; recommended a real golden-path E2E workflow for Sprint 5.
+- Claude architecture review: “real improvement, not skeleton”; highest-leverage Sprint 5 step is append-only status history for true funnel/time-in-stage/stale detection, plus real-client MCP validation.
 
-## Known limitations / Sprint 3 warnings
-- No live external provider eval was run because this shell has no `JOBOS_LLM_PROVIDER`, `JOBOS_LLM_MODEL`, or API key configured. Provider behavior was verified against a local OpenAI-compatible fake provider that exercises the same HTTP code path.
-- Research remains worksheet scaffolding and is still not the usability target.
-- Outreach is not implemented yet.
-- Interview prep is not implemented yet.
-- Dashboard is still mostly read-only HTML; REST routes exist but UI create/edit is not fully wired.
-- MCP server is not implemented yet.
-- `sql.js` whole-file writes remain a concurrency risk for future scheduler/automation work.
+## Known limitations / Sprint 5 warnings
+- Analytics is currently based on current application status, not an append-only status history; rejected/ghosted applications can under-report stages previously reached.
+- Dashboard is intentionally simple server-rendered HTML + fetch forms; it is interactive but not a polished SPA.
+- MCP stdio supports Content-Length framing and newline JSON fallback and is covered by tests, but still needs validation against an actual MCP client in Sprint 5.
+- No live external LLM provider eval was run in this shell; provider paths are tested against fake/local compatible providers.
+- `sql.js` whole-file writes remain a concurrency risk for simultaneous web/MCP/CLI write-heavy sessions.
 
 ## Next action
-Start Sprint 3: implement web-search-backed company research and stakeholder/outreach drafting. The first slice should make `research company --job <id>` produce a company dossier with at least 5 verified facts and source URLs, then inspect the generated dossier for a real company before moving on.
+Commit Sprint 4 locally, then start Sprint 5. First Sprint 5 slice should add status-change history and update analytics/weekly review to use stages reached and time-in-stage, because Claude identified it as the highest-leverage usability improvement.
 
 ## Key files
+- src/interview.js — interview prep packet generation
+- src/analytics.js — state, funnel analytics, weekly review
+- src/web.js — interactive dashboard
+- src/api.js — local API CRUD/review endpoints
+- src/mcp.js — stdio MCP server
+- tests/sprint4-interview-analytics-mcp.test.js — Sprint 4 tests
+- scripts/smoke.js — end-to-end smoke including Sprint 4
 - .tmp/jobos-rebuild-loop-plan.md — loop plan
 - .tmp/session-state.tmp — this file
-- src/llm.js — provider-backed JSON generation
-- src/scoring.js — LLM scoring with fallback
-- src/tailoring.js — LLM proof-grounded tailoring with fallback
-- tests/sprint2-llm.test.js — Sprint 2 provider/scoring/tailoring tests
-- tests/eval/ — Sprint 2 eval fixtures
 - ideal-agent-native-job-application-app.md — canonical spec
 - AGENTS.md — project conventions

@@ -2,8 +2,10 @@ import { all, one, run, save, audit, reload } from './db.js';
 import { state } from './analytics.js';
 import { createProfile, addProof } from './profiles.js';
 import { appCreate, appUpdate } from './tracking.js';
-import { syncJob } from './jobs.js';
+import { importText, syncJob, ensureCompany, requirements } from './jobs.js';
 import { id, now } from './utils.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 async function body(req){ let b=''; for await (const c of req) b+=c; return b?JSON.parse(b):{}; }
 function send(res,status,obj){ res.writeHead(status,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(obj,null,2)); }
@@ -23,10 +25,27 @@ export async function handleApi(s,req,res,u){
     const data=await body(req);
     if(req.method==='POST' && resource==='profiles'){ const r=createProfile(s,data.name||data.id||'Untitled Profile',{}); return send(res,201,{id:r.profile.id,created:r.created}); }
     if(req.method==='POST' && resource==='proofs'){ const p=addProof(s,data.profileId||data.profile_id,data.summary,data.evidence||'',data.skills||[]); return send(res,201,{id:p.id}); }
+    if(req.method==='POST' && resource==='jobs'){
+      const profileId=data.profileId||data.profile_id; if(!profileId) throw Error('Missing profileId');
+      const body=data.description||data.notes||'';
+      const text=`Title: ${data.title||'Imported role'}\nCompany: ${data.company||'Unknown company'}\nLocation: ${data.location||''}\n\n${body}`;
+      const tmp=path.join(s.p.state,`${id('api-job',`${profileId}:${data.title}:${data.company}:${now()}`)}.txt`); fs.writeFileSync(tmp,text);
+      const r=importText(s,{profileId,filePath:tmp,source:data.source||'dashboard',url:data.url||''});
+      return send(res,201,{id:r.job.id,created:r.created});
+    }
+    if(req.method==='PATCH' && resource==='jobs' && rid){
+      const row=one(s,'SELECT * FROM jobs WHERE id=?',[rid]); if(!row) return send(res,404,{error:'not found'});
+      const companyName=data.company??row.company, company=ensureCompany(s,companyName), at=now();
+      const description=data.description??row.description;
+      const nextUrl=(data.url==='' && String(row.url||'').startsWith('jobos:text:')) ? row.url : (data.url??row.url);
+      run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, compensation=?, work_model=?, updated_at=? WHERE id=?',[company.id,data.title??row.title,companyName,data.location??row.location,nextUrl,data.source??row.source,description,JSON.stringify(requirements(description)),data.compensation??row.compensation,data.workModel??data.work_model??row.work_model,at,rid]);
+      audit(s,'job.updated','job',rid,{jobId:rid}); syncJob(s,rid); save(s); return send(res,200,one(s,'SELECT * FROM jobs WHERE id=?',[rid]));
+    }
     if(req.method==='POST' && resource==='applications'){ const a=appCreate(s,data.jobId||data.job_id,data.status||'saved',data.notes||''); return send(res,201,a); }
     if(req.method==='PATCH' && resource==='applications' && rid){ const a=appUpdate(s,rid,data.status,data.notes??null); return send(res,200,a); }
     if(req.method==='POST' && resource==='tasks'){ const tid=id('task',`${data.title}:${now()}`), at=now(), jobId=data.jobId||null; run(s,'INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',[tid,jobId,data.applicationId||null,data.title||'Untitled task',data.description||'',data.type||'review',data.dueAt||null,data.priority||'normal',data.status||'open','api',at,at]); audit(s,'task.created','task',tid,{jobId}); if(jobId) syncJob(s,jobId); save(s); return send(res,201,{id:tid}); }
     if(req.method==='PATCH' && resource==='tasks' && rid){ const row=one(s,'SELECT * FROM tasks WHERE id=?',[rid]); if(!row) return send(res,404,{error:'not found'}); run(s,'UPDATE tasks SET title=?, description=?, due_at=?, priority=?, status=?, updated_at=? WHERE id=?',[data.title??row.title,data.description??row.description,data.dueAt??row.due_at,data.priority??row.priority,data.status??row.status,now(),rid]); audit(s,'task.updated','task',rid,{jobId:row.job_id||null}); if(row.job_id) syncJob(s,row.job_id); save(s); return send(res,200,one(s,'SELECT * FROM tasks WHERE id=?',[rid])); }
+    if(req.method==='PATCH' && resource==='artifacts' && rid){ const row=one(s,'SELECT * FROM artifacts WHERE id=?',[rid]); if(!row) return send(res,404,{error:'not found'}); const status=data.approvalStatus||data.approval_status||data.status; if(!['approved','rejected','draft_needs_human_review'].includes(status)) throw Error('Invalid artifact approval status'); run(s,'UPDATE artifacts SET approval_status=? WHERE id=?',[status,rid]); audit(s,'artifact.reviewed','artifact',rid,{jobId:row.job_id,approvalStatus:status}); save(s); return send(res,200,one(s,'SELECT id,job_id,profile_id,type,path,title,approval_status,created_at FROM artifacts WHERE id=?',[rid])); }
     return send(res,405,{error:'method not implemented for resource',resource});
   }catch(e){ return send(res,400,{error:e.message}); }
 }
