@@ -5,6 +5,10 @@ import { draftOutreach } from './outreach.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
+import { importUrl } from './jobs.js';
+import { listSearches, runSavedSearch } from './discovery.js';
+import { listAutomations } from './scheduler/store.js';
+import { recentRuns, runAutomationByName } from './scheduler/core.js';
 
 const tools = [
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' } }, required: ['jobId', 'profileId'] } },
@@ -16,7 +20,13 @@ const tools = [
   { name: 'update_application_status', description: 'Update a tracked application status.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, status: { type: 'string' }, notes: { type: 'string' } }, required: ['applicationId', 'status'] } },
   { name: 'list_tasks', description: 'List open tasks ordered by due date.', inputSchema: { type: 'object', properties: {} } },
   { name: 'interview_prep', description: 'Create an interview prep packet for an application and stage.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, stage: { type: 'string' } }, required: ['applicationId'] } },
-  { name: 'weekly_review', description: 'Generate weekly review and funnel insights.', inputSchema: { type: 'object', properties: { profileId: { type: 'string' } }, required: ['profileId'] } }
+  { name: 'weekly_review', description: 'Generate weekly review and funnel insights.', inputSchema: { type: 'object', properties: { profileId: { type: 'string' } }, required: ['profileId'] } },
+  { name: 'list_saved_searches', description: 'List configured local discovery searches.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'search_jobs', description: 'Run a saved discovery search and queue results for human review.', inputSchema: { type: 'object', properties: { search: { type: 'string' } }, required: ['search'] } },
+  { name: 'import_job_url', description: 'Import a human-provided job URL into local JobOS state.', inputSchema: { type: 'object', properties: { profileId: { type: 'string' }, url: { type: 'string' } }, required: ['profileId', 'url'] } },
+  { name: 'list_automations', description: 'List configured local automations and schedules.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'run_automation', description: 'Run an automation manually through the audited scheduler path.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+  { name: 'list_automation_runs', description: 'List recent automation runs.', inputSchema: { type: 'object', properties: { limit: { type: 'number' } } } }
 ];
 
 function result(value) {
@@ -37,6 +47,12 @@ async function callTool(s, name, args = {}) {
     const r = weekly(s, args.profileId);
     return result({ runId: r.runId, path: r.path, metrics: r.metrics });
   }
+  if (name === 'list_saved_searches') return result(listSearches(s));
+  if (name === 'search_jobs') return result(await runSavedSearch(s, args.search));
+  if (name === 'import_job_url') return result(await importUrl(s, { profileId: args.profileId, url: args.url }));
+  if (name === 'list_automations') return result(listAutomations(s));
+  if (name === 'run_automation') return result(await runAutomationByName(s, args.name, { trigger: 'mcp' }));
+  if (name === 'list_automation_runs') return result(recentRuns(s, args.limit || 25));
   throw Error(`Unknown MCP tool: ${name}`);
 }
 

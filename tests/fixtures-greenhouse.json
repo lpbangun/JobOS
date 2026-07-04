@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "id": 101,
+      "title": "Product Manager, Learning Platform",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/101",
+      "location": { "name": "Remote" },
+      "updated_at": "2026-07-01T12:00:00Z",
+      "content": "<p>Acme Learning needs a product manager to lead educator discovery, roadmap tradeoffs, activation metrics, and AI learning workflow experiments.</p><p>Responsibilities include user research, stakeholder communication, and cross-functional launch leadership.</p>"
+    },
+    {
+      "id": 102,
+      "title": "Backend Payments Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/102",
+      "location": { "name": "New York" },
+      "updated_at": "2026-07-02T12:00:00Z",
+      "content": "<p>Build payments infrastructure, settlement, PCI workflows, and backend services.</p>"
+    }
+  ]
+}

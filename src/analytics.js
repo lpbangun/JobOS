@@ -3,6 +3,8 @@ import { one, all, run, save, audit } from './db.js';
 import { now, id, parseJson } from './utils.js';
 import { writeMd } from './workspace.js';
 import { due } from './tracking.js';
+import { listAutomations, listRuns } from './scheduler/store.js';
+import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
 
 export function state(s) {
   return {
@@ -14,8 +16,13 @@ export function state(s) {
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
+    searches: listSearches(s),
+    watchlist: listWatchlist(s),
+    discoveryRuns: discoveryRuns(s),
+    reviewQueue: reviewQueue(s),
     audit: all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 50').map(a => ({ ...a, payload: parseJson(a.payload_json, {}) })),
-    automationRuns: all(s, 'SELECT * FROM automation_runs ORDER BY created_at DESC LIMIT 25'),
+    automations: listAutomations(s),
+    automationRuns: listRuns(s, { limit: 25 }),
     policy: { externalApply: 'human_approval_required', externalSend: 'human_approval_required', autoApply: 'disabled', autoSend: 'disabled' }
   };
 }
@@ -125,7 +132,7 @@ export function renderFunnelMarkdown(metrics) {
   return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
 }
 
-export function weekly(s, pid) {
+export function weekly(s, pid, { recordRun = true } = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   const metrics = funnel(s, pid, 30);
@@ -137,8 +144,12 @@ export function weekly(s, pid) {
   const rel = path.join('exports', `weekly-review-${pid}-${new Date().toISOString().slice(0, 10)}.md`);
   writeMd(path.join(s.p.ws, rel), content);
   const rid = id('run', `weekly-review:${pid}:${now()}`);
-  run(s, 'INSERT INTO automation_runs VALUES (?,?,?,?,?,?,?)', [rid, 'weekly-review', JSON.stringify({ profileId: pid }), JSON.stringify({ path: rel, metrics }), 'succeeded', 'none', now()]);
-  audit(s, 'review.weekly.created', 'automation_run', rid, { profileId: pid, path: rel });
+  if (recordRun) {
+    const at = now();
+    run(s, `INSERT INTO automation_runs (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,action_id,trigger_type,started_at,finished_at,duration_ms,counts_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [rid, 'weekly-review', JSON.stringify({ profileId: pid }), JSON.stringify({ path: rel, metrics }), 'succeeded', 'none', at, 'weekly_retrospective', 'manual', at, at, 0, JSON.stringify({ reviews: 1 })]);
+    audit(s, 'review.weekly.created', 'automation_run', rid, { profileId: pid, path: rel });
+  }
   save(s);
   return { runId: rid, path: rel, content, metrics };
 }

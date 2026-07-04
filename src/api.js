@@ -3,9 +3,12 @@ import { state } from './analytics.js';
 import { createProfile, addProof } from './profiles.js';
 import { appCreate, appUpdate } from './tracking.js';
 import { importText, syncJob, ensureCompany, requirements } from './jobs.js';
+import { configFromFlags, createSearch, discoveryRuns, listSearches, reviewQueue, runSavedSearch } from './discovery.js';
 import { id, now } from './utils.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createAutomation, listAutomations, updateAutomation } from './scheduler/store.js';
+import { recentRuns, runAutomationByName } from './scheduler/core.js';
 
 async function body(req){ let b=''; for await (const c of req) b+=c; return b?JSON.parse(b):{}; }
 function send(res,status,obj){ res.writeHead(status,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(obj,null,2)); }
@@ -17,6 +20,37 @@ export async function handleApi(s,req,res,u){
   try{
     reload(s);
     if(u.pathname==='/api/state' && req.method==='GET') return send(res,200,state(s));
+    if(u.pathname==='/api/runs' && req.method==='GET') return send(res,200,recentRuns(s, Number(u.searchParams.get('limit') || 25)));
+    if(u.pathname==='/api/automations' && req.method==='GET') return send(res,200,listAutomations(s));
+    if(u.pathname==='/api/automations' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,createAutomation(s,{name:data.name||data.id,actionId:data.actionId||data.action_id||data.action,schedule:data.schedule,profileId:data.profileId||data.profile_id||data.profile||null,enabled:Boolean(data.enabled),config:data.config||{}}));
+    }
+    const automationRunMatch=u.pathname.match(/^\/api\/automations\/([^/]+)\/run$/);
+    if(automationRunMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      return send(res,200,await runAutomationByName(s,automationRunMatch[1],{trigger:'api'}));
+    }
+    const automationPatchMatch=u.pathname.match(/^\/api\/automations\/([^/]+)$/);
+    if(automationPatchMatch && req.method==='PATCH'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,updateAutomation(s,automationPatchMatch[1],data));
+    }
+    if(u.pathname==='/api/searches' && req.method==='GET') return send(res,200,listSearches(s));
+    if(u.pathname==='/api/searches' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,createSearch(s,{name:data.name,profileId:data.profileId||data.profile_id,adapter:data.adapter,config:data.config||configFromFlags(data),minFit:data.minFit||data.min_fit||70}));
+    }
+    const runMatch=u.pathname.match(/^\/api\/searches\/([^/]+)\/run$/);
+    if(runMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      return send(res,200,await runSavedSearch(s,decodeURIComponent(runMatch[1])));
+    }
+    if(u.pathname==='/api/discovery/runs' && req.method==='GET') return send(res,200,discoveryRuns(s));
+    if(u.pathname==='/api/discovery/review-queue' && req.method==='GET') return send(res,200,reviewQueue(s));
     const m=u.pathname.match(/^\/api\/([^/]+)(?:\/([^/]+))?$/); if(!m) return false;
     const [,resource,rid]=m; if(!tables[resource]) return false;
     if(req.method==='GET' && !rid) return send(res,200,all(s,`SELECT * FROM ${tables[resource]} ORDER BY ${pk[resource]}`).map(row=>publicRow(resource,row)));
@@ -38,7 +72,8 @@ export async function handleApi(s,req,res,u){
       const companyName=data.company??row.company, company=ensureCompany(s,companyName), at=now();
       const description=data.description??row.description;
       const nextUrl=(data.url==='' && String(row.url||'').startsWith('jobos:text:')) ? row.url : (data.url??row.url);
-      run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, compensation=?, work_model=?, updated_at=? WHERE id=?',[company.id,data.title??row.title,companyName,data.location??row.location,nextUrl,data.source??row.source,description,JSON.stringify(requirements(description)),data.compensation??row.compensation,data.workModel??data.work_model??row.work_model,at,rid]);
+      if(data.status && !['imported','new','saved','archived'].includes(String(data.status))) throw Error(`Invalid job status: ${data.status}`);
+      run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, compensation=?, work_model=?, status=?, updated_at=? WHERE id=?',[company.id,data.title??row.title,companyName,data.location??row.location,nextUrl,data.source??row.source,description,JSON.stringify(requirements(description)),data.compensation??row.compensation,data.workModel??data.work_model??row.work_model,data.status??row.status,at,rid]);
       audit(s,'job.updated','job',rid,{jobId:rid}); syncJob(s,rid); save(s); return send(res,200,one(s,'SELECT * FROM jobs WHERE id=?',[rid]));
     }
     if(req.method==='POST' && resource==='applications'){ const a=appCreate(s,data.jobId||data.job_id,data.status||'saved',data.notes||''); return send(res,201,a); }
