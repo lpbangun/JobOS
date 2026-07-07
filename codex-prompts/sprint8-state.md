@@ -97,6 +97,48 @@ Blockers:
 
 - None.
 
+## Goal 6 - Eval Harness
+
+Status: completed
+
+Plan: Add a fixture-backed research/outreach eval harness in `run_eval_research.js` that starts local fake search and LLM servers, creates synthetic companies/jobs/profiles/stakeholders in a temporary JobOS workspace, scores company dossiers for groundedness/source diversity/distractor rejection/outreach-angle usefulness, scores stakeholder discovery for precision/recall/confidence labels, scores outreach drafts across three profiles and two goals for specificity/personalization/ask clarity/length/tone, and runs hard regression assertions for human gates, approval status, no live network, and audit rows. Add a focused Node test that runs the harness and asserts it clears the Sprint 8 bar.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `run_eval_research.js`
+- `tests/sprint8-research-eval.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- Added `run_eval_research.js` as a dedicated Sprint 8 eval harness rather than expanding the existing blind-agent Sprint 9 eval.
+- The harness uses temporary workspaces plus local fake DuckDuckGo-compatible search and OpenAI-compatible LLM servers; no live credentials or external network are required.
+- CLI calls are run asynchronously so the in-process fixture servers can respond to child-process search/LLM requests.
+- Dossier eval covers three synthetic companies, source diversity, distractor rejection, groundedness caps, and outreach angle usefulness.
+- Stakeholder eval covers valid people, non-people pages, wrong-company people, precision weighted 2x, recall, and confidence labels.
+- Outreach eval covers three profile/style/background fixtures across informational and referral goals, evidence specificity, personalization via textual dissimilarity, ask clarity, length discipline, and tone match.
+- Hard assertions cover Human gates, draft approval status, local-only fake provider usage, audit rows, human-sent logging, follow-up task scheduling, and scheduler-created follow-up draft gates.
+- Added `tests/sprint8-research-eval.test.js` so `npm test` runs the eval harness.
+
+Verification:
+
+- `node run_eval_research.js` passed.
+- `node --test tests/sprint8-research-eval.test.js` passed: 1/1 test.
+- `npm test` passed on rerun: 41/41 tests. The first full run had one transient `fetch failed` in `tests/cli.test.js`; `node --test tests/cli.test.js` passed immediately after, and the full rerun passed.
+- `npm run smoke` passed.
+
+Eval scores:
+
+- Dossier: groundedness 10/10, source diversity 10/10, distractor rejection 10/10, outreach angle usefulness 10/10.
+- Stakeholder: precision 10/10, recall 10/10, confidence labels 10/10.
+- Outreach: specificity 10/10, personalization 10/10, ask clarity 10/10, length discipline 10/10, tone match 10/10.
+- Hard assertions: 33/33 passed.
+
+Blockers:
+
+- None.
+
 ## Goal 2 - Pluggable Search Provider
 
 Status: completed
