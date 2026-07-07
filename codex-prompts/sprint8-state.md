@@ -130,3 +130,43 @@ Eval scores:
 Blockers:
 
 - None.
+
+## Goal 4 - Honest Stakeholder Pipeline
+
+Status: completed
+
+Plan: Add a primary `research add-stakeholder` path that accepts user-pasted text plus a required public source URL, structures the stakeholder with LLM JSON when configured or deterministic heuristics otherwise, and refuses to create unsourced stakeholder records. Upgrade search-based stakeholder discovery to attach confidence/source metadata and use an LLM relevance check when configured, dropping unsourced or irrelevant candidates rather than inventing people.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/research.js`
+- `src/cli.js`
+- `tests/sprint3-research.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `research add-stakeholder` requires `--job` and `--source-url`; missing/non-http source URLs fail before creating a record.
+- User-pasted stakeholder text can be supplied with `--text` or `--file`, and `--name`/`--role` can override or support deterministic inference.
+- LLM structuring is used when configured through `generateJson`; deterministic inference remains the no-LLM fallback.
+- Stakeholder records continue to use the existing table shape, with confidence/source-type labels persisted in the summary text to avoid a Goal 4 DB migration.
+- Search-based stakeholder discovery now excludes login/private social-profile domains from auto-created candidates.
+- Search candidates are labeled with confidence and source type before persistence.
+- When an LLM is configured, search candidates pass through a conservative relevance check; wrong-company/non-person/no-relevance candidates are dropped.
+- Stakeholder worksheets include confidence, source type, source URL, warnings, suppression policy, and Human gate.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 5/5 tests.
+- `npm test` passed: 39/39 tests.
+- `npm run smoke` passed.
+- New behavior is covered by tests for source-URL enforcement, pasted stakeholder recording, LLM relevance filtering, LinkedIn exclusion from search promotion, confidence labels, and continued draft-only outreach behavior.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.

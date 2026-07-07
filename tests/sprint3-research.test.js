@@ -47,7 +47,45 @@ function fakeResearchLlmServer() {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
-      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization, body: JSON.parse(body) });
+      const parsed = JSON.parse(body);
+      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization, body: parsed });
+      if (parsed.metadata?.schemaName === 'jobos_stakeholder_relevance') {
+        const payload = {
+          candidates: [
+            {
+              sourceUrl: 'https://acme.example/team/maya-chen',
+              isPerson: true,
+              belongsToCompany: true,
+              roleRelevance: 'high',
+              confidence: 'high',
+              reason: 'Maya Chen leads product at Acme Learning, matching the product manager role context.'
+            },
+            {
+              sourceUrl: 'https://acme.example/team/jordan-patel',
+              isPerson: true,
+              belongsToCompany: false,
+              roleRelevance: 'none',
+              confidence: 'low',
+              reason: 'The fixture asks the LLM relevance check to reject this candidate.'
+            }
+          ]
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+        return;
+      }
+      if (parsed.metadata?.schemaName === 'jobos_stakeholder_structuring') {
+        const payload = {
+          name: 'Maya Chen',
+          role: 'Head of Product',
+          relevanceSummary: 'Maya Chen leads product at Acme Learning and writes about AI learning workflows.',
+          confidence: 'high',
+          warnings: []
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+        return;
+      }
       const payload = {
         claims: [
           {
@@ -204,16 +242,75 @@ test('company research uses LLM synthesis but drops unsourced claims and angles'
   }
 });
 
+test('add-stakeholder requires source URL and records pasted stakeholder context', async () => {
+  const { root, run, runRaw } = makeRunner();
+  const { job } = await seedJob(run, root);
+  const missingSource = await runRaw([
+    'research', 'add-stakeholder',
+    '--job', job.id,
+    '--name', 'Maya Chen',
+    '--text', 'Maya Chen is Head of Product at Acme Learning.'
+  ]);
+  assert.notEqual(missingSource.status, 0);
+  assert.match(missingSource.stderr, /source-url/i);
+  const added = JSON.parse(await run([
+    'research', 'add-stakeholder',
+    '--job', job.id,
+    '--source-url', 'https://acme.example/team/maya-chen',
+    '--name', 'Maya Chen',
+    '--role', 'Head of Product',
+    '--text', 'Maya Chen is Head of Product at Acme Learning and writes about AI learning workflows.',
+    '--json'
+  ]));
+  assert.equal(added.name, 'Maya Chen');
+  assert.equal(added.sourceUrl, 'https://acme.example/team/maya-chen');
+  assert.equal(added.confidence, 'medium');
+  const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', added.path), 'utf8');
+  assert.match(stakeholderDoc, /Maya Chen/);
+  assert.match(stakeholderDoc, /Confidence: medium/);
+  assert.match(stakeholderDoc, /Source type: user_pasted/);
+  assert.match(stakeholderDoc, /Human gate/);
+  assert.doesNotMatch(stakeholderDoc, /did send|sent email/i);
+});
+
+test('stakeholder search uses LLM relevance check when configured', async () => {
+  const fake = await fakeSearchServer();
+  const llm = await fakeResearchLlmServer();
+  try {
+    const { root, run } = makeRunner({
+      JOBOS_SEARCH_BASE_URL: fake.baseUrl,
+      JOBOS_LLM_PROVIDER: 'openai',
+      JOBOS_LLM_MODEL: 'fake-relevance-model',
+      JOBOS_LLM_API_KEY: 'test-key',
+      JOBOS_LLM_BASE_URL: llm.baseUrl
+    });
+    const { job } = await seedJob(run, root);
+    const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
+    assert.equal(stakeholders.candidateCount, 2);
+    assert.equal(stakeholders.stakeholderIds.length, 1);
+    assert.equal(llm.requests.filter(r => r.body.metadata?.schemaName === 'jobos_stakeholder_relevance').length, 1);
+    const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
+    assert.match(stakeholderDoc, /Maya Chen/);
+    assert.match(stakeholderDoc, /Confidence: high/);
+    assert.match(stakeholderDoc, /Relevance check:/);
+    assert.doesNotMatch(stakeholderDoc, /Jordan Patel/);
+  } finally {
+    await fake.close();
+    await llm.close();
+  }
+});
+
 test('stakeholder research creates sourced outreach draft without sending anything', async () => {
   const fake = await fakeSearchServer();
   try {
     const { root, run, runRaw } = makeRunner({ JOBOS_SEARCH_BASE_URL: fake.baseUrl });
     const { profile, job } = await seedJob(run, root);
     const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
-    assert.equal(stakeholders.stakeholderIds.length, 3);
+    assert.equal(stakeholders.stakeholderIds.length, 2);
     const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
-    assert.match(stakeholderDoc, /Priya Rao/);
-    assert.doesNotMatch(stakeholderDoc, /OtherCo|Learning Guild|Sam Lee/);
+    assert.match(stakeholderDoc, /Maya Chen/);
+    assert.match(stakeholderDoc, /Confidence: high/);
+    assert.doesNotMatch(stakeholderDoc, /Priya Rao|linkedin\.com|OtherCo|Learning Guild|Sam Lee/);
     const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--goal', 'informational', '--json']));
     assert.equal(draft.approvalStatus, 'draft_needs_human_review');
     const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');

@@ -14,6 +14,7 @@
 - 2026-07-07: Sprint 8 Goal 1 approach dossier completed for LLM-grounded research/outreach: search provider recommendation, multi-query dossier pipeline, stakeholder source policy, outreach lifecycle design, and Phase C eval rubric.
 - 2026-07-07: Sprint 8 Goal 2 pluggable search provider registry implemented: DuckDuckGo default, Brave API provider, SearXNG provider, env-selected provider chains, per-provider timeouts, normalized provider metadata, and fallback warnings.
 - 2026-07-07: Sprint 8 Goal 3 LLM-synthesized company dossiers implemented: five-query company research, source-pooled LLM claims/open questions/outreach angles, unsupported-claim dropping, multi-query no-LLM fallback, and refreshed `companies.facts_json`.
+- 2026-07-07: Sprint 8 Goal 4 honest stakeholder pipeline implemented: source-required pasted stakeholder records, confidence/source labels, LinkedIn/private-profile exclusion for search promotion, LLM relevance filtering, and stakeholder worksheet warnings.
 
 ## Handoffs
 - PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
@@ -32,6 +33,7 @@
 - Sprint 8 Goal 1 gate passed: `npm test` (27/27) and `npm run smoke`.
 - Sprint 8 Goal 2 gate passed: `node --test tests/sprint8-search.test.js`, `node --test tests/sprint3-research.test.js`, `npm test` (30/30), and `npm run smoke`.
 - Sprint 8 Goal 3 gate passed: `node --test tests/sprint3-research.test.js`, `npm test` (31/31), and `npm run smoke`.
+- Sprint 8 Goal 4 gate passed: `node --test tests/sprint3-research.test.js` (5/5), `npm test` (39/39), and `npm run smoke`.
 
 ## Current implementation notes
 - Core flow is local-only and API-key-free.

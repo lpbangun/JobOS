@@ -107,6 +107,15 @@ function sourceAllowed(result) {
   }
 }
 
+function isHttpUrl(raw) {
+  try {
+    const url = new URL(raw);
+    return ['http:', 'https:'].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
 function dedupeResults(results) {
   const seen = new Set();
   const out = [];
@@ -297,6 +306,21 @@ function roleFromTitle(title) {
   return 'Relevant stakeholder';
 }
 
+function stripStakeholderMetadata(summary) {
+  return String(summary || '').replace(/^Confidence: [^.]+\. Source type: [^.]+\. /, '').trim();
+}
+
+function stakeholderSummary({ summary, confidence = 'low', sourceType = 'public_search', reason = '' }) {
+  const body = stripStakeholderMetadata(summary || reason || 'Source-backed stakeholder relevance requires human review.');
+  const extra = reason && !body.includes(reason) ? ` Relevance check: ${reason}` : '';
+  return `Confidence: ${normalizeConfidence(confidence, 'low')}. Source type: ${sourceType}. ${body}${extra}`.trim();
+}
+
+function stakeholderConfidence(result, company) {
+  if (companyMatches({ title: result.title, snippet: '', url: result.url }, company)) return 'high';
+  if (companyAffiliationMatches(result, company)) return 'medium';
+  return 'low';
+}
 
 function companyAffiliationMatches(result, company) {
   if (companyMatches({ title: result.title, snippet: '', url: result.url }, company)) return true;
@@ -313,6 +337,7 @@ function companyAffiliationMatches(result, company) {
 }
 
 function personFromResult(result, company) {
+  if (!sourceAllowed(result)) return null;
   const title = result.title.replace(/\s+/g, ' ').trim();
   const name = title.split(/\s+[—|-]\s+/)[0]?.trim();
   const words = name ? name.split(/\s+/) : [];
@@ -322,18 +347,140 @@ function personFromResult(result, company) {
   const overlapsCompany = words.some(w => companyTokens.has(w.toLowerCase()));
   const affiliatedWithCompany = companyAffiliationMatches(result, company);
   if (!name || !looksLikePerson || !hasRoleSignal || overlapsCompany || !affiliatedWithCompany || /career|job|team|company|about/i.test(name)) return null;
-  return { name, role: roleFromTitle(`${title} ${result.snippet || ''}`), links: [result.url], summary: result.snippet || title };
+  const confidence = stakeholderConfidence(result, company);
+  const rawSummary = result.snippet || title;
+  return { name, role: roleFromTitle(`${title} ${result.snippet || ''}`), links: [result.url], rawSummary, summary: stakeholderSummary({ summary: rawSummary, confidence, sourceType: 'public_search' }), confidence, sourceType: 'public_search' };
 }
 
-function renderStakeholders({ job, stakeholders, query, generatedAt, searchError }) {
-  const rows = stakeholders.length ? stakeholders.map(s => `- **${s.name}** — ${s.role}\n  - Relevance: ${s.summary}\n  - Source: ${s.links[0]}`).join('\n') : '- No named public stakeholders found from search results.';
-  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Human gate\nThis command used public web-search results only. It did not scrape private accounts or contact anyone.\n`;
+function renderStakeholders({ job, stakeholders, query, generatedAt, searchError, warnings = [] }) {
+  const rows = stakeholders.length ? stakeholders.map(s => {
+    const confidence = s.confidence ? `\n  - Confidence: ${s.confidence}` : '';
+    const sourceType = s.sourceType ? `\n  - Source type: ${s.sourceType}` : '';
+    return `- **${s.name}** — ${s.role}${confidence}${sourceType}\n  - Relevance: ${s.summary}\n  - Source: ${s.links[0]}`;
+  }).join('\n') : '- No named public stakeholders found from search results.';
+  const warningText = warnings.length ? `\n**Warnings:**\n${warnings.map(w => `- ${w}`).join('\n')}\n` : '';
+  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Human gate\nThis command used public web-search results only. It did not scrape private accounts or contact anyone.\n`;
 }
 
 function upsertStakeholder(s, job, person, at) {
   const sid = id('stakeholder', `${job.id}:${person.name}:${person.links[0] || ''}`);
   run(s, 'INSERT OR REPLACE INTO stakeholders VALUES (?,?,?,?,?,?,?,?,?,?)', [sid, job.id, job.company_id, person.name, person.role, JSON.stringify(person.links), person.summary, 'not_contacted', at, at]);
   return { id: sid, ...person };
+}
+
+function inferName(text) {
+  const match = String(text || '').match(/\b([A-Z][A-Za-z'.-]+\s+[A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+)?)\b/);
+  return match?.[1] || '';
+}
+
+function inferRole(text) {
+  const value = String(text || '');
+  const role = value.match(/\b(Head of [A-Z][A-Za-z ]+|Director of [A-Z][A-Za-z ]+|Recruiting Lead|Talent Lead|Product Manager|Product Leader|Hiring Manager|Founder|Recruiter)\b/);
+  return role?.[1]?.trim() || roleFromTitle(value);
+}
+
+function inferStakeholder(job, { name = '', role = '', sourceUrl, text = '', sourceType = 'user_pasted' }) {
+  const finalName = String(name || '').trim() || inferName(text);
+  if (!finalName) throw new Error('Missing --name or inferable person name in --text/--file');
+  const finalRole = String(role || '').trim() || inferRole(text);
+  const mentionsCompany = String(text || '').toLowerCase().includes(String(job.company || '').toLowerCase());
+  const confidence = mentionsCompany && finalRole !== 'Relevant stakeholder' ? 'medium' : 'low';
+  const rawSummary = String(text || `${finalName} is a possible stakeholder for ${job.company}.`).replace(/\s+/g, ' ').trim();
+  return {
+    name: finalName,
+    role: finalRole,
+    links: [sourceUrl],
+    rawSummary,
+    summary: stakeholderSummary({ summary: rawSummary, confidence, sourceType }),
+    confidence,
+    sourceType
+  };
+}
+
+async function structureStakeholder(job, input, fallback) {
+  const cfg = llmConfig();
+  if (!cfg.configured) return { person: fallback, warnings: ['JOBOS LLM is not configured; structured stakeholder with deterministic fallback.'] };
+  try {
+    const result = await generateJson({
+      schemaName: 'jobos_stakeholder_structuring',
+      system: 'You are JobOS stakeholder research. Structure only the user-provided source text and URL. Do not invent names, employers, or relevance.',
+      user: `Structure this pasted stakeholder source for a job. Return JSON with name, role, relevanceSummary, confidence low|medium|high, warnings array. The source URL is required and already supplied; do not replace it.\n\nJOB:\n${JSON.stringify({ title: job.title, company: job.company }, null, 2)}\n\nSOURCE:\n${JSON.stringify(input, null, 2)}`,
+      temperature: 0.1,
+      maxTokens: 1200
+    });
+    if (!result.ok) throw new Error(result.reason || 'LLM unavailable');
+    const json = result.json || {};
+    const name = String(json.name || fallback.name || '').trim();
+    if (!name) throw new Error('LLM returned no stakeholder name');
+    const role = String(json.role || fallback.role || 'Relevant stakeholder').trim();
+    const confidence = normalizeConfidence(json.confidence, fallback.confidence || 'low');
+    const rawSummary = String(json.relevanceSummary || fallback.rawSummary || fallback.summary || '').replace(/\s+/g, ' ').trim();
+    return {
+      person: { ...fallback, name, role, rawSummary, confidence, summary: stakeholderSummary({ summary: rawSummary, confidence, sourceType: 'user_pasted' }) },
+      warnings: Array.isArray(json.warnings) ? json.warnings.map(String) : []
+    };
+  } catch (e) {
+    return { person: fallback, warnings: [`LLM stakeholder structuring failed; used deterministic fallback: ${e.message}`] };
+  }
+}
+
+function stakeholderRelevancePrompt(job, candidates) {
+  return `Check stakeholder candidates for this job. Return JSON with candidates array. Each item must include sourceUrl, isPerson boolean, belongsToCompany boolean, roleRelevance high|medium|low|none, confidence low|medium|high, reason. Drop wrong-company and non-person candidates by setting belongsToCompany or isPerson false.\n\nJOB:\n${JSON.stringify({ title: job.title, company: job.company }, null, 2)}\n\nCANDIDATES:\n${JSON.stringify(candidates.map(c => ({ name: c.name, role: c.role, sourceUrl: c.links[0], summary: c.rawSummary || c.summary })), null, 2)}`;
+}
+
+async function filterStakeholdersWithLlm(job, candidates) {
+  const cfg = llmConfig();
+  if (!cfg.configured || !candidates.length) return { people: candidates, warnings: [] };
+  try {
+    const result = await generateJson({
+      schemaName: 'jobos_stakeholder_relevance',
+      system: 'You are JobOS stakeholder relevance checking. Be conservative. Never promote a candidate without source-backed company relevance.',
+      user: stakeholderRelevancePrompt(job, candidates),
+      temperature: 0,
+      maxTokens: 1800
+    });
+    if (!result.ok) throw new Error(result.reason || 'LLM unavailable');
+    const decisions = new Map((Array.isArray(result.json?.candidates) ? result.json.candidates : []).map(d => [canonicalUrl(d.sourceUrl), d]));
+    const people = [];
+    for (const candidate of candidates) {
+      const decision = decisions.get(canonicalUrl(candidate.links[0]));
+      if (!decision) continue;
+      if (!decision.isPerson || !decision.belongsToCompany || String(decision.roleRelevance || '').toLowerCase() === 'none') continue;
+      const confidence = normalizeConfidence(decision.confidence, candidate.confidence || 'low');
+      const reason = String(decision.reason || '').replace(/\s+/g, ' ').trim();
+      people.push({
+        ...candidate,
+        confidence,
+        summary: stakeholderSummary({ summary: candidate.rawSummary || candidate.summary, confidence, sourceType: candidate.sourceType || 'public_search', reason })
+      });
+    }
+    return { people, warnings: [] };
+  } catch (e) {
+    return { people: candidates, warnings: [`LLM stakeholder relevance check failed; used deterministic candidates: ${e.message}`] };
+  }
+}
+
+function writeStakeholderDoc(s, job, stakeholders, query, at, warnings = [], searchError = null) {
+  const rel = path.join('jobs', job.id, 'stakeholders.md');
+  writeMd(path.join(s.p.ws, rel), renderStakeholders({ job, stakeholders, query, generatedAt: at, searchError, warnings }));
+  return rel;
+}
+
+export async function addStakeholder(s, { jobId, name = '', role = '', sourceUrl = '', text = '' }) {
+  const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
+  if (!job) throw Error(`Unknown job: ${jobId}`);
+  const url = String(sourceUrl || '').trim();
+  if (!url) throw Error('Missing --source-url; stakeholder records require a public source URL.');
+  if (!isHttpUrl(url)) throw Error('Stakeholder --source-url must be a public http(s) URL.');
+  const at = now();
+  const fallback = inferStakeholder(job, { name, role, sourceUrl: url, text, sourceType: 'user_pasted' });
+  const structured = await structureStakeholder(job, { name, role, sourceUrl: url, text }, fallback);
+  const stakeholder = upsertStakeholder(s, job, structured.person, at);
+  const stakeholders = listJobStakeholders(s, job.id);
+  const rel = writeStakeholderDoc(s, job, stakeholders, 'user-pasted stakeholder source', at, structured.warnings);
+  audit(s, 'research.stakeholder.added', 'stakeholder', stakeholder.id, { jobId: job.id, path: rel, sourceUrl: url, confidence: structured.person.confidence });
+  save(s);
+  return { id: stakeholder.id, jobId: job.id, path: rel, name: stakeholder.name, role: stakeholder.role, sourceUrl: url, confidence: structured.person.confidence, warnings: structured.warnings, note: 'Stakeholder recorded from user-provided source text/URL; no outreach was sent.' };
 }
 
 export async function research(s, jid, type) {
@@ -355,13 +502,14 @@ export async function research(s, jid, type) {
 
   const query = `${job.company} ${job.title} stakeholder hiring manager recruiter product leader`;
   const { results, error: searchError } = await safeSearch(query, 8);
-  const people = results.map(result => personFromResult(result, job.company)).filter(Boolean).slice(0, 5);
+  const candidates = results.map(result => personFromResult(result, job.company)).filter(Boolean).slice(0, 5);
+  const checked = await filterStakeholdersWithLlm(job, candidates);
+  const people = checked.people;
   const stakeholders = people.map(p => upsertStakeholder(s, job, p, at));
-  const rel = path.join('jobs', jid, 'stakeholders.md');
-  writeMd(path.join(s.p.ws, rel), renderStakeholders({ job, stakeholders, query, generatedAt: at, searchError }));
-  audit(s, 'research.stakeholders.created', 'job', jid, { jobId: jid, path: rel, query, stakeholderIds: stakeholders.map(x => x.id) });
+  const rel = writeStakeholderDoc(s, job, stakeholders, query, at, checked.warnings, searchError);
+  audit(s, 'research.stakeholders.created', 'job', jid, { jobId: jid, path: rel, query, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, warnings: checked.warnings.length });
   save(s);
-  return { jobId: jid, path: rel, stakeholderIds: stakeholders.map(x => x.id), sourceCount: new Set(stakeholders.flatMap(x => x.links)).size, searchError, note: 'Stakeholder research created from public web-search results; no outreach was sent.' };
+  return { jobId: jid, path: rel, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, sourceCount: new Set(stakeholders.flatMap(x => x.links)).size, searchError, warnings: checked.warnings, note: 'Stakeholder research created from public web-search results; no outreach was sent.' };
 }
 
 export function getStakeholder(s, sid) {
