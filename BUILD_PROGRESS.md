@@ -12,6 +12,7 @@
 - 2026-07-07: Sprint 9 Goal 2 frontend architecture options completed in `docs/frontend-options.md`; decision remains CLI-primary with web as a companion after exemplar CLI pattern review.
 - 2026-07-07: Sprint 9 Goal 3 CLI-primary frontend plan completed in `docs/frontend-plan.md`, including command registry, exit-code, auto-workspace, loop/watch, and agent-guide contracts.
 - 2026-07-07: Sprint 8 Goal 1 approach dossier completed for LLM-grounded research/outreach: search provider recommendation, multi-query dossier pipeline, stakeholder source policy, outreach lifecycle design, and Phase C eval rubric.
+- 2026-07-07: Sprint 8 Goal 2 pluggable search provider registry implemented: DuckDuckGo default, Brave API provider, SearXNG provider, env-selected provider chains, per-provider timeouts, normalized provider metadata, and fallback warnings.
 
 ## Handoffs
 - PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
@@ -28,6 +29,7 @@
 - Sprint 6 targeted test passed: `node --test tests/sprint6-discovery.test.js`.
 - Sprint 7 targeted test passed: `node --test tests/sprint7-scheduler.test.js`.
 - Sprint 8 Goal 1 gate passed: `npm test` (27/27) and `npm run smoke`.
+- Sprint 8 Goal 2 gate passed: `node --test tests/sprint8-search.test.js`, `node --test tests/sprint3-research.test.js`, `npm test` (30/30), and `npm run smoke`.
 
 ## Current implementation notes
 - Core flow is local-only and API-key-free.

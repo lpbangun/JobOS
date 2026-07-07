@@ -48,3 +48,45 @@ Eval scores:
 Blockers:
 
 - None.
+
+## Goal 2 - Pluggable Search Provider
+
+Status: completed
+
+Plan: Rework `src/search.js` from a single DuckDuckGo HTML fetcher into a provider registry with normalized result shape, per-provider timeouts, provider metadata on each result, and warning-preserving fallback. Keep `duckduckgo` as the no-key default, add Brave Search API as the configured API provider, and support SearXNG as a configured self-host fallback because the Goal 1 dossier selected that chain.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/search.js`
+- `tests/sprint8-search.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `searchWeb` keeps the previous array return shape for compatibility with existing research code.
+- Added `searchWebDetailed` for provider/fallback metadata and warnings that later dossier rendering can use directly.
+- Provider registry now includes `duckduckgo`, `brave`, and `searxng`.
+- `duckduckgo` remains the no-key default.
+- `JOBOS_SEARCH_PROVIDER` or `JOBOS_SEARCH_PROVIDERS` selects the primary/chain; `auto` includes configured Brave/SearXNG before DuckDuckGo.
+- Brave uses `JOBOS_BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY` and `JOBOS_BRAVE_SEARCH_URL` for tests/custom endpoints.
+- SearXNG uses `JOBOS_SEARXNG_URL` and requests `format=json`.
+- Per-provider timeout is supported with `JOBOS_SEARCH_<PROVIDER>_TIMEOUT_MS`, falling back to `JOBOS_SEARCH_TIMEOUT_MS`.
+- Every normalized result includes `provider`, `query`, `rank`, and `fetchedAt`.
+- Provider failures are captured as warnings and fallback continues without throwing when a later provider succeeds or all providers fail.
+
+Verification:
+
+- `node --test tests/sprint8-search.test.js` passed: 3/3 tests.
+- `node --test tests/sprint3-research.test.js` passed: 2/2 tests for compatibility.
+- `npm test` passed: 30/30 tests.
+- `npm run smoke` passed.
+- New behavior is covered by `tests/sprint8-search.test.js`; the fallback/provider assertions would fail against the previous single-provider `src/search.js`.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
