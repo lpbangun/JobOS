@@ -9,17 +9,47 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createAutomation, listAutomations, updateAutomation } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
+import { draftOutreach, listOutreachThreads, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 
 async function body(req){ let b=''; for await (const c of req) b+=c; return b?JSON.parse(b):{}; }
 function send(res,status,obj){ res.writeHead(status,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(obj,null,2)); }
 function safeWriteOrigin(req){ const origin=req.headers.origin; if(!origin) return true; try { const host=new URL(origin).hostname; return ['127.0.0.1','localhost','::1'].includes(host); } catch { return false; } }
-const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',status_changes:'status_changes',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders'};
-const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',status_changes:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id'};
+const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',status_changes:'status_changes',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders',outreach_threads:'outreach_threads'};
+const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',status_changes:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id',outreach_threads:'id'};
 function publicRow(resource,row){ if(resource==='jobs' && row) return {...row,url:String(row.url||'').startsWith('jobos:text:')?'':row.url}; return row; }
 export async function handleApi(s,req,res,u){
   try{
     reload(s);
     if(u.pathname==='/api/state' && req.method==='GET') return send(res,200,state(s));
+    if(u.pathname==='/api/outreach/due' && req.method==='GET') return send(res,200,outreachDue(s));
+    if(u.pathname==='/api/outreach/threads' && req.method==='GET') return send(res,200,listOutreachThreads(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')||null}));
+    if(u.pathname==='/api/outreach/draft' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,await draftOutreach(s,{jobId:data.jobId||data.job_id,profileId:data.profileId||data.profile_id,stakeholderId:data.stakeholderId||data.stakeholder_id,goal:data.goal||'informational'}));
+    }
+    if(u.pathname==='/api/outreach/mark-sent' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,markOutreachSent(s,{artifactId:data.artifactId||data.artifact_id,channel:data.channel,notes:data.notes||''}));
+    }
+    if(u.pathname==='/api/outreach/schedule-followup' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,scheduleFollowup(s,{threadId:data.threadId||data.thread_id,afterDays:data.afterDays??data.after_days??data.after}));
+    }
+    const outreachSentMatch=u.pathname.match(/^\/api\/outreach\/([^/]+)\/mark-sent$/);
+    if(outreachSentMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,markOutreachSent(s,{artifactId:decodeURIComponent(outreachSentMatch[1]),channel:data.channel,notes:data.notes||''}));
+    }
+    const outreachFollowupMatch=u.pathname.match(/^\/api\/outreach\/threads\/([^/]+)\/followup$/);
+    if(outreachFollowupMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,scheduleFollowup(s,{threadId:decodeURIComponent(outreachFollowupMatch[1]),afterDays:data.afterDays??data.after_days??data.after}));
+    }
     if(u.pathname==='/api/runs' && req.method==='GET') return send(res,200,recentRuns(s, Number(u.searchParams.get('limit') || 25)));
     if(u.pathname==='/api/automations' && req.method==='GET') return send(res,200,listAutomations(s));
     if(u.pathname==='/api/automations' && req.method==='POST'){

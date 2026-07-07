@@ -62,8 +62,17 @@ test('analytics funnel reports conversion by source, stage, and role family', ()
 
 test('dashboard exposes interactive forms and artifact approval API', async () => {
   const { root, env, run } = makeRunner();
-  const { app } = seed(run, root);
+  const { app, profile, job } = seed(run, root);
   const packet = JSON.parse(run(['interview', 'prep', '--application', app.id, '--stage', 'recruiter-screen', '--json']));
+  const stakeholder = JSON.parse(run([
+    'research', 'add-stakeholder',
+    '--job', job.id,
+    '--source-url', 'https://acme.example/team/maya-chen',
+    '--name', 'Maya Chen',
+    '--role', 'Head of Product',
+    '--text', 'Maya Chen leads product at Acme Learning.',
+    '--json'
+  ]));
   const port = 4700 + Math.floor(Math.random() * 300);
   const server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(port)], { cwd: process.cwd(), env, encoding: 'utf8' });
   await new Promise((resolve, reject) => {
@@ -77,8 +86,17 @@ test('dashboard exposes interactive forms and artifact approval API', async () =
     assert.match(html, /Create job/);
     assert.match(html, /Artifact review UI/);
     assert.match(html, /data-api="\/api\/jobs"/);
+    assert.match(html, /data-api="\/api\/outreach\/draft"/);
     const approved = await fetch(`http://127.0.0.1:${port}/api/artifacts/${packet.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalStatus: 'approved' }) }).then(r => r.json());
     assert.equal(approved.approval_status, 'approved');
+    const outreach = await fetch(`http://127.0.0.1:${port}/api/outreach/draft`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.id, profileId: profile.id, stakeholderId: stakeholder.id, goal: 'informational' }) }).then(r => r.json());
+    assert.match(outreach.threadId, /^thread_/);
+    const marked = await fetch(`http://127.0.0.1:${port}/api/outreach/mark-sent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ artifactId: outreach.id, channel: 'other', notes: 'Human sent elsewhere.' }) }).then(r => r.json());
+    assert.equal(marked.status, 'sent_by_human');
+    const followup = await fetch(`http://127.0.0.1:${port}/api/outreach/schedule-followup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ threadId: outreach.threadId, afterDays: 0 }) }).then(r => r.json());
+    assert.match(followup.taskId, /^task_/);
+    const due = await fetch(`http://127.0.0.1:${port}/api/outreach/due`).then(r => r.json());
+    assert.ok(due.some(item => item.threadId === outreach.threadId));
     const created = await fetch(`http://127.0.0.1:${port}/api/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', title: 'Talent PM', company: 'Beta Learning', description: 'Title: Talent PM\nCompany: Beta Learning\n\nLead hiring workflows and product discovery.' }) }).then(r => r.json());
     assert.match(created.id, /^job_/);
     const createdPlain = await fetch(`http://127.0.0.1:${port}/api/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', title: 'Plain Description PM', company: 'Gamma Learning', description: 'Lead roadmap discovery without explicit title headers.' }) }).then(r => r.json());
@@ -94,7 +112,7 @@ test('dashboard exposes interactive forms and artifact approval API', async () =
 
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const names = mcpToolNames();
-  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','create_application','update_application_status','list_tasks','interview_prep','weekly_review']) {
+  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','create_application','update_application_status','list_tasks','interview_prep','weekly_review']) {
     assert.ok(names.includes(name), `${name} missing from MCP tools`);
   }
   const { env } = makeRunner();

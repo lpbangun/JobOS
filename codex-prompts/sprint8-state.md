@@ -1,0 +1,298 @@
+# Sprint 8 Loop State
+
+Started: 2026-07-07
+
+## Hard Constraints Check
+
+- Human gate is immutable: outreach remains draft-only, with no sending or external-account actions.
+- Evidence-grounded generation: dossier and outreach factual claims must carry source URLs; unsourced LLM claims are dropped.
+- No ToS-hostile scraping: use public web search, public company pages, public ATS APIs, or user-pasted content only.
+- Never invent stakeholders: stakeholder records require public source URLs; user-pasted content may support the record but cannot replace the URL requirement.
+- Existing tests are not weakened; production changes stay in research/outreach/search/eval plus surface wiring.
+
+## Goal 1 - Approach Dossier
+
+Status: completed
+
+Plan: Produce `codex-prompts/sprint8-approach.md` before production implementation. The dossier will compare search providers, define the LLM-grounded company research pipeline, define honest stakeholder handling, specify outreach generation inputs/schema/lifecycle direction, and design the Phase C eval rubric using evidence from the repo and public documentation.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `codex-prompts/sprint8-approach.md`
+
+Decisions made:
+
+- Keep `duckduckgo` as the no-key search default to preserve local-first behavior.
+- Implement Brave Search API first as the recommended configured provider, with registry fallback toward SearXNG when configured and DuckDuckGo last.
+- Treat Tavily as optional/env-selected rather than the first provider implementation.
+- Normalize search results to include provider/query/rank/title/url/snippet/fetchedAt/warning metadata.
+- Use five public-search queries for company dossiers and validate every LLM claim/angle source URL against pooled result URLs before rendering.
+- Make user-pasted stakeholder text the primary structuring path, but require a public `--source-url` before creating a stakeholder record.
+- Keep search-based stakeholder discovery secondary, confidence-labeled, and source-required.
+- Generate outreach through evidence-validated LLM JSON when configured, with deterministic draft-only fallback.
+- Add outreach lifecycle as local thread/log/task state only; no sending.
+- Extend evals with fixture-backed no-network research, stakeholder, outreach, and hard regression assertions.
+
+Verification:
+
+- `npm test` passed: 27/27 tests.
+- `npm run smoke` passed.
+- Goal 1 docs-only note: no new behavioral test was added because this goal creates an approach dossier, not runtime behavior.
+- Gate check: approach dossier exists, every decision row cites repo evidence or a URL, hard constraints are reflected in the design, and the state file is updated.
+
+Eval scores:
+
+- Not applicable yet. Phase C eval harness is Goal 6; Goal 1 defines the rubric and target bar.
+
+Blockers:
+
+- None.
+
+## Goal 5 - Personalized Outreach With Lifecycle
+
+Status: completed
+
+Plan: Upgrade `draftOutreach` to use the Goal 1 schema with optional LLM JSON generation, validated evidence references, and a deterministic fallback that uses profile proof points plus communication style instead of treating the profile name as background. Add a local-only outreach lifecycle through an `outreach_threads` table, per-job workspace YAML, `mark-sent`, `schedule-followup`, and `due` operations. Wire the lifecycle through CLI, API, MCP, and dashboard surfaces while preserving the immutable human gate: JobOS records that a human sent something and creates follow-up tasks, but never sends messages or touches external accounts.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/db.js`
+- `src/outreach.js`
+- `src/cli.js`
+- `src/api.js`
+- `src/mcp.js`
+- `src/analytics.js`
+- `src/web.js`
+- `tests/sprint3-research.test.js`
+- `tests/sprint4-interview-analytics-mcp.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `draftOutreach` is now async and uses `generateJson` with schema name `jobos_outreach_draft` when an LLM is configured.
+- LLM outreach drafts are accepted only with a usable subject/message and evidence references that match allowed stakeholder, company, job, or proof-point context.
+- Unsupported LLM evidence references are dropped and recorded as warnings; if the LLM omits valid evidence, deterministic evidence selection is retained.
+- The no-LLM fallback now uses stored proof points and `communicationStyle`, and no longer treats `profile.name` as professional background.
+- Outreach artifacts still use `approval_status: draft_needs_human_review` and include an explicit Human gate.
+- Added `outreach_threads` as local lifecycle state with per-job `outreach/threads.yaml` mirrors.
+- `mark-sent` records that a human sent the message outside JobOS; JobOS records local state and audit only.
+- `schedule-followup` creates a local `followup` task and updates the thread, which keeps it compatible with the existing `followup_watch` scheduler action.
+- CLI, REST API, MCP, dashboard state, and dashboard forms now expose draft, mark-sent, schedule-followup, and due-follow-up operations.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 6/6 tests.
+- `node --test tests/sprint4-interview-analytics-mcp.test.js` passed: 4/4 tests.
+- `npm test` passed: 40/40 tests.
+- `npm run smoke` passed.
+- New behavior is covered by tests for LLM evidence-backed outreach drafting, deterministic fallback proof/style usage, human-sent recording, follow-up task scheduling, due follow-up listing, per-job thread YAML, audit rows, API endpoints, dashboard form exposure, and MCP tool discovery.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
+
+## Goal 6 - Eval Harness
+
+Status: completed
+
+Plan: Add a fixture-backed research/outreach eval harness in `run_eval_research.js` that starts local fake search and LLM servers, creates synthetic companies/jobs/profiles/stakeholders in a temporary JobOS workspace, scores company dossiers for groundedness/source diversity/distractor rejection/outreach-angle usefulness, scores stakeholder discovery for precision/recall/confidence labels, scores outreach drafts across three profiles and two goals for specificity/personalization/ask clarity/length/tone, and runs hard regression assertions for human gates, approval status, no live network, and audit rows. Add a focused Node test that runs the harness and asserts it clears the Sprint 8 bar.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `run_eval_research.js`
+- `tests/sprint8-research-eval.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- Added `run_eval_research.js` as a dedicated Sprint 8 eval harness rather than expanding the existing blind-agent Sprint 9 eval.
+- The harness uses temporary workspaces plus local fake DuckDuckGo-compatible search and OpenAI-compatible LLM servers; no live credentials or external network are required.
+- CLI calls are run asynchronously so the in-process fixture servers can respond to child-process search/LLM requests.
+- Dossier eval covers three synthetic companies, source diversity, distractor rejection, groundedness caps, and outreach angle usefulness.
+- Stakeholder eval covers valid people, non-people pages, wrong-company people, precision weighted 2x, recall, and confidence labels.
+- Outreach eval covers three profile/style/background fixtures across informational and referral goals, evidence specificity, personalization via textual dissimilarity, ask clarity, length discipline, and tone match.
+- Hard assertions cover Human gates, draft approval status, local-only fake provider usage, audit rows, human-sent logging, follow-up task scheduling, and scheduler-created follow-up draft gates.
+- Added `tests/sprint8-research-eval.test.js` so `npm test` runs the eval harness.
+
+Verification:
+
+- `node run_eval_research.js` passed.
+- `node --test tests/sprint8-research-eval.test.js` passed: 1/1 test.
+- `npm test` passed on rerun: 41/41 tests. The first full run had one transient `fetch failed` in `tests/cli.test.js`; `node --test tests/cli.test.js` passed immediately after, and the full rerun passed.
+- `npm run smoke` passed.
+
+Eval scores:
+
+- Dossier: groundedness 10/10, source diversity 10/10, distractor rejection 10/10, outreach angle usefulness 10/10.
+- Stakeholder: precision 10/10, recall 10/10, confidence labels 10/10.
+- Outreach: specificity 10/10, personalization 10/10, ask clarity 10/10, length discipline 10/10, tone match 10/10.
+- Hard assertions: 33/33 passed.
+
+Blockers:
+
+- None.
+
+## Goal 7 - Close Out
+
+Status: completed
+
+Plan: Close Sprint 8 by updating user-facing README command/env/eval documentation, adding final build-progress and state-file scores, rerunning `node run_eval_research.js`, `npm test`, and `npm run smoke`, and committing the documentation close-out separately from the implementation goals.
+
+Files to touch:
+
+- `README.md`
+- `BUILD_PROGRESS.md`
+- `codex-prompts/sprint8-state.md`
+- `tests/cli.test.js`
+
+Decisions made:
+
+- README now documents Sprint 8 search provider env vars, LLM use across research/outreach, stakeholder add, outreach mark-sent/schedule-followup/due commands, REST API outreach endpoints, MCP outreach tools, workspace `outreach/threads.yaml`, and `run_eval_research.js`.
+- Added a narrow `tests/cli.test.js` stabilization for the recurring full-suite REST fetch flake: higher random dashboard port range and brief fetch retry helper.
+- Final close-out keeps all external actions human-gated and local-only; mark-sent records a human action without sending anything from JobOS.
+
+Verification:
+
+- `node run_eval_research.js` passed.
+- `npm test` passed: 41/41 tests.
+- `npm run smoke` passed.
+
+Eval scores:
+
+- Dossier: groundedness 10/10, source diversity 10/10, distractor rejection 10/10, outreach angle usefulness 10/10.
+- Stakeholder: precision 10/10, recall 10/10, confidence labels 10/10.
+- Outreach: specificity 10/10, personalization 10/10, ask clarity 10/10, length discipline 10/10, tone match 10/10.
+- Hard assertions: 33/33 passed.
+
+Blockers:
+
+- None.
+
+## Goal 2 - Pluggable Search Provider
+
+Status: completed
+
+Plan: Rework `src/search.js` from a single DuckDuckGo HTML fetcher into a provider registry with normalized result shape, per-provider timeouts, provider metadata on each result, and warning-preserving fallback. Keep `duckduckgo` as the no-key default, add Brave Search API as the configured API provider, and support SearXNG as a configured self-host fallback because the Goal 1 dossier selected that chain.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/search.js`
+- `tests/sprint8-search.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `searchWeb` keeps the previous array return shape for compatibility with existing research code.
+- Added `searchWebDetailed` for provider/fallback metadata and warnings that later dossier rendering can use directly.
+- Provider registry now includes `duckduckgo`, `brave`, and `searxng`.
+- `duckduckgo` remains the no-key default.
+- `JOBOS_SEARCH_PROVIDER` or `JOBOS_SEARCH_PROVIDERS` selects the primary/chain; `auto` includes configured Brave/SearXNG before DuckDuckGo.
+- Brave uses `JOBOS_BRAVE_API_KEY` or `BRAVE_SEARCH_API_KEY` and `JOBOS_BRAVE_SEARCH_URL` for tests/custom endpoints.
+- SearXNG uses `JOBOS_SEARXNG_URL` and requests `format=json`.
+- Per-provider timeout is supported with `JOBOS_SEARCH_<PROVIDER>_TIMEOUT_MS`, falling back to `JOBOS_SEARCH_TIMEOUT_MS`.
+- Every normalized result includes `provider`, `query`, `rank`, and `fetchedAt`.
+- Provider failures are captured as warnings and fallback continues without throwing when a later provider succeeds or all providers fail.
+
+Verification:
+
+- `node --test tests/sprint8-search.test.js` passed: 3/3 tests.
+- `node --test tests/sprint3-research.test.js` passed: 2/2 tests for compatibility.
+- `npm test` passed: 30/30 tests.
+- `npm run smoke` passed.
+- New behavior is covered by `tests/sprint8-search.test.js`; the fallback/provider assertions would fail against the previous single-provider `src/search.js`.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
+
+## Goal 3 - LLM-Synthesized Company Dossier
+
+Status: completed
+
+Plan: Rework company research to run the Goal 1 multi-query plan through the Goal 2 provider registry, pool/dedupe company-matched results, optionally call `generateJson` for claims/open questions/outreach angles, validate every LLM claim and angle against source URLs from the pool, drop unsupported LLM output, and keep a useful multi-query no-LLM fallback. Persist the final source-backed facts to `companies.facts_json` and keep the dossier Human gate.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/research.js`
+- `tests/sprint3-research.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- Company research now runs five public search queries from the Goal 1 plan.
+- Company search results are pooled, URL-deduped, filtered to public allowed sources, and matched to the company before facts or LLM source maps are built.
+- `generateJson` is used only when LLM config is complete and company-matched sources exist.
+- LLM claims are accepted only when `claim` and `sourceUrl` exist and the URL matches the company-matched source pool.
+- LLM outreach angles are accepted only when they cite at least one valid source URL from the same pool.
+- Unsupported LLM claims/angles are counted and rendered only as aggregate warnings; unsupported text is not published.
+- If the LLM is missing, fails, or returns no valid claims, JobOS renders a deterministic multi-query fallback facts list and conservative source-backed outreach angles.
+- `companies.facts_json` is always refreshed with the final rendered source-backed facts.
+- Company dossiers now show research mode, query list, warnings, source-backed facts, job-specific outreach angles, open questions, and the Human gate.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 3/3 tests.
+- `npm test` passed: 31/31 tests.
+- `npm run smoke` passed.
+- New behavior is covered by expanded no-LLM multi-query assertions and an LLM-backed fake-provider test that verifies unsourced claims and angles are dropped.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
+
+## Goal 4 - Honest Stakeholder Pipeline
+
+Status: completed
+
+Plan: Add a primary `research add-stakeholder` path that accepts user-pasted text plus a required public source URL, structures the stakeholder with LLM JSON when configured or deterministic heuristics otherwise, and refuses to create unsourced stakeholder records. Upgrade search-based stakeholder discovery to attach confidence/source metadata and use an LLM relevance check when configured, dropping unsourced or irrelevant candidates rather than inventing people.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/research.js`
+- `src/cli.js`
+- `tests/sprint3-research.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `research add-stakeholder` requires `--job` and `--source-url`; missing/non-http source URLs fail before creating a record.
+- User-pasted stakeholder text can be supplied with `--text` or `--file`, and `--name`/`--role` can override or support deterministic inference.
+- LLM structuring is used when configured through `generateJson`; deterministic inference remains the no-LLM fallback.
+- Stakeholder records continue to use the existing table shape, with confidence/source-type labels persisted in the summary text to avoid a Goal 4 DB migration.
+- Search-based stakeholder discovery now excludes login/private social-profile domains from auto-created candidates.
+- Search candidates are labeled with confidence and source type before persistence.
+- When an LLM is configured, search candidates pass through a conservative relevance check; wrong-company/non-person/no-relevance candidates are dropped.
+- Stakeholder worksheets include confidence, source type, source URL, warnings, suppression policy, and Human gate.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 5/5 tests.
+- `npm test` passed: 39/39 tests.
+- `npm run smoke` passed.
+- New behavior is covered by tests for source-URL enforcement, pasted stakeholder recording, LLM relevance filtering, LinkedIn exclusion from search promotion, confidence labels, and continued draft-only outreach behavior.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.

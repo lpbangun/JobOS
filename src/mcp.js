@@ -1,7 +1,7 @@
 import { score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { research } from './research.js';
-import { draftOutreach } from './outreach.js';
+import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
@@ -16,6 +16,9 @@ const tools = [
   { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' } }, required: ['jobId', 'profileId'] } },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] } },
   { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' }, profileId: { type: 'string' }, goal: { type: 'string' } }, required: ['jobId', 'stakeholderId', 'profileId'] } },
+  { name: 'mark_outreach_sent', description: 'Record that a human sent an outreach draft outside JobOS.', inputSchema: { type: 'object', properties: { artifactId: { type: 'string' }, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: { type: 'string' } }, required: ['artifactId', 'channel'] } },
+  { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, afterDays: { type: 'number' } }, required: ['threadId', 'afterDays'] } },
+  { name: 'list_outreach_due', description: 'List due outreach follow-up tasks without sending anything.', inputSchema: { type: 'object', properties: {} } },
   { name: 'create_application', description: 'Create a local application tracking record.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, status: { type: 'string' }, notes: { type: 'string' } }, required: ['jobId', 'status'] } },
   { name: 'update_application_status', description: 'Update a tracked application status.', inputSchema: { type: 'object', properties: { applicationId: { type: 'string' }, status: { type: 'string' }, notes: { type: 'string' } }, required: ['applicationId', 'status'] } },
   { name: 'list_tasks', description: 'List open tasks ordered by due date.', inputSchema: { type: 'object', properties: {} } },
@@ -38,7 +41,10 @@ async function callTool(s, name, args = {}) {
   if (name === 'tailor_resume') return result(await tailor(s, args.jobId, args.profileId, 'resume'));
   if (name === 'draft_cover_letter') return result(await tailor(s, args.jobId, args.profileId, 'cover'));
   if (name === 'research_company') return result(await research(s, args.jobId, 'company'));
-  if (name === 'draft_outreach') return result(draftOutreach(s, { jobId: args.jobId, stakeholderId: args.stakeholderId, profileId: args.profileId, goal: args.goal || 'informational' }));
+  if (name === 'draft_outreach') return result(await draftOutreach(s, { jobId: args.jobId, stakeholderId: args.stakeholderId, profileId: args.profileId, goal: args.goal || 'informational' }));
+  if (name === 'mark_outreach_sent') return result(markOutreachSent(s, { artifactId: args.artifactId, channel: args.channel, notes: args.notes || '' }));
+  if (name === 'schedule_outreach_followup') return result(scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays }));
+  if (name === 'list_outreach_due') return result(outreachDue(s));
   if (name === 'create_application') return result(appCreate(s, args.jobId, args.status, args.notes || ''));
   if (name === 'update_application_status') return result(appUpdate(s, args.applicationId, args.status, args.notes ?? null));
   if (name === 'list_tasks') return result(due(s));

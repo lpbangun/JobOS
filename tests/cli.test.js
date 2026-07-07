@@ -16,6 +16,23 @@ function makeRunner() {
   return { root, run };
 }
 
+async function fetchWithRetry(url, options = {}, attempts = 5) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (e) {
+      lastError = e;
+      await new Promise(resolve => setTimeout(resolve, 100 * (i + 1)));
+    }
+  }
+  throw lastError;
+}
+
+async function fetchJson(url, options = {}) {
+  return await fetchWithRetry(url, options).then(r => r.json());
+}
+
 test('CLI initializes, imports, scores, tailors, and tracks an application', () => {
   const { root, run } = makeRunner();
   const init = JSON.parse(run(['init', '--json']));
@@ -53,7 +70,7 @@ test('REST API scaffold exposes local CRUD-style task creation', async () => {
   const { root, run } = makeRunner();
   run(['init', '--json']);
   JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
-  const port = 4500 + Math.floor(Math.random() * 500);
+  const port = 20000 + Math.floor(Math.random() * 20000);
   const server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(port)], { cwd: process.cwd(), env: { ...process.env, JOBOS_HOME: root }, encoding: 'utf8' });
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
@@ -62,21 +79,21 @@ test('REST API scaffold exposes local CRUD-style task creation', async () => {
   });
   try {
     const job = JSON.parse(run(['jobs', 'import-text', '--profile', 'pm-edtech', '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
-    const profiles = await fetch(`http://127.0.0.1:${port}/api/profiles`).then(r => r.json());
+    const profiles = await fetchJson(`http://127.0.0.1:${port}/api/profiles`);
     assert.equal(profiles.length, 1);
-    const proof = await fetch(`http://127.0.0.1:${port}/api/proofs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', summary: 'Led an evidence-backed product discovery effort.', skills: ['product', 'discovery'] }) }).then(r => r.json());
+    const proof = await fetchJson(`http://127.0.0.1:${port}/api/proofs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', summary: 'Led an evidence-backed product discovery effort.', skills: ['product', 'discovery'] }) });
     assert.match(proof.id, /^proof_/);
-    const created = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Review API scaffold', priority: 'high' }) }).then(r => r.json());
+    const created = await fetchJson(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Review API scaffold', priority: 'high' }) });
     assert.match(created.id, /^task_/);
-    const blocked = await fetch(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: JSON.stringify({ title: 'Cross-site write' }) });
+    const blocked = await fetchWithRetry(`http://127.0.0.1:${port}/api/tasks`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: JSON.stringify({ title: 'Cross-site write' }) });
     assert.equal(blocked.status, 403);
-    const tasks = await fetch(`http://127.0.0.1:${port}/api/tasks`).then(r => r.json());
+    const tasks = await fetchJson(`http://127.0.0.1:${port}/api/tasks`);
     assert.ok(tasks.some(t => t.title === 'Review API scaffold'));
     const jobs = JSON.parse(run(['jobs', 'list', '--json']));
     assert.ok(jobs.some(j => j.id === job.id));
-    const apiJobs = await fetch(`http://127.0.0.1:${port}/api/jobs`).then(r => r.json());
+    const apiJobs = await fetchJson(`http://127.0.0.1:${port}/api/jobs`);
     assert.equal(apiJobs.find(j => j.id === job.id)?.url, '');
-    const apiState = await fetch(`http://127.0.0.1:${port}/api/state`).then(r => r.json());
+    const apiState = await fetchJson(`http://127.0.0.1:${port}/api/state`);
     assert.ok(apiState.jobs.some(j => j.id === job.id && Array.isArray(j.requirements)));
     assert.deepEqual(apiState.artifacts, []);
   } finally {
