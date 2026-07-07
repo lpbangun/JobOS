@@ -42,7 +42,7 @@ async function dailyDiscovery(s, automation) {
     const mod = await import('../discovery.js');
     const fn = mod.runAllSearches || mod.runAll || mod.runAllDiscovery || mod.default;
     if (typeof fn === 'function') {
-      const result = await fn(s, { profileId: automation.profileId, config: automation.config });
+      const result = await fn(s, { profileId: automation.profileId, config: automation.config, trigger: 'schedule', actionId: 'daily_discovery' });
       const runs = Array.isArray(result?.runs) ? result.runs : [];
       const totals = runs.reduce((acc, r) => {
         acc.jobsImported += Number(r?.counts?.imported || 0);

@@ -97,10 +97,13 @@ export function listWatchlist(s) {
   return all(s, 'SELECT * FROM company_watchlist ORDER BY company,adapter,handle').map(serializeWatch);
 }
 
-function recordAutomationRun(s, outputs) {
-  const inputs = { searchId: outputs.searchId, searchName: outputs.searchName, adapter: outputs.adapter, profileId: outputs.profileId, config: outputs.config, trigger: 'manual' };
-  run(s, `INSERT INTO automation_runs (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,action_id,trigger_type,started_at,finished_at,duration_ms,counts_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [outputs.runId, 'discover.run', JSON.stringify(inputs), JSON.stringify(outputs), outputs.status, 'none', outputs.createdAt, 'daily_discovery', inputs.trigger, outputs.createdAt, now(), 0, JSON.stringify(outputs.counts || {})]);
+function recordAutomationRun(s, outputs, opts = {}) {
+  const trigger = opts.trigger || 'manual';
+  const actionId = opts.actionId || 'discover.run';
+  const inputs = { searchId: outputs.searchId, searchName: outputs.searchName, adapter: outputs.adapter, profileId: outputs.profileId, config: outputs.config, trigger };
+  const error = outputs.errors?.length ? outputs.errors.join('; ') : null;
+  run(s, `INSERT INTO automation_runs (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,action_id,trigger_type,started_at,finished_at,duration_ms,error,counts_json)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [outputs.runId, 'discover.run', JSON.stringify(inputs), JSON.stringify(outputs), outputs.status, 'none', outputs.createdAt, actionId, trigger, outputs.createdAt, now(), 0, error, JSON.stringify(outputs.counts || {})]);
   audit(s, outputs.status === 'succeeded' ? 'discovery.run.completed' : 'discovery.run.failed', 'automation_run', outputs.runId, { profileId: outputs.profileId, searchId: outputs.searchId, counts: outputs.counts, errors: outputs.errors });
   syncDiscoveryRun(s, outputs);
   save(s);
@@ -135,12 +138,12 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
     run(s, 'UPDATE saved_searches SET last_run_at=?, updated_at=? WHERE id=?', [createdAt, now(), row.id]);
     syncSearch(s, one(s, 'SELECT * FROM saved_searches WHERE id=?', [row.id]));
   }
-  recordAutomationRun(s, outputs);
+  recordAutomationRun(s, outputs, opts);
   return outputs;
 }
 
 export async function runAllSearches(s, opts = {}) {
-  const rows = listSearches(s);
+  const rows = listSearches(s).filter(search => !opts.profileId || search.profileId === opts.profileId);
   const runs = [];
   for (const search of rows) runs.push(await runSavedSearch(s, search.id, opts));
   return { count: runs.length, runs };
