@@ -34,8 +34,10 @@ export JOBOS_HOME=/path/to/private/jobos-root
 ## Quick start
 
 ```bash
-# Initialize local DB and agent-readable workspace
+# Any successful command auto-creates the local DB and agent-readable workspace.
+# init remains available for explicit setup or path inspection.
 npm run jobos -- init --json
+npm run jobos -- agent-guide --json
 
 # Create a profile and import proof points from a local resume/proof file
 npm run jobos -- profile create "PM EdTech" --from-resume samples/resume-proof-points.md --json
@@ -79,6 +81,8 @@ npm run jobos -- automation enable daily_discovery --json
 npm run jobos -- automation enable morning_priority_brief --json
 npm run jobos -- scheduler run-once --json
 npm run jobos -- scheduler start --interval 60
+npm run jobos -- loop scheduler --max-iterations 1 --json
+npm run jobos -- tasks due --watch --max-iterations 1 --json
 
 # Local interactive dashboard
 npm run web -- --port 4317
@@ -109,6 +113,7 @@ npx jobos init --json
 ## Implemented CLI contract
 
 - `jobos init`
+- `jobos agent-guide`
 - `jobos profile create <name> [--from-resume file]`
 - `jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b]`
 - `jobos jobs import-url <url> --profile <profile>`
@@ -142,10 +147,15 @@ npx jobos init --json
 - `jobos scheduler start [--interval 60]`
 - `jobos scheduler status`
 - `jobos runs list`
+- `jobos loop scheduler [--interval N] [--max-iterations N]`
+- `jobos loop automation <name> [--interval N] [--max-iterations N]`
+- `jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N]`
 - `jobos mcp`
 - `jobos web [--port 4317]`
 
-Most successful commands can emit parseable JSON with `--json`. Validation errors exit non-zero and print a clear `jobos:` error message.
+Commands are non-interactive and are documented from a command registry that also powers `jobos --help`, per-command help, and `jobos agent-guide`. Most successful commands emit parseable JSON with `--json`; loop/watch commands emit JSONL. Usage errors exit `2`, runtime/domain errors exit `1`, and successes exit `0`. With `--json`, errors are written to stderr as a stable object: `{"ok":false,"error":{"code":"usage_error","type":"usage","message":"..."}}`.
+
+On the first successful command in an empty workspace, JobOS creates `.jobos/` and `jobos-workspace/` automatically and prints a one-line bootstrap notice to stderr unless `--quiet` is set. `init` is optional and remains useful for explicit/custom setup.
 
 ## Workspace layout
 
@@ -198,6 +208,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 ## Architecture notes
 
 - `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/discovery.js`, `src/discovery/adapters.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/outreach.js`, `src/tracking.js`, `src/interview.js`, `src/analytics.js`, `src/api.js`, `src/mcp.js`, and `src/web.js`.
+- The CLI has a command registry that generates root help, per-command help, and `jobos agent-guide`; registry metadata is covered by Sprint 9 tests.
 - Discovery supports direct public Greenhouse and Lever API adapters, saved searches, company watchlist entries, client-side keyword/location filtering, dedupe by URL and normalized company/title/location, scored review queue entries, and `automation_runs` records. Network or fixture fetch failures produce failed run records rather than crashing the discovery command.
 - The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
 - Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
@@ -205,6 +216,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - Interview prep creates role/stage-specific packets with likely questions, proof-linked STAR story prompts, questions to ask, company/role refresh, and a human gate. LLM-generated interview packets render stored proof summaries/metrics rather than freeform accomplishment details.
 - Analytics uses application status history for stages reached, conversion, source/role-family performance, and stale active-application warnings.
 - The scheduler stores disabled default automations in SQLite and mirrors them to `jobos-workspace/automations/automations.yaml`. It supports five-field cron expressions, one-shot `scheduler run-once`, long-running `scheduler start`, sequential execution with a PID guard, failed run recording, failure auto-disable after three consecutive failures, and per-day automation run JSONL. Built-in actions are `daily_discovery`, `followup_watch`, `stale_application_check`, `weekly_retrospective`, and `morning_priority_brief`.
+- Built-in loops reuse scheduler machinery: `loop scheduler`, `loop automation <name>`, `loop action <action-id>`, and `tasks due --watch` support `--interval`, `--max-iterations`, and JSONL output for agents.
 - The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks. It now supports local create/edit forms, discovery review queue accept/archive actions, kanban status movement, and artifact approve/reject review.
 - The REST API includes `GET/POST /api/searches`, `POST /api/searches/:id/run`, `GET /api/discovery/runs`, `GET/POST /api/automations`, `POST /api/automations/:id/run`, and `GET /api/runs` in addition to local CRUD-style core resources.
 - The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, create_application, update_application_status, list_tasks, interview_prep, weekly_review, list_saved_searches, search_jobs, import_job_url, list_automations, run_automation, and list_automation_runs.

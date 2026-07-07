@@ -11,6 +11,8 @@
 - 2026-07-07: Sprint 9 Goal 1 frontend surface audit completed in `docs/frontend-audit.md`; full test suite rerun passed after one transient API fetch failure passed on targeted rerun.
 - 2026-07-07: Sprint 9 Goal 2 frontend architecture options completed in `docs/frontend-options.md`; decision remains CLI-primary with web as a companion after exemplar CLI pattern review.
 - 2026-07-07: Sprint 9 Goal 3 CLI-primary frontend plan completed in `docs/frontend-plan.md`, including command registry, exit-code, auto-workspace, loop/watch, and agent-guide contracts.
+- 2026-07-07: Sprint 9 Goal 4 CLI frontend implementation completed: registry-generated help, typed JSON errors, auto-workspace bootstrap notice, agent guide command, scheduler-backed loops, and tasks watch mode.
+- 2026-07-07: Sprint 9 Goal 5 frontend evals completed: Sprint 9 registry/bootstrap/loop tests, blind-agent JSON eval, human usability checklist, and smoke auto-workspace coverage.
 - 2026-07-07: Sprint 8 Goal 1 approach dossier completed for LLM-grounded research/outreach: search provider recommendation, multi-query dossier pipeline, stakeholder source policy, outreach lifecycle design, and Phase C eval rubric.
 - 2026-07-07: Sprint 8 Goal 2 pluggable search provider registry implemented: DuckDuckGo default, Brave API provider, SearXNG provider, env-selected provider chains, per-provider timeouts, normalized provider metadata, and fallback warnings.
 - 2026-07-07: Sprint 8 Goal 3 LLM-synthesized company dossiers implemented: five-query company research, source-pooled LLM claims/open questions/outreach angles, unsupported-claim dropping, multi-query no-LLM fallback, and refreshed `companies.facts_json`.
@@ -33,6 +35,7 @@
 - Sprint 8 Goal 1 gate passed: `npm test` (27/27) and `npm run smoke`.
 - Sprint 8 Goal 2 gate passed: `node --test tests/sprint8-search.test.js`, `node --test tests/sprint3-research.test.js`, `npm test` (30/30), and `npm run smoke`.
 - Sprint 8 Goal 3 gate passed: `node --test tests/sprint3-research.test.js`, `npm test` (31/31), and `npm run smoke`.
+- Sprint 9 Goal 4/5 gate passed: `node --test tests/sprint9-frontend.test.js`, `node run_eval.js`, `npm test` (39/39), and `npm run smoke`.
 - Sprint 8 Goal 4 gate passed: `node --test tests/sprint3-research.test.js` (5/5), `npm test` (39/39), and `npm run smoke`.
 
 ## Current implementation notes
