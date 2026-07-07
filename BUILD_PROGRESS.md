@@ -8,6 +8,7 @@
 - 2026-07-02: Vision UI blocker pass addressed with navigable dashboard shell, route sections, artifact review modal, gate modal, command palette/CLI copy helpers, responsive CSS, accessibility labels, audit/automation state, and route hardening.
 - 2026-07-04: Sprint 6 discovery module implemented: Greenhouse/Lever public ATS adapters, saved searches, company watchlist, dedupe/review queue, discovery AutomationRun records, workspace sync, dashboard/API/MCP surfaces, tests, and smoke coverage.
 - 2026-07-04: Sprint 7 scheduler implemented: automations table/YAML sync, seeded disabled defaults, cron parser, run-once/start/manual triggers, action registry, audited AutomationRun rows, JSONL run mirror, dashboard/API/MCP surfaces, failure auto-disable, targeted tests, and smoke coverage.
+- 2026-07-07: Sprint 8 Goal 1 approach dossier completed for LLM-grounded research/outreach: search provider recommendation, multi-query dossier pipeline, stakeholder source policy, outreach lifecycle design, and Phase C eval rubric.
 
 ## Handoffs
 - PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
@@ -23,6 +24,7 @@
 - Additional URL smoke passed: `jobs import-url` with a data URL creates one idempotent job and duplicate import returns `created:false`.
 - Sprint 6 targeted test passed: `node --test tests/sprint6-discovery.test.js`.
 - Sprint 7 targeted test passed: `node --test tests/sprint7-scheduler.test.js`.
+- Sprint 8 Goal 1 gate passed: `npm test` (27/27) and `npm run smoke`.
 
 ## Current implementation notes
 - Core flow is local-only and API-key-free.
