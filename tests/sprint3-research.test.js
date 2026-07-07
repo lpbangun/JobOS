@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { openStore, one } from '../src/db.js';
 
 function fakeSearchServer() {
   const requests = [];
@@ -35,6 +36,67 @@ function fakeSearchServer() {
   });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
     baseUrl: `http://127.0.0.1:${server.address().port}/search`,
+    requests,
+    close: () => new Promise(done => server.close(done))
+  })));
+}
+
+function fakeResearchLlmServer() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization, body: JSON.parse(body) });
+      const payload = {
+        claims: [
+          {
+            claim: 'Acme Learning builds an AI tutoring platform for workforce upskilling.',
+            category: 'product',
+            sourceUrl: 'https://acme.example/about',
+            sourceTitle: 'Acme Learning - AI tutoring platform for workforce upskilling',
+            confidence: 'high'
+          },
+          {
+            claim: 'Unsupported claim with no source URL.',
+            category: 'market',
+            confidence: 'high'
+          },
+          {
+            claim: 'OtherCo is secretly the same company.',
+            category: 'risk',
+            sourceUrl: 'https://other.example/news',
+            sourceTitle: 'OtherCo product update',
+            confidence: 'high'
+          }
+        ],
+        openQuestions: [
+          'Confirm how the product manager role will measure educator discovery outcomes.'
+        ],
+        outreachAngles: [
+          {
+            angle: 'Ask how educator discovery shapes the roadmap for the learning platform role.',
+            whyItMattersForRole: 'The job asks for educator discovery and the source-backed company context is an AI learning platform.',
+            evidenceUrls: ['https://acme.example/about', 'https://acme.example/careers/pm'],
+            suggestedAsk: 'How is the team balancing learner workflow research with activation metrics this quarter?',
+            confidence: 'high'
+          },
+          {
+            angle: 'Unsupported angle should be dropped.',
+            whyItMattersForRole: 'No source.',
+            evidenceUrls: [],
+            suggestedAsk: 'Should not render.',
+            confidence: 'high'
+          }
+        ],
+        warnings: ['Review synthesized claims before outreach.']
+      };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+    });
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
     requests,
     close: () => new Promise(done => server.close(done))
   })));
@@ -81,8 +143,10 @@ test('company research uses web search results to create sourced dossier facts',
     const { root, run } = makeRunner({ JOBOS_SEARCH_BASE_URL: fake.baseUrl });
     const { job } = await seedJob(run, root);
     const result = JSON.parse(await run(['research', 'company', '--job', job.id, '--json']));
+    assert.equal(result.queryCount, 5);
     assert.equal(result.factCount, 4);
     assert.equal(result.sourceCount, 4);
+    assert.ok(fake.requests.length >= 5, `expected multi-query search, got ${fake.requests.join(', ')}`);
     assert.ok(fake.requests.some(q => q.includes('Acme Learning')));
     const dossier = readFileSync(path.join(root, 'jobos-workspace', result.path), 'utf8');
     assert.match(dossier, /Source-backed facts/);
@@ -94,6 +158,49 @@ test('company research uses web search results to create sourced dossier facts',
     assert.doesNotMatch(dossier, /not fabricated/i);
   } finally {
     await fake.close();
+  }
+});
+
+test('company research uses LLM synthesis but drops unsourced claims and angles', async () => {
+  const fake = await fakeSearchServer();
+  const llm = await fakeResearchLlmServer();
+  try {
+    const { root, run } = makeRunner({
+      JOBOS_SEARCH_BASE_URL: fake.baseUrl,
+      JOBOS_LLM_PROVIDER: 'openai',
+      JOBOS_LLM_MODEL: 'fake-research-model',
+      JOBOS_LLM_API_KEY: 'test-key',
+      JOBOS_LLM_BASE_URL: llm.baseUrl
+    });
+    const { job } = await seedJob(run, root);
+    const result = JSON.parse(await run(['research', 'company', '--job', job.id, '--json']));
+    assert.equal(result.mode, 'llm');
+    assert.equal(result.queryCount, 5);
+    assert.equal(result.factCount, 1);
+    assert.equal(result.outreachAngleCount, 1);
+    assert.equal(result.droppedUnsupportedClaims, 2);
+    assert.equal(result.droppedUnsupportedAngles, 1);
+    assert.ok(fake.requests.length >= 5, `expected multi-query search, got ${fake.requests.join(', ')}`);
+    assert.equal(llm.requests.length, 1);
+    assert.equal(llm.requests[0].authorization, 'Bearer test-key');
+    const dossier = readFileSync(path.join(root, 'jobos-workspace', result.path), 'utf8');
+    assert.match(dossier, /Research mode:\*\* llm/);
+    assert.match(dossier, /Acme Learning builds an AI tutoring platform/);
+    assert.match(dossier, /Ask how educator discovery shapes the roadmap/);
+    assert.match(dossier, /Confirm how the product manager role will measure educator discovery outcomes/);
+    assert.match(dossier, /Human gate/);
+    assert.doesNotMatch(dossier, /Unsupported claim with no source URL/);
+    assert.doesNotMatch(dossier, /OtherCo is secretly/);
+    assert.doesNotMatch(dossier, /Unsupported angle should be dropped/);
+    const store = await openStore({ workspace: root });
+    const company = one(store, 'SELECT facts_json FROM companies WHERE id=?', [result.companyId]);
+    const facts = JSON.parse(company.facts_json);
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0].source, 'llm-synthesis');
+    assert.equal(facts[0].url, 'https://acme.example/about');
+  } finally {
+    await fake.close();
+    await llm.close();
   }
 });
 

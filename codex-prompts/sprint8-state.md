@@ -90,3 +90,43 @@ Eval scores:
 Blockers:
 
 - None.
+
+## Goal 3 - LLM-Synthesized Company Dossier
+
+Status: completed
+
+Plan: Rework company research to run the Goal 1 multi-query plan through the Goal 2 provider registry, pool/dedupe company-matched results, optionally call `generateJson` for claims/open questions/outreach angles, validate every LLM claim and angle against source URLs from the pool, drop unsupported LLM output, and keep a useful multi-query no-LLM fallback. Persist the final source-backed facts to `companies.facts_json` and keep the dossier Human gate.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/research.js`
+- `tests/sprint3-research.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- Company research now runs five public search queries from the Goal 1 plan.
+- Company search results are pooled, URL-deduped, filtered to public allowed sources, and matched to the company before facts or LLM source maps are built.
+- `generateJson` is used only when LLM config is complete and company-matched sources exist.
+- LLM claims are accepted only when `claim` and `sourceUrl` exist and the URL matches the company-matched source pool.
+- LLM outreach angles are accepted only when they cite at least one valid source URL from the same pool.
+- Unsupported LLM claims/angles are counted and rendered only as aggregate warnings; unsupported text is not published.
+- If the LLM is missing, fails, or returns no valid claims, JobOS renders a deterministic multi-query fallback facts list and conservative source-backed outreach angles.
+- `companies.facts_json` is always refreshed with the final rendered source-backed facts.
+- Company dossiers now show research mode, query list, warnings, source-backed facts, job-specific outreach angles, open questions, and the Human gate.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 3/3 tests.
+- `npm test` passed: 31/31 tests.
+- `npm run smoke` passed.
+- New behavior is covered by expanded no-LLM multi-query assertions and an LLM-backed fake-provider test that verifies unsourced claims and angles are dropped.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
