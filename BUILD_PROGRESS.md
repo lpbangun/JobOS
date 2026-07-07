@@ -19,6 +19,7 @@
 - 2026-07-07: Sprint 8 Goal 4 honest stakeholder pipeline implemented: source-required pasted stakeholder records, confidence/source labels, LinkedIn/private-profile exclusion for search promotion, LLM relevance filtering, and stakeholder worksheet warnings.
 - 2026-07-07: Sprint 8 Goal 5 personalized outreach lifecycle implemented: LLM evidence-backed outreach drafts, proof/style-aware deterministic fallback, local outreach threads, human-sent recording, follow-up scheduling, due follow-up listing, and CLI/API/MCP/dashboard surfaces.
 - 2026-07-07: Sprint 8 Goal 6 research/outreach eval harness implemented: local fake search/LLM providers, dossier/stakeholder/outreach rubric scoring, hard human-gate/audit/no-live-network assertions, and `npm test` coverage.
+- 2026-07-07: Sprint 8 close-out completed: README command/env/API/MCP/eval docs updated, research eval scores reached 10/10 on every dossier/stakeholder/outreach axis with 33/33 hard assertions, and the final test/smoke gates passed.
 
 ## Handoffs
 - PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
@@ -41,6 +42,7 @@
 - Sprint 8 Goal 4 gate passed: `node --test tests/sprint3-research.test.js` (5/5), `npm test` (39/39), and `npm run smoke`.
 - Sprint 8 Goal 5 gate passed: `node --test tests/sprint3-research.test.js` (6/6), `node --test tests/sprint4-interview-analytics-mcp.test.js` (4/4), `npm test` (40/40), and `npm run smoke`.
 - Sprint 8 Goal 6 gate passed: `node run_eval_research.js`, `node --test tests/sprint8-research-eval.test.js` (1/1), `npm test` (41/41 after rerun; one transient API fetch failure passed on targeted and full rerun), and `npm run smoke`.
+- Sprint 8 final close-out gate passed: `node run_eval_research.js`, `npm test` (41/41), and `npm run smoke`.
 
 ## Current implementation notes
 - Core flow is local-only and API-key-free.

@@ -22,7 +22,16 @@ The implementation deliberately does **not** auto-apply to jobs, submit forms, s
 npm install
 ```
 
-No API keys or cloud accounts are required for the offline core flow. To enable LLM scoring and tailoring, set `JOBOS_LLM_PROVIDER` (`openai`, `ollama-cloud`, or `anthropic`), `JOBOS_LLM_MODEL`, and `JOBOS_LLM_API_KEY`. `JOBOS_LLM_BASE_URL` is optional for OpenAI-compatible local/fake/test endpoints. Without credentials, JobOS clearly marks scoring and tailoring as deterministic degraded mode.
+No API keys or cloud accounts are required for the offline core flow. To enable LLM scoring, tailoring, research synthesis, stakeholder structuring, and outreach drafting, set `JOBOS_LLM_PROVIDER` (`openai`, `ollama-cloud`, or `anthropic`), `JOBOS_LLM_MODEL`, and `JOBOS_LLM_API_KEY`. `JOBOS_LLM_BASE_URL` is optional for OpenAI-compatible local/fake/test endpoints. Without credentials, JobOS clearly marks LLM-enhanced work as deterministic degraded mode.
+
+Search defaults to keyless DuckDuckGo HTML. Optional configured search providers:
+
+```bash
+export JOBOS_SEARCH_PROVIDER=auto              # or duckduckgo, brave, searxng
+export JOBOS_BRAVE_API_KEY=...                 # Brave Search API
+export JOBOS_SEARXNG_URL=https://search.local  # self-hosted SearXNG JSON endpoint
+export JOBOS_SEARCH_TIMEOUT_MS=15000
+```
 
 Optional workspace selection:
 
@@ -69,6 +78,9 @@ npm run jobos -- research company --job <job-id> --json
 npm run jobos -- research stakeholders --job <job-id> --json
 npm run jobos -- research add-stakeholder --job <job-id> --source-url https://example.com/person --name "Maya Chen" --text "Source-backed stakeholder context." --json
 npm run jobos -- outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile pm-edtech --json
+npm run jobos -- outreach mark-sent --artifact <artifact-id> --channel email --json
+npm run jobos -- outreach schedule-followup --thread <thread-id> --after 7 --json
+npm run jobos -- outreach due --json
 
 # Due tasks and weekly review
 npm run jobos -- tasks due --json
@@ -99,6 +111,10 @@ npm run web -- --port 4317
 #   GET  /api/automations
 #   POST /api/automations/:id/run
 #   GET  /api/runs
+#   POST /api/outreach/draft
+#   POST /api/outreach/mark-sent
+#   POST /api/outreach/schedule-followup
+#   GET  /api/outreach/due
 #   POST /api/tasks {"title":"Follow up","priority":"high"}
 
 # MCP server for agents that speak stdio JSON-RPC/MCP framing
@@ -136,6 +152,9 @@ npx jobos init --json
 - `jobos research stakeholders --job <job-id>`
 - `jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>]`
 - `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational]`
+- `jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes <text>]`
+- `jobos outreach schedule-followup --thread <thread-id> --after <days>`
+- `jobos outreach due`
 - `jobos interview prep --application <application-id> --stage <stage> [--output markdown]`
 - `jobos analytics funnel --profile <profile-id> [--since 30] [--output markdown]`
 - `jobos tasks due --json`
@@ -200,6 +219,7 @@ jobos-workspace/
       interview-prep-<stage>.md
     outreach/
       <stakeholder-id>-informational.md
+      threads.yaml
   exports/
     weekly-review-<profile-id>-<date>.md
     morning-priority-brief-<profile-id>-<date>.md
@@ -214,14 +234,15 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - Discovery supports direct public Greenhouse and Lever API adapters, saved searches, company watchlist entries, client-side keyword/location filtering, dedupe by URL and normalized company/title/location, scored review queue entries, and `automation_runs` records. Network or fixture fetch failures produce failed run records rather than crashing the discovery command.
 - The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
 - Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
-- Research commands use public web-search results when available, write source URLs into company/stakeholder dossiers, and avoid claiming facts without a source.
+- Research commands use a pluggable public web-search provider chain, write source URLs into company/stakeholder dossiers, and drop unsupported LLM claims or angles instead of publishing them.
+- Outreach drafts use validated stakeholder/company/proof evidence when LLMs are configured and proof/style-aware deterministic fallback otherwise. Outreach lifecycle state is local only: `mark-sent` records that a human sent a draft elsewhere, `schedule-followup` creates a local task, and `due` lists reminders. JobOS never sends outreach.
 - Interview prep creates role/stage-specific packets with likely questions, proof-linked STAR story prompts, questions to ask, company/role refresh, and a human gate. LLM-generated interview packets render stored proof summaries/metrics rather than freeform accomplishment details.
 - Analytics uses application status history for stages reached, conversion, source/role-family performance, and stale active-application warnings.
 - The scheduler stores disabled default automations in SQLite and mirrors them to `jobos-workspace/automations/automations.yaml`. It supports five-field cron expressions, one-shot `scheduler run-once`, long-running `scheduler start`, sequential execution with a PID guard, failed run recording, failure auto-disable after three consecutive failures, and per-day automation run JSONL. Built-in actions are `daily_discovery`, `followup_watch`, `stale_application_check`, `weekly_retrospective`, and `morning_priority_brief`.
 - Built-in loops reuse scheduler machinery: `loop scheduler`, `loop automation <name>`, `loop action <action-id>`, and `tasks due --watch` support `--interval`, `--max-iterations`, and JSONL output for agents.
 - The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks. It now supports local create/edit forms, discovery review queue accept/archive actions, kanban status movement, and artifact approve/reject review.
-- The REST API includes `GET/POST /api/searches`, `POST /api/searches/:id/run`, `GET /api/discovery/runs`, `GET/POST /api/automations`, `POST /api/automations/:id/run`, and `GET /api/runs` in addition to local CRUD-style core resources.
-- The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, create_application, update_application_status, list_tasks, interview_prep, weekly_review, list_saved_searches, search_jobs, import_job_url, list_automations, run_automation, and list_automation_runs.
+- The REST API includes `GET/POST /api/searches`, `POST /api/searches/:id/run`, `GET /api/discovery/runs`, `GET/POST /api/automations`, `POST /api/automations/:id/run`, `GET /api/runs`, and outreach draft/mark-sent/schedule/due endpoints in addition to local CRUD-style core resources.
+- The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, mark_outreach_sent, schedule_outreach_followup, list_outreach_due, create_application, update_application_status, list_tasks, interview_prep, weekly_review, list_saved_searches, search_jobs, import_job_url, list_automations, run_automation, and list_automation_runs.
 
 ## Human-gating and safety policy
 
@@ -237,6 +258,7 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 ```bash
 npm test
 npm run smoke
+node run_eval_research.js
 ```
 
 Current smoke coverage verifies:
@@ -271,7 +293,8 @@ Implemented:
 - Provider-backed LLM fit scoring with deterministic degraded-mode fallback.
 - Provider-backed, proof-grounded resume and cover-letter drafts with deterministic degraded-mode fallback.
 - Web-search-backed company dossiers and stakeholder research with source URLs.
-- Human-gated outreach draft artifacts connected to researched stakeholders.
+- LLM-enhanced company dossiers and stakeholder research with source URLs, provider metadata, confidence labels, and unsupported-claim dropping.
+- Human-gated outreach draft artifacts connected to researched stakeholders, plus local outreach threads, human-sent logging, follow-up scheduling, and due follow-up listing.
 - Manual application tracking.
 - Append-only application status history for stage-reached analytics.
 - Interview prep packets grounded in stored proof points.

@@ -139,6 +139,42 @@ Blockers:
 
 - None.
 
+## Goal 7 - Close Out
+
+Status: completed
+
+Plan: Close Sprint 8 by updating user-facing README command/env/eval documentation, adding final build-progress and state-file scores, rerunning `node run_eval_research.js`, `npm test`, and `npm run smoke`, and committing the documentation close-out separately from the implementation goals.
+
+Files to touch:
+
+- `README.md`
+- `BUILD_PROGRESS.md`
+- `codex-prompts/sprint8-state.md`
+- `tests/cli.test.js`
+
+Decisions made:
+
+- README now documents Sprint 8 search provider env vars, LLM use across research/outreach, stakeholder add, outreach mark-sent/schedule-followup/due commands, REST API outreach endpoints, MCP outreach tools, workspace `outreach/threads.yaml`, and `run_eval_research.js`.
+- Added a narrow `tests/cli.test.js` stabilization for the recurring full-suite REST fetch flake: higher random dashboard port range and brief fetch retry helper.
+- Final close-out keeps all external actions human-gated and local-only; mark-sent records a human action without sending anything from JobOS.
+
+Verification:
+
+- `node run_eval_research.js` passed.
+- `npm test` passed: 41/41 tests.
+- `npm run smoke` passed.
+
+Eval scores:
+
+- Dossier: groundedness 10/10, source diversity 10/10, distractor rejection 10/10, outreach angle usefulness 10/10.
+- Stakeholder: precision 10/10, recall 10/10, confidence labels 10/10.
+- Outreach: specificity 10/10, personalization 10/10, ask clarity 10/10, length discipline 10/10, tone match 10/10.
+- Hard assertions: 33/33 passed.
+
+Blockers:
+
+- None.
+
 ## Goal 2 - Pluggable Search Provider
 
 Status: completed
