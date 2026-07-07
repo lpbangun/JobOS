@@ -34,6 +34,7 @@ The product invariant is that the CLI is the primary frontend because it is dire
 | Application create/update | `applications create/update` | `POST/PATCH /api/applications` | `create_application`, `update_application_status` | Create form and kanban status update | `application.yaml`, `tasks.yaml` | Status `applied` is manual tracking only. |
 | Company research | `research company` | Missing direct endpoint | `research_company` | Read-only guidance | `company-dossier.md` | Research worksheet cites public sources or records warnings. |
 | Stakeholder research | `research stakeholders` | Missing direct endpoint | Missing | Read-only guidance | `stakeholders.md` | CLI-only except workspace. |
+| Pasted stakeholder record | `research add-stakeholder` | Missing direct endpoint | Missing | Missing | `stakeholders.md`, SQLite stakeholders | Requires a public source URL and records human-provided context without contacting anyone. |
 | Outreach draft | `outreach draft` | Missing direct endpoint | `draft_outreach` | Read-only/gated copy | `outreach/*.md`, artifacts/tasks | Draft-only, never sends. |
 | Interview prep | `interview prep` | Missing direct endpoint | `interview_prep` | Artifact review after generation | `artifacts/interview-prep-*.md` | CLI/MCP. |
 | Funnel analytics | `analytics funnel` | `/api/state` includes summarized state, not funnel endpoint | Missing | Dashboard summaries only | Export markdown for review | CLI is the canonical report path. |

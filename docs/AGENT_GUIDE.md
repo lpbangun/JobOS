@@ -42,6 +42,7 @@ Run `jobos agent-guide --json` for the generated registry. Current command famil
 - `jobos applications update <application-id> --status <status> --json`
 - `jobos research company --job <job-id> --json`
 - `jobos research stakeholders --job <job-id> --json`
+- `jobos research add-stakeholder --job <job-id> --source-url <url> --name <name> --text <text> --json`
 - `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile> --json`
 - `jobos interview prep --application <application-id> --stage <stage> --json`
 - `jobos analytics funnel --profile <profile> --json`

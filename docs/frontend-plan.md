@@ -30,6 +30,7 @@ jobos applications create
 jobos applications update
 jobos research company
 jobos research stakeholders
+jobos research add-stakeholder
 jobos outreach draft
 jobos interview prep
 jobos analytics funnel

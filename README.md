@@ -67,6 +67,7 @@ npm run jobos -- applications update <application-id> --status applied --json
 # Public web-search-backed research and human-gated outreach drafts
 npm run jobos -- research company --job <job-id> --json
 npm run jobos -- research stakeholders --job <job-id> --json
+npm run jobos -- research add-stakeholder --job <job-id> --source-url https://example.com/person --name "Maya Chen" --text "Source-backed stakeholder context." --json
 npm run jobos -- outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile pm-edtech --json
 
 # Due tasks and weekly review
@@ -133,6 +134,7 @@ npx jobos init --json
 - `jobos applications update <application-id> --status <status>`
 - `jobos research company --job <job-id>`
 - `jobos research stakeholders --job <job-id>`
+- `jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>]`
 - `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational]`
 - `jobos interview prep --application <application-id> --stage <stage> [--output markdown]`
 - `jobos analytics funnel --profile <profile-id> [--since 30] [--output markdown]`
