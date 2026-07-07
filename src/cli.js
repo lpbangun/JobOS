@@ -10,7 +10,7 @@ import { score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { addStakeholder, research } from './research.js';
-import { draftOutreach } from './outreach.js';
+import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
 import { web } from './web.js';
 import { prepInterview } from './interview.js';
@@ -64,6 +64,9 @@ export const commandRegistry = [
   cmd(['research', 'stakeholders'], 'jobos research stakeholders --job <job-id> [--json]', 'Create a source-backed stakeholder worksheet.'),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
   cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--json]', 'Draft human-reviewed outreach without sending it.'),
+  cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
+  cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
+  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
   cmd(['tasks', 'due'], 'jobos tasks due [--watch] [--interval N] [--max-iterations N] [--json]', 'List due tasks, optionally watching on an interval.', { output: 'array-or-jsonl' }),
@@ -513,8 +516,24 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'outreach' && action === 'draft') {
     if (!flags.job || !flags.stakeholder) usage('Missing --job or --stakeholder');
-    const r = draftOutreach(s, { jobId: flags.job, profileId: needProfile(flags), stakeholderId: flags.stakeholder, goal: flags.goal ? String(flags.goal) : 'informational' });
+    const r = await draftOutreach(s, { jobId: flags.job, profileId: needProfile(flags), stakeholderId: flags.stakeholder, goal: flags.goal ? String(flags.goal) : 'informational' });
     out(r);
+    return;
+  }
+  if (group === 'outreach' && action === 'mark-sent') {
+    const artifactId = requireFlag(flags, 'artifact', '--artifact <artifact-id>');
+    const channel = requireFlag(flags, 'channel', '--channel <email|linkedin|other>');
+    out(markOutreachSent(s, { artifactId: String(artifactId), channel: String(channel), notes: flags.notes ? String(flags.notes) : '' }));
+    return;
+  }
+  if (group === 'outreach' && action === 'schedule-followup') {
+    const threadId = requireFlag(flags, 'thread', '--thread <thread-id>');
+    const afterDays = requireFlag(flags, 'after', '--after <days>');
+    out(scheduleFollowup(s, { threadId: String(threadId), afterDays }));
+    return;
+  }
+  if (group === 'outreach' && action === 'due') {
+    out(outreachDue(s));
     return;
   }
   if (group === 'interview' && action === 'prep') {

@@ -86,6 +86,21 @@ function fakeResearchLlmServer() {
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
         return;
       }
+      if (parsed.metadata?.schemaName === 'jobos_outreach_draft') {
+        const payload = {
+          subject: 'Question about Acme Learning product priorities',
+          message: 'Hi Maya,\n\nI saw that you lead product at Acme Learning and that Acme Learning builds an AI tutoring platform for workforce upskilling. My background includes educator discovery for AI-assisted learning workflows, so I would value your perspective on what strong contribution looks like for the Product Manager role.\n\nWould you be open to a short learning conversation?\n\nThanks,\nPM EdTech',
+          evidence: [
+            { sourceUrl: 'https://acme.example/team/maya-chen', reason: 'Stakeholder relevance' },
+            { sourceUrl: 'https://acme.example/about', reason: 'Company product context' }
+          ],
+          quality: { specificity: 9, personalization: 9, askClarity: 9, lengthDiscipline: 9, toneMatch: 9 },
+          warnings: []
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+        return;
+      }
       const payload = {
         claims: [
           {
@@ -300,6 +315,49 @@ test('stakeholder search uses LLM relevance check when configured', async () => 
   }
 });
 
+test('outreach draft uses LLM evidence schema when configured', async () => {
+  const fake = await fakeSearchServer();
+  const llm = await fakeResearchLlmServer();
+  try {
+    const { root, run } = makeRunner({
+      JOBOS_SEARCH_BASE_URL: fake.baseUrl,
+      JOBOS_LLM_PROVIDER: 'openai',
+      JOBOS_LLM_MODEL: 'fake-outreach-model',
+      JOBOS_LLM_API_KEY: 'test-key',
+      JOBOS_LLM_BASE_URL: llm.baseUrl
+    });
+    const { profile, job } = await seedJob(run, root);
+    await run(['research', 'company', '--job', job.id, '--json']);
+    const added = JSON.parse(await run([
+      'research', 'add-stakeholder',
+      '--job', job.id,
+      '--source-url', 'https://acme.example/team/maya-chen',
+      '--name', 'Maya Chen',
+      '--role', 'Head of Product',
+      '--text', 'Maya Chen leads product at Acme Learning and writes about AI learning workflows.',
+      '--json'
+    ]));
+    const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', added.id, '--profile', profile.id, '--goal', 'informational', '--json']));
+    assert.equal(draft.mode, 'llm');
+    assert.equal(draft.subject, 'Question about Acme Learning product priorities');
+    assert.ok(llm.requests.some(r => r.body.metadata?.schemaName === 'jobos_outreach_draft'));
+    const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
+    assert.match(content, /AI tutoring platform for workforce upskilling/);
+    assert.match(content, /https:\/\/acme\.example\/team\/maya-chen/);
+    assert.match(content, /https:\/\/acme\.example\/about/);
+    assert.match(content, /Quality check/);
+    assert.match(content, /Human gate/);
+    const store = await openStore({ workspace: root });
+    const artifact = one(store, 'SELECT evidence_json FROM artifacts WHERE id=?', [draft.id]);
+    const evidence = JSON.parse(artifact.evidence_json);
+    assert.ok(evidence.some(item => item.sourceUrl === 'https://acme.example/team/maya-chen'));
+    assert.ok(evidence.some(item => item.sourceUrl === 'https://acme.example/about'));
+  } finally {
+    await fake.close();
+    await llm.close();
+  }
+});
+
 test('stakeholder research creates sourced outreach draft without sending anything', async () => {
   const fake = await fakeSearchServer();
   try {
@@ -313,14 +371,32 @@ test('stakeholder research creates sourced outreach draft without sending anythi
     assert.doesNotMatch(stakeholderDoc, /Priya Rao|linkedin\.com|OtherCo|Learning Guild|Sam Lee/);
     const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--goal', 'informational', '--json']));
     assert.equal(draft.approvalStatus, 'draft_needs_human_review');
+    assert.match(draft.threadId, /^thread_/);
     const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
-    assert.match(content, /Draft only — not sent/);
-    assert.match(content, /Why this contact is relevant/);
+    assert.match(content, /Draft only - not sent/);
+    assert.match(content, /Evidence used/);
+    assert.match(content, /My relevant background includes/);
     assert.match(content, /Human gate/);
     assert.match(content, /did not send email/);
     assert.match(content, /Maya Chen|Jordan Patel/);
     assert.match(content, /https:\/\/acme\.example\/team\//);
+    assert.doesNotMatch(content, /My background is PM EdTech/);
     assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md')));
+    const sent = JSON.parse(await run(['outreach', 'mark-sent', '--artifact', draft.id, '--channel', 'email', '--notes', 'Human sent from email client.', '--json']));
+    assert.equal(sent.status, 'sent_by_human');
+    assert.equal(sent.channel, 'email');
+    assert.match(sent.note, /JobOS did not send/);
+    const scheduled = JSON.parse(await run(['outreach', 'schedule-followup', '--thread', draft.threadId, '--after', '0', '--json']));
+    assert.equal(scheduled.status, 'followup_scheduled');
+    assert.match(scheduled.taskId, /^task_/);
+    const due = JSON.parse(await run(['outreach', 'due', '--json']));
+    assert.ok(due.some(item => item.threadId === draft.threadId && item.taskId === scheduled.taskId));
+    const threadsYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'outreach', 'threads.yaml'), 'utf8');
+    assert.match(threadsYaml, /autoSend: disabled/);
+    assert.match(threadsYaml, /sent_by_human|followup_scheduled/);
+    const store = await openStore({ workspace: root });
+    assert.ok(one(store, 'SELECT id FROM audit_log WHERE action=?', ['outreach.mark_sent.recorded']));
+    assert.ok(one(store, 'SELECT id FROM audit_log WHERE action=?', ['outreach.followup_scheduled']));
     const otherProfile = JSON.parse(await run(['profile', 'create', 'Other Profile', '--json']));
     const wrongProfile = await runRaw(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', otherProfile.id, '--json']);
     assert.notEqual(wrongProfile.status, 0);

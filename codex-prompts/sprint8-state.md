@@ -49,6 +49,54 @@ Blockers:
 
 - None.
 
+## Goal 5 - Personalized Outreach With Lifecycle
+
+Status: completed
+
+Plan: Upgrade `draftOutreach` to use the Goal 1 schema with optional LLM JSON generation, validated evidence references, and a deterministic fallback that uses profile proof points plus communication style instead of treating the profile name as background. Add a local-only outreach lifecycle through an `outreach_threads` table, per-job workspace YAML, `mark-sent`, `schedule-followup`, and `due` operations. Wire the lifecycle through CLI, API, MCP, and dashboard surfaces while preserving the immutable human gate: JobOS records that a human sent something and creates follow-up tasks, but never sends messages or touches external accounts.
+
+Files to touch:
+
+- `codex-prompts/sprint8-state.md`
+- `src/db.js`
+- `src/outreach.js`
+- `src/cli.js`
+- `src/api.js`
+- `src/mcp.js`
+- `src/analytics.js`
+- `src/web.js`
+- `tests/sprint3-research.test.js`
+- `tests/sprint4-interview-analytics-mcp.test.js`
+- `BUILD_PROGRESS.md`
+
+Decisions made:
+
+- `draftOutreach` is now async and uses `generateJson` with schema name `jobos_outreach_draft` when an LLM is configured.
+- LLM outreach drafts are accepted only with a usable subject/message and evidence references that match allowed stakeholder, company, job, or proof-point context.
+- Unsupported LLM evidence references are dropped and recorded as warnings; if the LLM omits valid evidence, deterministic evidence selection is retained.
+- The no-LLM fallback now uses stored proof points and `communicationStyle`, and no longer treats `profile.name` as professional background.
+- Outreach artifacts still use `approval_status: draft_needs_human_review` and include an explicit Human gate.
+- Added `outreach_threads` as local lifecycle state with per-job `outreach/threads.yaml` mirrors.
+- `mark-sent` records that a human sent the message outside JobOS; JobOS records local state and audit only.
+- `schedule-followup` creates a local `followup` task and updates the thread, which keeps it compatible with the existing `followup_watch` scheduler action.
+- CLI, REST API, MCP, dashboard state, and dashboard forms now expose draft, mark-sent, schedule-followup, and due-follow-up operations.
+
+Verification:
+
+- `node --test tests/sprint3-research.test.js` passed: 6/6 tests.
+- `node --test tests/sprint4-interview-analytics-mcp.test.js` passed: 4/4 tests.
+- `npm test` passed: 40/40 tests.
+- `npm run smoke` passed.
+- New behavior is covered by tests for LLM evidence-backed outreach drafting, deterministic fallback proof/style usage, human-sent recording, follow-up task scheduling, due follow-up listing, per-job thread YAML, audit rows, API endpoints, dashboard form exposure, and MCP tool discovery.
+
+Eval scores:
+
+- Not applicable yet; Phase C eval harness is Goal 6.
+
+Blockers:
+
+- None.
+
 ## Goal 2 - Pluggable Search Provider
 
 Status: completed

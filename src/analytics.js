@@ -5,6 +5,7 @@ import { writeMd } from './workspace.js';
 import { due } from './tracking.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
 import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
+import { listOutreachThreads, outreachDue } from './outreach.js';
 
 export function state(s) {
   return {
@@ -16,6 +17,8 @@ export function state(s) {
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
+    outreachThreads: listOutreachThreads(s),
+    outreachDue: outreachDue(s),
     searches: listSearches(s),
     watchlist: listWatchlist(s),
     discoveryRuns: discoveryRuns(s),
