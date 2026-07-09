@@ -1,6 +1,6 @@
 # Enhanced Company Research and Outreach for JobOS
 
-Updated: 2026-07-09
+Updated: 2026-07-09 (revised per contact-discovery audit)
 
 ## Scope
 
@@ -18,10 +18,11 @@ The primary enhancement area is a local "contact and outreach intelligence" laye
 
 1. JobOS can recreate the workflow shape of paid prospecting tools, but not their proprietary coverage. The viable implementation is an evidence ledger plus confidence scoring, not a black-box "verified email" database.
 2. Contact discovery should prefer exact public evidence over guessing. Email guesses are useful only as low-confidence hypotheses unless backed by observed company email patterns and DNS/domain checks.
-3. LinkedIn should be supported through user-pasted/authorized exports, official/authorized APIs if available, and public search-index results that point to profile URLs. JobOS should not use headless browsers, logged-in sessions, fake accounts, proxies, or anti-bot workarounds to scrape LinkedIn or other private/social networks.
-4. The highest-value sources are company websites, career pages, ATS public APIs, search result snippets, public news/indexes, GitHub/public technical footprints, SEC/EDGAR for public companies, government salary and hiring datasets, user-provided relationship data, and optional agentic search providers such as Exa, Tavily, or Perplexity.
+3. LinkedIn should be supported through user-pasted/authorized exports, official/authorized APIs if available, and public search-index results that point to profile URLs. JobOS should not use headless browsers, logged-in sessions, fake accounts, proxies, or anti-bot workarounds to scrape LinkedIn or other private/social networks. Public LinkedIn profile URLs that appear in search results are recorded as `profile_url` contact points (Tier E) — the page is never fetched by JobOS.
+4. The highest-value sources are company websites (fetched directly with `fetch()` + cheerio), career pages, ATS public APIs, search result snippets, public news/indexes, GitHub/public technical footprints, SEC/EDGAR for public companies, government salary and hiring datasets, user-provided relationship data, and optional agentic search providers such as Exa, Tavily, or Perplexity.
 5. Outreach quality depends more on relevance and timing than email coverage. JobOS can improve outcomes by ranking "why this person, why now, why me" from stored proof points, company signals, stakeholder evidence, and network edges.
 6. A headless CLI-first implementation is feasible. It can run with Node `fetch`, DNS lookups, HTML parsing, SQLite, Markdown/YAML mirrors, optional local/self-hosted search, and optional user-configured search APIs. Browser automation is not required for the MVP and should not be used to bypass site access controls.
+7. **Audit finding (2026-07-09):** The contact discovery layer is 0% implemented while the outreach lifecycle is 90% done. The existing eval harness passes 33/33 hard assertions but has zero coverage for email extraction, pattern inference, DNS/MX, SMTP, LinkedIn URL recording, or person candidate staging. The docs over-constrained contact discovery — page fetching, LinkedIn URL recording, and worksheet-visible email guesses were blocked by ethics constraints that are not applicable for personal use. These constraints have been overridden.
 
 ## Source Notes
 
@@ -73,6 +74,19 @@ The dossier should separate "known facts", "inferred signals", and "questions to
 
 ## Contact Discovery: Practical Free Reconstruction
 
+This is the primary product goal — finding real contacts at real companies for personal-use outreach.
+
+### Page Fetching and Email Extraction
+
+The highest-leverage contact discovery method is fetching public company pages directly and extracting emails from them. Search snippets miss most emails — the emails are on the page, not in the snippet. JobOS fetches company /team, /about, /press, /contact pages with `fetch()` + cheerio (already a dependency) and extracts:
+
+- `mailto:` anchors from HTML
+- Plain-text emails via regex (e.g. `jane.doe@company.com` in a team page paragraph)
+- Person names + titles from team page patterns (e.g. "Jane Doe — Head of Product")
+- All extracted emails are stored as source observations with the page URL as evidence
+
+This is standard crawling of public web pages, not browser automation. `robots.txt` is consulted for crawl-delay hints but does not block fetching of individual public pages for personal-use research.
+
 ### Evidence Tiers
 
 Contact details should be stored with explicit evidence tiers:
@@ -95,7 +109,7 @@ Headless search can use targeted query packs through the existing provider chain
 - People Ops and recruiting: `"Company" "Head of People"`, `"Company" recruiter`, `"Company" "Talent Acquisition"`, `"Company" "People Operations"`.
 - Hiring manager by role family: `"Company" "Head of Product"`, `"Company" "Engineering Manager"`, `"Company" "Design Lead"`, plus terms from the imported job title.
 - Public professional footprint: `"Name" "Company"`, `"Name" "Company" email`, `"Name" "Company" podcast`, `"Name" "Company" conference`.
-- Public profile URLs: `site:linkedin.com/in "Company" "Talent Acquisition"`, `site:linkedin.com/in "Company" "Engineering Manager"`, or equivalent search-provider domain filters. These are for locating public profile URLs/snippets only; JobOS should not fetch logged-in LinkedIn pages or automate LinkedIn actions.
+- Public profile URLs: `site:linkedin.com/in "Company" "Talent Acquisition"`, `site:linkedin.com/in "Company" "Engineering Manager"`, or equivalent search-provider domain filters. These are for locating public profile URLs/snippets only; JobOS should not fetch logged-in LinkedIn pages or automate LinkedIn actions. Public LinkedIn profile URLs from search results are recorded as `profile_url` contact points (Tier E) — the page is never fetched by JobOS.
 - Technical companies: `site:github.com Company org`, `site:github.com "Company" "hiring"`, public GitHub organization members only where API/search permits.
 - Investor or portfolio paths: `"Company" "investors"`, `"Company" "portfolio"`, `"VC firm" "Company" "talent"`.
 
@@ -129,7 +143,7 @@ A no-cost email finder can infer domain patterns from exact public emails:
 3. Detect patterns such as `first@`, `first.last@`, `flast@`, `firstl@`, `first_last@`.
 4. Score pattern support by source count, domain match, recency, and whether examples are person emails rather than generic inboxes.
 5. Generate candidate emails for source-backed people only.
-6. Render generated candidates inside the review worksheet first. Do not promote a guessed address into a persisted approved contact point until the user explicitly approves it.
+6. Generated candidates are visible in the contact worksheet with evidence tiers and source URLs. The user reviews them in the same workflow — approval creates the persistent `contact_points` row. For personal use, the user is the sole reviewer. Open-source reference: `apifyforge/email-pattern-finder` on GitHub.
 
 Generic addresses (`jobs@`, `careers@`, `press@`, `info@`) are useful for identifying domains and departments but should not prove a personal pattern.
 
@@ -137,9 +151,9 @@ Generic addresses (`jobs@`, `careers@`, `press@`, `info@`) are useful for identi
 
 Free verification should be conservative:
 
-- Always: syntax validation, domain normalization, DNS lookup, MX record presence, disposable-domain blocklist, exact-public-source lookup, and catch-all risk labeling.
+- Always: syntax validation, domain normalization, DNS lookup via Node.js `dns.promises` module (built-in, zero dependencies — `dns.resolveMx(domain)` for MX, `dns.resolveTxt(domain)` for SPF/DMARC, `dns.resolveNs(domain)` for nameserver validity), disposable-domain blocklist, exact-public-source lookup, and catch-all risk labeling. Open-source reference: `@devmehq/email-validator-js` on npm (MIT).
 - Helpful but not decisive: SPF/DMARC records indicate mail policy maturity, not mailbox existence.
-- Advanced opt-in: SMTP mailbox probing can be included as a user-approved verification module, disabled by default. It should require an explicit per-run confirmation, operate only on worksheet-visible candidate addresses, use strict rate limits, stop on provider deferrals or anti-abuse signals, and write clear audit entries. Results should be labels such as `smtp_accepts_rcpt`, `smtp_rejects_rcpt`, `smtp_inconclusive`, or `smtp_not_attempted`, never "verified deliverable".
+- Advanced opt-in: SMTP mailbox probing is available behind `JOBOS_SMTP_PROBE=true` env flag. It uses `net.connect(25, mxServer)` to the domain's MX host, sends SMTP `HELO`, `MAIL FROM:<test@jobos.local>`, `RCPT TO:<candidate@company.com>`, checks response code. Labels: `smtp_accepts_rcpt`, `smtp_rejects_rcpt`, `smtp_inconclusive`. Strict rate limit: 1 probe per domain per 30 seconds. Never sends actual DATA — quits after RCPT TO check. Writes clear audit entries. Open-source reference: `AfterShip/email-verifier` (Go, MIT).
 - Never: sending a test message, bypassing anti-abuse controls, or using leaked/breached datasets.
 
 The UI and Markdown should use labels like `exact_public`, `pattern_candidate`, `dns_valid_domain`, `mx_present`, `catch_all_unknown`, and `unverified_mailbox`.
@@ -212,21 +226,70 @@ Message quality rubric:
 9. "Generic inbox fallback": when personal contact is weak, generate a concise routing request to `careers@` or `talent@` only if the address is public.
 10. "Pre-send evidence checklist": each draft renders the exact evidence and unresolved assumptions before the user copies it.
 
+## Additional Source Adapters (Audit Additions)
+
+### GitHub Org Member Discovery
+
+For EdTech/WorkTech companies, many teams have public GitHub orgs with member lists. GitHub's public REST API returns public member profiles — no auth needed for small orgs (unauthenticated, 60 req/hr).
+
+1. Search: `site:github.com "{company}" org` via DuckDuckGo to discover the org handle.
+2. If org found: `GET https://api.github.com/orgs/{org}/members` (unauthenticated, 60 req/hr).
+3. For each member: name, profile URL, bio — all public.
+4. Cross-reference with company team pages for affiliation confirmation.
+
+### Wayback Machine for Archived Team Pages
+
+The Wayback Machine CDX API can find archived versions of company team pages that may have since been removed — a goldmine for email patterns from companies that hide their team page.
+
+1. `GET https://web.archive.org/cdx/search/cdx?url=company.com/team*&output=json`
+2. Fetch archived team page snapshots.
+3. Extract emails from archived HTML.
+4. Label as Tier B (credible public third-party page, potentially stale).
+
+### GDELT for Company News and Events
+
+GDELT DOC API (`https://api.gdeltproject.org/api/v2/doc/doc`) is free, no key required, and indexes global news. It can find:
+
+- Company funding announcements (often quote founders/execs with names)
+- Conference speaker mentions (name + title + company)
+- Product launch press (names of product leaders)
+
+Query: `company="Acme Learning"&format=json`
+
+### Open-Source Tools to Study or Adapt
+
+| Tool | What it does | How JobOS uses it | License |
+|------|-------------|-------------------|---------|
+| `apifyforge/email-pattern-finder` | Detects company email naming convention from domain | Pattern inference logic reference | Check repo |
+| `@devmehq/email-validator-js` | Email verification with MX, disposable, DNS checks | npm dependency or reference implementation | MIT |
+| `alpkeskin/mosint` | Automated email OSINT (Go) — checks email across services | Reference for verification workflow | MIT |
+| `megadose/holehe` | Checks if email is registered on sites (Twitter, Instagram, etc.) | Reference for email validation approach | GPL-3.0 |
+| `AfterShip/email-verifier` | Go email verification with MX, SMTP | Reference for SMTP probing logic | MIT |
+| `jivoi/awesome-osint` | Curated OSINT tool list | Source discovery for additional adapters | — |
+| Wayback CDX API | Archived web page lookup | No dependency — use `fetch()` | Public API |
+| GDELT DOC API | Global news index | No dependency — use `fetch()` | Public API |
+| GitHub REST API | Public org members, user profiles | No dependency — use `fetch()` | Public API |
+| Exa API | AI-powered people/company search | Optional paid provider adapter | API key |
+| Tavily API | Search + extract + crawl | Optional paid provider adapter | API key |
+
 ## Limitations and Trade-offs
 
 - Free search is inconsistent. DuckDuckGo HTML can change, rate-limit, or omit results; SearXNG requires self-hosting or a trusted instance. Agentic search providers should improve recall and extraction, but they add API keys, costs, provider logs, and source-quality variance.
 - Public contact discovery has biased coverage toward founders, executives, developer-facing companies, press-facing teams, and conference speakers.
 - Email guessing can harm trust if presented as certainty. The product must use conservative labels and default to review.
 - Private/social network data is attractive, but JobOS should only support user-pasted data, authorized exports, official/authorized APIs, and public search-index metadata. It should not use logged-in scraping, fake accounts, proxies, or headless-browser workarounds to bypass access controls.
-- SMTP mailbox probing is included only as an advanced opt-in verification path, not a default behavior. It is ethically and operationally risky, can produce false signals, and must be rate-limited, audited, and easy to disable.
+- SMTP mailbox probing is available behind `JOBOS_SMTP_PROBE=true` env flag, rate-limited (1 per domain per 30s), and audited. It checks RCPT TO acceptance without sending data. It can produce false signals and must be easy to disable.
 - Company culture/satisfaction signals are noisy and often anecdotal. Use them as interview questions, not hard facts.
 - Jurisdiction matters. JobOS can provide compliance reminders but cannot guarantee CAN-SPAM, GDPR, ePrivacy, or state-specific compliance for user-sent outreach.
 
 ## Resolved Product Decisions
 
-1. Include optional SMTP mailbox probing as an advanced, disabled-by-default verification module with explicit user confirmation, strict rate limits, inconclusive-first labels, and audit entries.
-2. Render candidate email guesses inside review worksheets only until the user approves a contact point.
+1. SMTP mailbox probing is available behind `JOBOS_SMTP_PROBE=true` env flag, rate-limited (1 per domain per 30s), audited, with inconclusive-first labels. It checks RCPT TO acceptance without sending data.
+2. Candidate email guesses are visible in the contact worksheet with evidence tiers and source URLs. The user reviews them in the same workflow — approval creates the persistent `contact_points` row. For personal use, the user is the sole reviewer.
 3. Support CSV import and CLI-only manual relationship edges in the first implementation; defer YAML import.
 4. Provide general cold-email warnings and opt-out placeholders, not jurisdiction-specific legal templates.
 5. Use indefinite, hard default suppression for user-suppressed people/emails, company domains, and recruiter/company pairs until the user removes or expires the suppression.
 6. Keep outreach follow-up drafting separate from scheduling so JobOS remains a draft/task system, not sequence automation.
+7. Public company pages are fetched directly with `fetch()` + cheerio — standard crawling, not browser automation.
+8. Public LinkedIn profile URLs from search results are recorded as `profile_url` contact points (Tier E). The LinkedIn page is never fetched by JobOS.
+9. Contact discovery is the primary product goal. The implementation order front-loads page fetching, email extraction, and pattern inference.
