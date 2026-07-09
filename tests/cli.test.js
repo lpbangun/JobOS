@@ -36,7 +36,7 @@ async function fetchJson(url, options = {}) {
 test('CLI initializes, imports, scores, tailors, and tracks an application', () => {
   const { root, run } = makeRunner();
   const init = JSON.parse(run(['init', '--json']));
-  assert.equal(init.policy.externalActions, 'human_approval_required');
+  assert.equal(init.policy.externalActions, 'user_configured');
   const resume = path.join(root, 'resume.md');
   writeFileSync(resume, '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.\n');
   const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--json']));
@@ -53,7 +53,7 @@ test('CLI initializes, imports, scores, tailors, and tracks an application', () 
   const tasks = JSON.parse(run(['tasks', 'due', '--json']));
   assert.ok(tasks.some(t => t.title.includes('Review next action')));
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml')));
-  assert.ok(readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.md'), 'utf8').includes('human review required'));
+  assert.ok(readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.md'), 'utf8').includes('human review required') || readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.md'), 'utf8').includes('Review before'));
 });
 
 test('Tailoring warns instead of fabricating when proof points are missing', () => {

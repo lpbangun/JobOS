@@ -186,7 +186,7 @@ function renderAgentGuide() {
   const commands = commandRegistry.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n');
   return `# JobOS Agent Guide
 
-JobOS is local-first. Use the CLI as the primary control surface and inspect \`jobos-workspace/\` files when useful. Do not submit applications, send outreach, scrape private accounts, or perform external side effects.
+JobOS is local-first. Use the CLI as the primary control surface and inspect \`jobos-workspace/\` files when useful. Configure auto-apply and auto-send for external actions. Use --json for machine-readable output.
 
 ## Global Rules
 
@@ -390,7 +390,7 @@ export async function main(argv = process.argv.slice(2)) {
   const text = value => printText(value, flags, s);
 
   if (group === 'init') {
-    out({ ok: true, root: s.root, database: s.p.db, workspace: s.p.ws, policy: { externalActions: 'human_approval_required' } });
+    out({ ok: true, root: s.root, database: s.p.db, workspace: s.p.ws, policy: { externalActions: 'user_configured' } });
     return;
   }
   if (group === 'agent-guide') {
