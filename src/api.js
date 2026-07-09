@@ -10,12 +10,14 @@ import path from 'node:path';
 import { createAutomation, listAutomations, updateAutomation } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
 import { draftOutreach, listOutreachThreads, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
+import { approveContact, createOutreachPlan, discoverContacts, listContactPoints, suppressContact } from './research/contacts.js';
+import { mapReachableNetwork } from './research/network.js';
 
 async function body(req){ let b=''; for await (const c of req) b+=c; return b?JSON.parse(b):{}; }
 function send(res,status,obj){ res.writeHead(status,{'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(obj,null,2)); }
 function safeWriteOrigin(req){ const origin=req.headers.origin; if(!origin) return true; try { const host=new URL(origin).hostname; return ['127.0.0.1','localhost','::1'].includes(host); } catch { return false; } }
-const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',status_changes:'status_changes',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders',outreach_threads:'outreach_threads'};
-const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',status_changes:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id',outreach_threads:'id'};
+const tables={profiles:'profiles',proofs:'proof_points',jobs:'jobs',applications:'applications',status_changes:'status_changes',tasks:'tasks',artifacts:'artifacts',companies:'companies',stakeholders:'stakeholders',outreach_threads:'outreach_threads',source_observations:'source_observations',person_candidates:'person_candidates',contact_points:'contact_points',email_patterns:'email_patterns',relationship_edges:'relationship_edges',outreach_plans:'outreach_plans'};
+const pk={profiles:'id',proofs:'id',jobs:'id',applications:'id',status_changes:'id',tasks:'id',artifacts:'id',companies:'id',stakeholders:'id',outreach_threads:'id',source_observations:'id',person_candidates:'id',contact_points:'id',email_patterns:'id',relationship_edges:'id',outreach_plans:'id'};
 function publicRow(resource,row){ if(resource==='jobs' && row) return {...row,url:String(row.url||'').startsWith('jobos:text:')?'':row.url}; return row; }
 export async function handleApi(s,req,res,u){
   try{
@@ -23,10 +25,33 @@ export async function handleApi(s,req,res,u){
     if(u.pathname==='/api/state' && req.method==='GET') return send(res,200,state(s));
     if(u.pathname==='/api/outreach/due' && req.method==='GET') return send(res,200,outreachDue(s));
     if(u.pathname==='/api/outreach/threads' && req.method==='GET') return send(res,200,listOutreachThreads(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')||null}));
+    if(u.pathname==='/api/research/contacts' && req.method==='GET') return send(res,200,listContactPoints(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')||null,stakeholderId:u.searchParams.get('stakeholderId')||u.searchParams.get('stakeholder_id')||null,companyId:u.searchParams.get('companyId')||u.searchParams.get('company_id')||null}));
+    if(u.pathname==='/api/research/network' && req.method==='GET') return send(res,200,mapReachableNetwork(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')}));
+    if(u.pathname==='/api/research/contacts/discover' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,await discoverContacts(s,{jobId:data.jobId||data.job_id||null,stakeholderId:data.stakeholderId||data.stakeholder_id||null}));
+    }
+    const contactApproveMatch=u.pathname.match(/^\/api\/research\/contacts\/([^/]+)\/approve$/);
+    if(contactApproveMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      return send(res,200,approveContact(s,{contactId:decodeURIComponent(contactApproveMatch[1])}));
+    }
+    const contactSuppressMatch=u.pathname.match(/^\/api\/research\/contacts\/([^/]+)\/suppress$/);
+    if(contactSuppressMatch && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,200,suppressContact(s,{contactId:decodeURIComponent(contactSuppressMatch[1]),reason:data.reason||'dashboard'}));
+    }
+    if(u.pathname==='/api/outreach/plan' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,createOutreachPlan(s,{jobId:data.jobId||data.job_id,profileId:data.profileId||data.profile_id,stakeholderId:data.stakeholderId||data.stakeholder_id||null,goal:data.goal||'informational'}));
+    }
     if(u.pathname==='/api/outreach/draft' && req.method==='POST'){
       if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
       const data=await body(req);
-      return send(res,201,await draftOutreach(s,{jobId:data.jobId||data.job_id,profileId:data.profileId||data.profile_id,stakeholderId:data.stakeholderId||data.stakeholder_id,goal:data.goal||'informational'}));
+      return send(res,201,await draftOutreach(s,{jobId:data.jobId||data.job_id||null,profileId:data.profileId||data.profile_id,stakeholderId:data.stakeholderId||data.stakeholder_id||null,goal:data.goal||'informational',planId:data.planId||data.plan_id||null,contactId:data.contactId||data.contact_id||null}));
     }
     if(u.pathname==='/api/outreach/mark-sent' && req.method==='POST'){
       if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});

@@ -33,9 +33,14 @@ export function llmConfig(env = process.env) {
 }
 
 async function postOpenAiCompatible(cfg, messages, temperature, maxTokens, schemaName) {
-  const response = await fetch(`${cleanBaseUrl(cfg.baseUrl)}/chat/completions`, {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await fetch(`${cleanBaseUrl(cfg.baseUrl)}/chat/completions`, {
     method: 'POST',
-    signal: AbortSignal.timeout(cfg.timeoutMs),
+    signal: controller.signal,
     headers: {
       authorization: `Bearer ${cfg.apiKey}`,
       'content-type': 'application/json'
@@ -49,6 +54,9 @@ async function postOpenAiCompatible(cfg, messages, temperature, maxTokens, schem
       metadata: schemaName ? { schemaName } : undefined
     })
   });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) throw new Error(`LLM provider HTTP ${response.status}: ${await response.text()}`);
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content;
@@ -58,9 +66,14 @@ async function postOpenAiCompatible(cfg, messages, temperature, maxTokens, schem
 async function postAnthropic(cfg, messages, temperature, maxTokens) {
   const system = messages.find(m => m.role === 'system')?.content || '';
   const user = messages.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
-  const response = await fetch(`${cleanBaseUrl(cfg.baseUrl)}/messages`, {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+  timer.unref?.();
+  let response;
+  try {
+    response = await fetch(`${cleanBaseUrl(cfg.baseUrl)}/messages`, {
     method: 'POST',
-    signal: AbortSignal.timeout(cfg.timeoutMs),
+    signal: controller.signal,
     headers: {
       'x-api-key': cfg.apiKey,
       'anthropic-version': '2023-06-01',
@@ -68,6 +81,9 @@ async function postAnthropic(cfg, messages, temperature, maxTokens) {
     },
     body: JSON.stringify({ model: cfg.model, system, messages: user, temperature, max_tokens: maxTokens })
   });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) throw new Error(`LLM provider HTTP ${response.status}: ${await response.text()}`);
   const data = await response.json();
   const content = data.content?.map(part => part.text || '').join('\n');

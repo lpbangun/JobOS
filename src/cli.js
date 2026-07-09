@@ -11,6 +11,8 @@ import { tailor } from './tailoring.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { addStakeholder, research } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
+import { approveContact, createOutreachPlan, discoverContacts, promoteStakeholder, suppressContact } from './research/contacts.js';
+import { importNetworkCsv, mapReachableNetwork } from './research/network.js';
 import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
 import { web } from './web.js';
 import { prepInterview } from './interview.js';
@@ -62,8 +64,15 @@ export const commandRegistry = [
   cmd(['applications', 'update'], 'jobos applications update <application-id> --status <status> [--json]', 'Update a tracked application status.'),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
   cmd(['research', 'stakeholders'], 'jobos research stakeholders --job <job-id> [--json]', 'Create a source-backed stakeholder worksheet.'),
+  cmd(['research', 'contacts'], 'jobos research contacts --job <job-id>|--stakeholder <stakeholder-id> [--json]', 'Discover source-backed contact points, email patterns, and public profile paths for review.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>'] }),
+  cmd(['research', 'approve-contact'], 'jobos research approve-contact --contact <contact-id>|--worksheet-candidate <candidate-id> [--json]', 'Mark a discovered contact point as human-approved for later draft use.', { flags: ['--contact <contact-id>', '--worksheet-candidate <candidate-id>'] }),
+  cmd(['research', 'suppress-contact'], 'jobos research suppress-contact --contact <contact-id> --reason <text> [--json]', 'Mark a discovered contact point as do-not-use in local state.', { flags: ['--contact <contact-id>', '--reason <text>'] }),
+  cmd(['research', 'promote-stakeholder'], 'jobos research promote-stakeholder --candidate <candidate-id> [--json]', 'Promote a staged person candidate to a local stakeholder record.', { flags: ['--candidate <candidate-id>'] }),
+  cmd(['research', 'network'], 'jobos research network --job <job-id> [--json]', 'Create a local reachable-network path ladder for a job.', { flags: ['--job <job-id>'] }),
+  cmd(['network', 'import'], 'jobos network import --file <csv> [--json]', 'Import local relationship edges from a CSV file.', { flags: ['--file <csv>'] }),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
-  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--json]', 'Draft human-reviewed outreach without sending it.'),
+  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Draft human-reviewed outreach without sending it.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'] }),
+  cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a human-gated outreach path from discovered contacts and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
   cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
   cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
   cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
@@ -506,6 +515,37 @@ export async function main(argv = process.argv.slice(2)) {
     out(await research(s, jobId, 'stakeholders'));
     return;
   }
+  if (group === 'research' && action === 'contacts') {
+    if (!flags.job && !flags.stakeholder) usage('Missing --job <job-id> or --stakeholder <stakeholder-id>');
+    out(await discoverContacts(s, { jobId: flags.job ? String(flags.job) : null, stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null }));
+    return;
+  }
+  if (group === 'research' && action === 'approve-contact') {
+    const contactId = flags.contact || flags['worksheet-candidate'];
+    if (!contactId) usage('Missing --contact <contact-id> or --worksheet-candidate <candidate-id>');
+    out(approveContact(s, { contactId: String(contactId) }));
+    return;
+  }
+  if (group === 'research' && action === 'suppress-contact') {
+    const contactId = requireFlag(flags, 'contact', '--contact <contact-id>');
+    out(suppressContact(s, { contactId: String(contactId), reason: flags.reason ? String(flags.reason) : 'user_suppressed' }));
+    return;
+  }
+  if (group === 'research' && action === 'promote-stakeholder') {
+    const candidateId = requireFlag(flags, 'candidate', '--candidate <candidate-id>');
+    out(promoteStakeholder(s, { candidateId: String(candidateId) }));
+    return;
+  }
+  if (group === 'research' && action === 'network') {
+    const jobId = requireFlag(flags, 'job');
+    out(mapReachableNetwork(s, { jobId: String(jobId) }));
+    return;
+  }
+  if (group === 'network' && action === 'import') {
+    const filePath = requireFlag(flags, 'file', '--file <csv>');
+    out(importNetworkCsv(s, { filePath: String(filePath) }));
+    return;
+  }
   if (group === 'research' && action === 'add-stakeholder') {
     const jobId = requireFlag(flags, 'job');
     const sourceUrl = requireFlag(flags, 'source-url', '--source-url <url>');
@@ -515,8 +555,14 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'outreach' && action === 'draft') {
-    if (!flags.job || !flags.stakeholder) usage('Missing --job or --stakeholder');
-    const r = await draftOutreach(s, { jobId: flags.job, profileId: needProfile(flags), stakeholderId: flags.stakeholder, goal: flags.goal ? String(flags.goal) : 'informational' });
+    if (!flags.plan && (!flags.job || !flags.stakeholder)) usage('Missing --job/--stakeholder or --plan');
+    const r = await draftOutreach(s, { jobId: flags.job ? String(flags.job) : null, profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : 'informational', planId: flags.plan ? String(flags.plan) : null, contactId: flags.contact ? String(flags.contact) : null });
+    out(r);
+    return;
+  }
+  if (group === 'outreach' && action === 'plan') {
+    const jobId = requireFlag(flags, 'job');
+    const r = createOutreachPlan(s, { jobId: String(jobId), profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : 'informational' });
     out(r);
     return;
   }

@@ -6,6 +6,7 @@ import { due } from './tracking.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
 import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
 import { listOutreachThreads, outreachDue } from './outreach.js';
+import { listContactPoints } from './research/contacts.js';
 
 export function state(s) {
   return {
@@ -17,6 +18,11 @@ export function state(s) {
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
+    sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
+    personCandidates: all(s, 'SELECT * FROM person_candidates ORDER BY updated_at DESC'),
+    contactPoints: listContactPoints(s),
+    emailPatterns: all(s, 'SELECT * FROM email_patterns ORDER BY updated_at DESC'),
+    outreachPlans: all(s, 'SELECT * FROM outreach_plans ORDER BY created_at DESC').map(x => ({ ...x, reasoning: parseJson(x.reasoning_json, {}), warnings: parseJson(x.warnings_json, []) })),
     outreachThreads: listOutreachThreads(s),
     outreachDue: outreachDue(s),
     searches: listSearches(s),

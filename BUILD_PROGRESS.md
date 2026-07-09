@@ -20,6 +20,7 @@
 - 2026-07-07: Sprint 8 Goal 5 personalized outreach lifecycle implemented: LLM evidence-backed outreach drafts, proof/style-aware deterministic fallback, local outreach threads, human-sent recording, follow-up scheduling, due follow-up listing, and CLI/API/MCP/dashboard surfaces.
 - 2026-07-07: Sprint 8 Goal 6 research/outreach eval harness implemented: local fake search/LLM providers, dossier/stakeholder/outreach rubric scoring, hard human-gate/audit/no-live-network assertions, and `npm test` coverage.
 - 2026-07-07: Sprint 8 close-out completed: README command/env/API/MCP/eval docs updated, research eval scores reached 10/10 on every dossier/stakeholder/outreach axis with 33/33 hard assertions, and the final test/smoke gates passed.
+- 2026-07-09: Enhanced research/outreach harness state added in `SKILLS.md`, `plan.md`, and `eval_progress.md`; contact discovery core implemented with source observations, public page email extraction, pattern inference, DNS checks, SMTP fixture labels, LinkedIn URL recording, person candidates, contact approval/suppression, network CSV import, outreach planning, API/MCP/dashboard surfaces, and optional Exa/Tavily/Perplexity/GitHub/GDELT/Wayback adapters.
 
 ## Handoffs
 - PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
@@ -43,6 +44,8 @@
 - Sprint 8 Goal 5 gate passed: `node --test tests/sprint3-research.test.js` (6/6), `node --test tests/sprint4-interview-analytics-mcp.test.js` (4/4), `npm test` (40/40), and `npm run smoke`.
 - Sprint 8 Goal 6 gate passed: `node run_eval_research.js`, `node --test tests/sprint8-research-eval.test.js` (1/1), `npm test` (41/41 after rerun; one transient API fetch failure passed on targeted and full rerun), and `npm run smoke`.
 - Sprint 8 final close-out gate passed: `node run_eval_research.js`, `npm test` (41/41), and `npm run smoke`.
+- Enhanced research targeted gates passed: `node --test tests/sprint10-contact-discovery.test.js` (5/5), `node --test tests/sprint8-search.test.js` (4/4), and `node --test tests/sprint3-research.test.js` (6/6).
+- Enhanced research final gates passed: `node run_eval_research.js` (33/33 hard assertions, all scored axes 10/10), `npm test` (44/44), and `npm run smoke`.
 
 ## Current implementation notes
 - Core flow is local-only and API-key-free.
@@ -55,5 +58,7 @@
 - Dashboard is local and functional but still intentionally lightweight; richer persisted approve/reject commands, editable profile forms, and full artifact diffs are next steps.
 - URL import fetches public page text when available and otherwise records a manual-enrichment job; no ATS/private-account scraping.
 - Research commands create honest worksheets, not fabricated dossiers.
+- Contact discovery creates source-observation ledgers, contact worksheets, person candidates, email pattern records, contact approval/suppression state, and network path ladders. LinkedIn URLs are recorded from search metadata only and are not fetched.
+- Optional Exa/Tavily/Perplexity search providers and GitHub/GDELT/Wayback public adapters are configured via environment variables and feed the same evidence ledger.
 - Discovery uses direct public ATS APIs (Greenhouse/Lever) or local fixtures; no LinkedIn/Indeed/private-account scraping and no auto-apply behavior.
 - Default automations are seeded disabled; humans must opt in before scheduled discovery or briefs run.
