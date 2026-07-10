@@ -2,7 +2,7 @@
 
 JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, direct public ATS discovery adapters, an audited automation scheduler, provider-backed LLM fit scoring/tailoring/interview prep with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking with status history, funnel analytics, weekly review automation, an interactive local web dashboard, REST API endpoints, and an MCP stdio server for agent integrations.
 
-The implementation supports user-configured auto-apply, auto-send outreach, and broad job board discovery. External actions are opt-in via environment variables and profile preferences.
+Auto-apply, auto-send outreach, and broad job board discovery are planned for future phases (see PLAN_EXPANDED_TOOLS.md). The current MVP keeps external actions user-initiated with draft/review mode defaults.
 
 ## Stack
 
@@ -246,11 +246,11 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 
 ## Configuration and external actions
 
-- External actions (applying, sending outreach, scraping job boards) are user-configured via environment variables and profile preferences. All default to draft/review mode; enable auto-actions by setting the relevant config.
+- External actions (applying, sending outreach, scraping job boards) are user-initiated. Auto-apply and auto-send are planned for future phases (see PLAN_EXPANDED_TOOLS.md); the current MVP defaults all artifacts to draft/review mode.
 - Generated resumes, cover letters, outreach drafts, and interview prep packets are marked `draft_needs_human_review` unless explicitly approved in local state.
-- Application status `applied` can be set manually or via auto-apply adapters.
+- Application status `applied` is manual tracking only; JobOS does not submit applications.
 - URL import fetches any public page. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment.
-- Discovery adapters use direct public ATS APIs or local fixtures. JobOS can be configured to discover jobs from LinkedIn, Indeed, Glassdoor, and other boards via pluggable adapters.
+- Discovery adapters use direct public ATS APIs or local fixtures (Greenhouse, Lever). LinkedIn, Indeed, Glassdoor, and other board adapters are planned for future phases.
 - No telemetry or cloud sync exist in the MVP. External LLM calls happen only when the user explicitly configures provider credentials through environment variables.
 
 ## Tests and smoke checks

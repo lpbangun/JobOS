@@ -350,7 +350,7 @@ function renderStakeholders({ job, stakeholders, query, generatedAt, searchError
     return `- **${s.name}** — ${s.role}${confidence}${sourceType}\n  - Relevance: ${s.summary}\n  - Source: ${s.links[0]}`;
   }).join('\n') : '- No named public stakeholders found from search results.';
   const warningText = warnings.length ? `\n**Warnings:**\n${warnings.map(w => `- ${w}`).join('\n')}\n` : '';
-  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Notes\nThis command used web-search results. Stakeholders can be contacted via outreach commands.\n`;
+  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Use outreach commands to draft and manage messages.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Notes\nThis command used web-search results. Stakeholders can be contacted via outreach commands.\n`;
 }
 
 function upsertStakeholder(s, job, person, at) {

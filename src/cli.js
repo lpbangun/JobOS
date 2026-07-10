@@ -186,7 +186,7 @@ function renderAgentGuide() {
   const commands = commandRegistry.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n');
   return `# JobOS Agent Guide
 
-JobOS is local-first. Use the CLI as the primary control surface and inspect \`jobos-workspace/\` files when useful. Configure auto-apply and auto-send for external actions. Use --json for machine-readable output.
+JobOS is local-first. Use the CLI as the primary control surface and inspect \`jobos-workspace/\` files when useful. External actions are user-initiated; auto-apply and auto-send are planned for future phases. Use --json for machine-readable output.
 
 ## Global Rules
 

@@ -54,19 +54,6 @@ function cliJson(env, args) {
   return JSON.parse(cliSync(env, args));
 }
 
-function cliAsync(env, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
-    child.on('close', status => {
-      if (status !== 0) return reject(new Error(`jobos ${args.join(' ')} failed\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
-      try { resolve(JSON.parse(stdout)); } catch (e) { reject(new Error(`Invalid JSON: ${e.message}\n${stdout}`)); }
-    });
-  });
-}
-
 // ─── Restrictive Language Patterns ───────────────────────────────────────────
 
 const RESTRICTIVE_PATTERNS = [
@@ -98,11 +85,6 @@ const RESTRICTIVE_PATTERNS = [
   /scrape private accounts/i,
 ];
 
-const REMOVED_FUNCTION_PATTERNS = [
-  // sourceAllowed should be gone
-  /sourceAllowed/,
-];
-
 // ─── Data Integrity Patterns (should REMAIN) ────────────────────────────────
 
 const INTEGRITY_PATTERNS = [
@@ -130,7 +112,7 @@ function scoreRestrictiveLanguageRemoval(allOutputs) {
   return { score: 3, detail: `${violations} restrictive patterns found`, found };
 }
 
-function scoreSourceFilterRemoved(researchResult) {
+function scoreSourceFilterRemoved() {
   // LinkedIn results should no longer be filtered out
   // We check that sourceAllowed function is gone from research.js
   const researchSrc = readFileSync(path.join(process.cwd(), 'src', 'research.js'), 'utf8');
@@ -395,11 +377,11 @@ async function runIteration(iteration) {
     // 20. Dashboard state
     const port = 30000 + Math.floor(Math.random() * 5000);
     const server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(port)], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] });
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
-      server.stdout.on('data', data => { if (String(data).includes('JobOS dashboard running')) { clearTimeout(timeout); resolve(); } });
-    });
     try {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
+        server.stdout.on('data', data => { if (String(data).includes('JobOS dashboard running')) { clearTimeout(timeout); resolve(); } });
+      });
       const stateResponse = await fetch(`http://127.0.0.1:${port}/api/state`);
       const stateResult = await stateResponse.json();
       allOutputs.push({ source: 'dashboard-state', text: JSON.stringify(stateResult) });
