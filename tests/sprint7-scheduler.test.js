@@ -47,8 +47,7 @@ test('scheduler run-once executes due automation, records run row, JSONL, and pr
   const root = makeRoot();
   cli(root, ['init', '--json']);
   const profile = JSON.parse(cli(root, ['profile', 'create', 'PM EdTech', '--json']));
-  const now = new Date();
-  const schedule = `${now.getUTCMinutes()} ${now.getUTCHours()} * * *`;
+  const schedule = '* * * * *';
   JSON.parse(cli(root, ['automation', 'create', 'brief_now', '--action', 'morning_priority_brief', '--schedule', schedule, '--profile', profile.id, '--enabled', '--json']));
   const result = JSON.parse(cli(root, ['scheduler', 'run-once', '--json']));
   assert.equal(result.due, 1);

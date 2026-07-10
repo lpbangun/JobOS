@@ -137,7 +137,7 @@ npm run web -- --port 4317
 #   POST /api/research/contacts/discover {"jobId":"<job-id>"}
 #   POST /api/research/contacts/<contact-id>/approve
 #   POST /api/research/contacts/<contact-id>/suppress
-#   GET  /api/research/network?jobId=<job-id>
+#   POST /api/research/network {"jobId":"<job-id>"}
 #   POST /api/tasks {"title":"Follow up","priority":"high"}
 
 # MCP server for agents that speak stdio JSON-RPC/MCP framing

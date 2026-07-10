@@ -1,4 +1,6 @@
 import path from 'node:path';
+import net from 'node:net';
+import dns from 'node:dns/promises';
 import * as cheerio from 'cheerio';
 import { one, all, run } from '../db.js';
 import { hash, id, now, parseJson } from '../utils.js';
@@ -54,6 +56,58 @@ export function isFetchablePublicPage(raw) {
   if (isLinkedInProfileUrl(raw)) return false;
   const host = hostForUrl(raw);
   return !blockedProfileHosts.some(domain => host === domain || host.endsWith(`.${domain}`));
+}
+
+function internalBlockListV4() {
+  const block = new net.BlockList();
+  for (const [base, prefix] of [
+    ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+    ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+    ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
+    ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4], ['255.255.255.255', 32]
+  ]) block.addSubnet(base, prefix);
+  return block;
+}
+
+function internalBlockListV6() {
+  const block = new net.BlockList();
+  for (const [base, prefix] of [
+    ['::', 128], ['::1', 128], ['64:ff9b::', 96],
+    ['100::', 64], ['2001::', 32], ['2001:db8::', 32], ['fc00::', 7], ['fe80::', 10]
+  ]) block.addSubnet(base, prefix, 'ipv6');
+  return block;
+}
+
+export async function resolveHostIsPublic(host, { lookupImpl = dns.lookup, allowPrivate = false, env = process.env } = {}) {
+  if (!host) return { ok: false, addresses: [], reason: 'no_host' };
+  const override = (env?.JOBOS_ALLOW_PRIVATE_HOSTS || '') === 'true';
+  const allow = allowPrivate || override;
+  if (allow) return { ok: true, addresses: [], reason: 'allow_private_hosts' };
+  if (net.isIP(host)) {
+    const family = net.isIP(host);
+    const blocked = family === 4
+      ? internalBlockListV4().check(host, 'ipv4')
+      : internalBlockListV6().check(host, 'ipv6');
+    return blocked
+      ? { ok: false, addresses: [host], reason: 'private_ip_literal' }
+      : { ok: true, addresses: [host] };
+  }
+  let records;
+  try {
+    records = await lookupImpl(host, { all: true });
+  } catch {
+    return { ok: false, addresses: [], reason: 'dns_failure' };
+  }
+  if (!records.length) return { ok: false, addresses: [], reason: 'no_dns_records' };
+  const v4 = internalBlockListV4();
+  const v6 = internalBlockListV6();
+  for (const { address, family } of records) {
+    const blocked = family === 6
+      ? v6.check(address, 'ipv6')
+      : v4.check(address, 'ipv4');
+    if (blocked) return { ok: false, addresses: records.map(r => r.address), reason: 'resolved_private_ip' };
+  }
+  return { ok: true, addresses: records.map(r => r.address) };
 }
 
 export function sourceAllowedForRecording(raw) {
@@ -226,8 +280,10 @@ function extractPeopleFromHtml($, bodyText) {
   return people.slice(0, 25);
 }
 
-export async function fetchPublicPage(rawUrl, { fetchImpl = fetch, env = process.env } = {}) {
+export async function fetchPublicPage(rawUrl, { fetchImpl = fetch, env = process.env, lookupImpl } = {}) {
   if (!isFetchablePublicPage(rawUrl)) return { ok: false, url: rawUrl, skipped: true, reason: 'not_fetchable_public_page' };
+  const hostCheck = await resolveHostIsPublic(hostForUrl(rawUrl), { lookupImpl, env });
+  if (!hostCheck.ok) return { ok: false, url: rawUrl, skipped: true, reason: hostCheck.reason, addresses: hostCheck.addresses };
   const timeout = Math.max(1000, Number(env.JOBOS_RESEARCH_FETCH_TIMEOUT_MS || 12000));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);

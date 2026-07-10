@@ -8,9 +8,10 @@ import { spawn } from 'node:child_process';
 import { openStore, all, one, run, save } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
-import { approveContact, discoverContacts, promoteStakeholder, suppressContact } from '../src/research/contacts.js';
+import { approveContact, createOutreachPlan, discoverContacts, promoteStakeholder, suppressContact } from '../src/research/contacts.js';
 import { importNetworkCsv, mapReachableNetwork } from '../src/research/network.js';
 import { draftOutreach } from '../src/outreach.js';
+import net from 'node:net';
 
 function fakeSearchServer(baseResults) {
   const requests = [];
@@ -42,6 +43,13 @@ function fakeDnsResolver() {
       if (domain !== 'acme.test') throw Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
       return ['ns1.acme.test'];
     }
+  };
+}
+
+function fakeLookupImpl() {
+  return async (host, options) => {
+    if (net.isIP(host)) return [{ address: host, family: net.isIP(host) }];
+    return [{ address: '8.8.8.8', family: 4 }];
   };
 }
 
@@ -122,6 +130,7 @@ test('contact discovery extracts public emails, infers patterns, records LinkedI
     const result = await discoverContacts(s, {
       jobId: job.id,
       fetchImpl: fakePageFetch(fetchCalls),
+      lookupImpl: fakeLookupImpl(),
       resolver: fakeDnsResolver(),
       env: { ...process.env, JOBOS_SMTP_PROBE: 'true', JOBOS_SMTP_FIXTURE_JSON: JSON.stringify({ 'jane.doe@acme.test': 'smtp_accepts_rcpt', 'acme.test': 'smtp_inconclusive' }), JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4' }
     });
@@ -184,6 +193,7 @@ test('research contacts CLI returns parseable JSON and writes contact worksheet'
     JOBOS_HOME: root,
     JOBOS_SEARCH_BASE_URL: `http://127.0.0.1:${pageServer.address().port}/search`,
     JOBOS_SMTP_PROBE: 'false',
+    JOBOS_ALLOW_PRIVATE_HOSTS: 'true',
     JOBOS_DNS_FIXTURE_JSON: JSON.stringify({ 'acme.test': { mx: [{ exchange: 'mx.acme.test', priority: 10 }], txt: [['v=spf1 ~all']], dmarc: [['v=DMARC1; p=none']], ns: ['ns1.acme.test'] } }),
     JOBOS_RESEARCH_PAGE_LIMIT: '4',
     JOBOS_LLM_PROVIDER: '',
@@ -242,8 +252,9 @@ test('outreach draft blocks unapproved and suppressed explicit email contacts', 
     const result = await discoverContacts(s, {
       jobId: job.id,
       fetchImpl: fakePageFetch([]),
+      lookupImpl: fakeLookupImpl(),
       resolver: fakeDnsResolver(),
-      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4' }
+      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4', JOBOS_ALLOW_PRIVATE_HOSTS: 'true' }
     });
     const maya = result.personCandidates.find(c => c.name === 'Maya Chen');
     const promoted = promoteStakeholder(s, { candidateId: maya.id });
@@ -276,6 +287,7 @@ test('configured public adapters create reusable source observations', async () 
     const result = await discoverContacts(s, {
       jobId: job.id,
       fetchImpl: fakePageFetch([]),
+      lookupImpl: fakeLookupImpl(),
       resolver: fakeDnsResolver(),
       env: {
         ...process.env,
@@ -285,7 +297,8 @@ test('configured public adapters create reusable source observations', async () 
         JOBOS_RESEARCH_ADAPTERS: 'github,gdelt,wayback',
         JOBOS_GITHUB_API_URL: adapters.baseUrl,
         JOBOS_GDELT_DOC_URL: `${adapters.baseUrl}/gdelt`,
-        JOBOS_WAYBACK_CDX_URL: `${adapters.baseUrl}/cdx`
+        JOBOS_WAYBACK_CDX_URL: `${adapters.baseUrl}/cdx`,
+        JOBOS_ALLOW_PRIVATE_HOSTS: 'true'
       }
     });
     assert.ok(result.warnings.length === 0, result.warnings.join('\n'));
@@ -300,4 +313,66 @@ test('configured public adapters create reusable source observations', async () 
     await search.close();
     await adapters.close();
   }
+});
+
+test('createOutreachPlan ranks an approved pattern candidate, persists a plan, and emits an audit row', async () => {
+  const search = await fakeSearchServer([
+    { title: 'Acme Learning Team', url: 'https://acme.test/team', snippet: 'Jane Doe Head of People and Maya Chen Head of Product at Acme Learning.' },
+    { title: 'Maya Chen', url: 'https://www.linkedin.com/in/maya-chen', snippet: 'Maya Chen is Head of Product.' }
+  ]);
+  try {
+    const { s, profile, job } = await createFixtureStore();
+    const result = await discoverContacts(s, {
+      jobId: job.id,
+      fetchImpl: fakePageFetch([]),
+      lookupImpl: fakeLookupImpl(),
+      resolver: fakeDnsResolver(),
+      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4', JOBOS_ALLOW_PRIVATE_HOSTS: 'true' }
+    });
+    const mayaContact = result.contacts.find(c => c.normalizedValue === 'maya.chen@acme.test');
+    assert.ok(mayaContact, 'expected a maya.chen pattern candidate');
+    const approved = approveContact(s, { contactId: mayaContact.id });
+    assert.equal(approved.humanApproved, true);
+    const mayaCandidate = result.personCandidates.find(c => c.name === 'Maya Chen');
+    assert.ok(mayaCandidate, 'expected a Maya Chen person candidate');
+    const stakeholder = promoteStakeholder(s, { candidateId: mayaCandidate.id });
+    const plan = createOutreachPlan(s, { jobId: job.id, profileId: profile.id, stakeholderId: stakeholder.id, goal: 'informational' });
+    assert.match(plan.id, /^plan_/);
+    assert.equal(plan.jobId, job.id);
+    assert.equal(plan.profileId, profile.id);
+    assert.equal(plan.stakeholderId, stakeholder.id);
+    assert.equal(plan.contactPointId, mayaContact.id);
+    assert.equal(plan.recommended, true);
+    assert.ok(['email', 'manual_review', 'generic_inbox'].includes(plan.channel));
+    assert.ok(one(s, 'SELECT id FROM outreach_plans WHERE id=?', [plan.id]));
+    assert.ok(one(s, 'SELECT id FROM audit_log WHERE action=? AND entity_id=?', ['outreach.plan.created', plan.id]));
+    assert.match(plan.note, /human-gated/);
+    assert.throws(() => createOutreachPlan(s, { jobId: 'job_does_not_exist', profileId: profile.id }), /Unknown job/);
+  } finally {
+    await search.close();
+  }
+});
+
+test('createOutreachPlan returns no_safe_path when no contacts are available', async () => {
+  const { s, profile, job } = await createFixtureStore();
+  const plan = createOutreachPlan(s, { jobId: job.id, profileId: profile.id });
+  assert.equal(plan.recommended, false);
+  assert.equal(plan.channel, 'no_safe_path');
+  assert.equal(plan.pathStrength, 'blocked');
+  assert.equal(plan.contactPointId, null);
+  assert.ok(one(s, 'SELECT id FROM outreach_plans WHERE id=?', [plan.id]));
+});
+
+test('resolveHostIsPublic rejects private/loopback/link-local addresses and allows public ones', async () => {
+  const { resolveHostIsPublic } = await import('../src/research/sources.js');
+  for (const ip of ['127.0.0.1', '10.0.0.5', '192.168.1.1', '169.254.169.254', '0.0.0.0', '::1']) {
+    const result = await resolveHostIsPublic(ip);
+    assert.equal(result.ok, false, `expected ${ip} to be blocked, got ${JSON.stringify(result)}`);
+  }
+  const publicLookup = async () => [{ address: '8.8.8.8', family: 4 }];
+  assert.equal((await resolveHostIsPublic('example.com', { lookupImpl: publicLookup })).ok, true);
+  const privateLookup = async () => [{ address: '192.168.1.1', family: 4 }];
+  assert.equal((await resolveHostIsPublic('example.com', { lookupImpl: privateLookup })).ok, false);
+  const allowed = await resolveHostIsPublic('127.0.0.1', { env: { JOBOS_ALLOW_PRIVATE_HOSTS: 'true' } });
+  assert.equal(allowed.ok, true);
 });

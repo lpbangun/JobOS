@@ -50,7 +50,7 @@ This file captures must-meet criteria for the enhanced JobOS research and outrea
 - API:
   - `GET /api/research/contacts?jobId=...`
   - `POST /api/research/contacts/:id/approve`
-  - `GET /api/research/network?jobId=...`
+  - `POST /api/research/network {"jobId":"..."}`
 - MCP:
   - `discover_contacts`
   - `approve_contact`

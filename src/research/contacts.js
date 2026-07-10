@@ -428,7 +428,7 @@ async function collectGdeltObservations(s, job, { env = process.env } = {}) {
   return { observations, warnings };
 }
 
-async function collectWaybackObservations(s, job, domains, { fetchImpl = fetch, env = process.env } = {}) {
+async function collectWaybackObservations(s, job, domains, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
   const observations = [];
   const warnings = [];
   for (const domain of domains.slice(0, 2)) {
@@ -466,7 +466,7 @@ async function collectWaybackObservations(s, job, domains, { fetchImpl = fetch, 
   return { observations, warnings };
 }
 
-async function collectConfiguredAdapterObservations(s, job, domains, searchObservations, { fetchImpl = fetch, env = process.env } = {}) {
+async function collectConfiguredAdapterObservations(s, job, domains, searchObservations, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
   const names = adapterNames(env);
   const observations = [];
   const warnings = [];
@@ -481,7 +481,7 @@ async function collectConfiguredAdapterObservations(s, job, domains, searchObser
     warnings.push(...result.warnings);
   }
   if (names.includes('wayback')) {
-    const result = await collectWaybackObservations(s, job, domains, { fetchImpl, env });
+    const result = await collectWaybackObservations(s, job, domains, { fetchImpl, lookupImpl, env });
     observations.push(...result.observations);
     warnings.push(...result.warnings);
   }
@@ -516,14 +516,14 @@ async function collectSearchObservations(s, job, company, { env = process.env } 
   return { queries, observations, warnings };
 }
 
-async function fetchPageObservations(s, job, company, searchObservations, { fetchImpl = fetch, env = process.env } = {}) {
+async function fetchPageObservations(s, job, company, searchObservations, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
   const seedUrls = searchObservations.map(obs => obs.url).filter(isFetchablePublicPage);
   const targets = pageTargetsFromSeeds({ company, job, seedUrls, limit: Math.max(1, Number(env.JOBOS_RESEARCH_PAGE_LIMIT || 16)) });
   const observations = [];
   const warnings = [];
   for (const target of targets) {
     try {
-      const page = await fetchPublicPage(target, { fetchImpl, env });
+      const page = await fetchPublicPage(target, { fetchImpl, lookupImpl, env });
       if (!page.ok) continue;
       const observation = sourceObservationFromPage(job, page, { query: 'contact-page-crawl' });
       saveSourceObservation(s, observation);
@@ -665,6 +665,7 @@ async function smtpProbe(email, domainChecks, { env = process.env, timeoutMs = 8
   smtpProbeLastByDomain.set(domain, Date.now());
   return await new Promise(resolve => {
     const socket = net.connect(25, mx.exchange);
+    socket.setTimeout(timeoutMs);
     let buffer = '';
     let step = 0;
     const finish = status => {
@@ -672,7 +673,6 @@ async function smtpProbe(email, domainChecks, { env = process.env, timeoutMs = 8
       try { socket.end(); } catch {}
       resolve({ status });
     };
-    const timer = setTimeout(() => finish('smtp_inconclusive'), timeoutMs);
     socket.on('connect', () => {});
     socket.on('data', chunk => {
       buffer += chunk.toString('utf8');
@@ -687,14 +687,13 @@ async function smtpProbe(email, domainChecks, { env = process.env, timeoutMs = 8
         step = 3;
         socket.write(`RCPT TO:<${email}>\r\n`);
       } else if (step === 3) {
-        clearTimeout(timer);
         if (/^250/.test(line)) finish('smtp_accepts_rcpt');
         else if (/^(550|551|553)/.test(line)) finish('smtp_rejects_rcpt');
         else finish('smtp_inconclusive');
       }
     });
-    socket.on('error', () => { clearTimeout(timer); resolve({ status: 'smtp_inconclusive' }); });
-    socket.on('timeout', () => { clearTimeout(timer); resolve({ status: 'smtp_inconclusive' }); });
+    socket.on('error', () => resolve({ status: 'smtp_inconclusive' }));
+    socket.on('timeout', () => { try { socket.end(); } catch {} resolve({ status: 'smtp_inconclusive' }); });
   });
 }
 
@@ -830,7 +829,7 @@ ${candidateRows}
 `;
 }
 
-export async function discoverContacts(s, { jobId = null, stakeholderId = null, fetchImpl = fetch, resolver = null, env = process.env } = {}) {
+export async function discoverContacts(s, { jobId = null, stakeholderId = null, fetchImpl = fetch, lookupImpl = null, resolver = null, env = process.env } = {}) {
   let job = jobId ? one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]) : null;
   let stakeholder = null;
   if (stakeholderId) {
@@ -847,8 +846,8 @@ export async function discoverContacts(s, { jobId = null, stakeholderId = null, 
     ...search.observations
   ].filter((obs, index, arr) => arr.findIndex(other => other.id === obs.id) === index);
   const initialDomains = companyDomains(job, company, initialObservations);
-  const adapters = await collectConfiguredAdapterObservations(s, job, initialDomains, search.observations, { fetchImpl, env });
-  const pages = await fetchPageObservations(s, job, company, [...search.observations, ...adapters.observations], { fetchImpl, env });
+  const adapters = await collectConfiguredAdapterObservations(s, job, initialDomains, search.observations, { fetchImpl, lookupImpl, env });
+  const pages = await fetchPageObservations(s, job, company, [...search.observations, ...adapters.observations], { fetchImpl, lookupImpl, env });
   const observations = [
     ...initialObservations,
     ...adapters.observations,

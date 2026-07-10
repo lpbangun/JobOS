@@ -26,7 +26,11 @@ export async function handleApi(s,req,res,u){
     if(u.pathname==='/api/outreach/due' && req.method==='GET') return send(res,200,outreachDue(s));
     if(u.pathname==='/api/outreach/threads' && req.method==='GET') return send(res,200,listOutreachThreads(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')||null}));
     if(u.pathname==='/api/research/contacts' && req.method==='GET') return send(res,200,listContactPoints(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')||null,stakeholderId:u.searchParams.get('stakeholderId')||u.searchParams.get('stakeholder_id')||null,companyId:u.searchParams.get('companyId')||u.searchParams.get('company_id')||null}));
-    if(u.pathname==='/api/research/network' && req.method==='GET') return send(res,200,mapReachableNetwork(s,{jobId:u.searchParams.get('jobId')||u.searchParams.get('job_id')}));
+    if(u.pathname==='/api/research/network' && req.method==='POST'){
+      if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
+      const data=await body(req);
+      return send(res,201,mapReachableNetwork(s,{jobId:data.jobId||data.job_id||u.searchParams.get('jobId')||u.searchParams.get('job_id')}));
+    }
     if(u.pathname==='/api/research/contacts/discover' && req.method==='POST'){
       if(!safeWriteOrigin(req)) return send(res,403,{error:'write rejected: Origin must be localhost or omitted for CLI/agent calls'});
       const data=await body(req);

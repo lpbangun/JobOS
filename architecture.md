@@ -283,7 +283,7 @@ CLI/API shape:
 
 - `jobos network import --file <csv|yaml> --json`
 - `jobos research network --job <job-id> --json`
-- API: `GET /api/research/network?jobId=...`
+- API: `POST /api/research/network {"jobId":"..."}`
 - MCP: `map_reachable_network`
 
 Output:
