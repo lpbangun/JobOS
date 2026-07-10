@@ -2,6 +2,8 @@ import { score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { research } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
+import { approveContact, createOutreachPlan, discoverContacts } from './research/contacts.js';
+import { mapReachableNetwork } from './research/network.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
@@ -15,7 +17,11 @@ const tools = [
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' } }, required: ['jobId', 'profileId'] } },
   { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' } }, required: ['jobId', 'profileId'] } },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] } },
-  { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' }, profileId: { type: 'string' }, goal: { type: 'string' } }, required: ['jobId', 'stakeholderId', 'profileId'] } },
+  { name: 'discover_contacts', description: 'Discover source-backed contact points and email patterns for a job or stakeholder without sending outreach.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' } } } },
+  { name: 'approve_contact', description: 'Mark a discovered contact point as human-approved for later draft use.', inputSchema: { type: 'object', properties: { contactId: { type: 'string' } }, required: ['contactId'] } },
+  { name: 'plan_outreach', description: 'Rank a human-gated outreach path from discovered contacts.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' }, stakeholderId: { type: 'string' }, goal: { type: 'string' } }, required: ['jobId', 'profileId'] } },
+  { name: 'map_reachable_network', description: 'Create a local reachable-network path ladder for a job.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] } },
+  { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' }, profileId: { type: 'string' }, goal: { type: 'string' }, planId: { type: 'string' }, contactId: { type: 'string' } }, required: ['profileId'] } },
   { name: 'mark_outreach_sent', description: 'Record that a human sent an outreach draft outside JobOS.', inputSchema: { type: 'object', properties: { artifactId: { type: 'string' }, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: { type: 'string' } }, required: ['artifactId', 'channel'] } },
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, afterDays: { type: 'number' } }, required: ['threadId', 'afterDays'] } },
   { name: 'list_outreach_due', description: 'List due outreach follow-up tasks without sending anything.', inputSchema: { type: 'object', properties: {} } },
@@ -41,7 +47,11 @@ async function callTool(s, name, args = {}) {
   if (name === 'tailor_resume') return result(await tailor(s, args.jobId, args.profileId, 'resume'));
   if (name === 'draft_cover_letter') return result(await tailor(s, args.jobId, args.profileId, 'cover'));
   if (name === 'research_company') return result(await research(s, args.jobId, 'company'));
-  if (name === 'draft_outreach') return result(await draftOutreach(s, { jobId: args.jobId, stakeholderId: args.stakeholderId, profileId: args.profileId, goal: args.goal || 'informational' }));
+  if (name === 'discover_contacts') return result(await discoverContacts(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null }));
+  if (name === 'approve_contact') return result(approveContact(s, { contactId: args.contactId }));
+  if (name === 'plan_outreach') return result(createOutreachPlan(s, { jobId: args.jobId, profileId: args.profileId, stakeholderId: args.stakeholderId || null, goal: args.goal || 'informational' }));
+  if (name === 'map_reachable_network') return result(mapReachableNetwork(s, { jobId: args.jobId }));
+  if (name === 'draft_outreach') return result(await draftOutreach(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null, profileId: args.profileId, goal: args.goal || 'informational', planId: args.planId || null, contactId: args.contactId || null }));
   if (name === 'mark_outreach_sent') return result(markOutreachSent(s, { artifactId: args.artifactId, channel: args.channel, notes: args.notes || '' }));
   if (name === 'schedule_outreach_followup') return result(scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays }));
   if (name === 'list_outreach_due') return result(outreachDue(s));

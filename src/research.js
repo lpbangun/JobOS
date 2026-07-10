@@ -1,12 +1,64 @@
 import path from 'node:path';
 import { one, all, run, audit, save } from './db.js';
 import { id, now, parseJson, slug } from './utils.js';
-import { writeMd } from './workspace.js';
+import { writeMd, writeYaml } from './workspace.js';
 import { searchWebDetailed } from './search.js';
 import { generateJson, llmConfig } from './llm.js';
+import { saveSourceObservation, sourceAllowedForRecording, sourceObservationFromSearch, syncSourceObservations } from './research/sources.js';
 
 function sourceUrl(job) {
   return String(job.url || '').startsWith('jobos:text:') ? '' : job.url;
+}
+
+function domainFromUrl(raw) {
+  try {
+    return new URL(raw).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function companyAliases(name) {
+  const full = String(name || '').replace(/\s+/g, ' ').trim();
+  const stripped = full.replace(/\b(inc|incorporated|llc|ltd|limited|gmbh|ag|corp|corporation|co|company|plc|pbc)\b\.?/gi, '').replace(/\s+/g, ' ').trim();
+  return [...new Set([full, stripped].filter(Boolean))];
+}
+
+function resolveCompanyIdentity(job, matchedResults) {
+  const hostCounts = new Map();
+  const sources = [];
+  const addHost = (url, reason, trust = 'medium') => {
+    const host = domainFromUrl(url);
+    if (!host) return;
+    hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+    sources.push({ url, domain: host, reason, trust });
+  };
+  addHost(sourceUrl(job), 'job source URL', 'medium');
+  for (const result of matchedResults || []) addHost(result.url, `search result: ${result.title || result.url}`, result.provider ? 'medium' : 'low');
+  const sorted = [...hostCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const domain = sorted[0]?.[0] || '';
+  const topCount = sorted[0]?.[1] || 0;
+  const confidence = domain && topCount >= 3 ? 'high' : domain && topCount >= 1 ? 'medium' : 'low';
+  const collisions = sorted.slice(1).filter(([, count]) => count >= Math.max(1, topCount - 1)).map(([host, count]) => ({ domain: host, sourceCount: count }));
+  return {
+    domain,
+    aliases: companyAliases(job.company),
+    sourceConfidence: confidence,
+    identitySources: sources.filter(source => source.domain === domain).slice(0, 8),
+    collisionWarnings: collisions
+  };
+}
+
+function categoryStats(facts) {
+  const grouped = new Map();
+  for (const fact of facts || []) {
+    const category = fact.category || 'general';
+    const item = grouped.get(category) || { category, sourceCount: 0, latestFetchedAt: '', urls: new Set() };
+    if (fact.url) item.urls.add(fact.url);
+    if (fact.fetchedAt && String(fact.fetchedAt) > item.latestFetchedAt) item.latestFetchedAt = fact.fetchedAt;
+    grouped.set(category, item);
+  }
+  return [...grouped.values()].map(item => ({ category: item.category, sourceCount: item.urls.size, freshness: item.latestFetchedAt || 'unknown', urls: [...item.urls] }));
 }
 
 function factFromResult(result) {
@@ -84,8 +136,17 @@ function renderAngles(angles) {
   }).join('\n');
 }
 
-function renderCompanyDossier({ job, facts, queries, generatedAt, warnings, mode, openQuestions, outreachAngles }) {
-  return `# Company dossier — ${job.company}\n\nGenerated: ${generatedAt}\n\n**Related job:** ${job.title} (${job.id})\n**Job source URL:** ${sourceUrl(job) || 'not provided'}\n**Research mode:** ${mode}\n\n## Search queries\n${renderQueries(queries)}\n${renderWarnings(warnings)}\n## Known from imported job text\n- Company: ${job.company}\n- Role: ${job.title}\n- Location: ${job.location || 'not specified'}\n\n## Source-backed facts\n${renderFacts(facts)}\n\n## Job-specific outreach angles\n${renderAngles(outreachAngles)}\n\n## Open questions for human review\n${renderOpenQuestions(openQuestions)}\n\n## Notes\nThis command searched web sources and wrote a dossier. Configure auto-apply and auto-send to take external actions.\n`;
+function renderIdentity(identity) {
+  const collisions = identity.collisionWarnings?.length ? `\n- Collision warnings: ${identity.collisionWarnings.map(c => `${c.domain} (${c.sourceCount})`).join(', ')}` : '';
+  return `- Canonical domain: ${identity.domain || 'not resolved'}\n- Aliases: ${identity.aliases.join(', ') || 'none'}\n- Source confidence: ${identity.sourceConfidence}${collisions}`;
+}
+
+function renderCategoryStats(stats) {
+  return stats.length ? stats.map(stat => `- ${stat.category}: ${stat.sourceCount} source(s), freshness ${stat.freshness}`).join('\n') : '- No category source counts available.';
+}
+
+function renderCompanyDossier({ job, facts, queries, generatedAt, warnings, mode, openQuestions, outreachAngles, identity }) {
+  return `# Company dossier — ${job.company}\n\nGenerated: ${generatedAt}\n\n**Related job:** ${job.title} (${job.id})\n**Job source URL:** ${sourceUrl(job) || 'not provided'}\n**Research mode:** ${mode}\n\n## Company identity\n${renderIdentity(identity)}\n\n## Search queries\n${renderQueries(queries)}\n${renderWarnings(warnings)}\n## Known from imported job text\n- Company: ${job.company}\n- Role: ${job.title}\n- Location: ${job.location || 'not specified'}\n\n## Source-backed facts\n${renderFacts(facts)}\n\n## Category coverage\n${renderCategoryStats(categoryStats(facts))}\n\n## Outreach-safe facts\n${facts.length ? facts.slice(0, 5).map(f => `- ${f.claim}\n  - Source: ${f.url}`).join('\n') : '- No outreach-safe source-backed facts available.'}\n\n## Interview-only risk notes\n${facts.filter(f => /risk|legal|layoff|controversy|review/i.test(f.category || f.claim || '')).map(f => `- ${f.claim}\n  - Source: ${f.url}`).join('\n') || '- No source-backed risk notes found.'}\n\n## Job-specific outreach angles\n${renderAngles(outreachAngles)}\n\n## Open questions for human review\n${renderOpenQuestions(openQuestions)}\n\n## Human gate\nThis command searched public web sources and wrote an internal dossier only. It did not browse private accounts, scrape LinkedIn, submit applications, or send outreach.\n`;
 }
 
 function companyResearchQueries(job) {
@@ -98,6 +159,25 @@ function companyResearchQueries(job) {
   ];
 }
 
+function stakeholderResearchQueries(job) {
+  const roleTerms = String(job.title || '').replace(/[,()]/g, ' ').split(/\s+/).filter(Boolean).slice(0, 4).join(' ');
+  return [
+    `"${job.company}" "${job.title}" stakeholder hiring manager recruiter product leader`,
+    `"${job.company}" "Head of People" recruiter "Talent Acquisition"`,
+    `"${job.company}" "${roleTerms}" "hiring manager"`,
+    `site:linkedin.com/in "${job.company}" "Talent Acquisition"`,
+    `site:linkedin.com/in "${job.company}" "${roleTerms}"`
+  ];
+}
+
+function sourceAllowed(result) {
+  try {
+    const host = new URL(result.url).hostname.replace(/^www\./, '').toLowerCase();
+    return !['linkedin.com', 'facebook.com', 'instagram.com', 'x.com', 'twitter.com'].some(domain => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
 
 function isHttpUrl(raw) {
   try {
@@ -272,7 +352,7 @@ async function buildCompanyResearch(job) {
     for (const warning of searched.warnings || []) searchWarnings.push(`${query}: ${warning.provider} ${warning.message}`);
   }
   const pooled = dedupeResults(rawResults);
-  const matched = pooled.filter(result => companyMatches(result, job.company));
+  const matched = pooled.filter(result => sourceAllowed(result) && companyMatches(result, job.company));
   const fallbackFacts = matched.map(factFromResult);
   const synthesized = await synthesizeCompanyResearch(job, matched, fallbackFacts);
   return {
@@ -329,6 +409,7 @@ function companyAffiliationMatches(result, company) {
 }
 
 function personFromResult(result, company) {
+  if (!sourceAllowed(result)) return null;
   const title = result.title.replace(/\s+/g, ' ').trim();
   const name = title.split(/\s+[—|-]\s+/)[0]?.trim();
   const words = name ? name.split(/\s+/) : [];
@@ -350,7 +431,7 @@ function renderStakeholders({ job, stakeholders, query, generatedAt, searchError
     return `- **${s.name}** — ${s.role}${confidence}${sourceType}\n  - Relevance: ${s.summary}\n  - Source: ${s.links[0]}`;
   }).join('\n') : '- No named public stakeholders found from search results.';
   const warningText = warnings.length ? `\n**Warnings:**\n${warnings.map(w => `- ${w}`).join('\n')}\n` : '';
-  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Use outreach commands to draft and manage messages.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Notes\nThis command used web-search results. Stakeholders can be contacted via outreach commands.\n`;
+  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Human gate\nThis command used public web-search results only. It did not scrape private accounts or contact anyone.\n`;
 }
 
 function upsertStakeholder(s, job, person, at) {
@@ -471,7 +552,7 @@ export async function addStakeholder(s, { jobId, name = '', role = '', sourceUrl
   const rel = writeStakeholderDoc(s, job, stakeholders, 'user-pasted stakeholder source', at, structured.warnings);
   audit(s, 'research.stakeholder.added', 'stakeholder', stakeholder.id, { jobId: job.id, path: rel, sourceUrl: url, confidence: structured.person.confidence });
   save(s);
-  return { id: stakeholder.id, jobId: job.id, path: rel, name: stakeholder.name, role: stakeholder.role, sourceUrl: url, confidence: structured.person.confidence, warnings: structured.warnings, note: 'Stakeholder recorded from user-provided source text/URL.' };
+  return { id: stakeholder.id, jobId: job.id, path: rel, name: stakeholder.name, role: stakeholder.role, sourceUrl: url, confidence: structured.person.confidence, warnings: structured.warnings, note: 'Stakeholder recorded from user-provided source text/URL; no outreach was sent.' };
 }
 
 export async function research(s, jid, type) {
@@ -480,19 +561,49 @@ export async function research(s, jid, type) {
   const at = now();
   if (type === 'company') {
     const researchResult = await buildCompanyResearch(job);
-    const { queries, facts, warnings, mode, openQuestions, outreachAngles, droppedClaims, droppedAngles } = researchResult;
+    const { queries, facts, warnings, mode, openQuestions, outreachAngles, droppedClaims, droppedAngles, matched } = researchResult;
+    for (const result of matched) saveSourceObservation(s, sourceObservationFromSearch(job, result));
+    syncSourceObservations(s, jid);
+    const identity = resolveCompanyIdentity(job, matched);
     const rel = path.join('jobs', jid, 'company-dossier.md');
-    const content = renderCompanyDossier({ job, facts, queries, generatedAt: at, warnings, mode, openQuestions, outreachAngles });
+    const structuredRel = path.join('jobs', jid, 'research', 'company-research.yaml');
+    const content = renderCompanyDossier({ job, facts, queries, generatedAt: at, warnings, mode, openQuestions, outreachAngles, identity });
     writeMd(path.join(s.p.ws, rel), content);
+    writeYaml(path.join(s.p.ws, structuredRel), {
+      version: 1,
+      generatedAt: at,
+      jobId: jid,
+      companyId: job.company_id || slug(job.company),
+      identity,
+      categoryCoverage: categoryStats(facts),
+      facts: facts.map(fact => ({ type: 'fact', ...fact })),
+      outreachSafeFacts: facts.slice(0, 5),
+      interviewOnlyRiskNotes: facts.filter(f => /risk|legal|layoff|controversy|review/i.test(f.category || f.claim || '')),
+      openQuestions: openQuestions.map(question => ({ type: 'question', question })),
+      outreachAngles,
+      warnings,
+      policy: { externalSideEffects: 'none', humanGate: 'required before outreach or applications' }
+    });
     const summary = facts[0]?.claim || '';
-    run(s, 'UPDATE companies SET summary=?, facts_json=?, updated_at=? WHERE id=?', [summary, JSON.stringify(facts), at, job.company_id]);
-    audit(s, 'research.company.created', 'job', jid, { jobId: jid, path: rel, queries, sourceCount: facts.length, mode, droppedClaims, droppedAngles, warnings: warnings.length });
+    run(s, "UPDATE companies SET website=COALESCE(NULLIF(website,''),?), summary=?, facts_json=?, domain=?, aliases_json=?, source_confidence=?, identity_sources_json=?, updated_at=? WHERE id=?", [identity.domain ? `https://${identity.domain}` : '', summary, JSON.stringify(facts), identity.domain, JSON.stringify(identity.aliases), identity.sourceConfidence, JSON.stringify(identity.identitySources), at, job.company_id]);
+    audit(s, 'research.company.created', 'job', jid, { jobId: jid, path: rel, structuredPath: structuredRel, queries, sourceCount: facts.length, mode, droppedClaims, droppedAngles, warnings: warnings.length, identityConfidence: identity.sourceConfidence });
     save(s);
-    return { jobId: jid, companyId: job.company_id || slug(job.company), path: rel, mode, factCount: facts.length, sourceCount: new Set(facts.map(f => f.url)).size, sources: facts.map(f => f.url), queryCount: queries.length, outreachAngleCount: outreachAngles.length, droppedUnsupportedClaims: droppedClaims, droppedUnsupportedAngles: droppedAngles, warnings, note: 'Company dossier created from web-search results.' };
+    return { jobId: jid, companyId: job.company_id || slug(job.company), path: rel, structuredPath: structuredRel, mode, identity, factCount: facts.length, sourceCount: new Set(facts.map(f => f.url)).size, sources: facts.map(f => f.url), queryCount: queries.length, outreachAngleCount: outreachAngles.length, droppedUnsupportedClaims: droppedClaims, droppedUnsupportedAngles: droppedAngles, warnings, note: 'Company dossier created from public web-search results; no external side effects.' };
   }
 
-  const query = `${job.company} ${job.title} stakeholder hiring manager recruiter product leader`;
-  const { results, error: searchError } = await safeSearch(query, 8);
+  const queries = stakeholderResearchQueries(job);
+  const gathered = [];
+  const errors = [];
+  for (const query of queries) {
+    const searched = await safeSearch(query, 8);
+    gathered.push(...searched.results);
+    if (searched.error) errors.push(`${query}: ${searched.error}`);
+  }
+  const results = dedupeResults(gathered);
+  const query = queries.filter(q => !q.includes('linkedin.com')).join(' | ');
+  const searchError = errors.join('; ') || null;
+  for (const result of results.filter(result => sourceAllowedForRecording(result.url))) saveSourceObservation(s, sourceObservationFromSearch(job, result));
+  syncSourceObservations(s, jid);
   const candidates = results.map(result => personFromResult(result, job.company)).filter(Boolean).slice(0, 5);
   const checked = await filterStakeholdersWithLlm(job, candidates);
   const people = checked.people;
@@ -500,7 +611,7 @@ export async function research(s, jid, type) {
   const rel = writeStakeholderDoc(s, job, stakeholders, query, at, checked.warnings, searchError);
   audit(s, 'research.stakeholders.created', 'job', jid, { jobId: jid, path: rel, query, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, warnings: checked.warnings.length });
   save(s);
-  return { jobId: jid, path: rel, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, sourceCount: new Set(stakeholders.flatMap(x => x.links)).size, searchError, warnings: checked.warnings, note: 'Stakeholder research created from web-search results.' };
+  return { jobId: jid, path: rel, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, sourceCount: new Set(stakeholders.flatMap(x => x.links)).size, searchError, warnings: checked.warnings, note: 'Stakeholder research created from public web-search results; no outreach was sent.' };
 }
 
 export function getStakeholder(s, sid) {

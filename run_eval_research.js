@@ -428,9 +428,9 @@ async function main() {
       dossierScores.push(scoreDossier({ fixture, result: dossierResult, dossier, facts }));
       const stakeholderRows = all(store, 'SELECT * FROM stakeholders WHERE job_id=?', [job.id]);
       stakeholderScores.push(scoreStakeholders({ fixture, rows: stakeholderRows }));
-      assertHard(hard, `${fixture.company} dossier has Notes`, /## Notes/.test(dossier));
+      assertHard(hard, `${fixture.company} dossier has Human gate`, /Human gate/.test(dossier));
       const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', stakeholderResult.path), 'utf8');
-      assertHard(hard, `${fixture.company} stakeholder doc has Notes`, /## Notes/.test(stakeholderDoc));
+      assertHard(hard, `${fixture.company} stakeholder doc has Human gate`, /Human gate/.test(stakeholderDoc));
     }
 
     for (const [profileIndex, profile] of profileFixtures.entries()) {
@@ -447,7 +447,7 @@ async function main() {
         const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
         const evidence = parseJson(artifact.evidence_json, []);
         outreachDrafts.push({ profile, goal, draft, content, evidence, scores: scoreOutreachDraft({ content, evidence, profile, goal }) });
-        assertHard(hard, `${profile.name} ${goal} outreach has Notes`, /## Notes/.test(content));
+        assertHard(hard, `${profile.name} ${goal} outreach has Human gate`, /Human gate/.test(content));
         assertHard(hard, `${profile.name} ${goal} artifact is draft`, artifact.approval_status === 'draft_needs_human_review');
       }
     }
@@ -462,12 +462,12 @@ async function main() {
     const followupArtifact = followupArtifactId ? one(store, 'SELECT * FROM artifacts WHERE id=?', [followupArtifactId]) : null;
     if (followupArtifact) {
       const content = readFileSync(path.join(root, 'jobos-workspace', followupArtifact.path), 'utf8');
-      assertHard(hard, 'follow-up draft has Notes', /## Notes/.test(content));
+      assertHard(hard, 'follow-up draft has Human gate', /Human gate/.test(content));
       assertHard(hard, 'follow-up artifact is draft', followupArtifact.approval_status === 'draft_needs_human_review');
     } else {
       assertHard(hard, 'follow-up draft created by scheduler', false, JSON.stringify(followupRun));
     }
-    assertHard(hard, 'mark-sent records human send only', sent.note.includes('Recorded outreach as sent'));
+    assertHard(hard, 'mark-sent records human send only', sent.note.includes('JobOS did not send'));
     assertHard(hard, 'schedule-followup creates due task', due.some(item => item.taskId === scheduled.taskId));
     for (const action of ['research.company.created', 'research.stakeholders.created', 'research.stakeholder.added', 'outreach.draft.created', 'outreach.mark_sent.recorded', 'outreach.followup_scheduled']) {
       assertHard(hard, `audit row exists: ${action}`, Boolean(one(store, 'SELECT id FROM audit_log WHERE action=?', [action])));
@@ -480,7 +480,7 @@ async function main() {
     const fallbackStakeholder = await runCli(noLlmEnv, ['research', 'add-stakeholder', '--job', fallbackJob.id, '--source-url', fixtures[0].validStakeholders[0].url, '--name', fixtures[0].validStakeholders[0].name, '--role', 'Head of Product', '--text', `${fixtures[0].validStakeholders[0].name} leads product at ${fixtures[0].company}.`, '--json']);
     const fallbackDraft = await runCli(noLlmEnv, ['outreach', 'draft', '--job', fallbackJob.id, '--stakeholder', fallbackStakeholder.id, '--profile', fallbackProfile.id, '--json']);
     const fallbackContent = readFileSync(path.join(noLlmEnv.JOBOS_HOME, 'jobos-workspace', fallbackDraft.path), 'utf8');
-    assertHard(hard, 'no-LLM fallback has Notes', /## Notes/.test(fallbackContent));
+    assertHard(hard, 'no-LLM fallback has Human gate', /Human gate/.test(fallbackContent));
     assertHard(hard, 'no-LLM fallback avoids invented secret claims', !/secret|unsupported|fabricated/i.test(fallbackContent));
 
     const outreachByGoal = new Map();

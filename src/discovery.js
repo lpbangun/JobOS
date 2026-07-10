@@ -47,7 +47,8 @@ Created: ${outputs.createdAt}
 - Deduped: ${outputs.counts?.deduped ?? 0}
 - High fit: ${outputs.counts?.highFit ?? 0}
 
-## Notes\nDiscovered jobs are ready for review, scoring, and application.
+## Human gate
+Discovered jobs were queued for review only. JobOS did not apply, submit forms, send outreach, or touch external accounts.
 
 ${outputs.errors?.length ? `## Errors\n${outputs.errors.map(e => `- ${e}`).join('\n')}\n` : ''}
 `;

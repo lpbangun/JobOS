@@ -5,9 +5,9 @@ import { writeYaml } from '../workspace.js';
 import { nextRunAfter, parseCron } from './cron.js';
 
 export const policy = {
-  autoApply: 'user_configured',
-  autoSend: 'user_configured',
-  defaultExternalActions: 'user_configured'
+  autoApply: 'disabled',
+  autoSend: 'disabled',
+  defaultExternalActions: 'human_approval_required'
 };
 
 export const actionAliases = {

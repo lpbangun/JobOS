@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import * as cheerio from 'cheerio';
 
-const UA = 'JobOS local discovery (+direct ATS API)';
+const UA = 'JobOS local discovery (+direct ATS API; no scraping)';
 
 function textFromHtml(value = '') {
   const $ = cheerio.load(String(value || ''));

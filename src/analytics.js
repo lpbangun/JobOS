@@ -6,6 +6,7 @@ import { due } from './tracking.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
 import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
 import { listOutreachThreads, outreachDue } from './outreach.js';
+import { listContactPoints } from './research/contacts.js';
 
 export function state(s) {
   return {
@@ -17,6 +18,11 @@ export function state(s) {
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
+    sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
+    personCandidates: all(s, 'SELECT * FROM person_candidates ORDER BY updated_at DESC'),
+    contactPoints: listContactPoints(s),
+    emailPatterns: all(s, 'SELECT * FROM email_patterns ORDER BY updated_at DESC'),
+    outreachPlans: all(s, 'SELECT * FROM outreach_plans ORDER BY created_at DESC').map(x => ({ ...x, reasoning: parseJson(x.reasoning_json, {}), warnings: parseJson(x.warnings_json, []) })),
     outreachThreads: listOutreachThreads(s),
     outreachDue: outreachDue(s),
     searches: listSearches(s),
@@ -26,7 +32,7 @@ export function state(s) {
     audit: all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 50').map(a => ({ ...a, payload: parseJson(a.payload_json, {}) })),
     automations: listAutomations(s),
     automationRuns: listRuns(s, { limit: 25 }),
-    policy: { externalApply: 'user_configured', externalSend: 'user_configured', autoApply: 'user_configured', autoSend: 'user_configured' }
+    policy: { externalApply: 'human_approval_required', externalSend: 'human_approval_required', autoApply: 'disabled', autoSend: 'disabled' }
   };
 }
 
@@ -132,7 +138,7 @@ function table(rows, columns) {
 
 export function renderFunnelMarkdown(metrics) {
   const reached = metrics.stageReached?.length ? metrics.stageReached.map(x => `- ${x.stage}: ${x.count}`).join('\n') : '- No stage history recorded in this window.';
-  return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Notes\nAnalytics summarize internal state.\n`;
+  return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
 }
 
 export function weekly(s, pid, { recordRun = true } = {}) {
@@ -143,7 +149,7 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   const tasks = due(s);
   const top = jobs.slice(0, 5).map(x => `- ${x.title} at ${x.company}: ${x.fit_score ?? 'unscored'}/100 (${x.id})`).join('\n') || '- No jobs imported.';
   const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
-  const content = `# Weekly JobOS review — ${prof.name}\n\nGenerated: ${now()}\n\n## Funnel analytics\n${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}\n\n## Top jobs\n${top}\n\n## Due / open tasks\n${taskLines}\n\n## Recommended experiments\n- Double down on sources or role families that generate interviews, not just imports.\n- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.\n- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.\n\n## Notes\nThis review summarizes your job search state.\n`;
+  const content = `# Weekly JobOS review — ${prof.name}\n\nGenerated: ${now()}\n\n## Funnel analytics\n${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}\n\n## Top jobs\n${top}\n\n## Due / open tasks\n${taskLines}\n\n## Recommended experiments\n- Double down on sources or role families that generate interviews, not just imports.\n- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.\n- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.\n\n## Automation policy\nThis review is an internal summary. It did not submit applications or send outreach.\n`;
   const rel = path.join('exports', `weekly-review-${pid}-${new Date().toISOString().slice(0, 10)}.md`);
   writeMd(path.join(s.p.ws, rel), content);
   const rid = id('run', `weekly-review:${pid}:${now()}`);

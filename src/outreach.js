@@ -5,6 +5,7 @@ import { writeMd, writeYaml } from './workspace.js';
 import { getStakeholder } from './research.js';
 import { generateJson, llmConfig } from './llm.js';
 import { syncJob } from './jobs.js';
+import { contactSummaryForPlan } from './research/contacts.js';
 
 const sentChannels = new Set(['email', 'linkedin', 'other']);
 const pausedApplicationStatuses = new Set(['interview', 'offer', 'rejected']);
@@ -85,9 +86,9 @@ function syncOutreachThreads(s, jobId) {
   writeYaml(path.join(s.p.jobs, jobId, 'outreach', 'threads.yaml'), {
     version: 1,
     policy: {
-      autoSend: 'user_configured',
-      externalSend: 'user_configured',
-      note: 'JobOS can draft, send, and track outreach based on user configuration.'
+      autoSend: 'disabled',
+      externalSend: 'human_approval_required',
+      note: 'JobOS records drafts, human-sent status, and follow-up tasks only. It never sends outreach.'
     },
     threads: rows.map(row => ({
       id: row.id,
@@ -140,7 +141,21 @@ function loadProofs(s, profile) {
     }));
 }
 
-function evidenceContext(s, { job, profile, stakeholder }) {
+function rowToContact(row) {
+  return row ? {
+    id: row.id,
+    type: row.type,
+    value: row.value,
+    evidenceTier: row.evidence_tier,
+    verificationStatus: row.verification_status,
+    confidence: row.confidence,
+    humanApproved: Boolean(row.human_approved),
+    doNotUse: Boolean(row.do_not_use),
+    stakeholderId: row.stakeholder_id || null
+  } : null;
+}
+
+function evidenceContext(s, { job, profile, stakeholder, contact = null }) {
   const stakeholderSource = stakeholder.links[0] || '';
   const stakeholderEvidence = stakeholderSource ? [{
     id: `stakeholder:${stakeholder.id}`,
@@ -156,8 +171,16 @@ function evidenceContext(s, { job, profile, stakeholder }) {
     summary: cleanSentence(`${job.title} at ${job.company}`),
     sourceUrl: sourceUrl(job)
   }] : [];
+  const contactEvidence = contact ? [{
+    id: `contact:${contact.id}`,
+    type: 'contact_point',
+    label: `${contact.type} contact`,
+    summary: cleanSentence(`Tier ${contact.evidenceTier} ${contact.type} contact; verification status ${contact.verificationStatus}; confidence ${contact.confidence}`),
+    source: contact.value
+  }] : [];
   const evidence = [
     ...stakeholderEvidence,
+    ...contactEvidence,
     ...loadCompanyFacts(s, job),
     ...jobEvidence,
     ...loadProofs(s, profile)
@@ -211,7 +234,7 @@ function renderQuality(quality) {
 function renderOutreachContent({ job, profile, stakeholder, goal, subject, message, evidence, warnings, quality, mode }) {
   return `# Outreach draft - ${stakeholder.name}
 
-**Approval status:** Draft - review before sending.
+**Approval status:** Draft only - not sent.
 **Goal:** ${goal}
 **Related job:** ${job.title} at ${job.company}
 **Subject:** ${subject}
@@ -230,9 +253,10 @@ ${renderQuality(quality)}
 - Tone target: ${profileStyle(profile)}.
 - Keep the final message short, specific, and low-pressure.
 
-## Notes
-- Review the draft before sending, or configure auto-send mode.
-- Verify source and relationship context before use.
+## Human gate
+- JobOS created this draft only.
+- It did not send email, LinkedIn messages, or contact anyone.
+- Verify every source and relationship context before copying this into an external tool.
 `;
 }
 
@@ -285,6 +309,7 @@ function outreachPrompt({ job, profile, stakeholder, goal, ctx }) {
 Rules:
 - Use only ALLOWED_EVIDENCE for factual claims.
 - Every company or stakeholder fact used in the message must appear in evidence with its id or sourceUrl.
+- Do not claim that JobOS sent or will send anything.
 - Keep message under 150 words.
 - Match communicationStyle.
 - Ask for the goal without pressure.
@@ -312,7 +337,7 @@ async function llmDraft(input, fallback) {
   try {
     const result = await generateJson({
       schemaName: 'jobos_outreach_draft',
-      system: 'You are JobOS outreach drafting. Use only allowed evidence for factual claims.',
+      system: 'You are JobOS outreach drafting. Draft only. Use only allowed evidence. Never send messages or imply external action.',
       user: outreachPrompt({ job, profile, stakeholder, goal, ctx }),
       temperature: 0.2,
       maxTokens: 1800
@@ -344,10 +369,15 @@ async function llmDraft(input, fallback) {
   }
 }
 
-function baseWarnings({ stakeholder, app }) {
-  const warnings = ['Review before sending or configure auto-send to skip manual review.'];
+function baseWarnings({ stakeholder, app, contact = null }) {
+  const warnings = ['Draft only - not sent. Human approval is required before any external outreach.'];
   if (!String(stakeholder.summary || '').trim() || !stakeholder.links[0]) warnings.push('Stakeholder source context is missing; verify relevance manually before using this draft.');
   if (app && pausedApplicationStatuses.has(app.status)) warnings.push(`Application status is ${app.status}; pause outreach unless you intentionally approve this follow-up.`);
+  if (contact) {
+    const contactPlan = contactSummaryForPlan(contact);
+    warnings.push(...contactPlan.warnings);
+    warnings.push(`Selected contact channel: ${contactPlan.channel}; path strength: ${contactPlan.pathStrength}.`);
+  }
   return warnings;
 }
 
@@ -365,21 +395,49 @@ function saveOutreachArtifact(s, { job, profile, stakeholder, goal, content, evi
   return { id: aid, threadId: tid, path: rel, approvalStatus: 'draft_needs_human_review', warnings, subject, mode };
 }
 
-export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal = 'informational' }) {
+function resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planId = null, contactId = null }) {
+  let selectedPlan = null;
+  if (planId) {
+    selectedPlan = one(s, 'SELECT * FROM outreach_plans WHERE id=?', [planId]);
+    if (!selectedPlan) throw Error(`Unknown outreach plan: ${planId}`);
+    jobId = jobId || selectedPlan.job_id;
+    profileId = profileId || selectedPlan.profile_id;
+    stakeholderId = stakeholderId || selectedPlan.stakeholder_id;
+    contactId = contactId || selectedPlan.contact_point_id;
+    goal = goal || selectedPlan.goal;
+  }
+  const contact = contactId ? rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [contactId])) : null;
+  if (contactId && !contact) throw Error(`Unknown contact: ${contactId}`);
+  if (contact && !stakeholderId && contact.stakeholderId) stakeholderId = contact.stakeholderId;
+  if (contact?.doNotUse) throw Error(`Contact ${contact.id} is suppressed and cannot be used for outreach drafts.`);
+  if (contact && ['email', 'generic_inbox'].includes(contact.type) && !contact.humanApproved) {
+    throw Error(`Contact ${contact.id} is not human-approved. Approve it before drafting email-channel outreach.`);
+  }
+  return { jobId, profileId, stakeholderId, goal: goal || 'informational', plan: selectedPlan, contact };
+}
+
+export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal = 'informational', planId = null, contactId = null }) {
+  const resolved = resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planId, contactId });
+  jobId = resolved.jobId;
+  profileId = resolved.profileId;
+  stakeholderId = resolved.stakeholderId;
+  goal = resolved.goal;
+  const contact = resolved.contact;
   const safeGoal = slug(goal || 'informational');
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw Error(`Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw Error(`Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw Error(`Profile ${profileId} is not linked to job ${jobId}`);
+  if (!stakeholderId) throw Error('Missing --stakeholder or a selected plan/contact linked to a stakeholder.');
   const stakeholder = getStakeholder(s, stakeholderId);
   if (!stakeholder) throw Error(`Unknown stakeholder: ${stakeholderId}`);
   if (!stakeholder.job_id || stakeholder.job_id !== jobId) throw Error(`Stakeholder ${stakeholderId} is not linked to job ${jobId}`);
   const app = one(s, 'SELECT status FROM applications WHERE job_id=? ORDER BY updated_at DESC LIMIT 1', [jobId]);
-  const ctx = evidenceContext(s, { job, profile, stakeholder });
+  const ctx = evidenceContext(s, { job, profile, stakeholder, contact });
   const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx });
   const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx }, fallback);
-  const warnings = [...baseWarnings({ stakeholder, app }), ...drafted.warnings];
+  const warnings = [...baseWarnings({ stakeholder, app, contact }), ...drafted.warnings];
   const content = renderOutreachContent({ job, profile, stakeholder, goal: safeGoal, ...drafted, warnings });
   return saveOutreachArtifact(s, { job, profile, stakeholder, goal: safeGoal, content, evidence: drafted.evidence, warnings, subject: drafted.subject, mode: drafted.mode });
 }
@@ -398,7 +456,7 @@ export function markOutreachSent(s, { artifactId, channel, notes = '' }) {
   syncOutreachThreads(s, thread.job_id);
   if (thread.job_id) syncJob(s, thread.job_id);
   save(s);
-  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), note: 'Recorded outreach as sent.' };
+  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), note: 'Recorded that the human sent outreach; JobOS did not send or contact anyone.' };
 }
 
 export function scheduleFollowup(s, { threadId, afterDays }) {
@@ -412,7 +470,7 @@ export function scheduleFollowup(s, { threadId, afterDays }) {
   const due = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
   const taskId = thread.followup_task_id || id('task', `outreach-followup:${thread.id}:${due}`);
   const title = `Follow up on outreach to ${stakeholder?.name || 'stakeholder'}`;
-  const description = `Human-recorded outreach thread ${thread.id}. Draft or review a follow-up for ${artifact?.title || 'the outreach draft'}. Configure auto-send to send follow-ups automatically.`;
+  const description = `Human-recorded outreach thread ${thread.id}. Draft or review a follow-up for ${artifact?.title || 'the outreach draft'}. JobOS must not send it automatically.`;
   if (thread.followup_task_id && one(s, 'SELECT id FROM tasks WHERE id=?', [thread.followup_task_id])) {
     run(s, 'UPDATE tasks SET title=?, description=?, due_at=?, priority=?, status=?, updated_at=? WHERE id=?', [title, description, due, 'normal', 'open', at, thread.followup_task_id]);
   } else {
@@ -423,7 +481,7 @@ export function scheduleFollowup(s, { threadId, afterDays }) {
   syncOutreachThreads(s, thread.job_id);
   if (thread.job_id) syncJob(s, thread.job_id);
   save(s);
-  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), taskId, dueAt: due, note: 'Follow-up task created.' };
+  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), taskId, dueAt: due, note: 'Follow-up task created locally; no message was sent.' };
 }
 
 export function outreachDue(s, { nowDate = new Date() } = {}) {
@@ -448,6 +506,6 @@ export function outreachDue(s, { nowDate = new Date() } = {}) {
     status: row.task_status,
     channel: row.channel || null,
     sentAt: row.sent_at || null,
-    note: 'Due follow-up reminder.'
+    note: 'Due follow-up is a local reminder only; JobOS does not send outreach.'
   }));
 }
