@@ -106,10 +106,9 @@ If it is useful, I can provide more context or adjust timing.
 
 Thanks,
 
-## Human gate
-- JobOS created this follow-up draft only.
-- It did not send email, LinkedIn messages, or contact anyone.
-- Review the relationship context and application status before using this in an external tool.
+## Notes
+- Review before sending, or configure auto-send.
+- Check application status before follow-up.
 `;
     const artifact = insertArtifact(s, {
       jobId: task.job_id || null,
@@ -119,7 +118,7 @@ Thanks,
       title,
       content,
       evidence: [{ taskId: task.id, dueAt: task.due_at, applicationId: task.application_id || null }],
-      warnings: ['Draft only — not sent. Human approval is required before any external outreach.']
+      warnings: ['Review before sending or configure auto-send.']
     });
     if (artifact.created) drafted++;
     outputs.push({ taskId: task.id, artifactId: artifact.id, path: artifact.path, approvalStatus: artifact.approvalStatus });
@@ -147,7 +146,7 @@ function staleApplicationCheck(s, automation, { nowDate = new Date() } = {}) {
       app.job_id,
       app.id,
       `Review stale application: ${app.title}`,
-      `No status change or task activity since ${lastActivity || app.created_at}. Review the next human-gated action; do not auto-send or auto-apply.`,
+      `No status change or task activity since ${lastActivity || app.created_at}. Review the next action; configure auto-send or auto-apply if desired.`,
       'review',
       at,
       'high',
@@ -206,8 +205,8 @@ ${jobLines}
 ## Upcoming interviews
 ${interviewLines}
 
-## Human gate
-This brief summarizes local JobOS state only. It did not submit applications, send outreach, scrape private accounts, or perform external actions.
+## Notes
+This brief summarizes local JobOS state.
 `;
     const rel = path.join('exports', `morning-priority-brief-${profile.id}-${day}.md`);
     writeMd(path.join(s.p.ws, rel), content);

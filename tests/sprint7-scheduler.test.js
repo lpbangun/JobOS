@@ -37,7 +37,7 @@ test('init seeds disabled default automations and writes YAML mirror', async () 
   assert.deepEqual(automations.map(a => a.name).sort(), ['daily_discovery', 'followup_watch', 'morning_priority_brief', 'stale_application_check', 'weekly_retrospective'].sort());
   assert.ok(automations.every(a => a.enabled === false));
   const yaml = readFileSync(path.join(root, 'jobos-workspace', 'automations', 'automations.yaml'), 'utf8');
-  assert.match(yaml, /autoApply: disabled/);
+  assert.match(yaml, /autoApply: user_configured/);
   assert.match(yaml, /morning_priority_brief:/);
   const design = JSON.parse(readFileSync(path.join(root, 'jobos-workspace', 'automations', 'scheduler-design.json'), 'utf8'));
   assert.equal(design.configFile, 'automations.yaml');
@@ -47,8 +47,7 @@ test('scheduler run-once executes due automation, records run row, JSONL, and pr
   const root = makeRoot();
   cli(root, ['init', '--json']);
   const profile = JSON.parse(cli(root, ['profile', 'create', 'PM EdTech', '--json']));
-  const now = new Date();
-  const schedule = `${now.getUTCMinutes()} ${now.getUTCHours()} * * *`;
+  const schedule = '* * * * *';
   JSON.parse(cli(root, ['automation', 'create', 'brief_now', '--action', 'morning_priority_brief', '--schedule', schedule, '--profile', profile.id, '--enabled', '--json']));
   const result = JSON.parse(cli(root, ['scheduler', 'run-once', '--json']));
   assert.equal(result.due, 1);

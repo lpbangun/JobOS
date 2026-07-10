@@ -40,7 +40,7 @@ test('interview prep creates role-specific proof-grounded packet', () => {
   assert.match(content, /STAR story bank|STAR stories mapped/);
   assert.match(content, /proof_/);
   assert.match(content, /Questions to ask the interviewer/);
-  assert.match(content, /did not contact the company/);
+  assert.match(content, /JobOS generated a prep packet for review/);
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'interview-prep-hiring-manager.md')));
 });
 

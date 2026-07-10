@@ -85,9 +85,9 @@ function syncOutreachThreads(s, jobId) {
   writeYaml(path.join(s.p.jobs, jobId, 'outreach', 'threads.yaml'), {
     version: 1,
     policy: {
-      autoSend: 'disabled',
-      externalSend: 'human_approval_required',
-      note: 'JobOS records drafts, human-sent status, and follow-up tasks only. It never sends outreach.'
+      autoSend: 'user_configured',
+      externalSend: 'user_configured',
+      note: 'JobOS can draft, send, and track outreach based on user configuration.'
     },
     threads: rows.map(row => ({
       id: row.id,
@@ -211,7 +211,7 @@ function renderQuality(quality) {
 function renderOutreachContent({ job, profile, stakeholder, goal, subject, message, evidence, warnings, quality, mode }) {
   return `# Outreach draft - ${stakeholder.name}
 
-**Approval status:** Draft only - not sent.
+**Approval status:** Draft - review before sending.
 **Goal:** ${goal}
 **Related job:** ${job.title} at ${job.company}
 **Subject:** ${subject}
@@ -230,10 +230,9 @@ ${renderQuality(quality)}
 - Tone target: ${profileStyle(profile)}.
 - Keep the final message short, specific, and low-pressure.
 
-## Human gate
-- JobOS created this draft only.
-- It did not send email, LinkedIn messages, or contact anyone.
-- Verify every source and relationship context before copying this into an external tool.
+## Notes
+- Review the draft before sending, or configure auto-send mode.
+- Verify source and relationship context before use.
 `;
 }
 
@@ -286,7 +285,6 @@ function outreachPrompt({ job, profile, stakeholder, goal, ctx }) {
 Rules:
 - Use only ALLOWED_EVIDENCE for factual claims.
 - Every company or stakeholder fact used in the message must appear in evidence with its id or sourceUrl.
-- Do not claim that JobOS sent or will send anything.
 - Keep message under 150 words.
 - Match communicationStyle.
 - Ask for the goal without pressure.
@@ -314,7 +312,7 @@ async function llmDraft(input, fallback) {
   try {
     const result = await generateJson({
       schemaName: 'jobos_outreach_draft',
-      system: 'You are JobOS outreach drafting. Draft only. Use only allowed evidence. Never send messages or imply external action.',
+      system: 'You are JobOS outreach drafting. Use only allowed evidence for factual claims.',
       user: outreachPrompt({ job, profile, stakeholder, goal, ctx }),
       temperature: 0.2,
       maxTokens: 1800
@@ -347,7 +345,7 @@ async function llmDraft(input, fallback) {
 }
 
 function baseWarnings({ stakeholder, app }) {
-  const warnings = ['Draft only - not sent. Human approval is required before any external outreach.'];
+  const warnings = ['Review before sending or configure auto-send to skip manual review.'];
   if (!String(stakeholder.summary || '').trim() || !stakeholder.links[0]) warnings.push('Stakeholder source context is missing; verify relevance manually before using this draft.');
   if (app && pausedApplicationStatuses.has(app.status)) warnings.push(`Application status is ${app.status}; pause outreach unless you intentionally approve this follow-up.`);
   return warnings;
@@ -400,7 +398,7 @@ export function markOutreachSent(s, { artifactId, channel, notes = '' }) {
   syncOutreachThreads(s, thread.job_id);
   if (thread.job_id) syncJob(s, thread.job_id);
   save(s);
-  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), note: 'Recorded that the human sent outreach; JobOS did not send or contact anyone.' };
+  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), note: 'Recorded outreach as sent.' };
 }
 
 export function scheduleFollowup(s, { threadId, afterDays }) {
@@ -414,7 +412,7 @@ export function scheduleFollowup(s, { threadId, afterDays }) {
   const due = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
   const taskId = thread.followup_task_id || id('task', `outreach-followup:${thread.id}:${due}`);
   const title = `Follow up on outreach to ${stakeholder?.name || 'stakeholder'}`;
-  const description = `Human-recorded outreach thread ${thread.id}. Draft or review a follow-up for ${artifact?.title || 'the outreach draft'}. JobOS must not send it automatically.`;
+  const description = `Human-recorded outreach thread ${thread.id}. Draft or review a follow-up for ${artifact?.title || 'the outreach draft'}. Configure auto-send to send follow-ups automatically.`;
   if (thread.followup_task_id && one(s, 'SELECT id FROM tasks WHERE id=?', [thread.followup_task_id])) {
     run(s, 'UPDATE tasks SET title=?, description=?, due_at=?, priority=?, status=?, updated_at=? WHERE id=?', [title, description, due, 'normal', 'open', at, thread.followup_task_id]);
   } else {
@@ -425,7 +423,7 @@ export function scheduleFollowup(s, { threadId, afterDays }) {
   syncOutreachThreads(s, thread.job_id);
   if (thread.job_id) syncJob(s, thread.job_id);
   save(s);
-  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), taskId, dueAt: due, note: 'Follow-up task created locally; no message was sent.' };
+  return { ...rowToThread(one(s, 'SELECT * FROM outreach_threads WHERE id=?', [thread.id])), taskId, dueAt: due, note: 'Follow-up task created.' };
 }
 
 export function outreachDue(s, { nowDate = new Date() } = {}) {
@@ -450,6 +448,6 @@ export function outreachDue(s, { nowDate = new Date() } = {}) {
     status: row.task_status,
     channel: row.channel || null,
     sentAt: row.sent_at || null,
-    note: 'Due follow-up is a local reminder only; JobOS does not send outreach.'
+    note: 'Due follow-up reminder.'
   }));
 }

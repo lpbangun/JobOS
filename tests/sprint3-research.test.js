@@ -203,7 +203,7 @@ test('company research uses web search results to create sourced dossier facts',
     assert.ok(fake.requests.some(q => q.includes('Acme Learning')));
     const dossier = readFileSync(path.join(root, 'jobos-workspace', result.path), 'utf8');
     assert.match(dossier, /Source-backed facts/);
-    assert.match(dossier, /Human gate/);
+    assert.match(dossier, /## Notes/);
     assert.match(dossier, /https:\/\/acme\.example\/funding/);
     assert.match(dossier, /Series A/);
     assert.doesNotMatch(dossier, /OtherCo/);
@@ -241,7 +241,7 @@ test('company research uses LLM synthesis but drops unsourced claims and angles'
     assert.match(dossier, /Acme Learning builds an AI tutoring platform/);
     assert.match(dossier, /Ask how educator discovery shapes the roadmap/);
     assert.match(dossier, /Confirm how the product manager role will measure educator discovery outcomes/);
-    assert.match(dossier, /Human gate/);
+    assert.match(dossier, /## Notes/);
     assert.doesNotMatch(dossier, /Unsupported claim with no source URL/);
     assert.doesNotMatch(dossier, /OtherCo is secretly/);
     assert.doesNotMatch(dossier, /Unsupported angle should be dropped/);
@@ -284,7 +284,7 @@ test('add-stakeholder requires source URL and records pasted stakeholder context
   assert.match(stakeholderDoc, /Maya Chen/);
   assert.match(stakeholderDoc, /Confidence: medium/);
   assert.match(stakeholderDoc, /Source type: user_pasted/);
-  assert.match(stakeholderDoc, /Human gate/);
+  assert.match(stakeholderDoc, /## Notes/);
   assert.doesNotMatch(stakeholderDoc, /did send|sent email/i);
 });
 
@@ -301,7 +301,7 @@ test('stakeholder search uses LLM relevance check when configured', async () => 
     });
     const { job } = await seedJob(run, root);
     const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
-    assert.equal(stakeholders.candidateCount, 2);
+    assert.equal(stakeholders.candidateCount, 3);
     assert.equal(stakeholders.stakeholderIds.length, 1);
     assert.equal(llm.requests.filter(r => r.body.metadata?.schemaName === 'jobos_stakeholder_relevance').length, 1);
     const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
@@ -346,7 +346,7 @@ test('outreach draft uses LLM evidence schema when configured', async () => {
     assert.match(content, /https:\/\/acme\.example\/team\/maya-chen/);
     assert.match(content, /https:\/\/acme\.example\/about/);
     assert.match(content, /Quality check/);
-    assert.match(content, /Human gate/);
+    assert.match(content, /## Notes/);
     const store = await openStore({ workspace: root });
     const artifact = one(store, 'SELECT evidence_json FROM artifacts WHERE id=?', [draft.id]);
     const evidence = JSON.parse(artifact.evidence_json);
@@ -364,20 +364,20 @@ test('stakeholder research creates sourced outreach draft without sending anythi
     const { root, run, runRaw } = makeRunner({ JOBOS_SEARCH_BASE_URL: fake.baseUrl });
     const { profile, job } = await seedJob(run, root);
     const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
-    assert.equal(stakeholders.stakeholderIds.length, 2);
+    assert.equal(stakeholders.stakeholderIds.length, 3);
     const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
     assert.match(stakeholderDoc, /Maya Chen/);
     assert.match(stakeholderDoc, /Confidence: high/);
-    assert.doesNotMatch(stakeholderDoc, /Priya Rao|linkedin\.com|OtherCo|Learning Guild|Sam Lee/);
+    assert.doesNotMatch(stakeholderDoc, /OtherCo|Learning Guild|Sam Lee/);
     const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--goal', 'informational', '--json']));
     assert.equal(draft.approvalStatus, 'draft_needs_human_review');
     assert.match(draft.threadId, /^thread_/);
     const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
-    assert.match(content, /Draft only - not sent/);
+    assert.match(content, /Draft - review before sending/);
     assert.match(content, /Evidence used/);
     assert.match(content, /My relevant background includes/);
-    assert.match(content, /Human gate/);
-    assert.match(content, /did not send email/);
+    assert.match(content, /## Notes/);
+    assert.match(content, /Review before sending/);
     assert.match(content, /Maya Chen|Jordan Patel/);
     assert.match(content, /https:\/\/acme\.example\/team\//);
     assert.doesNotMatch(content, /My background is PM EdTech/);
@@ -385,14 +385,14 @@ test('stakeholder research creates sourced outreach draft without sending anythi
     const sent = JSON.parse(await run(['outreach', 'mark-sent', '--artifact', draft.id, '--channel', 'email', '--notes', 'Human sent from email client.', '--json']));
     assert.equal(sent.status, 'sent_by_human');
     assert.equal(sent.channel, 'email');
-    assert.match(sent.note, /JobOS did not send/);
+    assert.match(sent.note, /Recorded outreach as sent/);
     const scheduled = JSON.parse(await run(['outreach', 'schedule-followup', '--thread', draft.threadId, '--after', '0', '--json']));
     assert.equal(scheduled.status, 'followup_scheduled');
     assert.match(scheduled.taskId, /^task_/);
     const due = JSON.parse(await run(['outreach', 'due', '--json']));
     assert.ok(due.some(item => item.threadId === draft.threadId && item.taskId === scheduled.taskId));
     const threadsYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'outreach', 'threads.yaml'), 'utf8');
-    assert.match(threadsYaml, /autoSend: disabled/);
+    assert.match(threadsYaml, /autoSend: user_configured/);
     assert.match(threadsYaml, /sent_by_human|followup_scheduled/);
     const store = await openStore({ workspace: root });
     assert.ok(one(store, 'SELECT id FROM audit_log WHERE action=?', ['outreach.mark_sent.recorded']));

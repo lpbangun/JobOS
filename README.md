@@ -2,7 +2,7 @@
 
 JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, direct public ATS discovery adapters, an audited automation scheduler, provider-backed LLM fit scoring/tailoring/interview prep with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking with status history, funnel analytics, weekly review automation, an interactive local web dashboard, REST API endpoints, and an MCP stdio server for agent integrations.
 
-The implementation deliberately does **not** auto-apply to jobs, submit forms, send outreach, scrape private accounts, or require paid APIs.
+Auto-apply, auto-send outreach, and broad job board discovery are planned for future phases (see PLAN_EXPANDED_TOOLS.md). The current MVP keeps external actions user-initiated with draft/review mode defaults.
 
 ## Stack
 
@@ -244,13 +244,13 @@ SQLite is canonical for queries and the web dashboard. Workspace files are regen
 - The REST API includes `GET/POST /api/searches`, `POST /api/searches/:id/run`, `GET /api/discovery/runs`, `GET/POST /api/automations`, `POST /api/automations/:id/run`, `GET /api/runs`, and outreach draft/mark-sent/schedule/due endpoints in addition to local CRUD-style core resources.
 - The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, mark_outreach_sent, schedule_outreach_followup, list_outreach_due, create_application, update_application_status, list_tasks, interview_prep, weekly_review, list_saved_searches, search_jobs, import_job_url, list_automations, run_automation, and list_automation_runs.
 
-## Human-gating and safety policy
+## Configuration and external actions
 
-- No command submits applications, sends messages, posts to job boards, or performs account actions.
+- External actions (applying, sending outreach, scraping job boards) are user-initiated. Auto-apply and auto-send are planned for future phases (see PLAN_EXPANDED_TOOLS.md); the current MVP defaults all artifacts to draft/review mode.
 - Generated resumes, cover letters, outreach drafts, and interview prep packets are marked `draft_needs_human_review` unless explicitly approved in local state.
-- Application status `applied` is manual; JobOS does not capture or fake confirmation.
-- URL import is human-initiated. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment instead of failing the whole workspace.
-- Discovery adapters use direct public ATS APIs or local fixtures. JobOS does not scrape LinkedIn, Indeed, Glassdoor, private accounts, or ToS-sensitive boards.
+- Application status `applied` is manual tracking only; JobOS does not submit applications.
+- URL import fetches any public page. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment.
+- Discovery adapters use direct public ATS APIs or local fixtures (Greenhouse, Lever). LinkedIn, Indeed, Glassdoor, and other board adapters are planned for future phases.
 - No telemetry or cloud sync exist in the MVP. External LLM calls happen only when the user explicitly configures provider credentials through environment variables.
 
 ## Tests and smoke checks

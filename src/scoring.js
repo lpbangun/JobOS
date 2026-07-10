@@ -123,5 +123,5 @@ export async function score(s, jid, pid) {
 export function scoreMd(job, sc) {
   const dims = Object.entries(sc.dimensions).map(([k, v]) => `- **${k}:** ${v.score}/100 — ${v.reason}`).join('\n');
   const flags = sc.redFlags.length ? sc.redFlags.map(f => `- ${f}`).join('\n') : '- None detected.';
-  return `# Fit score: ${job.title} at ${job.company}\n\nOverall: **${sc.overall}/100**\n\nMode: **${sc.mode || 'deterministic-degraded'}**\n\nConfidence: **${sc.confidence}**\n\n## Dimensions\n${dims}\n\n## Red flags\n${flags}\n\n## Reasoning\n${sc.reasoning}\n\n_Human review required before applying or sending materials._\n`;
+  return `# Fit score: ${job.title} at ${job.company}\n\nOverall: **${sc.overall}/100**\n\nMode: **${sc.mode || 'deterministic-degraded'}**\n\nConfidence: **${sc.confidence}**\n\n## Dimensions\n${dims}\n\n## Red flags\n${flags}\n\n## Reasoning\n${sc.reasoning}\n\n_Review before applying or sending materials._\n`;
 }

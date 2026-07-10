@@ -81,7 +81,7 @@ function htmlResults(html, options) {
 
 async function fetchText(url, { provider, env, headers = {} }) {
   const response = await fetch(url, {
-    headers: { 'accept': 'application/json,text/html;q=0.9,*/*;q=0.8', 'user-agent': 'JobOS local research (+human-initiated search)', ...headers },
+    headers: { 'accept': 'application/json,text/html;q=0.9,*/*;q=0.8', 'user-agent': 'JobOS local research', ...headers },
     signal: AbortSignal.timeout(timeoutMs(provider, env))
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
