@@ -1,88 +1,68 @@
 # JobOS Agent Guide
 
-Date: 2026-07-07
+JobOS is a local-first CLI for job discovery, networking, and application preparation. Treat the CLI as the write surface, prefer `--json`, and inspect `jobos-workspace/` when Markdown/YAML context is useful. Run `jobos agent-guide --json` for the current generated command registry and schemas; it is authoritative over this overview.
 
-JobOS is a local-first, agent-native job application operating system. Treat the CLI as the primary control surface, use `--json` for commands you need to parse, and inspect `jobos-workspace/` files when Markdown/YAML context is useful.
-
-## Safety Rules
-
-- Do not submit applications, send outreach, scrape private accounts, or perform external side effects.
-- Generated resumes, cover letters, research dossiers, interview prep packets, and outreach drafts require human review.
-- Application status `applied` is manual tracking only.
-- Research outputs are worksheets with sources and uncertainty; do not invent company or stakeholder facts.
-
-## Global Contract
+## Contract
 
 - Workspace selection: `--workspace <dir>` overrides `JOBOS_HOME`; otherwise JobOS uses the current directory.
-- First successful command in an empty workspace creates `.jobos/` and `jobos-workspace/`.
+- A successful command in an empty workspace creates `.jobos/` and `jobos-workspace/`.
 - Machine output: pass `--json`; streaming commands emit one JSON object per line.
 - Diagnostics go to stderr.
 - Exit codes: `0` success, `1` runtime/domain error, `2` usage error.
-- JSON errors use this stderr shape:
+- JSON errors have `{ "ok": false, "error": { "code", "type", "message" } }`.
+- Select a registered local agent with `--agent <name>` or `JOBOS_AGENT`; the flag wins. Explicit agent failures never fall back silently.
+- SQLite is canonical. Use CLI/API/MCP writes instead of hand-editing runtime mirrors.
 
-```json
-{"ok":false,"error":{"code":"usage_error","type":"usage","message":"Missing --profile <profile-id>"}}
-```
+## Safety
 
-## Command Inventory
+- Never invent claims, accomplishments, company facts, stakeholders, contact details, or external-action receipts.
+- Tailoring and answer drafts must trace to stored proof-point IDs.
+- Research claims require public source URLs and explicit uncertainty.
+- Sensitive/restricted application answers require direct user input; do not infer them.
+- External actions default off. They may run only through a connector or browser script the user explicitly configured and enabled.
+- Browser scripts are trusted unsandboxed Node.js. A side-effecting script additionally requires the per-run `--allow-side-effects` flag.
+- Never print or mirror browser cookies, storage state, API keys, or other credentials.
+- Do not bypass CAPTCHA or claim a send/submission succeeded without the configured tool's result.
 
-Run `jobos agent-guide --json` for the generated registry. Current command families:
-
-- `jobos profile create <name> --json`
-- `jobos proof add --profile <profile> --summary <text> --json`
-- `jobos jobs import-text --profile <profile> --file <path> --json`
-- `jobos jobs import-url <url> --profile <profile> --json`
-- `jobos jobs list --json`
-- `jobos searches create <name> --profile <profile> --adapter greenhouse|lever --json`
-- `jobos discover run --search <name-or-id> --json`
-- `jobos score <job-id> --profile <profile> --json`
-- `jobos tailor resume --job <job-id> --profile <profile> --json`
-- `jobos tailor cover-letter --job <job-id> --profile <profile> --json`
-- `jobos applications create --job <job-id> --status <status> --json`
-- `jobos applications update <application-id> --status <status> --json`
-- `jobos research company --job <job-id> --json`
-- `jobos research stakeholders --job <job-id> --json`
-- `jobos research add-stakeholder --job <job-id> --source-url <url> --name <name> --text <text> --json`
-- `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile> --json`
-- `jobos interview prep --application <application-id> --stage <stage> --json`
-- `jobos analytics funnel --profile <profile> --json`
-- `jobos tasks due --json`
-- `jobos tasks due --watch --max-iterations 1 --json`
-- `jobos automation list --json`
-- `jobos automation run <name> --json`
-- `jobos scheduler run-once --json`
-- `jobos runs list --json`
-- `jobos loop scheduler --max-iterations 1 --json`
-- `jobos loop automation <name> --max-iterations 1 --json`
-- `jobos loop action <action-id> --max-iterations 1 --json`
-
-## Minimal Flow
+## Primary workflow
 
 ```bash
-jobos agent-guide --json
 jobos profile create "PM EdTech" --from-resume samples/resume-proof-points.md --json
-jobos jobs import-text --profile pm-edtech --file samples/job-description.md --json
+jobos searches create "Portfolio" --profile pm-edtech --adapter portfolio --url https://example.vc/portfolio --json
+jobos daily --profile pm-edtech --json
 jobos jobs list --json
-jobos score <job-id> --profile pm-edtech --json
-jobos tailor resume --job <job-id> --profile pm-edtech --json
-jobos applications create --job <job-id> --status materials-ready --json
-jobos tasks due --json
-jobos loop scheduler --max-iterations 1 --json
+jobos pursue <job-id> --profile pm-edtech --json
+jobos network paths --job <job-id> --json
 ```
 
-## Workspace Files
+`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `pursue` composes score, research, contact discovery, user-owned network mapping, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies.
 
-SQLite is canonical for dashboard/API queries, but agents may read:
+## Extension surfaces
+
+```bash
+jobos agents list --json
+jobos agents test codex --json
+jobos browser status --json
+jobos mcp
+```
+
+Generic agents receive one protocol-v1 JSON request on stdin and must emit exactly one JSON object on stdout. MCP exposes `daily_discovery`, `pursue_job`, and `answers_match` plus lower-level domain tools. Authenticated browser state stays only in `.jobos/browser/`; it is credential material and never part of the workspace mirror.
+
+## Agent-readable files
+
+Useful mirrors include:
 
 - `jobos-workspace/profiles/*.yaml`
 - `jobos-workspace/proof-points/*.md`
+- `jobos-workspace/profiles/*-answers.yaml`
+- `jobos-workspace/searches/*.yaml`
+- `jobos-workspace/discovery/runs/*.yaml`
 - `jobos-workspace/jobs/<job-id>/job.yaml`
-- `jobos-workspace/jobs/<job-id>/description.md`
 - `jobos-workspace/jobs/<job-id>/score.md`
-- `jobos-workspace/jobs/<job-id>/artifacts/*.md`
-- `jobos-workspace/jobs/<job-id>/company-dossier.md`
-- `jobos-workspace/jobs/<job-id>/stakeholders.md`
-- `jobos-workspace/automations/automations.yaml`
-- `jobos-workspace/automations/runs-YYYY-MM-DD.jsonl`
+- `jobos-workspace/jobs/<job-id>/research/*`
+- `jobos-workspace/jobs/<job-id>/artifacts/*`
+- `jobos-workspace/jobs/<job-id>/outreach/*`
+- `jobos-workspace/automations/*`
+- `jobos-workspace/audit.log.jsonl`
 
-Workspace files are mirrors. Use CLI/API/MCP writes instead of hand-editing runtime state.
+Browser profiles, cookie files, and registered browser scripts are deliberately absent from the mirror.

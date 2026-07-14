@@ -87,8 +87,8 @@ function syncOutreachThreads(s, jobId) {
     version: 1,
     policy: {
       autoSend: 'disabled',
-      externalSend: 'human_approval_required',
-      note: 'JobOS records drafts, human-sent status, and follow-up tasks only. It never sends outreach.'
+      externalSend: 'user_configured',
+      note: 'This module records drafts, sent status, and follow-up tasks. Delivery occurs only through a separately configured and enabled external tool.'
     },
     threads: rows.map(row => ({
       id: row.id,
@@ -359,9 +359,10 @@ async function llmDraft(input, fallback) {
       evidence: selected,
       warnings,
       quality: result.json?.quality && typeof result.json.quality === 'object' ? result.json.quality : {},
-      mode: 'llm'
+      mode: result.config?.provider === 'agent' ? 'agent' : 'llm'
     };
   } catch (e) {
+    if (e?.type === 'agent_error') throw e;
     return {
       ...fallback,
       warnings: [`LLM outreach draft failed; used deterministic fallback: ${e.message}`, ...fallback.warnings]

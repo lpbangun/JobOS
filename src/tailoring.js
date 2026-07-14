@@ -83,6 +83,7 @@ export async function tailor(s, jid, pid, kind) {
   if (!job) throw Error(`Unknown job: ${jid}`);
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
+  if (job.profile_id !== pid) throw Object.assign(new Error(`Job ${jid} belongs to profile ${job.profile_id}, not ${pid}`), { code: 'profile_job_mismatch', type: 'validation' });
   const proofs = all(s, 'SELECT * FROM proof_points WHERE profile_id=?', [pid]);
   const enriched = relevant(job, proofs);
   const chosen = enriched.filter(p => p.relevance > 0).slice(0, kind === 'resume' ? 5 : 3);
@@ -104,6 +105,7 @@ export async function tailor(s, jid, pid, kind) {
         return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content: rendered.content, evidence: rendered.evidence, warnings: rendered.warnings });
       }
     } catch (e) {
+      if (e?.type === 'agent_error') throw e;
       warnings.push(`LLM tailoring failed; used deterministic degraded-mode draft instead: ${e.message}`);
     }
   }

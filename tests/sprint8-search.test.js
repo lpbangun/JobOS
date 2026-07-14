@@ -38,6 +38,7 @@ test('duckduckgo remains the default and normalizes provider metadata', async ()
   try {
     const env = { JOBOS_SEARCH_BASE_URL: `${fake.baseUrl}/duck`, JOBOS_SEARCH_TIMEOUT_MS: '1000' };
     assert.deepEqual(providerChain(env), ['duckduckgo']);
+    assert.deepEqual(providerChain({ JOBOS_SEARCH_PROVIDER: 'none' }), []);
     const detailed = await searchWebDetailed('Acme Learning product', { env, limit: 3 });
     assert.equal(detailed.provider, 'duckduckgo');
     assert.deepEqual(detailed.warnings, []);

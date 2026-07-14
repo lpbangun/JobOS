@@ -7,7 +7,7 @@ import { nextRunAfter, parseCron } from './cron.js';
 export const policy = {
   autoApply: 'disabled',
   autoSend: 'disabled',
-  defaultExternalActions: 'human_approval_required'
+  defaultExternalActions: 'user_configured'
 };
 
 export const actionAliases = {

@@ -38,6 +38,7 @@ test('init seeds disabled default automations and writes YAML mirror', async () 
   assert.ok(automations.every(a => a.enabled === false));
   const yaml = readFileSync(path.join(root, 'jobos-workspace', 'automations', 'automations.yaml'), 'utf8');
   assert.match(yaml, /autoApply: disabled/);
+  assert.match(yaml, /defaultExternalActions: user_configured/);
   assert.match(yaml, /morning_priority_brief:/);
   const design = JSON.parse(readFileSync(path.join(root, 'jobos-workspace', 'automations', 'scheduler-design.json'), 'utf8'));
   assert.equal(design.configFile, 'automations.yaml');

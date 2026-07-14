@@ -32,7 +32,7 @@ export function state(s) {
     audit: all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 50').map(a => ({ ...a, payload: parseJson(a.payload_json, {}) })),
     automations: listAutomations(s),
     automationRuns: listRuns(s, { limit: 25 }),
-    policy: { externalApply: 'human_approval_required', externalSend: 'human_approval_required', autoApply: 'disabled', autoSend: 'disabled' }
+    policy: { externalApply: 'user_configured', externalSend: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' }
   };
 }
 
@@ -112,7 +112,7 @@ export function funnel(s, profileId, days = 30) {
     if (applied && interviews === 0) insights.push('Applications are not yet converting to interviews; review fit scoring, company targeting, and outreach before increasing volume.');
     if (interviews > 0) insights.push(`Interview conversion is ${pct(interviews, applied || apps.length)}%; inspect the role families and sources that produced those interviews.`);
     const stuck = byStage.find(x => ['saved', 'researching', 'materials-ready'].includes(x.stage) && x.count > 0);
-    if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next human-gated action for each.`);
+    if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next action and use an explicitly configured external tool if one is needed.`);
     if (stale) insights.push(`${stale} active application(s) have not moved in 14+ days; schedule follow-up, prep for the next touchpoint, or mark them withdrawn/ghosted.`);
   }
   return {

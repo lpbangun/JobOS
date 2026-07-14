@@ -11,6 +11,8 @@ import { importUrl } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
+import { matchAnswers } from './answers.js';
+import { runDaily, runPursuit } from './workflows.js';
 
 const tools = [
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' } }, required: ['jobId', 'profileId'] } },
@@ -19,7 +21,7 @@ const tools = [
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] } },
   { name: 'discover_contacts', description: 'Discover source-backed contact points and email patterns for a job or stakeholder without sending outreach.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' } } } },
   { name: 'approve_contact', description: 'Mark a discovered contact point as human-approved for later draft use.', inputSchema: { type: 'object', properties: { contactId: { type: 'string' } }, required: ['contactId'] } },
-  { name: 'plan_outreach', description: 'Rank a human-gated outreach path from discovered contacts.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' }, stakeholderId: { type: 'string' }, goal: { type: 'string' } }, required: ['jobId', 'profileId'] } },
+  { name: 'plan_outreach', description: 'Rank a reviewable outreach path from discovered contacts and user-owned network evidence.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' }, stakeholderId: { type: 'string' }, goal: { type: 'string' } }, required: ['jobId', 'profileId'] } },
   { name: 'map_reachable_network', description: 'Create a local reachable-network path ladder for a job.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' } }, required: ['jobId'] } },
   { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, stakeholderId: { type: 'string' }, profileId: { type: 'string' }, goal: { type: 'string' }, planId: { type: 'string' }, contactId: { type: 'string' } }, required: ['profileId'] } },
   { name: 'mark_outreach_sent', description: 'Record that a human sent an outreach draft outside JobOS.', inputSchema: { type: 'object', properties: { artifactId: { type: 'string' }, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: { type: 'string' } }, required: ['artifactId', 'channel'] } },
@@ -36,6 +38,9 @@ const tools = [
   { name: 'list_automations', description: 'List configured local automations and schedules.', inputSchema: { type: 'object', properties: {} } },
   { name: 'run_automation', description: 'Run an automation manually through the audited scheduler path.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
   { name: 'list_automation_runs', description: 'List recent automation runs.', inputSchema: { type: 'object', properties: { limit: { type: 'number' } } } }
+  ,{ name: 'daily_discovery', description: 'Run every saved discovery source for one profile and return ranked results plus isolated failures.', inputSchema: { type: 'object', properties: { profileId: { type: 'string' } }, required: ['profileId'] } }
+  ,{ name: 'pursue_job', description: 'Run the integrated fit, research, networking, question, artifact, application, and outreach preparation workflow.', inputSchema: { type: 'object', properties: { jobId: { type: 'string' }, profileId: { type: 'string' }, stage: { type: 'string' }, dryRun: { type: 'boolean' }, stageTimeoutMs: { type: 'number' } }, required: ['jobId', 'profileId'] } }
+  ,{ name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: { type: 'object', properties: { profileId: { type: 'string' }, employer: { type: 'string' }, questions: { type: 'array', items: { type: ['string', 'object'] } } }, required: ['profileId', 'questions'] } }
 ];
 
 function result(value) {
@@ -69,6 +74,9 @@ async function callTool(s, name, args = {}) {
   if (name === 'list_automations') return result(listAutomations(s));
   if (name === 'run_automation') return result(await runAutomationByName(s, args.name, { trigger: 'mcp' }));
   if (name === 'list_automation_runs') return result(recentRuns(s, args.limit || 25));
+  if (name === 'daily_discovery') return result(await runDaily(s, { profileId: args.profileId }));
+  if (name === 'pursue_job') return result(await runPursuit(s, { jobId: args.jobId, profileId: args.profileId, stage: args.stage || null, dryRun: Boolean(args.dryRun), stageTimeoutMs: args.stageTimeoutMs || 30000 }));
+  if (name === 'answers_match') return result(matchAnswers(s, { profileId: args.profileId, questions: args.questions, employer: args.employer || '' }));
   throw Error(`Unknown MCP tool: ${name}`);
 }
 

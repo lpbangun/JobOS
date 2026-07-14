@@ -1056,35 +1056,79 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
   if (!job) throw Error(`Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw Error(`Unknown profile: ${profileId}`);
+  if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+
   const contacts = stakeholderId ? listContactPoints(s, { stakeholderId }) : listContactPoints(s, { jobId });
   const sorted = contacts.sort((a, b) => {
     const tierScore = tier => ({ A: 5, B: 4, C: 3, E: 2, D: 1 }[tier] || 0);
     return Number(b.humanApproved) - Number(a.humanApproved) || tierScore(b.evidenceTier) - tierScore(a.evidenceTier);
   });
   const selected = sorted[0] || null;
+  const stakeholderRows = all(s, 'SELECT id,name FROM stakeholders WHERE job_id=?', [jobId]);
+  const targetIds = new Set([
+    job.company_id,
+    job.company,
+    ...stakeholderRows.map(row => row.id),
+    ...listPersonCandidates(s, { jobId }).map(candidate => candidate.id)
+  ].filter(Boolean).map(value => String(value).toLowerCase()));
+  const edgeScore = type => type === 'direct_connection' ? 6
+    : ['shared_employer', 'shared_school', 'shared_open_source', 'shared_event'].includes(type) ? 5
+      : ['shared_investor', 'shared_customer_domain'].includes(type) ? 4 : 3;
+  const warmEdges = all(s, 'SELECT * FROM relationship_edges ORDER BY created_at DESC')
+    .filter(edge => targetIds.has(String(edge.to_id || '').toLowerCase()))
+    .filter(edge => !stakeholderId || edge.to_id === stakeholderId || String(edge.to_id || '').toLowerCase() === String(job.company || '').toLowerCase())
+    .sort((a, b) => edgeScore(b.edge_type) - edgeScore(a.edge_type));
+  const selectedEdge = warmEdges[0] || null;
   const summary = contactSummaryForPlan(selected);
+  const edgeStrength = selectedEdge ? edgeScore(selectedEdge.edge_type) : 0;
+  const contactStrength = selected ? ({ A: 5, B: 4, C: 3, E: 2, D: 1 }[selected.evidenceTier] || 1) : 0;
+  const preferWarmPath = edgeStrength >= contactStrength && Boolean(selectedEdge);
+  const channel = preferWarmPath ? (selectedEdge.edge_type === 'direct_connection' ? 'intro_request' : 'warm_context') : summary.channel;
+  const pathStrength = preferWarmPath
+    ? (edgeStrength >= 6 ? 'direct' : edgeStrength >= 5 ? 'strong' : 'moderate')
+    : summary.pathStrength;
+  const recommended = Boolean(selected || selectedEdge);
   const at = now();
-  const pid = id('plan', `${jobId}:${profileId}:${stakeholderId || ''}:${selected?.id || ''}:${goal}:${at}`);
+  const pid = id('plan', `${jobId}:${profileId}:${stakeholderId || ''}:${selected?.id || ''}:${selectedEdge?.id || ''}:${goal}:${at}`);
   const reasoning = {
     selectedContact: selected,
-    reason: selected ? `Selected ${selected.evidenceTier} ${selected.type} path for review.` : 'No contact path is available.',
-    humanGate: 'draft_or_copy_only'
+    selectedNetworkEdge: selectedEdge ? {
+      id: selectedEdge.id,
+      fromType: selectedEdge.from_type,
+      fromId: selectedEdge.from_id,
+      toType: selectedEdge.to_type,
+      toId: selectedEdge.to_id,
+      edgeType: selectedEdge.edge_type,
+      confidence: selectedEdge.confidence,
+      evidence: parseJson(selectedEdge.evidence_json, [])
+    } : null,
+    reason: preferWarmPath
+      ? `Selected ${selectedEdge.edge_type.replace(/_/g, ' ')} as the strongest introduction path.`
+      : selected
+        ? `Selected ${selected.evidenceTier} ${selected.type} contact path for review.`
+        : 'No source-backed contact or user-owned network path is available.',
+    execution: 'local_draft_or_user_configured_action'
   };
-  run(s, 'INSERT INTO outreach_plans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [pid, jobId, profileId, stakeholderId || selected?.stakeholderId || null, selected?.id || null, slug(goal || 'informational'), summary.channel, summary.pathStrength, selected ? 1 : 0, JSON.stringify(reasoning), JSON.stringify(summary.warnings), at]);
-  audit(s, 'outreach.plan.created', 'outreach_plan', pid, { jobId, profileId, stakeholderId, contactPointId: selected?.id || null, channel: summary.channel, warnings: summary.warnings.length });
+  const resolvedStakeholderId = stakeholderId
+    || selected?.stakeholderId
+    || (stakeholderRows.some(row => row.id === selectedEdge?.to_id) ? selectedEdge.to_id : null);
+  const warnings = summary.warnings;
+  run(s, 'INSERT INTO outreach_plans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [pid, jobId, profileId, resolvedStakeholderId, selected?.id || null, slug(goal || 'informational'), channel, pathStrength, recommended ? 1 : 0, JSON.stringify(reasoning), JSON.stringify(warnings), at]);
+  audit(s, 'outreach.plan.created', 'outreach_plan', pid, { jobId, profileId, stakeholderId: resolvedStakeholderId, contactPointId: selected?.id || null, relationshipEdgeId: selectedEdge?.id || null, channel, warnings: warnings.length });
   save(s);
   return {
     id: pid,
     jobId,
     profileId,
-    stakeholderId: stakeholderId || selected?.stakeholderId || null,
+    stakeholderId: resolvedStakeholderId,
     contactPointId: selected?.id || null,
+    relationshipEdgeId: selectedEdge?.id || null,
     goal: slug(goal || 'informational'),
-    channel: summary.channel,
-    pathStrength: summary.pathStrength,
-    recommended: Boolean(selected),
+    channel,
+    pathStrength,
+    recommended,
     reasoning,
-    warnings: summary.warnings,
-    note: 'Outreach plan is local and human-gated; JobOS did not send outreach.'
+    warnings,
+    note: 'Outreach plan created locally; JobOS did not send a message.'
   };
 }

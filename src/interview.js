@@ -125,7 +125,9 @@ export async function prepInterview(s, applicationId, stage = 'interview') {
     try {
       const result = await generateJson({ schemaName: 'jobos_interview_prep', system: 'You are JobOS interview prep. Create useful, role-specific prep while grounding every accomplishment in supplied proof IDs.', user: llmPrompt({ job, prof, app, stage, proofs, company, stakeholders }) });
       if (result.ok) content = renderLlmPacket({ job, prof, app, stage, json: result.json, proofs, company, stakeholders });
-    } catch {}
+    } catch (e) {
+      if (e?.type === 'agent_error') throw e;
+    }
   }
   if (!content) content = fallbackPacket({ job, prof, app, stage, proofs, company, stakeholders });
   const safeStage = slug(stage);

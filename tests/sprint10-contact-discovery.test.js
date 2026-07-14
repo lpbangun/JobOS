@@ -346,7 +346,7 @@ test('createOutreachPlan ranks an approved pattern candidate, persists a plan, a
     assert.ok(['email', 'manual_review', 'generic_inbox'].includes(plan.channel));
     assert.ok(one(s, 'SELECT id FROM outreach_plans WHERE id=?', [plan.id]));
     assert.ok(one(s, 'SELECT id FROM audit_log WHERE action=? AND entity_id=?', ['outreach.plan.created', plan.id]));
-    assert.match(plan.note, /human-gated/);
+    assert.match(plan.note, /did not send/);
     assert.throws(() => createOutreachPlan(s, { jobId: 'job_does_not_exist', profileId: profile.id }), /Unknown job/);
   } finally {
     await search.close();

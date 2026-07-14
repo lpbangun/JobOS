@@ -232,6 +232,7 @@ function addUnique(items, name) {
 
 export function providerChain(env = process.env) {
   const explicit = splitProviderNames(env.JOBOS_SEARCH_PROVIDERS || env.JOBOS_SEARCH_PROVIDER);
+  if (explicit.length === 1 && ['none', 'disabled', 'off'].includes(explicit[0])) return [];
   const chain = [];
   const requested = explicit.length ? explicit : ['duckduckgo'];
   for (const name of requested) {
