@@ -40,6 +40,14 @@ function workflowError(code, message) {
   return Object.assign(new Error(message), { code, type: 'workflow' });
 }
 
+function shouldAdvanceApplication(currentStatus, newStatus) {
+  const forwardOrder = ['researching', 'saved', 'materials-ready', 'applied', 'recruiter-screen', 'interview', 'offer'];
+  const currentRank = forwardOrder.indexOf(currentStatus);
+  const newRank = forwardOrder.indexOf(newStatus);
+  if (currentRank === -1) return false;
+  return newRank > currentRank;
+}
+
 function validateProfileJob(s, jobId, profileId) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw workflowError('unknown_job', `Unknown job: ${jobId}`);
@@ -65,27 +73,36 @@ function selectedStages(stage) {
 function compactResult(value) {
   if (value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.slice(0, 20);
-  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application'];
+  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application', 'questions', 'factCount', 'reasoning', 'dimensions', 'generatedAt', 'unmatched'];
   return Object.fromEntries(keep.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 }
 
 async function runStage(name, operation, timeoutMs) {
   const started = Date.now();
   try {
-    const result = await operation();
+    const result = await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(workflowError('stage_timeout', `Stage "${name}" exceeded ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      })
+    ]);
     const elapsedMs = Date.now() - started;
     return {
       stage: name,
       status: 'ok',
       elapsedMs,
-      deadlineExceeded: elapsedMs > timeoutMs,
+      deadlineExceeded: false,
       result: compactResult(result)
     };
   } catch (error) {
+    const elapsedMs = Date.now() - started;
+    const deadlineExceeded = elapsedMs > timeoutMs && error?.code !== 'stage_timeout';
     return {
       stage: name,
       status: 'failed',
-      elapsedMs: Date.now() - started,
+      elapsedMs,
+      deadlineExceeded,
       error: {
         code: error?.code || 'stage_failed',
         type: error?.type || 'runtime',
@@ -154,7 +171,12 @@ export async function runPursuit(s, {
     application: () => {
       const materialStages = ['questions', 'resume', 'cover-letter'].map(name => byName.get(name));
       const materialsReady = materialStages.every(item => item?.status === 'ok');
-      const application = appCreate(s, jobId, materialsReady ? 'materials-ready' : 'researching', materialsReady ? 'Prepared by jobos pursue' : 'Pursuit completed with preparation gaps');
+      const existing = one(s, 'SELECT * FROM applications WHERE job_id=?', [jobId]);
+      const status = materialsReady ? 'materials-ready' : 'researching';
+      const notes = materialsReady ? 'Prepared by jobos pursue' : 'Pursuit completed with preparation gaps';
+      const application = !existing || shouldAdvanceApplication(existing.status, status)
+        ? appCreate(s, jobId, status, notes)
+        : existing;
       return { application: { id: application.id, jobId: application.job_id, profileId: application.profile_id, status: application.status } };
     },
     outreach: async () => {

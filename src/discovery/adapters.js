@@ -33,9 +33,25 @@ class DiscoveryLimitError extends Error {
   }
 }
 
+function ipv4FromMapped(mapped) {
+  if (isIP(mapped) === 4) return mapped;
+  const parts = mapped.split(':');
+  if (parts.length === 2) {
+    const high = parseInt(parts[0], 16);
+    const low = parseInt(parts[1], 16);
+    if (Number.isFinite(high) && Number.isFinite(low)) {
+      return `${(high >> 8) & 0xFF}.${high & 0xFF}.${(low >> 8) & 0xFF}.${low & 0xFF}`;
+    }
+  }
+  return null;
+}
+
 function isBlockedIp(value) {
   let address = String(value || '').split('%')[0].toLowerCase();
-  if (address.startsWith('::ffff:')) address = address.slice(7);
+  if (address.startsWith('::ffff:')) {
+    const mapped = address.slice(7);
+    address = ipv4FromMapped(mapped) || mapped;
+  }
   if (isIP(address) === 4) {
     const [a, b, c] = address.split('.').map(Number);
     return a === 0 || a === 10 || a === 127 || a >= 224 ||

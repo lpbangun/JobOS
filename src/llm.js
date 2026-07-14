@@ -19,11 +19,13 @@ function extractJson(text) {
 export function llmConfig(env = process.env) {
   const agent = String(env.JOBOS_AGENT || '').trim();
   if (agent) {
+    const rawAgentTimeout = Number(env.JOBOS_AGENT_TIMEOUT_MS || 120000);
+    const timeoutMs = Number.isFinite(rawAgentTimeout) && rawAgentTimeout >= 1000 ? rawAgentTimeout : 120000;
     return {
       provider: 'agent',
       model: agent,
       baseUrl: '',
-      timeoutMs: Math.max(1000, Number(env.JOBOS_AGENT_TIMEOUT_MS || 120000)),
+      timeoutMs,
       configured: true,
       degradedMode: false,
       agent,
@@ -34,7 +36,8 @@ export function llmConfig(env = process.env) {
   const model = env.JOBOS_LLM_MODEL || '';
   const apiKey = env.JOBOS_LLM_API_KEY || (provider === 'anthropic' ? env.ANTHROPIC_API_KEY : provider === 'ollama-cloud' ? env.OLLAMA_API_KEY : env.OPENAI_API_KEY) || '';
   const baseUrl = env.JOBOS_LLM_BASE_URL || (provider === 'anthropic' ? 'https://api.anthropic.com/v1' : provider === 'ollama-cloud' ? 'https://ollama.com/v1' : 'https://api.openai.com/v1');
-  const timeoutMs = Math.max(1000, Number(env.JOBOS_LLM_TIMEOUT_MS || 30000));
+  const rawTimeout = Number(env.JOBOS_LLM_TIMEOUT_MS || 30000);
+  const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout >= 1000 ? rawTimeout : 30000;
   const configured = Boolean(provider && model && apiKey);
   return {
     provider,
@@ -108,13 +111,14 @@ async function postAnthropic(cfg, messages, temperature, maxTokens) {
 export async function generateJson({ system = '', user = '', schemaName = 'jobos_json', schema, stage = schemaName, temperature = 0.2, maxTokens = 2200, env = process.env, workspace } = {}) {
   const agentName = String(env.JOBOS_AGENT || '').trim();
   if (agentName) {
+    const cfg = llmConfig(env);
     const result = await runAgent(agentName, {
       protocolVersion: AGENT_PROTOCOL_VERSION,
       stage,
       systemPrompt: `${system}\n\nReturn valid JSON only. Do not include markdown fences or prose outside JSON.`.trim(),
       userPrompt: user,
       schema: schema || { name: schemaName, type: 'object' }
-    }, { env, workspace });
+    }, { env, workspace, timeoutMs: cfg.timeoutMs });
     return {
       ok: true,
       json: result.json,

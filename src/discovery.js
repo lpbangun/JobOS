@@ -71,7 +71,7 @@ export function createSearch(s, { name, profileId, adapter, config = {}, minFit 
   if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
   getAdapter(adapter);
   const at = now(), sid = id('search', name);
-  run(s, 'INSERT OR REPLACE INTO saved_searches (id,name,profile_id,adapter,config_json,min_fit,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)', [sid, name, profileId, adapter, JSON.stringify(parseConfig(config)), Number(minFit || 70), one(s, 'SELECT last_run_at FROM saved_searches WHERE id=?', [sid])?.last_run_at || null, one(s, 'SELECT created_at FROM saved_searches WHERE id=?', [sid])?.created_at || at, at]);
+  run(s, 'INSERT OR REPLACE INTO saved_searches (id,name,profile_id,adapter,config_json,min_fit,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)', [sid, name, profileId, adapter, JSON.stringify(parseConfig(config)), Number.isFinite(minFit) ? minFit : 70, one(s, 'SELECT last_run_at FROM saved_searches WHERE id=?', [sid])?.last_run_at || null, one(s, 'SELECT created_at FROM saved_searches WHERE id=?', [sid])?.created_at || at, at]);
   const row = one(s, 'SELECT * FROM saved_searches WHERE id=?', [sid]);
   audit(s, 'search.saved', 'saved_search', sid, { profileId, adapter, name });
   syncSearch(s, row); save(s);

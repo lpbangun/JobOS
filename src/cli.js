@@ -290,14 +290,16 @@ function needProfile(flags) {
 }
 
 function requireFlag(flags, name, display = `--${name}`) {
-  if (!flags[name]) usage(`Missing ${display}`);
-  return flags[name];
+  const value = flags[name];
+  if (value === undefined || value === true) usage(`Missing ${display}`);
+  return value;
 }
 
 function numberFlag(flags, name, fallback, { min = 0 } = {}) {
-  const raw = flags[name] ?? fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < min) usage(`Invalid --${name}: ${raw}`);
+  const raw = flags[name];
+  if (raw === true) usage(`Missing --${name}`);
+  const n = Number(raw ?? fallback);
+  if (!Number.isFinite(n) || n < min) usage(`Invalid --${name}: ${raw ?? fallback}`);
   return n;
 }
 
@@ -492,7 +494,12 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'answers' && action === 'match') {
     const file = requireFlag(flags, 'questions', '--questions <json-file>');
-    const questions = JSON.parse(fs.readFileSync(String(file), 'utf8'));
+    let questions;
+    try {
+      questions = JSON.parse(fs.readFileSync(String(file), 'utf8'));
+    } catch (e) {
+      usage(`Invalid --questions JSON file: ${e.message}`);
+    }
     out(matchAnswers(s, { profileId: needProfile(flags), questions, employer: flags.employer ? String(flags.employer) : '' }));
     return;
   }
@@ -773,7 +780,14 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'agents' && action === 'add') {
     if (!subaction) usage('Missing agent name');
-    const args = flags.args ? JSON.parse(String(flags.args)) : [];
+    let args = [];
+    if (flags.args) {
+      try {
+        args = JSON.parse(String(flags.args));
+      } catch (e) {
+        usage(`Invalid --args JSON: ${e.message}`);
+      }
+    }
     if (!Array.isArray(args)) usage('--args must be a JSON array');
     out(await addAgent(String(subaction), {
       command: String(requireFlag(flags, 'command')),
@@ -839,7 +853,14 @@ export async function main(argv = process.argv.slice(2)) {
     if (!subaction) usage('Missing browser profile name');
     const scriptName = String(requireFlag(flags, 'script'));
     const allowSideEffects = Boolean(flags['allow-side-effects']);
-    const input = flags.input ? JSON.parse(fs.readFileSync(String(flags.input), 'utf8')) : null;
+    let input = null;
+    if (flags.input) {
+      try {
+        input = JSON.parse(fs.readFileSync(String(flags.input), 'utf8'));
+      } catch (e) {
+        usage(`Invalid --input JSON file: ${e.message}`);
+      }
+    }
     try {
       const result = await runRegisteredScript({ workspace: s.root, profile: String(subaction), url: String(requireFlag(flags, 'url')), script: scriptName, input, allowSideEffects });
       audit(s, 'browser.script.completed', 'browser_script', scriptName, result.audit, allowSideEffects ? 'user_configured_browser' : 'none');

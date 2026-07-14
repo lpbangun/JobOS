@@ -68,7 +68,12 @@ function migrate(db){
     "CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id))"
-  ]) { try { db.run(sql); } catch {} }
+  ]) {
+    try { db.run(sql); } catch (e) {
+      const message = String(e?.message || e);
+      if (!/duplicate column name/i.test(message) && !/already exists/i.test(message)) throw e;
+    }
+  }
 }
 
 function revisionOf(db) {
@@ -104,7 +109,7 @@ function concurrencyError(code, message) {
   return Object.assign(new Error(message), { code, type: 'concurrency', retryable: true });
 }
 
-function acquireWriteLock(s, { timeoutMs = 5000, staleMs = 30000 } = {}) {
+export function acquireWriteLock(s, { timeoutMs = 5000, staleMs = 30000 } = {}) {
   fs.mkdirSync(s.p.state, { recursive: true });
   const file = path.join(s.p.state, 'jobos.lock');
   const deadline = Date.now() + timeoutMs;

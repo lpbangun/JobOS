@@ -13,9 +13,7 @@
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0",
     "cheerio": "^1.2.0",
-    "openai": "^6.45.0",
     "sql.js": "^1.12.0",
     "yaml": "^2.8.0"
   },

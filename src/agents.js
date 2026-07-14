@@ -3,6 +3,7 @@ import { access, chmod, lstat, mkdir, open, readFile, rename, rm, stat } from 'n
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { acquireWriteLock } from './db.js';
 
 export const AGENT_PROTOCOL_VERSION = 1;
 export const DEFAULT_AGENT_TIMEOUT_MS = 120_000;
@@ -229,12 +230,18 @@ export async function addAgent(name, manifest, options = {}) {
     throw new AgentError('agent_reserved_name', `Agent name "${normalizedName}" is reserved for a built-in manifest`, { name: normalizedName });
   }
   const normalizedManifest = { name: normalizedName, ...validateManifest(manifest, { includeName: false }) };
-  const registry = await readRegistry(options);
-  const index = registry.agents.findIndex(entry => entry.name === normalizedName);
-  if (index >= 0) registry.agents[index] = normalizedManifest;
-  else registry.agents.push(normalizedManifest);
-  registry.agents.sort((left, right) => left.name.localeCompare(right.name));
-  await writeRegistry(registry, options);
+  const root = resolveWorkspace(options);
+  const release = acquireWriteLock({ p: { state: path.join(root, '.jobos') } });
+  try {
+    const registry = await readRegistry(options);
+    const index = registry.agents.findIndex(entry => entry.name === normalizedName);
+    if (index >= 0) registry.agents[index] = normalizedManifest;
+    else registry.agents.push(normalizedManifest);
+    registry.agents.sort((left, right) => left.name.localeCompare(right.name));
+    await writeRegistry(registry, options);
+  } finally {
+    release();
+  }
   return getAgent(normalizedName, options);
 }
 
@@ -349,6 +356,7 @@ async function executeAgent({ name, manifest, executablePath, root, env, request
     const stop = reason => {
       if (!forcedFailure) forcedFailure = reason;
       child.kill('SIGTERM');
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 250);
       forceKillTimer.unref?.();
     };

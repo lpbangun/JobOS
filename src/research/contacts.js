@@ -1112,7 +1112,7 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
   const resolvedStakeholderId = stakeholderId
     || selected?.stakeholderId
     || (stakeholderRows.some(row => row.id === selectedEdge?.to_id) ? selectedEdge.to_id : null);
-  const warnings = summary.warnings;
+  const warnings = preferWarmPath ? [] : summary.warnings;
   run(s, 'INSERT INTO outreach_plans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [pid, jobId, profileId, resolvedStakeholderId, selected?.id || null, slug(goal || 'informational'), channel, pathStrength, recommended ? 1 : 0, JSON.stringify(reasoning), JSON.stringify(warnings), at]);
   audit(s, 'outreach.plan.created', 'outreach_plan', pid, { jobId, profileId, stakeholderId: resolvedStakeholderId, contactPointId: selected?.id || null, relationshipEdgeId: selectedEdge?.id || null, channel, warnings: warnings.length });
   save(s);

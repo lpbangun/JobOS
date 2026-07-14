@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { id, now, parseJson, slug } from '../utils.js';
 import { writeYaml } from '../workspace.js';
+import { save } from '../db.js';
 import { nextRunAfter, parseCron } from './cron.js';
 
 export const policy = {
@@ -34,10 +35,6 @@ function rawAll(s, sql, params = []) {
 
 function rawOne(s, sql, params = []) {
   return rawAll(s, sql, params)[0] || null;
-}
-
-function persist(s) {
-  fs.writeFileSync(s.p.db, Buffer.from(s.db.export()));
 }
 
 export function canonicalActionId(actionId) {
@@ -103,7 +100,7 @@ export function createAutomation(s, { name, actionId, schedule, profileId = null
     at
   ]);
   syncAutomationsWorkspace(s);
-  persist(s);
+  save(s);
   return getAutomation(s, aid);
 }
 
@@ -112,7 +109,7 @@ export function setAutomationEnabled(s, idOrName, enabled) {
   if (!row) throw Error(`Unknown automation: ${idOrName}`);
   s.db.run('UPDATE automations SET enabled=?, updated_at=? WHERE id=?', [enabled ? 1 : 0, now(), row.id]);
   syncAutomationsWorkspace(s);
-  persist(s);
+  save(s);
   return getAutomation(s, row.id);
 }
 
@@ -133,7 +130,7 @@ export function updateAutomation(s, idOrName, changes = {}) {
     next.name, next.actionId, next.schedule, next.profileId || null, next.enabled ? 1 : 0, JSON.stringify(next.config || {}), now(), row.id
   ]);
   syncAutomationsWorkspace(s);
-  persist(s);
+  save(s);
   return getAutomation(s, row.id);
 }
 
