@@ -78,7 +78,7 @@ function normalizeScore(raw, job, profileId, cfg, fallback) {
     profileId,
     overall: clamp(raw?.overall, fallback.overall),
     confidence: ['low', 'medium', 'high'].includes(raw?.confidence) ? raw.confidence : fallback.confidence,
-    mode: 'llm',
+    mode: cfg.provider === 'agent' ? 'agent' : 'llm',
     llm: { provider: cfg.provider, model: cfg.model, baseUrl: cfg.baseUrl },
     dimensions,
     redFlags: Array.isArray(raw?.redFlags) ? raw.redFlags.map(String) : fallback.redFlags,
@@ -97,6 +97,7 @@ export async function score(s, jid, pid) {
   if (!job) throw Error(`Unknown job: ${jid}`);
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
+  if (job.profile_id !== pid) throw Object.assign(new Error(`Job ${jid} belongs to profile ${job.profile_id}, not ${pid}`), { code: 'profile_job_mismatch', type: 'validation' });
   const proofs = listProofs(s, pid);
   const fallback = deterministicScore(job, prof, proofs);
   const cfg = llmConfig();
@@ -110,6 +111,7 @@ export async function score(s, jid, pid) {
       });
       if (result.ok) out = normalizeScore(result.json, job, pid, result.config, fallback);
     } catch (e) {
+      if (e?.type === 'agent_error') throw e;
       out = { ...out, llmError: e.message, reasoning: `${out.reasoning} LLM call failed: ${e.message}` };
     }
   }

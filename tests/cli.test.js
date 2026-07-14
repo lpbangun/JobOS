@@ -36,7 +36,7 @@ async function fetchJson(url, options = {}) {
 test('CLI initializes, imports, scores, tailors, and tracks an application', () => {
   const { root, run } = makeRunner();
   const init = JSON.parse(run(['init', '--json']));
-  assert.equal(init.policy.externalActions, 'human_approval_required');
+  assert.equal(init.policy.externalActions, 'user_configured');
   const resume = path.join(root, 'resume.md');
   writeFileSync(resume, '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.\n');
   const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--json']));
@@ -96,6 +96,8 @@ test('REST API scaffold exposes local CRUD-style task creation', async () => {
     const apiState = await fetchJson(`http://127.0.0.1:${port}/api/state`);
     assert.ok(apiState.jobs.some(j => j.id === job.id && Array.isArray(j.requirements)));
     assert.deepEqual(apiState.artifacts, []);
+    assert.equal(apiState.policy.externalApply, 'user_configured');
+    assert.equal(apiState.policy.externalSend, 'user_configured');
   } finally {
     server.kill('SIGTERM');
   }

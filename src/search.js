@@ -2,7 +2,8 @@ import * as cheerio from 'cheerio';
 
 function timeoutMs(provider, env) {
   const key = `JOBOS_SEARCH_${provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TIMEOUT_MS`;
-  return Math.max(1000, Number(env[key] || env.JOBOS_SEARCH_TIMEOUT_MS || 15000));
+  const raw = Number(env[key] || env.JOBOS_SEARCH_TIMEOUT_MS || 15000);
+  return Number.isFinite(raw) && raw >= 1000 ? raw : 15000;
 }
 
 function searchUrl(base, query, params = {}) {
@@ -232,6 +233,7 @@ function addUnique(items, name) {
 
 export function providerChain(env = process.env) {
   const explicit = splitProviderNames(env.JOBOS_SEARCH_PROVIDERS || env.JOBOS_SEARCH_PROVIDER);
+  if (explicit.length === 1 && ['none', 'disabled', 'off'].includes(explicit[0])) return [];
   const chain = [];
   const requested = explicit.length ? explicit : ['duckduckgo'];
   for (const name of requested) {

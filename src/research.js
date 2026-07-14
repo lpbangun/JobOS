@@ -320,7 +320,7 @@ async function synthesizeCompanyResearch(job, matchedResults, fallbackFacts) {
     if (droppedAngleCount) warnings.push(`Dropped ${droppedAngleCount} unsupported LLM outreach angle(s) without valid source URLs.`);
     if (!claims.length) warnings.push('LLM returned no valid source-backed claims; rendered deterministic facts instead.');
     return {
-      mode: 'llm',
+      mode: result.config?.provider === 'agent' ? 'agent' : 'llm',
       facts: claims.length ? claims : fallbackFacts,
       openQuestions: Array.isArray(result.json?.openQuestions) ? result.json.openQuestions.map(String).filter(Boolean) : fallbackOpenQuestions(job),
       outreachAngles: angles.length ? angles : fallbackOutreachAngles(job, fallbackFacts),
@@ -329,6 +329,7 @@ async function synthesizeCompanyResearch(job, matchedResults, fallbackFacts) {
       droppedAngles: droppedAngleCount
     };
   } catch (e) {
+    if (e?.type === 'agent_error') throw e;
     return {
       mode: 'deterministic-degraded',
       facts: fallbackFacts,
@@ -492,6 +493,7 @@ async function structureStakeholder(job, input, fallback) {
       warnings: Array.isArray(json.warnings) ? json.warnings.map(String) : []
     };
   } catch (e) {
+    if (e?.type === 'agent_error') throw e;
     return { person: fallback, warnings: [`LLM stakeholder structuring failed; used deterministic fallback: ${e.message}`] };
   }
 }
@@ -528,6 +530,7 @@ async function filterStakeholdersWithLlm(job, candidates) {
     }
     return { people, warnings: [] };
   } catch (e) {
+    if (e?.type === 'agent_error') throw e;
     return { people: candidates, warnings: [`LLM stakeholder relevance check failed; used deterministic candidates: ${e.message}`] };
   }
 }

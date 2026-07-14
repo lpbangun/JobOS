@@ -1,7 +1,7 @@
 {
   "name": "jobos-local-first-mvp",
   "version": "0.1.0",
-  "description": "JobOS local-first agent-native job application operating system MVP",
+  "description": "Local-first CLI for job discovery, networking, applications, and pluggable agents",
   "type": "module",
   "bin": {
     "jobos": "./src/cli.js"
@@ -13,11 +13,17 @@
     "smoke": "node scripts/smoke.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0",
     "cheerio": "^1.2.0",
-    "openai": "^6.45.0",
     "sql.js": "^1.12.0",
     "yaml": "^2.8.0"
+  },
+  "peerDependencies": {
+    "playwright": "^1.61.1"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=22"
