@@ -75,6 +75,7 @@ export const commandRegistry = [
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
+  cmd(['applications', 'plan'], 'jobos applications plan --job <job-id> --profile <profile-id> [--json]', 'Compile review readiness from local score, proofs, materials, answers, and identity evidence.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['applications', 'create'], 'jobos applications create --job <job-id> --status <status> [--json]', 'Create or upsert a local application tracking record.'),
   cmd(['applications', 'update'], 'jobos applications update <application-id> --status <status> [--json]', 'Update a tracked application status.'),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
@@ -626,6 +627,13 @@ export async function main(argv = process.argv.slice(2)) {
     const r = await tailor(s, jobId, needProfile(flags), 'cover');
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
+    return;
+  }
+  if (group === 'applications' && action === 'plan') {
+    out(await callDomainTool(s, 'applications_plan', {
+      jobId: String(requireFlag(flags, 'job')),
+      profileId: needProfile(flags)
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'applications' && action === 'create') {

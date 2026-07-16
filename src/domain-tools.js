@@ -13,6 +13,7 @@ import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
 import { matchAnswers } from './answers.js';
 import { runDaily, runPursuit } from './workflows.js';
+import { planApplication } from './readiness.js';
 import { all, one } from './db.js';
 import { parseJson } from './utils.js';
 
@@ -52,6 +53,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: required({ threadId: text, afterDays: { type: 'number' } }, ['threadId', 'afterDays']) },
   { name: 'list_outreach_due', description: 'List due outreach follow-up tasks without sending anything.', inputSchema: object({}) },
   { name: 'create_application', description: 'Create a local application tracking record; agent mediation cannot attest submission by default.', inputSchema: required({ jobId: text, status: text, notes: text }, ['jobId', 'status']) },
+  { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
   { name: 'list_tasks', description: 'List open tasks ordered by due date.', inputSchema: object({}) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
@@ -247,6 +249,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'schedule_outreach_followup') return scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays });
   if (name === 'list_outreach_due') return outreachDue(s);
   if (name === 'create_application') return appCreate(s, args.jobId, args.status, args.notes || '');
+  if (name === 'applications_plan') return planApplication(s, { jobId: args.jobId, profileId: args.profileId });
   if (name === 'update_application_status') return appUpdate(s, args.applicationId, args.status, args.notes ?? null);
   if (name === 'list_tasks') return due(s);
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');

@@ -6,6 +6,7 @@ import { research, listJobStakeholders } from './research.js';
 import { discoverContacts, createOutreachPlan } from './research/contacts.js';
 import { mapReachableNetwork } from './research/network.js';
 import { prepareApplicationQuestions } from './answers.js';
+import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { tailor } from './tailoring.js';
 import { appCreate } from './tracking.js';
 import { draftOutreach } from './outreach.js';
@@ -73,7 +74,7 @@ function selectedStages(stage) {
 function compactResult(value) {
   if (value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.slice(0, 20);
-  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application', 'questions', 'factCount', 'reasoning', 'dimensions', 'generatedAt', 'unmatched'];
+  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application', 'readiness', 'questions', 'factCount', 'reasoning', 'dimensions', 'generatedAt', 'unmatched'];
   return Object.fromEntries(keep.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 }
 
@@ -153,12 +154,14 @@ export async function runPursuit(s, {
       dryRun: true,
       jobId,
       profileId,
-      stages: stagesToRun.map(name => ({ stage: name, dependencies: stageDependencies[name] || [] }))
+      stages: stagesToRun.map(name => ({ stage: name, dependencies: stageDependencies[name] || [] })),
+      readiness: compileApplicationReadiness(s, { jobId, profileId })
     };
   }
 
   const results = [];
   const byName = new Map();
+  let readiness = null;
   const operations = {
     score: () => score(s, jobId, profileId),
     company: () => research(s, jobId, 'company'),
@@ -169,15 +172,26 @@ export async function runPursuit(s, {
     resume: () => tailor(s, jobId, profileId, 'resume'),
     'cover-letter': () => tailor(s, jobId, profileId, 'cover'),
     application: () => {
-      const materialStages = ['questions', 'resume', 'cover-letter'].map(name => byName.get(name));
-      const materialsReady = materialStages.every(item => item?.status === 'ok');
-      const existing = one(s, 'SELECT * FROM applications WHERE job_id=?', [jobId]);
-      const status = materialsReady ? 'materials-ready' : 'researching';
-      const notes = materialsReady ? 'Prepared by jobos pursue' : 'Pursuit completed with preparation gaps';
+      const preflight = compileApplicationReadiness(s, { jobId, profileId });
+      const existing = one(s, 'SELECT * FROM applications WHERE job_id=? AND profile_id=?', [jobId, profileId]);
+      const status = preflight.readyForReview ? 'materials-ready' : 'researching';
+      const notes = preflight.readyForReview ? 'Readiness compiler: ready for human review' : `Readiness compiler: blocked by ${preflight.blockers.map(item => item.code).join(', ')}`;
       const application = !existing || shouldAdvanceApplication(existing.status, status)
         ? appCreate(s, jobId, status, notes)
         : existing;
-      return { application: { id: application.id, jobId: application.job_id, profileId: application.profile_id, status: application.status } };
+      const applicationStatusChanged = !existing || application.status !== existing.status;
+      readiness = planApplication(s, {
+        jobId,
+        profileId,
+        policyContext: {
+          applicationStatusChanged,
+          applicationStatusChangeScope: applicationStatusChanged ? 'local-tracking-only' : 'none'
+        }
+      });
+      return {
+        application: { id: application.id, jobId: application.job_id, profileId: application.profile_id, previousStatus: existing?.status || null, status: application.status, statusChanged: applicationStatusChanged },
+        readiness
+      };
     },
     outreach: async () => {
       const plan = createOutreachPlan(s, { jobId, profileId });
@@ -204,6 +218,7 @@ export async function runPursuit(s, {
     byName.set(name, result);
   }
 
+  if (!readiness) readiness = planApplication(s, { jobId, profileId });
   const failed = results.filter(item => item.status === 'failed');
   const skipped = results.filter(item => item.status === 'skipped');
   return {
@@ -214,7 +229,8 @@ export async function runPursuit(s, {
     profileId,
     failed: failed.length,
     skipped: skipped.length,
-    stages: results
+    stages: results,
+    readiness
   };
 }
 

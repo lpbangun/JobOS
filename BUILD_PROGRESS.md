@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-15
+## Current status — 2026-07-16
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI and dashboard remain supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -9,6 +9,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company/stakeholder/contact research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and an outreach draft when a sourced stakeholder is available.
+- `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
@@ -33,8 +34,9 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `sql.js` save hardening with an exclusive lock, optimistic store revision, fsync, same-directory atomic rename, stale-snapshot rejection, and lock cleanup.
 - Policy migration from obsolete `human_approval_required` wording to `user_configured`; external effects remain disabled until configured/enabled.
 - Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
-- MCP additions: `daily_discovery`, `pursue_job`, and `answers_match`.
+- MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, and `answers_match`.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
+- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
 
 ### Intentionally deferred
 
@@ -48,13 +50,14 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- `npm test`: **104/104 passed** after the final ACP cancel-isolation fix.
+- `npm test`: re-verified after readiness rebase onto PR #6 main (see readiness suite below).
 - `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 30-tool list, `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
+- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
 

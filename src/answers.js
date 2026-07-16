@@ -41,7 +41,7 @@ function rowToAnswer(row, { reveal = false } = {}) {
     reuseScope: row.reuse_scope,
     verificationStatus: row.verification_status,
     sourceRef: row.source_ref,
-    employer: row.employer,
+    employer: row.reuse_scope === 'employer_specific' ? row.employer : '',
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -74,23 +74,27 @@ export function addAnswer(s, {
 }) {
   if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw domainError('unknown_profile', `Unknown profile: ${profileId}`);
   const normalizedCategory = validateEnum(answerCategories, String(category), 'category');
-  const normalizedSensitivity = validateEnum(answerSensitivities, String(sensitivity), 'sensitivity');
-  const normalizedScope = validateEnum(answerReuseScopes, String(reuseScope), 'reuse scope');
+  const requestedSensitivity = validateEnum(answerSensitivities, String(sensitivity), 'sensitivity');
+  const requestedScope = validateEnum(answerReuseScopes, String(reuseScope), 'reuse scope');
   const normalizedStatus = validateEnum(answerStatuses, String(verificationStatus), 'verification status');
+  const normalizedSensitivity = restrictedCategories.has(normalizedCategory) ? 'restricted' : requestedSensitivity;
+  const normalizedScope = restrictedCategories.has(normalizedCategory) ? 'never_auto_fill' : requestedScope;
   const questionText = String(question || '').trim();
   const answerText = String(answer || '').trim();
   if (!questionText) throw domainError('missing_question', 'Answer requires a question');
   if (!answerText) throw domainError('missing_answer', 'Answer requires non-empty answer text');
   const fingerprint = questionFingerprint(questionText);
-  const employerKey = normalizedScope === 'employer_specific' ? String(employer || '').trim().toLowerCase() : '';
+  const normalizedSourceRef = String(sourceRef || '').trim();
+  const restrictedContextKey = normalizedSensitivity === 'restricted' && /^job:[a-z0-9_-]+$/i.test(normalizedSourceRef) ? normalizedSourceRef.toLowerCase() : '';
+  const employerKey = restrictedContextKey || (normalizedScope === 'employer_specific' ? String(employer || '').trim().toLowerCase() : '');
   if (normalizedScope === 'employer_specific' && !employerKey) throw domainError('missing_employer', 'Employer-specific answers require --employer');
   const at = now();
   const answerId = id('answer', `${profileId}:${fingerprint}:${employerKey}`);
   run(s, `INSERT INTO answers (id,profile_id,category,question_fingerprint,question_text,answer_text,sensitivity,reuse_scope,verification_status,source_ref,employer,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(profile_id,question_fingerprint,employer) DO UPDATE SET category=excluded.category,question_text=excluded.question_text,answer_text=excluded.answer_text,sensitivity=excluded.sensitivity,reuse_scope=excluded.reuse_scope,verification_status=excluded.verification_status,source_ref=excluded.source_ref,updated_at=excluded.updated_at`,
-  [answerId, profileId, normalizedCategory, fingerprint, questionText, answerText, normalizedSensitivity, normalizedScope, normalizedStatus, String(sourceRef || ''), employerKey, at, at]);
-  audit(s, 'answer.saved', 'answer', answerId, { profileId, category: normalizedCategory, sensitivity: normalizedSensitivity, reuseScope: normalizedScope, verificationStatus: normalizedStatus, sourceRef: String(sourceRef || '') });
+  [answerId, profileId, normalizedCategory, fingerprint, questionText, answerText, normalizedSensitivity, normalizedScope, normalizedStatus, normalizedSourceRef, employerKey, at, at]);
+  audit(s, 'answer.saved', 'answer', answerId, { profileId, category: normalizedCategory, sensitivity: normalizedSensitivity, reuseScope: normalizedScope, verificationStatus: normalizedStatus, sourceRef: normalizedSourceRef });
   syncAnswers(s, profileId);
   save(s);
   return rowToAnswer(one(s, 'SELECT * FROM answers WHERE profile_id=? AND question_fingerprint=? AND employer=?', [profileId, fingerprint, employerKey]));
@@ -162,6 +166,73 @@ function applicationQuestions(job) {
     if (text) questions.push({ category: 'experience_story', question: `Describe your experience with: ${text}` });
   }
   return questions;
+}
+
+export function inspectApplicationQuestions(s, { jobId, profileId }) {
+  const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
+  if (!job) throw domainError('unknown_job', `Unknown job: ${jobId}`);
+  if (job.profile_id !== profileId) throw domainError('profile_job_mismatch', `Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`);
+  const matched = matchAnswers(s, { profileId, questions: applicationQuestions(job), employer: job.company });
+  const restrictedRows = all(s, `SELECT * FROM answers
+    WHERE profile_id=? AND verification_status='verified' AND sensitivity='restricted' AND reuse_scope='never_auto_fill' AND source_ref=?`, [profileId, `job:${jobId}`]);
+  const directByFingerprint = new Map(restrictedRows.map(row => [row.question_fingerprint, row]));
+  const questions = matched.questions.map(item => {
+    if (item.status === 'matched') {
+      return {
+        question: item.question,
+        category: item.category,
+        status: 'matched',
+        confidence: item.confidence,
+        answerId: item.match.id,
+        autoFill: true
+      };
+    }
+    if (item.status === 'blocked') {
+      const direct = directByFingerprint.get(questionFingerprint(item.question));
+      if (direct) {
+        return {
+          question: item.question,
+          category: item.category,
+          status: 'direct_input_recorded',
+          blocker: null,
+          confidence: 1,
+          answerId: direct.id,
+          redacted: true,
+          autoFill: false
+        };
+      }
+      return {
+        question: item.question,
+        category: item.category,
+        status: 'blocked',
+        blocker: 'sensitive_prompt',
+        confidence: 0,
+        answerId: null,
+        redacted: true,
+        autoFill: false
+      };
+    }
+    return {
+      question: item.question,
+      category: item.category,
+      status: 'unmatched',
+      confidence: item.confidence,
+      answerId: null,
+      autoFill: false
+    };
+  });
+  return {
+    jobId,
+    profileId,
+    employer: job.company,
+    count: questions.length,
+    matched: questions.filter(item => item.status === 'matched').length,
+    unmatched: questions.filter(item => item.status === 'unmatched').length,
+    restricted: questions.filter(item => item.category === 'work_authorization' || restrictedCategories.has(item.category)).length,
+    directInputRecorded: questions.filter(item => item.status === 'direct_input_recorded').length,
+    unresolvedRestricted: questions.filter(item => item.status === 'blocked').length,
+    questions
+  };
 }
 
 async function draftUnmatchedAnswers(s, job, profileId, questions) {

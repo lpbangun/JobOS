@@ -128,6 +128,35 @@ npm run jobos -- pursue <job-id> --profile pm-edtech \
   --stage questions --json
 ```
 
+## Application readiness
+
+Check whether your local materials are complete for human review:
+
+```bash
+npm run jobos -- applications plan --job <job-id> --profile <profile-id> --json
+```
+
+The plan returns one of two statuses:
+
+- **`blocked`** — one or more blockers prevent review readiness. Blockers include missing stored proof points (`missing_proofs`), no persisted fit score (`missing_score`), no tailored resume (`missing_resume_material`), a rejected or ungrounded resume (`resume_rejected` / `resume_missing_proof_grounding`), unmatched ordinary questions (`unmatched_questions`), unresolved restricted questions (`restricted_questions_require_input`), and a possible prior application detected from local status evidence (`possible_duplicate_application`). Each blocker includes a recovery `nextAction`.
+- **`ready-for-review`** — no blockers remain. This is reviewable local completeness; it does **not** mean approved, submitted, applied, or receipt-recorded (`policy.submissionPerformed: false`, `applicationStatusChanged: false`, `readyDoesNotMean` lists the excluded actions).
+
+### Identity and duplicate detection
+
+The plan emits stable identity keys (`identityKey`, `employerKey`, `sourceKey`, `applicationKey`) for cross-session reference. Duplicate checking uses two precision-first signals—exact source URL match and exact dedupe-key (company|title|location) match—both gated on local status or status-history evidence that the matched job reached `applied` or a later outcome. Results appear under `possibleDuplicateApplications` with the matching signals and a disclaimer that no submission receipt is inferred.
+
+### Restricted input redaction
+
+Sensitive and restricted answer values are always redacted in JSON and YAML output (answer text is `null`, `redacted: true`). Restricted questions (`work_authorization`, `demographic`, `legal_attestation`) are never auto-filled. A direct response clears a readiness blocker only when it is recorded for that exact job with `--sensitivity restricted --reuse never_auto_fill --source job:<job-id>`; its value remains redacted in plans and mirrors and is never populated into forms or draft assertions.
+
+### Mirror
+
+The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call and during the `application` stage of `pursue`. The mirror carries the same redaction guarantee as the JSON output.
+
+### MCP parity
+
+The MCP tool `applications_plan` returns the identical plan structure. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
+
 ## Daily automatic discovery
 
 `daily` is the cron-friendly one-shot command. Existing scheduler support can run it every day:
@@ -252,7 +281,7 @@ Generic `stdin-json` contract:
 
 This batch process must exit `0` and write one JSON object to stdout. Missing executables, timeouts, non-zero exits, malformed/oversized output, and failed connection tests return typed `agent_error`; explicit agent selection never silently falls back to another provider. `--agent` overrides `JOBOS_AGENT` for batch workflow generation. Without either, existing HTTP LLM configuration remains available; without any provider, deterministic degraded mode remains.
 
-External agents can run `jobos mcp`. The server accepts standard Content-Length framing and ACP-session JSONL framing, and exposes `daily_discovery`, `pursue_job`, `answers_match`, selection/review/discovery reads, and the lower-level scoring, research, networking, tailoring, application, and scheduler tools through the same `domain-tools` facade.
+External agents can run `jobos mcp`. The server accepts standard Content-Length framing and ACP-session JSONL framing, and exposes `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, selection/review/discovery reads, and the lower-level scoring, research, networking, tailoring, application, and scheduler tools through the same `domain-tools` facade.
 
 The repository includes a real external-client drill—not a tool-list unit test. It initializes `jobos mcp`, discovers the live tool catalog, calls `score_job` and `get_job_context`, closes the server, and verifies the same stored score:
 
@@ -348,6 +377,7 @@ jobos-workspace/
     research/
     artifacts/
     outreach/
+    application-readiness.yaml   # redacted plan mirror
   automations/
   audit.log.jsonl
 ```
@@ -374,6 +404,7 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 - LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
+- `ready-for-review` indicates reviewable local completeness from stored evidence; it does not mean approved, submitted, applied, or receipt-recorded. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.
 - Trusted browser scripts are not sandboxed.
 
 ## Verification
@@ -388,7 +419,6 @@ npm run acp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
 npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
   --output .tmp/mcp-demo-transcript.jsonl
 ```
-
 The ACP drill launches the installed backend, performs same-session tool turns, denies an applied-status policy probe, cancels a live turn, proves zero leaked post-cancel events, starts a clean recovery session, completes an exact `get_job_context` call, restarts again, checks a real deadline and missing-backend typing, and verifies sentinel redaction. Set a throwaway `JOBOS_LLM_API_KEY` value only when explicitly running the transcript-redaction probe; the summary reports whether that sentinel was configured and absent.
 
-The test suite covers the established CLI/domain behavior plus real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.
+The test suite covers the established CLI/domain behavior plus real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, application readiness, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.
