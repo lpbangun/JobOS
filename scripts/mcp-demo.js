@@ -207,7 +207,7 @@ async function main() {
     profileId: flags.profile || null,
     jobId: String(flags.job),
     output: flags.output || null,
-    timeoutMs: Number(flags.timeout || 30_000)
+    timeoutMs: typeof flags.timeout === 'string' && Number.isFinite(Number(flags.timeout)) ? Number(flags.timeout) : 30_000
   });
   console.log(JSON.stringify(summary, null, 2));
 }

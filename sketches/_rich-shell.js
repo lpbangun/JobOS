@@ -1,5 +1,6 @@
 // Richer shell for 009 (A-style) and 010 (C-style)
 (function () {
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const jobs = [
     {
       id: 'acme', title: 'PM, Learning Platform', co: 'Acme Learning', loc: 'Remote',
@@ -356,7 +357,7 @@
     } else if (kind === 'log') {
       html = `<h3>Event log</h3>
         <div class="ov-card" style="font-family:inherit;max-height:50vh;overflow:auto">
-          ${logLines.map((l) => `<div style="padding:3px 0;border-bottom:1px solid rgba(127,127,127,.15)">${l}</div>`).join('')}
+          ${logLines.map((l) => `<div style="padding:3px 0;border-bottom:1px solid rgba(127,127,127,.15)">${escapeHtml(l)}</div>`).join('')}
         </div>
         <div class="actions" style="margin-top:10px"><button class="btn ghost" id="x-close">Close</button></div>`;
     }
@@ -398,12 +399,27 @@
     work(800);
     const msgs = $('msgs');
     if (!msgs) return;
-    msgs.insertAdjacentHTML('beforeend', `<div class="msg"><div class="who">you</div>${text}</div>`);
+    const userMsg = document.createElement('div');
+    userMsg.className = 'msg';
+    const userWho = document.createElement('div');
+    userWho.className = 'who';
+    userWho.textContent = 'you';
+    const userBody = document.createElement('div');
+    userBody.textContent = text;
+    userMsg.appendChild(userWho);
+    userMsg.appendChild(userBody);
+    msgs.appendChild(userMsg);
     setTimeout(() => {
-      msgs.insertAdjacentHTML('beforeend',
-        `<div class="msg"><div class="who">hermes · tools</div>
-         → pursue_job / map_reachable_network on <b>${job().id}</b><br/>
-         Fit ${job().fit}. Path: ${job().path.summary}. Drafts gated. Nothing external.</div>`);
+      const reply = document.createElement('div');
+      reply.className = 'msg';
+      const replyWho = document.createElement('div');
+      replyWho.className = 'who';
+      replyWho.textContent = 'hermes · tools';
+      const replyBody = document.createElement('div');
+      replyBody.textContent = '→ pursue_job / map_reachable_network on ' + job().id + '. Fit ' + job().fit + '. Path: ' + job().path.summary + '. Drafts gated. Nothing external.';
+      reply.appendChild(replyWho);
+      reply.appendChild(replyBody);
+      msgs.appendChild(reply);
       msgs.scrollTop = msgs.scrollHeight;
       logLines.unshift(new Date().toTimeString().slice(0, 5) + ' agent · ' + job().id);
       flash('agent idle');

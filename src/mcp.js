@@ -39,7 +39,7 @@ export function startMcp(s, { input = process.stdin } = {}) {
         const len = Number(header.match(/Content-Length:\s*(\d+)/i)?.[1]);
         if (!Number.isFinite(len)) {
           send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Missing Content-Length' } }, 'header');
-          buffer = buffer.subarray(headerEnd + 4);
+          buffer = Buffer.alloc(0);
           continue;
         }
         const bodyStart = headerEnd + 4;

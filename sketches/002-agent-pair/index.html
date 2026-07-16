@@ -301,16 +301,23 @@
     const input = document.getElementById('input');
     const status = document.getElementById('status');
 
-    function add(who, html, cls) {
+    function add(who, html, cls, escape = false) {
       const el = document.createElement('div');
       el.className = 'msg ' + cls;
-      el.innerHTML = `<div class="who">${who}</div><div>${html}</div>`;
+      const whoDiv = document.createElement('div');
+      whoDiv.className = 'who';
+      whoDiv.textContent = who;
+      const contentDiv = document.createElement('div');
+      if (escape) contentDiv.textContent = html;
+      else contentDiv.innerHTML = html;
+      el.appendChild(whoDiv);
+      el.appendChild(contentDiv);
       messages.appendChild(el);
       messages.scrollTop = messages.scrollHeight;
     }
 
     function respond(text) {
-      add('you', text, 'user');
+      add('you', text, 'user', true);
       status.textContent = 'agent working…';
       setTimeout(() => {
         let reply = 'Got it. I can route that through JobOS MCP tools without inventing claims.';

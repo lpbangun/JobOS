@@ -476,6 +476,21 @@
 
     document.getElementById('close-agent').onclick = () => { state.agent = false; render(); };
     document.getElementById('send').onclick = () => {
+      const input = document.getElementById('input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      const agent = document.getElementById('agent');
+      const msg = document.createElement('div');
+      msg.className = 'msg';
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = 'you';
+      const body = document.createElement('div');
+      body.textContent = text;
+      msg.appendChild(who);
+      msg.appendChild(body);
+      agent.insertBefore(msg, agent.querySelector('.composer'));
       flash('agent: working on ' + state.job + ' with MCP tools');
     };
     document.getElementById('run-cmd').onclick = () => {

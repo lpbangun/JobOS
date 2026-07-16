@@ -255,7 +255,7 @@ export class AcpClient extends EventEmitter {
     this.initializeResult = null;
     this.nextId = 0;
     this.pending = new Map();
-    this.stdoutBuffer = '';
+    this.stdoutBuffer = Buffer.alloc(0);
     this.stderr = Buffer.alloc(0);
     this.stderrBytes = 0;
     this.state = 'disconnected';
@@ -307,7 +307,7 @@ export class AcpClient extends EventEmitter {
     this.mcpServers = mcpServers;
     this.stderr = Buffer.alloc(0);
     this.stderrBytes = 0;
-    this.stdoutBuffer = '';
+    this.stdoutBuffer = Buffer.alloc(0);
     this.quarantinedSessionId = null;
     this.quarantineReason = null;
     this.setState('connecting');
@@ -369,7 +369,13 @@ export class AcpClient extends EventEmitter {
       }, timeoutMs);
       this.pending.set(id, { method, resolve, reject, timer });
       this.recordFrame('client_to_agent', message);
-      this.child.stdin.write(`${JSON.stringify(message)}\n`);
+      try {
+        this.child.stdin.write(`${JSON.stringify(message)}\n`);
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new AcpError('acp_write_failed', `ACP write failed: ${method}`, { method, cause: error?.code || error?.message }));
+      }
     });
   }
 
@@ -425,12 +431,13 @@ export class AcpClient extends EventEmitter {
   }
 
   onStdout(chunk) {
-    this.stdoutBuffer += String(chunk);
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, buf]);
     while (true) {
       const newline = this.stdoutBuffer.indexOf('\n');
       if (newline < 0) break;
-      const line = this.stdoutBuffer.slice(0, newline).trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      const line = this.stdoutBuffer.toString('utf8', 0, newline).trim();
+      this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       if (!line) continue;
       let message;
       try {

@@ -47,7 +47,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'approve_contact', description: 'Mark a discovered contact point as human-approved for later draft use.', inputSchema: required({ contactId: text }, ['contactId']) },
   { name: 'plan_outreach', description: 'Rank a reviewable outreach path from discovered contacts and user-owned network evidence.', inputSchema: required({ jobId: text, profileId: text, stakeholderId: text, goal: text }, ['jobId', 'profileId']) },
   { name: 'map_reachable_network', description: 'Create a local reachable-network path ladder for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
-  { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder; never send it.', inputSchema: required({ jobId: text, stakeholderId: text, profileId: text, goal: text, planId: text, contactId: text }, ['profileId']) },
+  { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder; never send it.', inputSchema: { type: 'object', properties: { jobId: text, stakeholderId: text, profileId: text, goal: text, planId: text, contactId: text }, required: ['profileId'], anyOf: [{ required: ['jobId', 'stakeholderId'] }, { required: ['planId'] }] } },
   { name: 'mark_outreach_sent', description: 'Record a user-confirmed outreach send; agent mediation is denied unless explicitly enabled.', inputSchema: required({ artifactId: text, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: text }, ['artifactId', 'channel']) },
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: required({ threadId: text, afterDays: { type: 'number' } }, ['threadId', 'afterDays']) },
   { name: 'list_outreach_due', description: 'List due outreach follow-up tasks without sending anything.', inputSchema: object({}) },
@@ -103,6 +103,7 @@ function publicJob(row) {
     source: row.source,
     status: row.status,
     fitScore: row.fit_score == null ? null : Number(row.fit_score),
+    score: row.fit_score == null ? null : Number(row.fit_score),
     highFit: Boolean(row.high_fit),
     scoringMode: parseJson(row.score_json, {})?.mode || null,
     applicationStatus: row.application_status || null,
@@ -236,7 +237,12 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'approve_contact') return approveContact(s, { contactId: args.contactId });
   if (name === 'plan_outreach') return createOutreachPlan(s, { jobId: args.jobId, profileId: args.profileId, stakeholderId: args.stakeholderId || null, goal: args.goal || 'informational' });
   if (name === 'map_reachable_network') return mapReachableNetwork(s, { jobId: args.jobId });
-  if (name === 'draft_outreach') return await draftOutreach(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null, profileId: args.profileId, goal: args.goal || 'informational', planId: args.planId || null, contactId: args.contactId || null });
+  if (name === 'draft_outreach') {
+    if (!(args.jobId && args.stakeholderId) && !args.planId) {
+      throw new DomainToolError('draft_outreach_missing_target', 'draft_outreach requires a jobId+stakeholderId or a planId', { args });
+    }
+    return await draftOutreach(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null, profileId: args.profileId, goal: args.goal || 'informational', planId: args.planId || null, contactId: args.contactId || null });
+  }
   if (name === 'mark_outreach_sent') return markOutreachSent(s, { artifactId: args.artifactId, channel: args.channel, notes: args.notes || '' });
   if (name === 'schedule_outreach_followup') return scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays });
   if (name === 'list_outreach_due') return outreachDue(s);

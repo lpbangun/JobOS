@@ -392,6 +392,7 @@
       document.querySelectorAll('.job').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
       const j = jobs[id];
       if (!j) return;
+      idx = order.indexOf(id);
       document.getElementById('detail-title').textContent = j.title;
       document.getElementById('detail-sub').textContent = j.sub;
       document.getElementById('detail-body').textContent = j.body;

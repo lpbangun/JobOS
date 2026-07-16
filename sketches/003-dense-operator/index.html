@@ -328,8 +328,9 @@
       const id = tr.dataset.id;
       document.getElementById('selid').textContent = id;
       const d = details[id];
+      const selbody = document.getElementById('selbody');
       if (d) {
-        document.getElementById('selbody').innerHTML = d.html + `
+        selbody.innerHTML = d.html + `
           <div style="margin-top:10px" class="dim">commands</div>
           <div class="list">
             <div data-cmd="pursue ${id} --agent hermes">:pursue --agent hermes</div>
@@ -337,6 +338,8 @@
             <div data-cmd="score ${id}">:score</div>
           </div>`;
         bindCmdLinks();
+      } else {
+        selbody.innerHTML = `<div class="dim">No detailed preview available for ${id}.</div>`;
       }
       status.textContent = 'selected ' + id;
     }
