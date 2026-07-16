@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS · Rich Pipeline (A)</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#0b0f14;--panel:#111821;--panel2:#0e141c;--border:#243041;--text:#d7e0ea;
+      --muted:#7f8b99;--accent:#4fd1c5;--agent:#90cdf4;--ok:#68d391;--warn:#f6ad55;--bad:#fc8181;
+      --sel:#1a2a38;--focus:#15202b;
+    }
+    body{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;background:#05070a;color:var(--text);min-height:100vh;padding:12px;font-size:12.5px;line-height:1.35}
+    .note{max-width:1320px;margin:0 auto 10px;font-family:system-ui,sans-serif;color:#9aa7b5;font-size:12.5px}
+    .app{max-width:1320px;margin:0 auto;border:1px solid var(--border);background:var(--bg);border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.45);min-height:860px;display:grid;grid-template-rows:auto auto 1fr auto auto;position:relative}
+    header{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;background:var(--panel2);border-bottom:1px solid var(--border);color:var(--muted);flex-wrap:wrap}
+    header b{color:var(--accent)}
+    .pill{border:1px solid var(--border);border-radius:999px;padding:2px 8px;cursor:pointer;color:var(--muted)}
+    .pill:hover,.pill.on{color:var(--accent);border-color:#2f6f68}
+    #counts{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px}
+    #counts b{color:var(--text)}
+    .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+    .brief-bar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);background:#0c1219}
+    .brief-item{border:1px solid var(--border);background:var(--panel);border-radius:8px;padding:8px;cursor:pointer;display:flex;gap:8px;align-items:flex-start}
+    .brief-item:hover{border-color:#35506b;background:var(--sel)}
+    .tag{font-size:10px;border:1px solid var(--border);border-radius:999px;padding:0 6px;color:var(--muted);text-transform:uppercase}
+    .tag.due,.tag.iv{color:var(--warn);border-color:#6b4d1f}
+    .tag.new{color:var(--ok);border-color:#2f5d45}
+    .tag.fail{color:var(--bad);border-color:#6b2d2d}
+    .workspace{display:grid;grid-template-columns:360px 1fr;min-height:0}
+    .workspace.agent-on{grid-template-columns:320px 1fr 340px}
+    .workspace.log-on{grid-template-columns:360px 1fr;grid-template-rows:1fr 140px}
+    .workspace.log-on .log-pane{display:block;grid-column:1/-1}
+    .pane{border-right:1px solid var(--border);overflow:auto;min-height:520px}
+    .pane:last-child{border-right:none}
+    .list,.detail,.agent-pane{padding:10px}
+    .agent-pane{display:none;background:#0c1219}
+    .workspace.agent-on .agent-pane{display:block}
+    .log-pane{display:none;border-top:1px solid var(--border);background:#0a1016;padding:8px 12px;font-size:11.5px;color:var(--muted);overflow:auto}
+    .filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .filter{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:8px;padding:4px 8px;font:inherit;cursor:pointer}
+    .filter.on{color:var(--accent);border-color:#2f6f68;background:var(--sel)}
+    .job{border:1px solid transparent;border-radius:8px;padding:9px;cursor:pointer;margin-bottom:6px;background:var(--panel)}
+    .job:hover{border-color:#334155}
+    .job.on{border-color:#35506b;background:var(--sel)}
+    .job-top{display:flex;justify-content:space-between;gap:8px}
+    .job-meta,.job-next,.job-signals{color:var(--muted);font-size:11.5px;margin-top:3px}
+    .job-signals{display:flex;gap:8px;flex-wrap:wrap}
+    .fit{color:var(--ok);font-size:11.5px}
+    .section{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;margin:0 0 8px}
+    .block{border:1px solid var(--border);background:var(--panel);border-radius:10px;padding:10px;margin-bottom:10px}
+    .fit-num{font-size:22px;font-weight:700;margin-right:6px}
+    .chip{display:inline-block;border:1px solid var(--border);border-radius:8px;padding:5px 8px;margin:0 6px 6px 0;background:#0d131b;font-size:11.5px}
+    .chip.btnish{cursor:pointer;font:inherit;color:inherit}
+    .chip.btnish:hover{border-color:var(--accent);color:var(--accent)}
+    .path{display:flex;flex-direction:column;gap:2px}
+    .path.high b{color:var(--ok)}
+    .path.medium b{color:var(--warn)}
+    .path.none b,.path.low b{color:var(--muted)}
+    .stages{display:flex;flex-wrap:wrap;gap:4px}
+    .stage{border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:10.5px;color:var(--muted)}
+    .stage.ok{color:var(--ok);border-color:#2f5d45}
+    .stage.draft{color:var(--warn);border-color:#6b4d1f}
+    .stage i{margin-left:4px;opacity:.8;font-style:normal}
+    .actions{display:flex;flex-wrap:wrap;gap:6px}
+    .btn{border:1px solid var(--border);background:var(--focus);color:var(--text);border-radius:7px;padding:6px 9px;font:inherit;cursor:pointer}
+    .btn:hover{border-color:var(--accent);color:var(--accent)}
+    .btn.primary{border-color:#2f6f68;color:var(--accent)}
+    .btn.ghost{background:transparent;color:var(--muted)}
+    .btn.tiny{padding:3px 6px;font-size:11px}
+    .review-row{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer}
+    .review-row:hover{background:var(--sel)}
+    .msg{border:1px solid var(--border);border-radius:10px;padding:8px;margin-bottom:8px;background:var(--panel)}
+    .msg .who{color:var(--agent);font-size:11px;margin-bottom:4px}
+    textarea{width:100%;min-height:56px;background:#0a1017;border:1px solid var(--border);border-radius:8px;color:var(--text);font:inherit;padding:8px;outline:none;resize:vertical}
+    .cmd{display:none;border-top:1px solid var(--border);padding:8px 12px;gap:8px;align-items:center;background:#0a1017}
+    .cmd.open{display:flex}
+    .cmd input{flex:1;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--text);font:inherit;padding:7px 8px;outline:none}
+    footer{border-top:1px solid var(--border);padding:8px 12px;display:flex;justify-content:space-between;gap:8px;color:var(--muted);background:var(--panel2);flex-wrap:wrap}
+    kbd{border:1px solid #2c4a5f;border-radius:4px;padding:0 5px;color:var(--accent);margin-right:2px}
+    .overlay{position:absolute;inset:0;background:rgba(5,8,12,.8);display:none;align-items:center;justify-content:center;padding:18px;z-index:5}
+    .overlay.open{display:flex}
+    .modal{width:min(820px,100%);max-height:82vh;overflow:auto;background:#10161f;border:1px solid #334155;border-radius:12px;padding:14px}
+    .modal h3{color:var(--accent);margin-bottom:10px}
+    .ov-card{border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:#0d131b}
+    .doc-layout{display:grid;grid-template-columns:200px 1fr;gap:12px;min-height:280px}
+    .doc-item,.doc-nav .doc-item{padding:7px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer}
+    .doc-item.on,.doc-item:hover{border-color:#35506b;background:var(--sel)}
+    .doc-body{white-space:pre-wrap;font:inherit;color:var(--text);margin:0;background:#0d131b;border:1px solid var(--border);border-radius:8px;padding:10px}
+    .toast{position:fixed;right:16px;bottom:16px;background:#12352f;border:1px solid #2f6f68;color:#b2f5ea;padding:8px 10px;border-radius:8px;opacity:0;pointer-events:none;transition:opacity .15s}
+    .toast.show{opacity:1}
+    body.working #loader{display:inline-flex}
+    #loader{display:none;align-items:center;gap:8px}
+    .bar{width:70px;height:3px;background:#1e293b;overflow:hidden;border-radius:2px}
+    .bar>i{display:block;height:100%;width:40%;background:var(--accent);animation:slide 1s linear infinite}
+    @keyframes slide{from{transform:translateX(-120%)}to{transform:translateX(280%)}}
+    @media(max-width:1000px){
+      .brief-bar{grid-template-columns:1fr 1fr}
+      .workspace,.workspace.agent-on{grid-template-columns:1fr}
+      .agent-pane{border-top:1px solid var(--border)}
+      .doc-layout{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body data-density="pipeline">
+  <div class="note">
+    <b>Rich · Variant A style (pipeline)</b> — denser always-on: priority strip, counts, rich job cards, detail with fit/proofs/path/artifacts/stages.
+    Toggle: agent · review · log · cmd · profile. Overlay: network · docs · answers · discovery · system.
+  </div>
+  <div class="app">
+    <header>
+      <div><b>jobos</b> <span class="pill" id="profile">pm-edtech ▾</span> <span id="loader" class="muted">working <span class="bar"><i></i></span></span></div>
+      <div id="counts"></div>
+      <div>
+        <span class="pill" id="btn-review">review</span>
+        <span class="pill" id="btn-log">log</span>
+        <span class="pill" id="btn-agent">agent</span>
+        <span class="pill" id="btn-src">sources</span>
+        <span class="pill" id="btn-sys">system</span>
+        <span class="muted">effects off</span>
+      </div>
+    </header>
+
+    <div class="brief-bar" id="brief"></div>
+
+    <div class="workspace" id="ws">
+      <section class="pane list">
+        <div class="filters">
+          <button class="filter on" data-f="today">Today</button>
+          <button class="filter" data-f="all">All</button>
+          <button class="filter" data-f="high">High-fit</button>
+          <button class="filter" data-f="review">Review</button>
+          <button class="filter" data-f="materials">Materials</button>
+          <button class="filter" data-f="applied">Applied</button>
+          <button class="filter" data-f="interview">Interview</button>
+        </div>
+        <div id="jobs"></div>
+        <div id="review-panel" class="block" hidden style="margin-top:10px"></div>
+      </section>
+
+      <section class="pane detail">
+        <div class="block">
+          <div class="section">Selected job</div>
+          <h2 id="d-title" style="font-size:15px;margin-bottom:4px">—</h2>
+          <div class="muted" id="d-sub"></div>
+          <div style="margin-top:10px" id="d-fit"></div>
+          <p style="margin-top:8px" id="d-body" class="muted"></p>
+        </div>
+        <div class="block">
+          <div class="section">Next action</div>
+          <div id="d-next"></div>
+        </div>
+        <div class="block">
+          <div class="section">Proof matches</div>
+          <div id="d-proofs"></div>
+        </div>
+        <div class="block">
+          <div class="section">Warm path</div>
+          <div id="d-path"></div>
+        </div>
+        <div class="block">
+          <div class="section">Artifacts</div>
+          <div id="d-artifacts"></div>
+        </div>
+        <div class="block">
+          <div class="section">Pursue stages</div>
+          <div class="stages" id="d-stages"></div>
+        </div>
+        <div class="actions" id="d-actions"></div>
+      </section>
+
+      <aside class="pane agent-pane">
+        <div class="section">Agent</div>
+        <div id="msgs"></div>
+        <textarea id="input" placeholder="Steer the selected job…"></textarea>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn primary" id="send">Send</button>
+          <button class="btn ghost" id="hide-agent">Hide</button>
+        </div>
+      </aside>
+
+      <div class="log-pane" id="log-panel" hidden></div>
+    </div>
+
+    <div class="cmd" id="cmdbar"><span style="color:var(--accent)">:</span><input id="cmd" placeholder="pursue · daily · network import · …" /><button class="btn" id="runcmd">run</button></div>
+    <footer>
+      <div><kbd>j/k</kbd>list <kbd>a</kbd>agent <kbd>r</kbd>review <kbd>l</kbd>log <kbd>:</kbd>cmd <kbd>n</kbd>network <kbd>o</kbd>docs <kbd>q</kbd>answers <kbd>s</kbd>sources <kbd>?</kbd>sys <kbd>p</kbd>/<kbd>d</kbd></div>
+      <div id="status">ready · denser always-on signals</div>
+    </footer>
+    <div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/_rich-shell.js"></script>
+</body>
+</html>

@@ -285,6 +285,7 @@ test('add-stakeholder requires source URL and records pasted stakeholder context
   assert.match(stakeholderDoc, /Confidence: medium/);
   assert.match(stakeholderDoc, /Source type: user_pasted/);
   assert.match(stakeholderDoc, /Human gate/);
+  assert.match(stakeholderDoc, /explicit public source URLs/);
   assert.doesNotMatch(stakeholderDoc, /did send|sent email/i);
 });
 

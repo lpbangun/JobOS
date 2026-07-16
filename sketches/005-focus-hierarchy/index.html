@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS TUI — Focus Hierarchy</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0b0f14;
+      --panel: #121920;
+      --border: #2a3648;
+      --text: #e8eef6;
+      --muted: #8b98ab;
+      --accent: #5eead4;
+      --agent: #c4b5fd;
+      --ok: #86efac;
+      --warn: #fbbf24;
+      --sel: #1a2836;
+    }
+    body {
+      font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+      background: #06090d;
+      color: var(--text);
+      min-height: 100vh;
+      padding: 16px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .note {
+      max-width: 980px;
+      margin: 0 auto 12px;
+      font-family: system-ui, sans-serif;
+      color: #9aa8ba;
+      font-size: 13px;
+    }
+    .frame {
+      max-width: 980px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--bg);
+      overflow: hidden;
+      box-shadow: 0 18px 50px rgba(0,0,0,.45);
+      min-height: 720px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #0e141c;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .top strong { color: var(--accent); }
+    .body { display: grid; grid-template-columns: 1fr; min-height: 560px; position: relative; }
+    .body.with-agent { grid-template-columns: 1.2fr 0.9fr; }
+    .main { padding: 14px; }
+    .agent {
+      display: none;
+      border-left: 1px solid var(--border);
+      background: #0c1118;
+      padding: 12px;
+      flex-direction: column;
+    }
+    .body.with-agent .agent { display: flex; }
+    .crumb {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .crumb b { color: var(--text); font-weight: 600; }
+    .crumb span { opacity: .7; }
+    h1 { font-size: 16px; margin-bottom: 6px; }
+    .lead { color: var(--muted); margin-bottom: 14px; max-width: 54ch; }
+    .stack { display: flex; flex-direction: column; gap: 10px; }
+    .card {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 10px;
+      padding: 12px;
+      cursor: pointer;
+    }
+    .card:hover, .card.active { border-color: #3d5a78; background: var(--sel); }
+    .card .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-right: 4px;
+    }
+    .pill.due { color: var(--warn); border-color: #6b5418; }
+    .pill.ok { color: var(--ok); border-color: #2f5d45; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .btn {
+      border: 1px solid var(--border);
+      background: #15202b;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { border-color: #2f6f68; color: var(--accent); }
+    .btn.ghost { background: transparent; color: var(--muted); }
+    .foot {
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      background: #0e141c;
+      flex-wrap: wrap;
+    }
+    kbd {
+      color: var(--accent);
+      border: 1px solid #2c4a5f;
+      border-radius: 4px;
+      padding: 0 5px;
+      margin-right: 2px;
+    }
+    .levels {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .level {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+    }
+    .level.on { color: var(--text); border-color: #3d5a78; background: var(--sel); }
+    .level small { display: block; color: var(--muted); margin-top: 2px; }
+    .hidden { display: none !important; }
+    .detail-block { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 10px; color: var(--muted); }
+    .detail-block.open { color: var(--text); }
+    .msg {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 8px;
+      background: var(--panel);
+    }
+    .msg .who { color: var(--agent); font-size: 11px; margin-bottom: 4px; }
+    .composer textarea {
+      width: 100%;
+      min-height: 64px;
+      background: #0a1017;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      padding: 8px;
+      outline: none;
+      resize: vertical;
+    }
+    .cmdline {
+      display: none;
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      background: #0a1017;
+      gap: 8px;
+      align-items: center;
+    }
+    .cmdline.open { display: flex; }
+    .cmdline input {
+      flex: 1;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      padding: 7px 9px;
+      outline: none;
+    }
+    .toast {
+      position: fixed; right: 18px; bottom: 18px;
+      background: #12352f; border: 1px solid #2f6f68; color: #b2f5ea;
+      padding: 10px 12px; border-radius: 8px; display: none; max-width: 360px;
+    }
+    .list-row {
+      display: flex; justify-content: space-between; gap: 10px;
+      padding: 8px 0; border-bottom: 1px solid #1a2430; cursor: pointer;
+    }
+    .list-row:hover { color: var(--accent); }
+    @media (max-width: 800px) {
+      .body.with-agent { grid-template-columns: 1fr; }
+      .body.with-agent .agent { border-left: none; border-top: 1px solid var(--border); }
+      .levels { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="note">
+    <strong>Variant E — Focus hierarchy</strong>
+    · One main question at a time. Depth on demand. Agent and <code>:</code> are layers, not permanent chrome.
+    · Keys: <kbd>Enter</kbd> drill in · <kbd>Esc</kbd> back · <kbd>a</kbd> agent · <kbd>:</kbd> command · <kbd>p</kbd>/<kbd>d</kbd> actions
+  </div>
+
+  <div class="frame">
+    <div class="top">
+      <div><strong>jobos</strong> · pm-edtech · <span id="mode-label">home</span></div>
+      <div>side-effects off · hermes ready</div>
+    </div>
+
+    <div class="body" id="body">
+      <main class="main">
+        <div class="levels" id="levels">
+          <div class="level on" data-l="0">L0 Home<small>what now?</small></div>
+          <div class="level" data-l="1">L1 List<small>pick one</small></div>
+          <div class="level" data-l="2">L2 Focus<small>one job</small></div>
+          <div class="level" data-l="3">L3 Deep<small>on demand</small></div>
+        </div>
+        <div class="crumb" id="crumb"><b>Home</b></div>
+        <div id="screen"></div>
+      </main>
+
+      <aside class="agent" id="agent">
+        <div style="color:var(--muted);font-size:11px;margin-bottom:8px">AGENT LAYER · not always visible</div>
+        <div class="msg">
+          <div class="who">hermes</div>
+          I only appear when you need multi-step help. Pipeline stays calm underneath.
+        </div>
+        <div class="composer">
+          <textarea id="input" placeholder="Ask about the focused job…"></textarea>
+          <div class="actions">
+            <button class="btn primary" id="send">Send</button>
+            <button class="btn ghost" id="close-agent">Hide agent (a)</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="cmdline" id="cmdline">
+      <span style="color:var(--accent)">:</span>
+      <input id="cmd" placeholder="command escape hatch — full CLI when needed" />
+      <button class="btn" id="run-cmd">run</button>
+      <button class="btn ghost" id="close-cmd">esc</button>
+    </div>
+
+    <div class="foot">
+      <div>
+        <kbd>enter</kbd>in
+        <kbd>esc</kbd>back
+        <kbd>a</kbd>agent
+        <kbd>:</kbd>cmd
+        <kbd>p</kbd>pursue
+        <kbd>d</kbd>daily
+      </div>
+      <div id="status">L0 · three choices max on home</div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const state = {
+      level: 0,
+      list: null, // today | pipeline | review
+      job: 'acme',
+      deep: null, // network | drafts | answers | null
+      agent: false,
+      cmd: false,
+    };
+
+    const jobs = {
+      acme: { title: 'PM, Learning Platform', co: 'Acme Learning', fit: 84, stage: 'interview', next: 'Review HM prep · optional Jane intro' },
+      nova: { title: 'Founding PM', co: 'NovaWork', fit: 79, stage: 'review', next: 'Pursue + stakeholder research' },
+      ridge: { title: 'PM, Talent Ops', co: 'Ridge AI', fit: 82, stage: 'applied', next: 'Follow-up due tomorrow' },
+      field: { title: 'PM, Workforce', co: 'Fieldnote', fit: 77, stage: 'applied', next: 'Nudge if silent' },
+    };
+
+    const toast = document.getElementById('toast');
+    const status = document.getElementById('status');
+    const screen = document.getElementById('screen');
+    const crumb = document.getElementById('crumb');
+    const body = document.getElementById('body');
+    const cmdline = document.getElementById('cmdline');
+
+    function flash(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      status.textContent = msg;
+      clearTimeout(flash._t);
+      flash._t = setTimeout(() => toast.style.display = 'none', 1400);
+    }
+
+    function setLevelIndicators() {
+      document.querySelectorAll('.level').forEach(el => {
+        el.classList.toggle('on', Number(el.dataset.l) === state.level);
+      });
+      document.getElementById('mode-label').textContent =
+        state.level === 0 ? 'home' :
+        state.level === 1 ? state.list :
+        state.level === 2 ? 'focus:' + state.job :
+        'deep:' + state.deep;
+      body.classList.toggle('with-agent', state.agent);
+      cmdline.classList.toggle('open', state.cmd);
+    }
+
+    function render() {
+      setLevelIndicators();
+      if (state.level === 0) {
+        crumb.innerHTML = '<b>Home</b> <span>· what needs attention?</span>';
+        screen.innerHTML = `
+          <h1>Today</h1>
+          <p class="lead">Only the urgent layer. Everything else waits one keystroke deeper.</p>
+          <div class="stack">
+            <div class="card" data-go="list:today">
+              <span class="pill due">2 due</span><span class="pill ok">3 new high-fit</span>
+              <strong>Priority brief</strong>
+              <div class="meta">Follow-ups + interview prep + daily results</div>
+            </div>
+            <div class="card" data-go="list:pipeline">
+              <strong>Pipeline</strong>
+              <div class="meta">7 open · move stages when you’re ready</div>
+            </div>
+            <div class="card" data-go="list:review">
+              <span class="pill due">4 drafts</span>
+              <strong>Review queue</strong>
+              <div class="meta">Human gate for resumes / outreach / prep</div>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" data-act="daily">[d] Run daily discovery</button>
+            <button class="btn ghost" data-act="agent">[a] Ask agent</button>
+            <button class="btn ghost" data-act="cmd">[:] Command…</button>
+          </div>`;
+      } else if (state.level === 1) {
+        const title = state.list === 'today' ? 'Priority brief' : state.list === 'pipeline' ? 'Pipeline' : 'Review queue';
+        crumb.innerHTML = `<b>Home</b> / <b>${title}</b> <span>· pick one thing</span>`;
+        if (state.list === 'today') {
+          screen.innerHTML = `
+            <h1>Priority brief</h1>
+            <p class="lead">Still a list — not a dashboard. Open one item.</p>
+            <div class="stack">
+              <div class="card" data-go="job:acme"><span class="pill due">due 16:00</span><strong>Follow up Jane · Acme</strong><div class="meta">Warm path ready</div></div>
+              <div class="card" data-go="job:acme"><span class="pill">interview</span><strong>HM prep · Acme tomorrow 2pm</strong><div class="meta">Packet needs review</div></div>
+              <div class="card" data-go="job:nova"><span class="pill ok">new</span><strong>Founding PM · NovaWork · 79</strong><div class="meta">From daily · ashby</div></div>
+            </div>
+            <div class="actions"><button class="btn ghost" data-act="back">[esc] Back</button></div>`;
+        } else if (state.list === 'pipeline') {
+          screen.innerHTML = `
+            <h1>Pipeline</h1>
+            <p class="lead">One column of work at a time is enough. Stages as filters, not four kanban walls.</p>
+            <div class="list-row" data-go="job:acme"><span>Acme · PM Learning</span><span class="ok">84 · interview</span></div>
+            <div class="list-row" data-go="job:nova"><span>NovaWork · Founding PM</span><span class="ok">79 · review</span></div>
+            <div class="list-row" data-go="job:ridge"><span>Ridge · Talent Ops</span><span class="ok">82 · applied</span></div>
+            <div class="list-row" data-go="job:field"><span>Fieldnote · Workforce</span><span>77 · applied</span></div>
+            <div class="actions"><button class="btn ghost" data-act="back">[esc] Back</button></div>`;
+        } else {
+          screen.innerHTML = `
+            <h1>Review queue</h1>
+            <p class="lead">Drafts only. Approve/reject or hand to agent for a revise pass.</p>
+            <div class="card" data-go="job:acme"><strong>resume-job_acme.md</strong><div class="meta">draft_needs_human_review</div></div>
+            <div class="card" data-go="job:acme"><strong>interview-hm-acme.md</strong><div class="meta">STAR × 3 · proof-linked</div></div>
+            <div class="card" data-go="job:acme"><strong>outreach-jane.md</strong><div class="meta">draft only · not sent</div></div>
+            <div class="actions"><button class="btn ghost" data-act="back">[esc] Back</button></div>`;
+        }
+      } else if (state.level === 2) {
+        const j = jobs[state.job];
+        crumb.innerHTML = `<b>Home</b> / <b>${state.list || 'pipeline'}</b> / <b>${j.co}</b>`;
+        screen.innerHTML = `
+          <h1>${j.title}</h1>
+          <p class="lead">${j.co} · fit ${j.fit} · ${j.stage}</p>
+          <div class="card active" style="cursor:default">
+            <strong>Next</strong>
+            <div class="meta" style="color:var(--text);margin-top:6px">${j.next}</div>
+          </div>
+          <div class="actions">
+            <button class="btn primary" data-act="pursue">[p] Pursue</button>
+            <button class="btn" data-act="deep:network">Network</button>
+            <button class="btn" data-act="deep:drafts">Drafts</button>
+            <button class="btn" data-act="deep:answers">Answers</button>
+            <button class="btn ghost" data-act="agent">[a] Agent</button>
+            <button class="btn ghost" data-act="back">[esc] Back</button>
+          </div>
+          <p class="lead" style="margin-top:16px">Deep tools stay collapsed until you ask. No permanent third column of chrome.</p>`;
+      } else if (state.level === 3) {
+        const j = jobs[state.job];
+        const deepTitle = { network: 'Network path', drafts: 'Drafts', answers: 'Answers match' }[state.deep];
+        crumb.innerHTML = `<b>Home</b> / … / <b>${j.co}</b> / <b>${deepTitle}</b>`;
+        const bodyMap = {
+          network: `<div class="card active" style="cursor:default"><span class="pill ok">warm</span><strong>you → Jane Chen → HM</strong><div class="meta">shared_employer · high · nothing sent</div></div>
+            <div class="actions"><button class="btn" data-act="agent">Draft intro with agent</button><button class="btn ghost" data-act="back">[esc] Back to job</button></div>`,
+          drafts: `<div class="card">resume · draft_needs_human_review</div>
+            <div class="card">cover · draft</div>
+            <div class="card">outreach-jane · draft only</div>
+            <div class="actions"><button class="btn primary" data-act="flash:Approved locally">Approve selected</button><button class="btn ghost" data-act="back">[esc] Back</button></div>`,
+          answers: `<div class="card active" style="cursor:default">matched 4 · blocked 1 restricted</div>
+            <div class="meta">Restricted questions never auto-fill.</div>
+            <div class="actions"><button class="btn ghost" data-act="back">[esc] Back</button></div>`
+        };
+        screen.innerHTML = `<h1>${deepTitle}</h1><p class="lead">L3 detail for ${j.title}. Leave when done — hierarchy collapses.</p>${bodyMap[state.deep]}`;
+      }
+      bind();
+    }
+
+    function goList(name) {
+      state.level = 1;
+      state.list = name;
+      state.deep = null;
+      render();
+      flash('L1 · ' + name);
+    }
+    function goJob(id) {
+      state.level = 2;
+      state.job = id;
+      state.deep = null;
+      if (!state.list) state.list = 'pipeline';
+      render();
+      flash('L2 · focus ' + id);
+    }
+    function goDeep(name) {
+      state.level = 3;
+      state.deep = name;
+      render();
+      flash('L3 · ' + name);
+    }
+    function back() {
+      if (state.cmd) { state.cmd = false; render(); return; }
+      if (state.agent && state.level <= 2) { state.agent = false; render(); flash('agent hidden'); return; }
+      if (state.level === 3) { state.level = 2; state.deep = null; }
+      else if (state.level === 2) { state.level = 1; }
+      else if (state.level === 1) { state.level = 0; state.list = null; }
+      render();
+      flash('back · L' + state.level);
+    }
+
+    function bind() {
+      screen.querySelectorAll('[data-go]').forEach(el => {
+        el.onclick = () => {
+          const [k, v] = el.dataset.go.split(':');
+          if (k === 'list') goList(v);
+          if (k === 'job') goJob(v);
+        };
+      });
+      screen.querySelectorAll('[data-act]').forEach(el => {
+        el.onclick = () => act(el.dataset.act);
+      });
+    }
+
+    function act(name) {
+      if (name === 'back') return back();
+      if (name === 'daily') return flash('daily started · results will land in Priority brief');
+      if (name === 'pursue') return flash('pursue ' + state.job + ' · drafts gated · agent optional');
+      if (name === 'agent') {
+        state.agent = !state.agent;
+        render();
+        flash(state.agent ? 'agent layer open' : 'agent layer closed');
+        return;
+      }
+      if (name === 'cmd') {
+        state.cmd = true;
+        render();
+        document.getElementById('cmd').focus();
+        return;
+      }
+      if (name.startsWith('deep:')) return goDeep(name.split(':')[1]);
+      if (name.startsWith('flash:')) return flash(name.slice(6));
+    }
+
+    document.getElementById('close-agent').onclick = () => { state.agent = false; render(); };
+    document.getElementById('send').onclick = () => {
+      const input = document.getElementById('input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      const agent = document.getElementById('agent');
+      const msg = document.createElement('div');
+      msg.className = 'msg';
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = 'you';
+      const body = document.createElement('div');
+      body.textContent = text;
+      msg.appendChild(who);
+      msg.appendChild(body);
+      agent.insertBefore(msg, agent.querySelector('.composer'));
+      flash('agent: working on ' + state.job + ' with MCP tools');
+    };
+    document.getElementById('run-cmd').onclick = () => {
+      const v = document.getElementById('cmd').value.trim();
+      if (v) flash('ran: ' + v);
+      state.cmd = false;
+      document.getElementById('cmd').value = '';
+      render();
+    };
+    document.getElementById('close-cmd').onclick = () => { state.cmd = false; render(); };
+    document.getElementById('cmd').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('run-cmd').click();
+      if (e.key === 'Escape') { state.cmd = false; render(); }
+    });
+
+    window.addEventListener('keydown', e => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        if (e.key === 'Escape') { document.activeElement.blur(); back(); }
+        return;
+      }
+      if (e.key === 'Escape') back();
+      if (e.key === 'a') act('agent');
+      if (e.key === ':') { e.preventDefault(); act('cmd'); }
+      if (e.key === 'p' && state.level >= 2) act('pursue');
+      if (e.key === 'd') act('daily');
+      if (e.key === 'Enter' && state.level === 0) goList('today');
+    });
+
+    render();
+  </script>
+</body>
+</html>

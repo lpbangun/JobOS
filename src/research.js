@@ -432,7 +432,7 @@ function renderStakeholders({ job, stakeholders, query, generatedAt, searchError
     return `- **${s.name}** — ${s.role}${confidence}${sourceType}\n  - Relevance: ${s.summary}\n  - Source: ${s.links[0]}`;
   }).join('\n') : '- No named public stakeholders found from search results.';
   const warningText = warnings.length ? `\n**Warnings:**\n${warnings.map(w => `- ${w}`).join('\n')}\n` : '';
-  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Human gate\nThis command used public web-search results only. It did not scrape private accounts or contact anyone.\n`;
+  return `# Stakeholder research — ${job.title} at ${job.company}\n\nGenerated: ${generatedAt}\n\n**Search query:** ${query}\n${searchError ? `**Search warning:** ${searchError}\n` : ''}${warningText}\n## Candidates\n${rows}\n\n## Suppression and relevance policy\n- Draft outreach only after relevance is documented.\n- Do not send messages from JobOS.\n- Pause outreach if application stage changes to interview/offer/rejected unless user reviews.\n\n## Human gate\nThis worksheet uses only explicit public source URLs and/or public web-search results. It did not scrape private accounts or contact anyone.\n`;
 }
 
 function upsertStakeholder(s, job, person, at) {

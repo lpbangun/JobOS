@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS TUI — Pipeline Command</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0b0f14;
+      --panel: #111821;
+      --border: #243041;
+      --text: #d7e0ea;
+      --muted: #7f8b99;
+      --accent: #4fd1c5;
+      --warn: #f6ad55;
+      --good: #68d391;
+      --bad: #fc8181;
+      --selected: #1a2a38;
+      --focus: #2b6cb0;
+    }
+    body {
+      font-family: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      background: #05070a;
+      color: var(--text);
+      min-height: 100vh;
+      padding: 18px;
+      line-height: 1.35;
+    }
+    .frame {
+      max-width: 1280px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    }
+    .titlebar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #0e141c;
+      font-size: 12px;
+    }
+    .titlebar strong { color: var(--accent); }
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      margin-left: 6px;
+    }
+    .badge.live { color: var(--good); border-color: #2f5d45; }
+    .layout {
+      display: grid;
+      grid-template-columns: 220px 1fr 280px;
+      min-height: 680px;
+    }
+    .rail, .main, .side {
+      border-right: 1px solid var(--border);
+      min-height: 100%;
+    }
+    .side { border-right: none; }
+    .rail, .side, .main { padding: 12px; }
+    .section-label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin: 8px 0 8px;
+    }
+    .nav-item, .row, .card, .job {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .nav-item:hover, .row:hover, .job:hover, .card:hover { background: var(--selected); }
+    .nav-item.active, .job.selected, .row.selected {
+      background: var(--selected);
+      border-color: #35506b;
+    }
+    .nav-item .key {
+      color: var(--accent);
+      width: 18px;
+      display: inline-block;
+    }
+    .kanban {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .lane {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 280px;
+    }
+    .lane h3 {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .card {
+      background: #0d131b;
+      border: 1px solid var(--border);
+      margin-bottom: 8px;
+    }
+    .card .company { color: var(--muted); font-size: 11px; }
+    .score {
+      color: var(--good);
+      font-size: 11px;
+    }
+    .score.mid { color: var(--warn); }
+    .score.low { color: var(--bad); }
+    .brief {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .brief li { margin: 6px 0 6px 16px; color: var(--text); }
+    .muted { color: var(--muted); }
+    .footer {
+      border-top: 1px solid var(--border);
+      padding: 8px 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      background: #0e141c;
+      color: var(--muted);
+    }
+    .footer kbd {
+      color: var(--accent);
+      border: 1px solid #2c4a5f;
+      border-radius: 4px;
+      padding: 0 5px;
+      margin-right: 4px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .pill.agent { color: #90cdf4; border-color: #2a4a6a; }
+    .pill.due { color: var(--warn); border-color: #6b4d1f; }
+    .detail {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 220px;
+    }
+    .detail h2 { font-size: 14px; margin-bottom: 6px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .btn {
+      border: 1px solid var(--border);
+      background: #15202b;
+      color: var(--text);
+      border-radius: 7px;
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { border-color: #2f6f68; color: var(--accent); }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      background: #12352f;
+      border: 1px solid #2f6f68;
+      color: #b2f5ea;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      display: none;
+    }
+    .stance {
+      margin: 0 auto 12px;
+      max-width: 1280px;
+      color: #9aa7b5;
+      font-size: 13px;
+      font-family: system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div class="stance">
+    <strong>Variant A — Pipeline Command Center</strong>
+    · Stance: pipeline-first, keyboard-driven board like a project ops desk.
+    · Open as a local file. Keys: 1–4 switch focus, j/k move selection, p pursue, d daily.
+  </div>
+  <div class="frame">
+    <div class="titlebar">
+      <div><strong>jobos</strong> · profile <span class="badge">pm-edtech</span> <span class="badge live">local</span></div>
+      <div class="muted">Tue 14:22 · agents: hermes ✓ · codex ✓ · mcp idle</div>
+    </div>
+    <div class="layout">
+      <aside class="rail">
+        <div class="section-label">Views</div>
+        <div class="nav-item active" data-view="today"><span class="key">1</span> Today</div>
+        <div class="nav-item" data-view="pipeline"><span class="key">2</span> Pipeline</div>
+        <div class="nav-item" data-view="review"><span class="key">3</span> Review queue</div>
+        <div class="nav-item" data-view="network"><span class="key">4</span> Network</div>
+        <div class="section-label">Status</div>
+        <div class="row">Open apps <span style="float:right">7</span></div>
+        <div class="row">High-fit new <span style="float:right;color:var(--good)">3</span></div>
+        <div class="row">Due follow-ups <span style="float:right;color:var(--warn)">2</span></div>
+        <div class="row">Drafts to review <span style="float:right">4</span></div>
+        <div class="section-label">Agents</div>
+        <div class="row"><span class="pill agent">hermes</span> ready</div>
+        <div class="row"><span class="pill agent">codex</span> ready</div>
+        <div class="row muted">MCP · 26 tools</div>
+      </aside>
+
+      <main class="main">
+        <div class="brief">
+          <div class="section-label">Today / Priority brief</div>
+          <ul id="brief-list">
+            <li><span class="pill due">due</span> Follow up Jane @ Acme — warm intro path ready</li>
+            <li><span class="pill">new</span> 3 high-fit roles from daily discovery (portfolio + Ashby)</li>
+            <li><span class="pill">interview</span> Acme Corp hiring-manager prep packet draft needs review</li>
+          </ul>
+        </div>
+
+        <div class="section-label">Pipeline board</div>
+        <div class="kanban" id="kanban">
+          <section class="lane" data-stage="review">
+            <h3>Review <span>3</span></h3>
+            <article class="card job selected" data-id="job_acme">
+              <strong>PM, Learning Platform</strong>
+              <div class="company">Acme Learning · Remote</div>
+              <div class="score">fit 84 · high</div>
+            </article>
+            <article class="card job" data-id="job_orbit">
+              <strong>Product Lead, K-12</strong>
+              <div class="company">Orbit Labs · Hybrid</div>
+              <div class="score mid">fit 71</div>
+            </article>
+            <article class="card job" data-id="job_nova">
+              <strong>Founding PM</strong>
+              <div class="company">NovaWork · Remote</div>
+              <div class="score">fit 79 · high</div>
+            </article>
+          </section>
+          <section class="lane" data-stage="materials">
+            <h3>Materials <span>2</span></h3>
+            <article class="card job" data-id="job_ridge">
+              <strong>PM, Talent Ops</strong>
+              <div class="company">Ridge AI · Remote</div>
+              <div class="score">fit 82</div>
+            </article>
+            <article class="card job" data-id="job_lumen">
+              <strong>Education PM</strong>
+              <div class="company">Lumen · NYC</div>
+              <div class="score mid">fit 68</div>
+            </article>
+          </section>
+          <section class="lane" data-stage="applied">
+            <h3>Applied <span>1</span></h3>
+            <article class="card job" data-id="job_field">
+              <strong>PM, Workforce</strong>
+              <div class="company">Fieldnote · Remote</div>
+              <div class="score">fit 77</div>
+            </article>
+          </section>
+          <section class="lane" data-stage="interview">
+            <h3>Interview <span>1</span></h3>
+            <article class="card job" data-id="job_acme_live">
+              <strong>PM, Learning Platform</strong>
+              <div class="company">Acme · HM tomorrow 2pm</div>
+              <div class="score">fit 84</div>
+            </article>
+          </section>
+        </div>
+
+        <div class="detail" id="detail" style="margin-top:12px">
+          <h2 id="detail-title">PM, Learning Platform · Acme Learning</h2>
+          <div class="muted" id="detail-sub">job_acme · score 84 · stage review · agent hermes available</div>
+          <p style="margin-top:10px" id="detail-body">
+            Daily discovery imported this from portfolio → Greenhouse. Proof points cover educator discovery and launch ownership.
+            Best next action: run pursue (research + resume + questions + outreach path).
+          </p>
+          <div class="actions">
+            <button class="btn primary" data-action="pursue">[p] pursue</button>
+            <button class="btn" data-action="score">[s] score</button>
+            <button class="btn" data-action="network">[n] network</button>
+            <button class="btn" data-action="review">[r] open draft</button>
+            <button class="btn" data-action="archive">[x] archive</button>
+          </div>
+        </div>
+      </main>
+
+      <aside class="side">
+        <div class="section-label">Selected context</div>
+        <div class="detail">
+          <div><strong>Proof points</strong></div>
+          <div class="muted" style="margin:8px 0">3 matched · 0 fabricated</div>
+          <div class="row selected">Educator discovery → −30% review time</div>
+          <div class="row">Cross-functional launch</div>
+          <div class="row">Activation improvement</div>
+          <div style="margin-top:14px"><strong>Warm path</strong></div>
+          <div class="muted" style="margin:8px 0">shared_employer · high</div>
+          <div class="row">you → Jane Chen → hiring manager</div>
+          <div style="margin-top:14px"><strong>Agent handoff</strong></div>
+          <div class="muted" style="margin:8px 0">MCP tools ready</div>
+          <div class="row">pursue_job</div>
+          <div class="row">answers_match</div>
+          <div class="row">plan_outreach</div>
+        </div>
+      </aside>
+    </div>
+    <div class="footer">
+      <div>
+        <kbd>1-4</kbd>views
+        <kbd>j/k</kbd>move
+        <kbd>p</kbd>pursue
+        <kbd>d</kbd>daily
+        <kbd>a</kbd>agent
+        <kbd>?</kbd>help
+      </div>
+      <div id="statusline">ready · no external side effects · drafts need review</div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const jobs = {
+      job_acme: {
+        title: 'PM, Learning Platform · Acme Learning',
+        sub: 'job_acme · score 84 · stage review · agent hermes available',
+        body: 'Daily discovery imported this from portfolio → Greenhouse. Proof points cover educator discovery and launch ownership. Best next action: run pursue (research + resume + questions + outreach path).'
+      },
+      job_orbit: {
+        title: 'Product Lead, K-12 · Orbit Labs',
+        sub: 'job_orbit · score 71 · stage review',
+        body: 'Solid education domain fit, weaker platform scale proof. Consider pursue --stage questions before tailoring.'
+      },
+      job_nova: {
+        title: 'Founding PM · NovaWork',
+        sub: 'job_nova · score 79 · stage review · high fit',
+        body: 'Early-stage WorkTech match. Network path thin; research stakeholders before outreach draft.'
+      },
+      job_ridge: {
+        title: 'PM, Talent Ops · Ridge AI',
+        sub: 'job_ridge · score 82 · stage materials-ready',
+        body: 'Resume + cover letter drafts await review. Application not tracked yet.'
+      },
+      job_lumen: {
+        title: 'Education PM · Lumen',
+        sub: 'job_lumen · score 68 · stage materials-ready',
+        body: 'Mid fit. Drafts exist but proof grounding is thinner — review carefully.'
+      },
+      job_field: {
+        title: 'PM, Workforce · Fieldnote',
+        sub: 'job_field · score 77 · stage applied',
+        body: 'Applied 4 days ago. Follow-up task due tomorrow. No interview scheduled.'
+      },
+      job_acme_live: {
+        title: 'PM, Learning Platform · Acme (Interview)',
+        sub: 'job_acme_live · score 84 · stage interview · tomorrow 2pm',
+        body: 'Hiring-manager stage. Interview prep packet drafted. STAR stories linked to 2 proof points.'
+      }
+    };
+
+    const toast = document.getElementById('toast');
+    const status = document.getElementById('statusline');
+    function flash(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      status.textContent = msg;
+      clearTimeout(flash._t);
+      flash._t = setTimeout(() => { toast.style.display = 'none'; }, 1800);
+    }
+
+    function selectJob(id) {
+      document.querySelectorAll('.job').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
+      const j = jobs[id];
+      if (!j) return;
+      idx = order.indexOf(id);
+      document.getElementById('detail-title').textContent = j.title;
+      document.getElementById('detail-sub').textContent = j.sub;
+      document.getElementById('detail-body').textContent = j.body;
+    }
+
+    document.querySelectorAll('.job').forEach(el => {
+      el.addEventListener('click', () => selectJob(el.dataset.id));
+    });
+
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.addEventListener('click', () => {
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        el.classList.add('active');
+        flash('view → ' + el.dataset.view);
+      });
+    });
+
+    document.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const a = btn.dataset.action;
+        if (a === 'pursue') flash('queued: pursue job_acme --agent hermes');
+        else if (a === 'score') flash('score complete · overall 84');
+        else if (a === 'network') flash('network paths: 1 warm path found');
+        else if (a === 'review') flash('open draft: resume-job_acme.md');
+        else if (a === 'archive') flash('archived from review queue');
+      });
+    });
+
+    const order = [...document.querySelectorAll('.job')].map(el => el.dataset.id);
+    let idx = 0;
+    window.addEventListener('keydown', (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      if (e.key === 'j') { idx = Math.min(order.length - 1, idx + 1); selectJob(order[idx]); }
+      if (e.key === 'k') { idx = Math.max(0, idx - 1); selectJob(order[idx]); }
+      if (e.key === 'p') flash('queued: pursue ' + order[idx] + ' --agent hermes');
+      if (e.key === 'd') flash('daily discovery started · ranking results…');
+      if (e.key === 'a') flash('agent picker · hermes / codex / mcp');
+      if (e.key >= '1' && e.key <= '4') {
+        const map = {1:'today',2:'pipeline',3:'review',4:'network'};
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === map[e.key]));
+        flash('view → ' + map[e.key]);
+      }
+    });
+  </script>
+</body>
+</html>

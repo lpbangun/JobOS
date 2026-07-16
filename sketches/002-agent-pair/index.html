@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS TUI — Agent Pair</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0c10;
+      --panel: #10141b;
+      --border: #2a3140;
+      --text: #e7ecf3;
+      --muted: #8b95a7;
+      --accent: #7aa2ff;
+      --agent: #c4b5fd;
+      --ok: #86efac;
+      --warn: #fbbf24;
+    }
+    body {
+      font-family: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      background: radial-gradient(circle at top, #141a24, #07090d 55%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 18px;
+    }
+    .stance {
+      max-width: 1280px;
+      margin: 0 auto 12px;
+      font-family: system-ui, sans-serif;
+      color: #a7b0c0;
+      font-size: 13px;
+    }
+    .frame {
+      max-width: 1280px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: 0 24px 70px rgba(0,0,0,.5);
+      min-height: 740px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: #0d1118;
+      font-size: 12px;
+    }
+    .top strong { color: var(--accent); }
+    .body {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      min-height: 0;
+    }
+    .chat, .context {
+      min-height: 620px;
+      padding: 14px;
+    }
+    .chat { border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .context { background: #0c1016; overflow: auto; }
+    .section {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 10px;
+    }
+    .messages {
+      flex: 1;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-right: 4px;
+    }
+    .msg {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 12px;
+      max-width: 92%;
+    }
+    .msg.user { align-self: flex-end; border-color: #31415f; }
+    .msg.agent { align-self: flex-start; border-color: #3d3460; }
+    .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .msg.agent .who { color: var(--agent); }
+    .tool {
+      margin-top: 8px;
+      border-left: 2px solid var(--accent);
+      padding: 6px 10px;
+      background: #0b1220;
+      color: #b8c7e6;
+      font-size: 12px;
+    }
+    .composer {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #0d1219;
+      padding: 10px;
+    }
+    .composer textarea {
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+    }
+    .composer-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .btn {
+      border: 1px solid #35507a;
+      background: #15233a;
+      color: #cfe0ff;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .chip {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin: 0 4px 4px 0;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .chip:hover { color: var(--text); border-color: #4a5b78; }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel);
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .job {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 8px;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .job:hover, .job.active { background: #151c28; border-color: #31415f; }
+    .job .meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .score { color: var(--ok); }
+    .stage { color: var(--warn); }
+    .footer {
+      border-top: 1px solid var(--border);
+      padding: 8px 14px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--muted);
+      background: #0d1118;
+    }
+    kbd {
+      color: var(--accent);
+      border: 1px solid #31415f;
+      border-radius: 4px;
+      padding: 0 5px;
+      margin-right: 3px;
+    }
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    .tab {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .tab.active { color: var(--text); border-color: #4b628a; background: #152033; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="stance">
+    <strong>Variant B — Agent Pair Workspace</strong>
+    · Stance: conversation + live job context side-by-side (OpenCode / pair-programming feel).
+    · Type a prompt or click a chip; watch tool calls stream into the chat.
+  </div>
+  <div class="frame">
+    <div class="top">
+      <div><strong>jobos pair</strong> · session with <span style="color:var(--agent)">hermes</span> · workspace ~/jobos</div>
+      <div>model: auto · tools: mcp/jobos · mode: plan+act</div>
+    </div>
+    <div class="body">
+      <section class="chat">
+        <div class="section">Conversation</div>
+        <div class="messages" id="messages">
+          <div class="msg agent">
+            <div class="who">hermes · job coach</div>
+            <div>Ready. Profile <code>pm-edtech</code> loaded. Daily discovery found 3 high-fit roles. What do you want to work on?</div>
+          </div>
+          <div class="msg user">
+            <div class="who">you</div>
+            <div>Pursue the Acme Learning PM role end-to-end, but keep outreach draft-only.</div>
+          </div>
+          <div class="msg agent">
+            <div class="who">hermes · tools</div>
+            <div>Running pursue stages with proof grounding and no external send.</div>
+            <div class="tool">→ pursue_job { jobId: "job_acme", profileId: "pm-edtech" }</div>
+            <div class="tool">✓ score 84 · company research written · resume draft staged · warm path: Jane Chen</div>
+            <div style="margin-top:8px">Acme is ready for review. Resume/cover letter are drafts. Warm intro path found via shared employer. Want me to open the resume draft or prep interview stories?</div>
+          </div>
+        </div>
+        <div class="composer">
+          <div style="margin-bottom:8px">
+            <span class="chip" data-prompt="Run daily discovery and summarize only high-fit roles.">daily high-fit</span>
+            <span class="chip" data-prompt="Show network paths for the selected job.">network paths</span>
+            <span class="chip" data-prompt="Match my answers to Acme application questions.">match answers</span>
+            <span class="chip" data-prompt="Prepare HM interview packet for Acme.">interview prep</span>
+          </div>
+          <textarea id="input" placeholder="Ask JobOS… e.g. research Acme stakeholders and rank warm paths"></textarea>
+          <div class="composer-bar">
+            <div><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> newline · agents via MCP</div>
+            <button class="btn" id="send">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="context">
+        <div class="tabs">
+          <div class="tab active" data-tab="jobs">Jobs</div>
+          <div class="tab" data-tab="artifacts">Artifacts</div>
+          <div class="tab" data-tab="tasks">Tasks</div>
+        </div>
+
+        <div id="tab-jobs">
+          <div class="panel">
+            <div class="section">Active selection</div>
+            <div class="job active">
+              <strong>PM, Learning Platform</strong>
+              <div class="meta">Acme Learning · <span class="score">84</span> · <span class="stage">materials-ready</span></div>
+            </div>
+            <div class="job">
+              <strong>Founding PM</strong>
+              <div class="meta">NovaWork · <span class="score">79</span> · review</div>
+            </div>
+            <div class="job">
+              <strong>PM, Talent Ops</strong>
+              <div class="meta">Ridge AI · <span class="score">82</span> · applied</div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="section">Live pursue stages</div>
+            <div class="job">score · ok · 84</div>
+            <div class="job">company · ok · dossier.md</div>
+            <div class="job">network · ok · Jane Chen path</div>
+            <div class="job">resume · draft_needs_human_review</div>
+            <div class="job">outreach · draft only · not sent</div>
+          </div>
+        </div>
+
+        <div id="tab-artifacts" class="hidden">
+          <div class="panel">
+            <div class="section">Review queue</div>
+            <div class="job">resume-job_acme.md · draft</div>
+            <div class="job">cover-job_acme.md · draft</div>
+            <div class="job">interview-hm-acme.md · draft</div>
+            <div class="job">outreach-jane.md · draft</div>
+          </div>
+        </div>
+
+        <div id="tab-tasks" class="hidden">
+          <div class="panel">
+            <div class="section">Due / next</div>
+            <div class="job">Follow up Jane · due today</div>
+            <div class="job">HM interview · tomorrow 2pm</div>
+            <div class="job">Review 3 discovery candidates</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <div class="footer">
+      <div><kbd>/</kbd>commands · <kbd>@</kbd>attach job · <kbd>esc</kbd>stop run</div>
+      <div id="status">mcp connected · no silent fallback · external actions off</div>
+    </div>
+  </div>
+  <script>
+    const messages = document.getElementById('messages');
+    const input = document.getElementById('input');
+    const status = document.getElementById('status');
+
+    function add(who, html, cls, escape = false) {
+      const el = document.createElement('div');
+      el.className = 'msg ' + cls;
+      const whoDiv = document.createElement('div');
+      whoDiv.className = 'who';
+      whoDiv.textContent = who;
+      const contentDiv = document.createElement('div');
+      if (escape) contentDiv.textContent = html;
+      else contentDiv.innerHTML = html;
+      el.appendChild(whoDiv);
+      el.appendChild(contentDiv);
+      messages.appendChild(el);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function respond(text) {
+      add('you', text, 'user', true);
+      status.textContent = 'agent working…';
+      setTimeout(() => {
+        let reply = 'Got it. I can route that through JobOS MCP tools without inventing claims.';
+        if (/daily/i.test(text)) {
+          reply = `<div class="tool">→ daily_discovery { profileId: "pm-edtech" }</div>
+                   <div class="tool">✓ 3 high-fit · 1 source failure isolated (career-page timeout)</div>
+                   Top: Acme 84, NovaWork 79, Ridge 82.`;
+        } else if (/network/i.test(text)) {
+          reply = `<div class="tool">→ map_reachable_network { jobId: "job_acme" }</div>
+                   Warm path: you → Jane Chen (shared employer) → hiring manager.`;
+        } else if (/answer/i.test(text)) {
+          reply = `<div class="tool">→ answers_match { profileId: "pm-edtech", questions: [...] }</div>
+                   Matched 4 · blocked 1 restricted (sensitive_prompt).`;
+        } else if (/interview/i.test(text)) {
+          reply = `<div class="tool">→ interview_prep { applicationId: "app_acme", stage: "hiring-manager" }</div>
+                   Packet drafted with 3 STAR stories grounded in proof points.`;
+        }
+        add('hermes · tools', reply, 'agent');
+        status.textContent = 'mcp connected · run complete';
+      }, 450);
+    }
+
+    document.getElementById('send').addEventListener('click', () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      respond(text);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById('send').click();
+      }
+    });
+    document.querySelectorAll('.chip').forEach(chip => {
+      chip.addEventListener('click', () => respond(chip.dataset.prompt));
+    });
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        ['jobs','artifacts','tasks'].forEach(id => {
+          document.getElementById('tab-' + id).classList.toggle('hidden', id !== tab.dataset.tab);
+        });
+      });
+    });
+    document.querySelectorAll('#tab-jobs .job').forEach(job => {
+      job.addEventListener('click', () => {
+        document.querySelectorAll('#tab-jobs .job').forEach(j => j.classList.remove('active'));
+        job.classList.add('active');
+        status.textContent = 'context pinned · ' + job.querySelector('strong').textContent;
+      });
+    });
+  </script>
+</body>
+</html>
