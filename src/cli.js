@@ -5,8 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { audit, openStore, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof } from './profiles.js';
-import { dedupeJobs, importText, importUrl, listJobs } from './jobs.js';
-import { score } from './scoring.js';
+import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
 import { appCreate, appUpdate, due } from './tracking.js';
 import { addStakeholder, research } from './research.js';
@@ -20,10 +19,13 @@ import { startMcp } from './mcp.js';
 import { addWatchlist, configFromFlags, createSearch, listSearches, listWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
 import { createAutomation, listAutomations, setAutomationEnabled } from './scheduler/store.js';
 import { recentRuns, runAutomation, runAutomationByName, runDueAutomations, schedulerStatus, startScheduler } from './scheduler/core.js';
-import { addAnswer, listAnswers, matchAnswers } from './answers.js';
-import { listNetworkContacts, listNetworkEdges, runDaily, runPursuit } from './workflows.js';
+import { addAnswer, listAnswers } from './answers.js';
+import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
+import { callDomainTool } from './domain-tools.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
+import { buildTuiModel } from './tui-model.js';
+import { defaultTuiState, renderTui, startTui } from './tui.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -52,6 +54,7 @@ function cmd(pathParts, usage, summary, opts = {}) {
 export const commandRegistry = [
   cmd(['init'], 'jobos init [--json]', 'Create or verify the local database and agent-readable workspace.'),
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
+  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the locked data-bound terminal product shell with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage <name>] [--dry-run] [--json]', 'Run integrated fit, research, networking, application preparation, and outreach planning.', { flags: ['--stage <name>', '--stage-timeout <ms>', '--dry-run'], category: 'workflow' }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
@@ -161,14 +164,14 @@ function commandFor(parts) {
 }
 
 function renderRootHelp({ allCommands = false } = {}) {
-  const primaryNames = new Set(['init', 'profile create', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
+  const primaryNames = new Set(['init', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
   const primary = commandRegistry.filter(command => primaryNames.has(command.name));
   const section = (title, names) => `${title}:\n${names.map(command => `  ${command.usage}\n      ${command.summary}`).join('\n')}`;
   const setup = primary.filter(command => ['init', 'profile create'].includes(command.name));
-  const workflows = primary.filter(command => ['daily', 'pursue', 'jobs list', 'network paths'].includes(command.name));
+  const workflows = primary.filter(command => ['tui', 'daily', 'pursue', 'jobs list', 'network paths'].includes(command.name));
   const extend = primary.filter(command => ['agents list', 'browser status'].includes(command.name));
   const advanced = allCommands ? `\n\nAdvanced commands:\n${commandRegistry.filter(command => !primaryNames.has(command.name)).map(command => `  ${command.usage}`).join('\n')}` : '\n\nRun "jobos help --all" for every low-level command.';
-  return `JobOS — local-first job discovery, networking, and application CLI
+  return `JobOS — local-first agent-native terminal product and composable CLI
 
 Usage:
   jobos <command> [flags]
@@ -209,7 +212,17 @@ Flags:
 
 function registryJson() {
   return {
-    version: 2,
+    version: 3,
+    architecture: {
+      role: 'jobos-host',
+      interactive: 'tui',
+      guestProtocol: 'acp-v1',
+      primaryGuest: 'hermes-acp',
+      sessionTools: 'mcp',
+      externalToolDoor: 'jobos mcp',
+      sourceOfTruth: 'local-sqlite-and-workspace',
+      sideEffects: 'default-off'
+    },
     globalFlags,
     exitCodes: { success: 0, runtimeError: 1, usageError: 2 },
     commands: commandRegistry.map(c => ({
@@ -230,13 +243,20 @@ function renderAgentGuide() {
   const commands = commandRegistry.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n');
   return `# JobOS Agent Guide
 
-JobOS is local-first. Use the CLI as the primary control surface and inspect \`jobos-workspace/\` files when useful. Core workflows may discover, score, research, draft, and stage actions. External effects are disabled by default and run only through a user-configured connector or an explicitly side-effecting trusted browser script.
+JobOS is the local-first host and source of truth for job state. The TUI is the primary interactive product: it launches a real Hermes ACP guest session and mediates JobOS MCP tools. The CLI and external \`jobos mcp\` server remain first-class automation doors. Core workflows may discover, score, research, draft, and stage actions. External effects are disabled by default.
+
+## Host Architecture
+
+- \`jobos tui --profile <id>\` launches the data-bound shell and the Hermes ACP guest pane.
+- The guest receives a secret-safe selected-job packet and a session-scoped JobOS MCP server; it does not receive terminal or filesystem permission.
+- \`jobos mcp\` exposes the same \`domain-tools\` semantics to external agents.
+- \`--agent <name>\` / \`JOBOS_AGENT\` select the separate noninteractive batch generator; explicit failures never silently fall back.
+- JobOS reloads SQLite after guest tools complete and rejects stale concurrent writers.
 
 ## Global Rules
 
-- Prefer \`--json\` for one-shot commands.
-- Use \`--workspace <dir>\` or \`JOBOS_HOME\` to select state.
-- Select a registered local agent with \`--agent <name>\` or \`JOBOS_AGENT\`; explicit agent failures never silently fall back.
+- Prefer \`--json\` for one-shot commands; use \`tui --snapshot\` for a noninteractive shell view.
+- Use \`--workspace <dir>\` or \`JOBOS_HOME\` to select state. ACP cwd and MCP tools use that same root.
 - Exit codes: \`0\` success, \`1\` runtime/domain error, \`2\` usage error.
 - JSON errors are written to stderr as \`{"ok":false,"error":{"code":"...","type":"...","message":"..."}}\`.
 - Generated resumes, cover letters, research, interview prep, application answers, and outreach remain proof/source-grounded drafts.
@@ -245,6 +265,15 @@ JobOS is local-first. Use the CLI as the primary control surface and inspect \`j
 ## Commands
 
 ${commands}
+
+## Interactive Flow
+
+\`\`\`bash
+hermes acp --check
+jobos tui --profile pm-edtech
+# External agents use the second door:
+jobos mcp
+\`\`\`
 
 ## Minimal Non-Interactive Flow
 
@@ -427,13 +456,13 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (flags.agent) process.env.JOBOS_AGENT = String(flags.agent);
+  if (flags.agent && group !== 'tui') process.env.JOBOS_AGENT = String(flags.agent);
   if (flags.workspace) process.env.JOBOS_WORKSPACE = path.resolve(String(flags.workspace));
   const boot = bootstrapInfo(flags);
   const s = await openStore(flags);
   s.bootstrapCreated = boot.created;
   s.bootstrapNoticeEmitted = false;
-  s.suppressBootstrapNotice = ['mcp', 'web'].includes(group);
+  s.suppressBootstrapNotice = ['mcp', 'web', 'tui'].includes(group);
   const out = value => output(value, flags, s);
   const text = value => printText(value, flags, s);
 
@@ -446,19 +475,42 @@ export async function main(argv = process.argv.slice(2)) {
     else text(renderAgentGuide());
     return;
   }
+  if (group === 'tui') {
+    const profileId = flags.profile ? String(flags.profile) : null;
+    const model = buildTuiModel(s, { profileId });
+    if (flags.json) {
+      out(model);
+      return;
+    }
+    if (flags.snapshot) {
+      const state = { ...defaultTuiState(), profileId: model.profileId, selectedJobId: model.selectedJobId, agentState: 'offline', status: 'snapshot · no agent process started' };
+      text(renderTui(model, state, {
+        width: numberFlag(flags, 'width', 140, { min: 60 }),
+        height: numberFlag(flags, 'height', 42, { min: 20 }),
+        color: false
+      }));
+      return;
+    }
+    const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    await startTui(s, {
+      profileId,
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
+    });
+    return;
+  }
   if (group === 'daily') {
-    out(await runDaily(s, { profileId: needProfile(flags) }));
+    out(await callDomainTool(s, 'daily_discovery', { profileId: needProfile(flags) }, { source: 'cli' }));
     return;
   }
   if (group === 'pursue') {
     if (!action) usage('Missing job id');
-    out(await runPursuit(s, {
+    out(await callDomainTool(s, 'pursue_job', {
       jobId: String(action),
       profileId: needProfile(flags),
       stage: flags.stage ? String(flags.stage) : null,
       dryRun: Boolean(flags['dry-run']),
       stageTimeoutMs: flags['stage-timeout'] ? numberFlag(flags, 'stage-timeout', 30000, { min: 1000 }) : 30000
-    }));
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'profile' && action === 'create') {
@@ -500,7 +552,7 @@ export async function main(argv = process.argv.slice(2)) {
     } catch (e) {
       usage(`Invalid --questions JSON file: ${e.message}`);
     }
-    out(matchAnswers(s, { profileId: needProfile(flags), questions, employer: flags.employer ? String(flags.employer) : '' }));
+    out(await callDomainTool(s, 'answers_match', { profileId: needProfile(flags), questions, employer: flags.employer ? String(flags.employer) : '' }, { source: 'cli' }));
     return;
   }
   if (group === 'jobs' && action === 'import-text') {
@@ -517,7 +569,7 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'jobs' && action === 'list') {
-    out(listJobs(s).map(x => ({ id: x.id, title: x.title, company: x.company, profileId: x.profile_id, score: x.fit_score, applicationStatus: x.application_status || null, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url || '' })));
+    out(await callDomainTool(s, 'list_jobs', {}, { source: 'cli' }));
     return;
   }
   if (group === 'jobs' && action === 'dedupe') {
@@ -559,7 +611,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'score') {
     if (!action) usage('Missing job id');
-    out(await score(s, action, needProfile(flags)));
+    out(await callDomainTool(s, 'score_job', { jobId: action, profileId: needProfile(flags) }, { source: 'cli' }));
     return;
   }
   if (group === 'tailor' && action === 'resume') {
@@ -630,7 +682,7 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'network' && action === 'paths') {
-    out(mapReachableNetwork(s, { jobId: String(requireFlag(flags, 'job')) }));
+    out(await callDomainTool(s, 'map_reachable_network', { jobId: String(requireFlag(flags, 'job')) }, { source: 'cli' }));
     return;
   }
   if (group === 'network' && action === 'contacts') {

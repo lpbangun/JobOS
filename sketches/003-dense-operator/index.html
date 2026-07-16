@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS TUI — Dense Operator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #000;
+      --fg: #c8d1c1;
+      --dim: #6f7a6a;
+      --panel: #0b0f0b;
+      --line: #1d261d;
+      --hi: #b6f26d;
+      --cyan: #7ee0d0;
+      --yellow: #e6d36b;
+      --red: #ff7b72;
+      --sel: #142014;
+    }
+    body {
+      background: #020302;
+      color: var(--fg);
+      font-family: "Cascadia Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+      min-height: 100vh;
+      padding: 16px;
+      font-size: 12.5px;
+    }
+    .stance {
+      max-width: 1320px;
+      margin: 0 auto 10px;
+      color: #9aa392;
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+    }
+    .shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      background: var(--bg);
+      box-shadow: 0 0 0 1px #050805, 0 20px 50px rgba(0,0,0,.55);
+    }
+    .bar {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--dim);
+      background: #050805;
+    }
+    .bar b { color: var(--hi); font-weight: 600; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1.2fr 0.9fr;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 0;
+      min-height: 720px;
+    }
+    .box {
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      background: var(--panel);
+    }
+    .box:nth-child(3n) { border-right: none; }
+    .h {
+      color: var(--cyan);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .h span { color: var(--dim); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 3px 4px; border-bottom: 1px solid #121912; vertical-align: top; }
+    th { color: var(--dim); font-weight: 500; }
+    tr { cursor: pointer; }
+    tr:hover, tr.active { background: var(--sel); }
+    .ok { color: var(--hi); }
+    .warn { color: var(--yellow); }
+    .bad { color: var(--red); }
+    .dim { color: var(--dim); }
+    .list div {
+      padding: 3px 4px;
+      border-left: 2px solid transparent;
+      margin-bottom: 2px;
+      cursor: pointer;
+    }
+    .list div:hover, .list div.active {
+      background: var(--sel);
+      border-left-color: var(--hi);
+    }
+    .log {
+      height: 150px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #a7b39a;
+      line-height: 1.4;
+    }
+    .cmd {
+      grid-column: 1 / -1;
+      border-right: none;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: #050805;
+    }
+    .cmd input {
+      flex: 1;
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--fg);
+      font: inherit;
+      padding: 7px 8px;
+      outline: none;
+    }
+    .cmd input:focus { border-color: #355035; }
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 10px;
+      border-top: 1px solid var(--line);
+      color: var(--dim);
+      background: #050805;
+    }
+    .spark { color: var(--hi); }
+    .wide { grid-column: span 1; }
+    .help kbd {
+      color: var(--hi);
+      border: 1px solid #2a3a2a;
+      border-radius: 3px;
+      padding: 0 4px;
+      margin-right: 2px;
+    }
+    .filters { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+    .filter {
+      border: 1px solid var(--line);
+      color: var(--dim);
+      padding: 2px 6px;
+      cursor: pointer;
+      border-radius: 3px;
+    }
+    .filter.on { color: var(--hi); border-color: #355035; }
+  </style>
+</head>
+<body>
+  <div class="stance">
+    <strong>Variant C — Dense Operator Console</strong>
+    · Stance: maximum information density for power users (htop / radar feel).
+    · Filter jobs, inspect selected row details, run command palette line at bottom.
+  </div>
+  <div class="shell">
+    <div class="bar">
+      <div><b>JOBOS</b> operator · host local · db .jobos/jobos.sqlite · rev 184</div>
+      <div>cpu n/a · agents hermes:ok codex:ok · side-effects:off</div>
+    </div>
+    <div class="grid">
+      <div class="box">
+        <div class="h">FUNNEL <span>30d</span></div>
+        <table>
+          <tr><td>discovered</td><td class="ok">42</td></tr>
+          <tr><td>high-fit</td><td class="ok">11</td></tr>
+          <tr><td>materials</td><td>7</td></tr>
+          <tr><td>applied</td><td>5</td></tr>
+          <tr><td>interview</td><td class="warn">2</td></tr>
+          <tr><td>offer</td><td class="dim">0</td></tr>
+        </table>
+      </div>
+      <div class="box">
+        <div class="h">TODAY <span>priority</span></div>
+        <div class="list" id="today">
+          <div class="active">[!] follow-up Jane / Acme · due 16:00</div>
+          <div>[*] HM interview prep packet · review</div>
+          <div>[+] 3 high-fit from daily (portfolio)</div>
+          <div>[ ] enable automation daily_discovery</div>
+        </div>
+      </div>
+      <div class="box">
+        <div class="h">AGENTS / MCP <span>live</span></div>
+        <table>
+          <tr><td>hermes</td><td class="ok">ready</td><td class="dim">prompt-arg</td></tr>
+          <tr><td>codex</td><td class="ok">ready</td><td class="dim">stdin-json</td></tr>
+          <tr><td>mcp tools</td><td class="ok">26</td><td class="dim">stdio</td></tr>
+          <tr><td>browser</td><td class="bad">unavailable</td><td class="dim">install pw</td></tr>
+          <tr><td>llm http</td><td class="dim">unset</td><td class="dim">deterministic</td></tr>
+        </table>
+      </div>
+
+      <div class="box" style="grid-column: 1 / span 2;">
+        <div class="h">JOBS <span id="jobcount">8 shown</span></div>
+        <div class="filters">
+          <div class="filter on" data-f="all">all</div>
+          <div class="filter" data-f="high">high-fit</div>
+          <div class="filter" data-f="interview">interview</div>
+          <div class="filter" data-f="due">due action</div>
+        </div>
+        <table id="jobs">
+          <thead>
+            <tr>
+              <th>id</th><th>role</th><th>co</th><th>fit</th><th>stage</th><th>next</th><th>src</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="active" data-tags="high due" data-id="job_acme">
+              <td class="dim">acme</td><td>PM Learning</td><td>Acme</td><td class="ok">84</td><td>interview</td><td class="warn">prep review</td><td>portfolio</td>
+            </tr>
+            <tr data-tags="high" data-id="job_nova">
+              <td class="dim">nova</td><td>Founding PM</td><td>NovaWork</td><td class="ok">79</td><td>review</td><td>pursue</td><td>ashby</td>
+            </tr>
+            <tr data-tags="high" data-id="job_ridge">
+              <td class="dim">ridge</td><td>PM Talent Ops</td><td>Ridge</td><td class="ok">82</td><td>applied</td><td class="warn">follow-up</td><td>greenhouse</td>
+            </tr>
+            <tr data-tags="" data-id="job_orbit">
+              <td class="dim">orbit</td><td>Product Lead</td><td>Orbit</td><td class="warn">71</td><td>review</td><td>score deeper</td><td>career</td>
+            </tr>
+            <tr data-tags="due" data-id="job_field">
+              <td class="dim">field</td><td>PM Workforce</td><td>Fieldnote</td><td class="ok">77</td><td>applied</td><td class="warn">nudge</td><td>lever</td>
+            </tr>
+            <tr data-tags="" data-id="job_lumen">
+              <td class="dim">lumen</td><td>Education PM</td><td>Lumen</td><td class="warn">68</td><td>materials</td><td>human review</td><td>portfolio</td>
+            </tr>
+            <tr data-tags="interview high" data-id="job_slate">
+              <td class="dim">slate</td><td>PM Growth</td><td>Slate</td><td class="ok">80</td><td>interview</td><td>STAR stories</td><td>ashby</td>
+            </tr>
+            <tr data-tags="" data-id="job_kind">
+              <td class="dim">kind</td><td>Learning Designer</td><td>Kindling</td><td class="dim">59</td><td>archived</td><td>—</td><td>career</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="box">
+        <div class="h">SELECTED <span id="selid">job_acme</span></div>
+        <div id="selbody">
+          <div class="ok">fit 84 · high</div>
+          <div class="dim" style="margin:6px 0">PM, Learning Platform · Acme Learning · Remote</div>
+          <div>proofs matched: 3</div>
+          <div>warm path: Jane Chen (shared_employer)</div>
+          <div>artifacts: resume draft, cover draft, HM packet</div>
+          <div class="warn" style="margin-top:6px">next: review prep before 2pm interview</div>
+          <div style="margin-top:10px" class="dim">commands</div>
+          <div class="list">
+            <div data-cmd="pursue job_acme --agent hermes">:pursue --agent hermes</div>
+            <div data-cmd="network paths --job job_acme">:network paths</div>
+            <div data-cmd="answers match --profile pm-edtech">:answers match</div>
+            <div data-cmd="interview prep --application app_acme">:interview prep</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box" style="grid-column: 1 / span 2;">
+        <div class="h">EVENT LOG / AGENT TRACE <span>live</span></div>
+        <div class="log" id="log">14:01:02 daily_discovery start profile=pm-edtech
+14:01:08 source portfolio ok imported=2 high_fit=2
+14:01:11 source ashby ok imported=1 high_fit=1
+14:01:12 source career-page fail timeout recovery=retry
+14:02:40 pursue job_acme stage=score ok overall=84 mode=deterministic-degraded
+14:03:05 pursue job_acme stage=network ok path=Jane Chen
+14:03:44 artifact resume draft_needs_human_review
+14:04:10 agent hermes authenticated protocol=1
+</div>
+      </div>
+      <div class="box">
+        <div class="h">DISCOVERY HEALTH</div>
+        <table>
+          <tr><td>greenhouse</td><td class="ok">ok</td></tr>
+          <tr><td>lever</td><td class="ok">ok</td></tr>
+          <tr><td>ashby</td><td class="ok">ok</td></tr>
+          <tr><td>portfolio</td><td class="ok">ok</td></tr>
+          <tr><td>career-page</td><td class="bad">timeout</td></tr>
+        </table>
+      </div>
+
+      <div class="box cmd">
+        <span class="spark">:</span>
+        <input id="cmd" placeholder="pursue job_acme --agent hermes   |   daily --profile pm-edtech   |   network paths --job job_acme" />
+        <span class="dim">enter run · esc clear</span>
+      </div>
+    </div>
+    <div class="footer help">
+      <div>
+        <kbd>j/k</kbd>rows
+        <kbd>/</kbd>filter
+        <kbd>:</kbd>command
+        <kbd>p</kbd>pursue
+        <kbd>d</kbd>daily
+        <kbd>r</kbd>review
+      </div>
+      <div id="status">ready · local-only · drafts gated</div>
+    </div>
+  </div>
+  <script>
+    const details = {
+      job_acme: {
+        html: `<div class="ok">fit 84 · high</div>
+          <div class="dim" style="margin:6px 0">PM, Learning Platform · Acme Learning · Remote</div>
+          <div>proofs matched: 3</div>
+          <div>warm path: Jane Chen (shared_employer)</div>
+          <div>artifacts: resume draft, cover draft, HM packet</div>
+          <div class="warn" style="margin-top:6px">next: review prep before 2pm interview</div>`
+      },
+      job_nova: {
+        html: `<div class="ok">fit 79 · high</div>
+          <div class="dim" style="margin:6px 0">Founding PM · NovaWork · Remote</div>
+          <div>proofs matched: 2</div>
+          <div>warm path: none yet</div>
+          <div>artifacts: none</div>
+          <div class="warn" style="margin-top:6px">next: pursue + stakeholder research</div>`
+      },
+      job_ridge: {
+        html: `<div class="ok">fit 82 · high</div>
+          <div class="dim" style="margin:6px 0">PM Talent Ops · Ridge AI · Remote</div>
+          <div>applied 3d ago</div>
+          <div>follow-up due tomorrow</div>
+          <div class="warn" style="margin-top:6px">next: mark outreach or nudge</div>`
+      }
+    };
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+    const cmd = document.getElementById('cmd');
+
+    function appendLog(line) {
+      log.textContent += '\n' + line;
+      log.scrollTop = log.scrollHeight;
+    }
+    function selectRow(tr) {
+      document.querySelectorAll('#jobs tbody tr').forEach(r => r.classList.remove('active'));
+      tr.classList.add('active');
+      const id = tr.dataset.id;
+      document.getElementById('selid').textContent = id;
+      const d = details[id];
+      if (d) {
+        document.getElementById('selbody').innerHTML = d.html + `
+          <div style="margin-top:10px" class="dim">commands</div>
+          <div class="list">
+            <div data-cmd="pursue ${id} --agent hermes">:pursue --agent hermes</div>
+            <div data-cmd="network paths --job ${id}">:network paths</div>
+            <div data-cmd="score ${id}">:score</div>
+          </div>`;
+        bindCmdLinks();
+      }
+      status.textContent = 'selected ' + id;
+    }
+    function bindCmdLinks() {
+      document.querySelectorAll('#selbody [data-cmd]').forEach(el => {
+        el.addEventListener('click', () => run(el.dataset.cmd));
+      });
+    }
+    function run(line) {
+      appendLog(new Date().toTimeString().slice(0,8) + ' exec ' + line);
+      status.textContent = 'ran: ' + line;
+      if (/daily/.test(line)) appendLog('       daily ok · high_fit=3 · failures=1');
+      if (/pursue/.test(line)) appendLog('       pursue queued · stages=10 · agent=hermes');
+      if (/network/.test(line)) appendLog('       network paths=1 · Jane Chen');
+    }
+
+    document.querySelectorAll('#jobs tbody tr').forEach(tr => {
+      tr.addEventListener('click', () => selectRow(tr));
+    });
+    document.querySelectorAll('.filter').forEach(f => {
+      f.addEventListener('click', () => {
+        document.querySelectorAll('.filter').forEach(x => x.classList.remove('on'));
+        f.classList.add('on');
+        const mode = f.dataset.f;
+        let shown = 0;
+        document.querySelectorAll('#jobs tbody tr').forEach(tr => {
+          const tags = tr.dataset.tags || '';
+          const ok = mode === 'all' || tags.split(/\s+/).includes(mode);
+          tr.style.display = ok ? '' : 'none';
+          if (ok) shown++;
+        });
+        document.getElementById('jobcount').textContent = shown + ' shown';
+      });
+    });
+    document.querySelectorAll('#today div').forEach(item => {
+      item.addEventListener('click', () => {
+        document.querySelectorAll('#today div').forEach(x => x.classList.remove('active'));
+        item.classList.add('active');
+        status.textContent = 'today focus · ' + item.textContent.trim();
+      });
+    });
+    cmd.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const line = cmd.value.trim();
+        if (!line) return;
+        run(line);
+        cmd.value = '';
+      }
+      if (e.key === 'Escape') cmd.value = '';
+    });
+    window.addEventListener('keydown', (e) => {
+      if (document.activeElement === cmd) return;
+      const rows = [...document.querySelectorAll('#jobs tbody tr')].filter(r => r.style.display !== 'none');
+      let i = rows.findIndex(r => r.classList.contains('active'));
+      if (e.key === 'j') { i = Math.min(rows.length - 1, i + 1); selectRow(rows[i]); }
+      if (e.key === 'k') { i = Math.max(0, i - 1); selectRow(rows[i]); }
+      if (e.key === 'p') run('pursue ' + (rows[i]?.dataset.id || 'job_acme') + ' --agent hermes');
+      if (e.key === 'd') run('daily --profile pm-edtech');
+      if (e.key === ':') { e.preventDefault(); cmd.focus(); }
+      if (e.key === '/') { e.preventDefault(); document.querySelector('.filter[data-f="high"]').click(); }
+    });
+    bindCmdLinks();
+  </script>
+</body>
+</html>

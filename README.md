@@ -1,8 +1,8 @@
 # JobOS
 
-JobOS is a local-first CLI for discovering roles, researching companies and people, finding warm paths, preparing applications, and delegating structured work to local agents. SQLite is canonical; an agent-readable Markdown/YAML/JSONL mirror is written under `jobos-workspace/`.
+JobOS is a local-first, agent-native job application operating system. Its terminal product binds a real pipeline, job detail, review/log overlays, and an embedded guest-agent session to the same local state. SQLite is canonical; an agent-readable Markdown/YAML/JSONL mirror is written under `jobos-workspace/`.
 
-The default product is offline-capable and deterministic. Public web discovery, LLMs, local agents, and authenticated Playwright sessions are optional. External effects are disabled by default and occur only through an explicitly configured tool or a trusted browser script run with `--allow-side-effects`.
+The core product is offline-capable and deterministic. Public web discovery, LLMs, local agents, and authenticated Playwright sessions are optional. External effects are disabled by default and occur only through an explicitly configured tool or a trusted browser script run with `--allow-side-effects`.
 
 ## Requirements and install
 
@@ -13,6 +13,50 @@ The default product is offline-capable and deterministic. Public web discovery, 
 npm install
 npm run jobos -- --help
 ```
+
+### Optional Hermes ACP backend
+
+The embedded pane supports ACP protocol v1 and the current product drill is verified with **Hermes Agent 0.18.2**. Other versions were not exercised here; use `hermes acp --check` before launch. Install Hermes from the upstream Nous Research installer, then configure one model provider:
+
+```bash
+# Linux, macOS, or WSL2. Inspect the upstream script first if required by policy.
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+source ~/.bashrc
+
+# Choose one setup path. Provider credentials remain in Hermes' private config.
+hermes setup
+hermes setup --portal       # Nous Portal OAuth alternative
+hermes setup model          # provider/model section only
+hermes acp --version
+hermes acp --check
+```
+
+Hermes also accepts its documented provider environment variables. JobOS does not mirror credentials into `jobos-workspace/`; its ACP child environment is allowlisted and transcripts are redacted. If `hermes` is not on `PATH`, point JobOS at the ACP v1 executable without changing the workspace:
+
+```bash
+JOBOS_ACP_COMMAND=/absolute/path/to/hermes npm run tui -- --profile pm-edtech
+```
+
+Run provider setup in a trusted terminal before a headless session. A missing/unconfigured backend leaves the pipeline usable and shows reconnect guidance instead of substituting a fake agent.
+
+## Launch the terminal product
+
+```bash
+# Optional but recommended for the embedded live agent pane.
+hermes acp --check
+
+# Start the data-bound 011 terminal shell. The agent pane is on by default.
+npm run tui -- --profile pm-edtech
+
+# Useful for SSH checks, CI, or a host without an ACP backend.
+npm run jobos -- tui --profile pm-edtech --agent off
+npm run jobos -- tui --profile pm-edtech --snapshot --width 140 --height 42
+npm run jobos -- tui --profile pm-edtech --json
+```
+
+The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, `?`, and `v` open network, documents, answers, discovery, system, and profile surfaces. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+
+An empty workspace is valid: the shell gives profile/import commands rather than fabricated sample data. If Hermes is absent or crashes, pipeline navigation and direct JobOS actions remain available with a visible reconnect message.
 
 A browser is optional. Install it only when authenticated browser work is needed:
 
@@ -156,7 +200,24 @@ Answers are profile-scoped and may be `verified`, `unverified`, `stale`, or `ret
 
 ## Pluggable agents: Hermes, Codex, and compatible tools
 
-Built-in suggested manifests are available when their executables are installed:
+### Host, guest, and the two tool doors
+
+JobOS is the host and source of truth; it is not a general agent harness. `jobos tui` starts an ACP v1 client, launches the real `hermes acp` binary in the selected JobOS workspace, opens a multi-turn session, and attaches JobOS as a session-scoped MCP server. Hermes is the guest. The host sends only the selected job's IDs, fit, proof references, path, artifact metadata, next actions, and policy—not the database or browser secrets. ACP filesystem/terminal capabilities are disabled, permission requests are denied, subprocess environment variables are allowlisted, and streamed events/stderr are secret-redacted.
+
+```text
+interactive:  JobOS TUI -> ACP client -> Hermes guest -> session MCP -> domain-tools -> SQLite/workspace
+direct:       JobOS TUI/CLI ---------------------------> domain-tools -> SQLite/workspace
+external:     external agent -> jobos mcp ------------> domain-tools -> SQLite/workspace
+```
+
+Both doors expose the same domain semantics. Agent tool completions reload the authoritative database into list/detail; optimistic revisions reject colliding writers instead of silently merging them. External apply/send or human-confirmation attestations are denied in ACP/MCP mediation unless the operator explicitly enables `JOBOS_ALLOW_AGENT_ATTESTATION=1`. Drafts still default to `draft_needs_human_review`.
+
+Hermes ACP is the primary embedded backend. The System overlay reports the runtime capability matrix. An installed Codex app-server is detected honestly as a separate adapter that is not selected by this ACP client; it is not mislabeled as ACP. The structured subprocess runner below remains a noninteractive batch fallback, not the architecture of the agent pane.
+
+### Noninteractive batch agents
+
+
+Built-in batch manifests are available when their executables are installed:
 
 ```bash
 npm run jobos -- agents list --json
@@ -189,9 +250,16 @@ Generic `stdin-json` contract:
 }
 ```
 
-The process must exit `0` and write one JSON object to stdout. Missing executables, timeouts, non-zero exits, malformed/oversized output, and failed connection tests return typed `agent_error`; explicit agent selection never silently falls back to another provider. `--agent` overrides `JOBOS_AGENT`. Without either, existing HTTP LLM configuration remains available; without any provider, deterministic degraded mode remains.
+This batch process must exit `0` and write one JSON object to stdout. Missing executables, timeouts, non-zero exits, malformed/oversized output, and failed connection tests return typed `agent_error`; explicit agent selection never silently falls back to another provider. `--agent` overrides `JOBOS_AGENT` for batch workflow generation. Without either, existing HTTP LLM configuration remains available; without any provider, deterministic degraded mode remains.
 
-Agents that prefer tool orchestration can run `jobos mcp`. The MCP surface includes `daily_discovery`, `pursue_job`, and `answers_match` alongside the lower-level scoring, research, networking, tailoring, application, and scheduler tools.
+External agents can run `jobos mcp`. The server accepts standard Content-Length framing and ACP-session JSONL framing, and exposes `daily_discovery`, `pursue_job`, `answers_match`, selection/review/discovery reads, and the lower-level scoring, research, networking, tailoring, application, and scheduler tools through the same `domain-tools` facade.
+
+The repository includes a real external-client drill—not a tool-list unit test. It initializes `jobos mcp`, discovers the live tool catalog, calls `score_job` and `get_job_context`, closes the server, and verifies the same stored score:
+
+```bash
+npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/mcp-demo-transcript.jsonl
+```
 
 ## Authenticated Playwright profiles
 
@@ -211,6 +279,8 @@ npm run jobos -- browser cookies export work \
 ```
 
 Browser state stays under `.jobos/browser/` with private permissions and is never mirrored to `jobos-workspace/`. Cookie values never appear in command results, audit logs, or error messages. Login redirects, expired auth, blocked responses, CAPTCHA, timeouts, missing packages, and missing browser binaries have distinct typed failures and recovery commands. CAPTCHA bypass is not supported.
+
+On a headless VPS, the TUI, ACP session, CLI, discovery adapters, and external MCP server work without Chromium. A headed `browser login` does not: authenticate on a trusted machine and import an explicit storage-state file, or use a host with a display. Imported sessions can still expire or encounter MFA, CAPTCHA, bot defenses, or site changes; JobOS returns a typed failure and requires manual recovery rather than claiming success. The TUI System overlay deliberately reports browser support as optional/unavailable and never treats the embedded agent as a hidden browser login path.
 
 For site-specific inspection, autofill, or configured application actions, register a trusted local Playwright module:
 
@@ -292,6 +362,8 @@ npm run jobos -- agent-guide --json
 
 The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, MCP, API, and local dashboard—remains available for composition. Dashboard work is not the product focus.
 
+`jobos tui --json` exposes the same presentation model for machine inspection; `jobos tui --snapshot` renders the terminal shell without starting an agent process.
+
 ## Safety and honest limitations
 
 - Core state is local; there is no telemetry or required cloud sync.
@@ -301,7 +373,7 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
 - LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
-- A headed browser login needs a display. Headless hosts can import an existing storage-state file.
+- A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
 - Trusted browser scripts are not sandboxed.
 
 ## Verification
@@ -309,6 +381,14 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 ```bash
 npm test
 npm run smoke
+
+# Each demo requires one real local job in <dir>.
+npm run acp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/acp-demo-transcript.jsonl
+npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/mcp-demo-transcript.jsonl
 ```
 
-The test suite covers the established CLI/domain behavior plus routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.
+The ACP drill launches the installed backend, performs same-session tool turns, denies an applied-status policy probe, cancels a live turn, proves zero leaked post-cancel events, starts a clean recovery session, completes an exact `get_job_context` call, restarts again, checks a real deadline and missing-backend typing, and verifies sentinel redaction. Set a throwaway `JOBOS_LLM_API_KEY` value only when explicitly running the transcript-redaction probe; the summary reports whether that sentinel was configured and absent.
+
+The test suite covers the established CLI/domain behavior plus real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.

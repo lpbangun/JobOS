@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS · Terminal</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#0b0f14;--panel:#121920;--border:#2a3648;--text:#e2e8f0;--muted:#8794a8;
+      --accent:#5eead4;--agent:#c4b5fd;--ok:#86efac;--warn:#fbbf24;--focus:#162230;
+    }
+    body{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;background:#05070a;color:var(--text);min-height:100vh;padding:12px;font-size:12.5px;line-height:1.4}
+    .note{max-width:1200px;margin:0 auto 10px;font-family:system-ui,sans-serif;color:#9aa7b8;font-size:12px}
+    .app{max-width:1200px;margin:0 auto;border:1px solid var(--border);background:var(--bg);min-height:780px;display:grid;grid-template-rows:auto 1fr auto;position:relative;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+    header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);color:var(--muted);gap:10px;background:#0e141c}
+    header b{color:var(--accent);font-weight:600}
+    .pill{border:1px solid var(--border);padding:2px 8px;border-radius:999px;color:var(--muted);cursor:pointer}
+    .pill:hover,.pill.on{color:var(--accent);border-color:#2f6f68}
+    .workspace{display:grid;grid-template-columns:340px 1fr;min-height:0}
+    .workspace.agent-on{grid-template-columns:300px 1fr 320px}
+    .pane{border-right:1px solid var(--border);min-height:620px;overflow:auto}
+    .pane:last-child{border-right:none}
+    .list,.detail,.agent{padding:10px}
+    .agent{display:none;background:#0c1118}
+    .workspace.agent-on .agent{display:block}
+    .filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .filter{border:1px solid var(--border);color:var(--muted);padding:4px 8px;border-radius:999px;cursor:pointer;background:transparent;font:inherit}
+    .filter.on{color:var(--accent);border-color:#2f6f68;background:var(--focus)}
+    .job{padding:9px 8px;border:1px solid transparent;border-radius:8px;cursor:pointer;margin-bottom:2px}
+    .job:hover{background:var(--focus)}
+    .job.on{background:var(--focus);border-color:#35506b}
+    .job .t{display:flex;justify-content:space-between;gap:8px}
+    .job .m{color:var(--muted);margin-top:3px;font-size:11.5px}
+    .muted{color:var(--muted)}
+    h2{font-size:13px;font-weight:600;margin-bottom:8px}
+    .block{border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px;background:var(--panel)}
+    .actions{display:flex;flex-wrap:wrap;gap:6px}
+    .btn{border:1px solid var(--border);background:#15202b;color:var(--text);border-radius:7px;padding:6px 9px;font:inherit;cursor:pointer}
+    .btn:hover{border-color:var(--accent);color:var(--accent)}
+    .btn.primary{border-color:#2f6f68;color:var(--accent)}
+    .btn.ghost{background:transparent;color:var(--muted)}
+    footer{border-top:1px solid var(--border);padding:8px 12px;display:flex;justify-content:space-between;gap:8px;color:var(--muted);flex-wrap:wrap;background:#0e141c}
+    kbd{border:1px solid #2c4a5f;padding:0 5px;border-radius:4px;color:var(--accent);margin-right:2px}
+    .cmd{display:none;border-top:1px solid var(--border);padding:8px 12px;gap:8px;align-items:center;background:#0a1017}
+    .cmd.open{display:flex}
+    .cmd input{flex:1;background:transparent;border:1px solid var(--border);color:var(--text);font:inherit;padding:7px 8px;border-radius:8px;outline:none}
+    .cmd input:focus{border-color:#3d5a78}
+    .overlay{position:absolute;inset:0;background:rgba(5,8,12,.78);display:none;align-items:center;justify-content:center;padding:20px;z-index:5}
+    .overlay.open{display:flex}
+    .modal{width:min(720px,100%);max-height:80vh;overflow:auto;background:#10161f;border:1px solid #334155;border-radius:12px;padding:14px;box-shadow:0 20px 50px rgba(0,0,0,.5)}
+    .modal h3{margin-bottom:8px;color:var(--accent);font-weight:600}
+    .msg{border:1px solid var(--border);border-radius:10px;padding:8px;margin-bottom:8px;background:var(--panel)}
+    .msg .who{color:var(--agent);font-size:11px;margin-bottom:4px}
+    textarea{width:100%;min-height:52px;background:#0a1017;border:1px solid var(--border);color:var(--text);font:inherit;padding:8px;border-radius:8px;outline:none;resize:vertical}
+    .loader{display:none;align-items:center;gap:8px;color:var(--muted)}
+    .bar{width:80px;height:3px;background:#1e293b;overflow:hidden;border-radius:2px}
+    .bar>i{display:block;height:100%;width:45%;background:linear-gradient(90deg,transparent,var(--accent),transparent);animation:slide 1s linear infinite}
+    @keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(260%)}}
+    .pulse{color:var(--accent)}
+    .doc-line{padding:6px 0;border-bottom:1px solid #1a2430;cursor:pointer}
+    .doc-line:hover,.doc-line.on{color:var(--accent)}
+    .toast{position:fixed;right:16px;bottom:16px;background:#12352f;border:1px solid #2f6f68;color:#b2f5ea;padding:8px 10px;border-radius:8px;display:none;z-index:9}
+    .row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid #1a2430}
+  </style>
+</head>
+<body>
+  <div class="note"><b>Style 2 · Terminal / prior renders</b> — teal accent, JetBrains Mono, dark panels. Same structure as 006/008.</div>
+  <div class="app">
+    <header>
+      <div><b>jobos</b> <span class="pill" id="profile">pm-edtech ▾</span></div>
+      <div class="loader" id="loader"><span class="pulse">working</span><span class="bar"><i></i></span></div>
+      <div>
+        <span class="pill" id="btn-review">review 4</span>
+        <span class="pill" id="btn-agent">agent</span>
+        <span class="pill" id="btn-sys">system</span>
+        <span class="muted"> effects off</span>
+      </div>
+    </header>
+    <div class="workspace" id="ws">
+      <section class="pane list">
+        <div class="filters">
+          <button class="filter on" data-f="today">Today</button>
+          <button class="filter" data-f="all">All</button>
+          <button class="filter" data-f="review">Review</button>
+          <button class="filter" data-f="materials">Materials</button>
+          <button class="filter" data-f="applied">Applied</button>
+          <button class="filter" data-f="interview">Interview</button>
+        </div>
+        <div id="jobs"></div>
+      </section>
+      <section class="pane detail">
+        <div class="block">
+          <div class="muted" style="margin-bottom:4px">Selected</div>
+          <h2 id="d-title">—</h2>
+          <div class="muted" id="d-sub"></div>
+        </div>
+        <div class="block">
+          <div class="muted" style="margin-bottom:6px">Next</div>
+          <div id="d-next"></div>
+        </div>
+        <div class="actions" id="d-actions"></div>
+        <div id="review-panel" class="block" style="display:none;margin-top:12px">
+          <div class="muted" style="margin-bottom:8px">Review queue</div>
+          <div id="review-list"></div>
+        </div>
+      </section>
+      <section class="pane agent" id="agent">
+        <h2>Agent</h2>
+        <div id="msgs"></div>
+        <textarea id="input" placeholder="Steer selected job…"></textarea>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn primary" id="send">Send</button>
+          <button class="btn ghost" id="hide-agent">Hide</button>
+        </div>
+      </section>
+    </div>
+    <div class="cmd" id="cmdbar"><span style="color:var(--accent)">:</span><input id="cmd" placeholder="pursue · daily · …" /><button class="btn" id="runcmd">run</button></div>
+    <footer>
+      <div><kbd>j/k</kbd>list <kbd>a</kbd>agent <kbd>r</kbd>review <kbd>:</kbd>cmd <kbd>n</kbd>network <kbd>o</kbd>docs <kbd>s</kbd>sources <kbd>?</kbd>system <kbd>p</kbd>/<kbd>d</kbd></div>
+      <div id="status">ready</div>
+    </footer>
+    <div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/_picked-shell.js"></script>
+</body>
+</html>
