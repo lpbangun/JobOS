@@ -50,10 +50,10 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- `npm test`: re-verified after readiness rebase onto PR #6 main (see readiness suite below).
+- `npm test`: **118/118 passed** after readiness rebase onto PR #6 main (ACP host + domain-tools + readiness suite).
 - `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
-- Real external MCP drill: initialize, 30-tool list, `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
+- Real external MCP drill: initialize, 31-tool list (includes `applications_plan`), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
