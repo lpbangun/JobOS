@@ -97,13 +97,19 @@
       rp.style.display = state.review ? 'block' : 'none';
       if (state.review) {
         $('review-list').innerHTML = [
-          'resume-job_acme.md · draft',
-          'interview-hm-acme.md · draft',
-          'outreach-jane.md · draft only',
-          'cover-lumen.md · draft',
-        ].map((x) => `<div class="doc-line" data-doc="1">${x}</div>`).join('');
+          { text: 'resume-job_acme.md · draft', job: 'acme', artifact: 'resume-job_acme.md' },
+          { text: 'interview-hm-acme.md · draft', job: 'acme', artifact: 'interview-hm-acme.md' },
+          { text: 'outreach-jane.md · draft only', job: 'acme', artifact: 'outreach-jane.md' },
+          { text: 'cover-lumen.md · draft', job: 'lumen', artifact: 'cover-lumen.md' },
+        ].map((x) => `<div class="doc-line" data-job="${x.job}" data-artifact="${x.artifact}">${x.text}</div>`).join('');
         $('review-list').querySelectorAll('.doc-line').forEach((n) => {
-          n.onclick = () => openOverlay('docs');
+          n.onclick = () => {
+            state.selected = n.dataset.job;
+            render();
+            const list = docs[state.selected] || [];
+            const idx = Math.max(0, list.findIndex((d) => d.name === n.dataset.artifact));
+            openOverlay('docs', { idx });
+          };
         });
       }
     }

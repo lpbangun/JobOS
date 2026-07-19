@@ -93,7 +93,7 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
   const resume = artifactState(artifacts.get('resume'), proofIds, { required: true });
   const coverLetter = artifactState(artifacts.get('cover_letter'), proofIds, { required: false });
   const score = parseJson(job.score_json, null);
-  const scoreAvailable = Number.isFinite(Number(job.fit_score)) && score && typeof score === 'object';
+  const scoreAvailable = job.fit_score != null && Number.isFinite(Number(job.fit_score)) && score && typeof score === 'object';
   const answers = inspectApplicationQuestions(s, { jobId, profileId });
   const application = one(s, 'SELECT id,status,notes,updated_at FROM applications WHERE job_id=? AND profile_id=?', [jobId, profileId]);
   const duplicates = possibleDuplicateApplications(s, job);

@@ -383,8 +383,13 @@ export class AcpClient extends EventEmitter {
     if (!this.child || !this.child.stdin.writable) return false;
     const message = { jsonrpc: '2.0', method, params };
     this.recordFrame('client_to_agent', message);
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
-    return true;
+    try {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`);
+      return true;
+    } catch (error) {
+      this.emit('event', { type: 'client_write_failed', method, cause: error?.code || error?.message });
+      return false;
+    }
   }
 
   async prompt(text, { context = null, timeoutMs = this.promptTimeoutMs } = {}) {
@@ -521,14 +526,22 @@ export class AcpClient extends EventEmitter {
     if (!this.child?.stdin.writable) return;
     const message = { jsonrpc: '2.0', id, result };
     this.recordFrame('client_to_agent', message);
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    try {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      this.emit('event', { type: 'client_write_failed', method: 'response', cause: error?.code || error?.message });
+    }
   }
 
   respondError(id, code, message) {
     if (!this.child?.stdin.writable) return;
     const payload = { jsonrpc: '2.0', id, error: { code, message } };
     this.recordFrame('client_to_agent', payload);
-    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+    try {
+      this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+    } catch (error) {
+      this.emit('event', { type: 'client_write_failed', method: 'response_error', cause: error?.code || error?.message });
+    }
   }
 
   onProcessError(error) {

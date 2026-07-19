@@ -27,7 +27,7 @@ export function startMcp(s, { input = process.stdin } = {}) {
   let buffer = Buffer.alloc(0);
   let queue = Promise.resolve();
   const dispatch = (line, framing) => {
-    queue = queue.then(() => handleLine(s, line, message => send(message, framing)));
+    queue = queue.then(() => handleLine(s, line, message => send(message, framing))).catch(() => {});
   };
   input.on('data', chunk => {
     buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))]);

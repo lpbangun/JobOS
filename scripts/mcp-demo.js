@@ -201,7 +201,7 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
 
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
-  if (!flags.job) throw new Error('Missing --job <job-id>');
+  if (typeof flags.job !== 'string' || !flags.job) throw new Error('Missing --job <job-id>');
   const summary = await runMcpDemo({
     workspace: flags.workspace,
     profileId: flags.profile || null,

@@ -38,7 +38,7 @@ function stageState(s, context) {
     { name: 'network', state: done(Boolean(context.path)) },
     { name: 'answers', state: done(audits.has('application.questions.prepared')) },
     { name: 'resume', state: types.has('resume') ? 'draft' : 'empty' },
-    { name: 'cover', state: types.has('cover') ? 'draft' : 'empty' },
+    { name: 'cover', state: types.has('cover_letter') ? 'draft' : 'empty' },
     { name: 'application', state: application ? application : 'empty' },
     { name: 'outreach', state: types.has('outreach') ? 'draft' : 'empty' },
     { name: 'interview', state: types.has('interview_prep') ? 'draft' : 'empty' }

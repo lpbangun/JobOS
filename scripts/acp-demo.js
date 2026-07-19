@@ -63,7 +63,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
   let restartDetails;
   let processDetails;
   try {
-    const connected = await client.connect({ mcpServers: [jobosMcpServer(root)] });
+    const connected = await client.connect({ mcpServers: [jobosMcpServer(root, { allowAgentAttestation: false })] });
     processDetails = connected.process;
     append(records, 'connected', { connected });
     primarySessionId = client.sessionId;
@@ -256,6 +256,9 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
 
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
+  if (flags.job && typeof flags.job !== 'string') throw new Error('Missing --job <job-id>');
+  if (flags.profile && typeof flags.profile !== 'string') throw new Error('Missing --profile <profile-id>');
+  if (flags.workspace && typeof flags.workspace !== 'string') throw new Error('Missing --workspace <dir>');
   const summary = await runAcpDemo({
     workspace: flags.workspace,
     profileId: flags.profile || null,

@@ -174,7 +174,7 @@ export function inspectApplicationQuestions(s, { jobId, profileId }) {
   if (job.profile_id !== profileId) throw domainError('profile_job_mismatch', `Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`);
   const matched = matchAnswers(s, { profileId, questions: applicationQuestions(job), employer: job.company });
   const restrictedRows = all(s, `SELECT * FROM answers
-    WHERE profile_id=? AND verification_status='verified' AND sensitivity='restricted' AND reuse_scope='never_auto_fill' AND source_ref=?`, [profileId, `job:${jobId}`]);
+    WHERE profile_id=? AND verification_status='verified' AND sensitivity='restricted' AND reuse_scope='never_auto_fill' AND employer=?`, [profileId, `job:${jobId}`]);
   const directByFingerprint = new Map(restrictedRows.map(row => [row.question_fingerprint, row]));
   const questions = matched.questions.map(item => {
     if (item.status === 'matched') {

@@ -315,7 +315,7 @@
         <div class="doc-layout">
           <div class="doc-nav">${arts.map((a, idx) =>
             `<div class="doc-item ${idx === i ? 'on' : ''}" data-i="${idx}">${a.name}<div class="muted">${a.status}</div></div>`).join('')}</div>
-          <pre class="doc-body">${bodies[arts[i].name] || 'No preview.'}</pre>
+          <pre class="doc-body">${bodies[arts[i].name] || arts[i].body || 'No preview.'}</pre>
         </div>
         <div class="actions"><button class="btn" id="x-close">Close</button></div>`;
     } else if (kind === 'discovery') {
@@ -348,11 +348,15 @@
         <div class="actions"><button class="btn ghost" id="x-close">Close</button></div>`;
     } else if (kind === 'review') {
       html = `<h3>Review queue · ${reviewItems.length}</h3>
-        ${reviewItems.map((r) => `
-          <div class="ov-card review-row" data-job="${r.job}" data-doc="1" style="cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center">
+        ${reviewItems.map((r) => {
+          const job = jobs.find((j) => j.id === r.job);
+          const idx = job ? Math.max(0, job.artifacts.findIndex((a) => a.name === r.name)) : 0;
+          return `
+          <div class="ov-card review-row" data-job="${r.job}" data-doc="${idx}" style="cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center">
             <div><b>${r.name}</b><div class="muted">${r.status} · ${r.job}</div></div>
             <span class="muted">open →</span>
-          </div>`).join('')}
+          </div>`;
+        }).join('')}
         <div class="actions" style="margin-top:10px"><button class="btn ghost" id="x-close">Close</button></div>`;
     } else if (kind === 'log') {
       html = `<h3>Event log</h3>
@@ -386,7 +390,7 @@
       row.onclick = () => {
         state.selected = row.dataset.job;
         render();
-        openOverlay('docs');
+        openOverlay('docs', Number(row.dataset.doc));
       };
     });
   }
