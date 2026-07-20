@@ -108,7 +108,7 @@ export function currentArtifacts(s, { jobId = null, profileId = null, types = nu
   const params = [];
   if (jobId) { where.push('artifacts.job_id=?'); params.push(jobId); }
   if (profileId) { where.push('artifacts.profile_id=?'); params.push(profileId); }
-  if (types?.length) {
+  if (Array.isArray(types) && types.length > 0) {
     where.push(`artifacts.type IN (${types.map(() => '?').join(',')})`);
     params.push(...types);
   }

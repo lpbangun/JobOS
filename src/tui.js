@@ -810,14 +810,19 @@ export class JobosTui {
 
   onInputKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
-    if ((this.state.mode === 'approve-confirm' || this.state.mode === 'reject-confirm') && value === 'y') {
-      void this.commitArtifactReview(this.state.mode === 'approve-confirm' ? 'approved' : 'rejected');
-      return true;
-    }
-    if ((this.state.mode === 'approve-confirm' || this.state.mode === 'reject-confirm') && value === 'n') {
-      this.state.mode = 'normal';
-      this.state.input = '';
-      this.state.status = 'review decision cancelled';
+    if (this.state.mode === 'approve-confirm' || this.state.mode === 'reject-confirm') {
+      if (value === 'y') {
+        void this.commitArtifactReview(this.state.mode === 'approve-confirm' ? 'approved' : 'rejected');
+        return true;
+      }
+      if (value === 'n') {
+        this.state.mode = 'normal';
+        this.state.input = '';
+        this.state.status = 'review decision cancelled';
+        this.render();
+        return true;
+      }
+      // Ignore other keys (Enter, backspace, etc.) so they do not silently cancel the confirmation.
       this.render();
       return true;
     }

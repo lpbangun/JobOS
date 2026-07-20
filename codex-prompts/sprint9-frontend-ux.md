@@ -5,11 +5,10 @@
 You are working in the JobOS repo (`/home/logani/projects/Job App`). Read first:
 
 - `ideal-agent-native-job-application-app.md` — the product vision; JobOS is agent-native: every capability must be equally usable by a human and by an external agent (Claude Code, Hermes, OpenClaw, etc.).
-- `jobos-dashboard-uiux-handoff.md` — prior UI/UX thinking for the web dashboard.
-- `src/cli.js`, `src/web.js`, `src/api.js`, `src/mcp.js`, `src/workspace.js` — the four existing surfaces (CLI, web dashboard, HTTP API, MCP) plus the file workspace. These are the incumbents you are evaluating.
+- `src/cli.js`, `src/tui.js`, `src/mcp.js`, `src/workspace.js` — the existing surfaces (CLI, TUI, MCP) plus the file workspace. These are the incumbents you are evaluating.
 - `BUILD_PROGRESS.md` and `AGENTS.md` — history and conventions.
 
-Working hypothesis (test it, don't just accept it): the primary frontend should be a **full-featured CLI** — like Hermes CLI, which started CLI-only and grew a GUI only after traction — because a CLI is the surface every human can test each feature on directly AND every agent can drive via its own harness. The web dashboard becomes a read-mostly companion, not the primary UX.
+Working hypothesis (test it, don't just accept it): the primary frontend should be a **full-featured CLI plus TUI** — like Hermes CLI, which started CLI-only and grew a GUI only after traction — because the CLI and TUI are the surfaces every human can test each feature on directly AND every agent can drive via its own harness. There is no web dashboard in the current MVP; any future GUI should layer on top of the same command registry.
 
 ## Hard constraints (binding)
 
@@ -24,12 +23,12 @@ Working hypothesis (test it, don't just accept it): the primary frontend should 
 Work through these goals in order. After each goal: run `npm test`, fix regressions, commit with a clear message, append a dated line to `BUILD_PROGRESS.md`, then proceed. Do not move on with failing tests.
 
 ### Goal 1 — Analysis of the current approach
-- Audit every command in `src/cli.js` and every feature in `src/web.js`/`src/api.js`/`src/mcp.js`. Produce `docs/frontend-audit.md`: a feature × surface matrix (CLI / API / MCP / web / workspace files), noting gaps, inconsistencies (naming, flags, output formats), features missing `--json`, commands that can block an agent, and anything OS-specific.
+- Audit every command in `src/cli.js` and every feature in `src/tui.js`/`src/mcp.js`. Produce `docs/frontend-audit.md`: a feature × surface matrix (CLI / TUI / MCP / workspace files), noting gaps, inconsistencies (naming, flags, output formats), features missing `--json`, commands that can block an agent, and anything OS-specific.
 - Score the current CLI against a usability rubric you define: discoverability (`--help` quality), consistency, scriptability, agent-drivability, error messages, first-run experience.
 
 ### Goal 2 — Research & options
 - Study 3–5 exemplar CLIs known for great UX and agent-friendliness (e.g. `gh`, `git`, Hermes CLI, `kubectl`, Claude Code itself) plus the clig.dev guidelines. Extract concrete patterns: noun-verb command grammar, `--json`/`--jq`-style output, exit-code conventions, config precedence, shell completion, TTY-aware output.
-- Write `docs/frontend-options.md` comparing at least three architectures: (a) CLI-primary with web as companion, (b) TUI-first, (c) web-first with CLI wrapper. Evaluate each against: human testability of every feature, agent connectability (any agent with shell access can drive it), maintenance cost, cross-OS story. End with a decision and rationale. If the evidence contradicts the CLI-primary hypothesis, say so and justify the alternative.
+- Write `docs/frontend-options.md` comparing at least three architectures: (a) CLI-primary, (b) TUI-first, (c) CLI+TUI hybrid. Evaluate each against: human testability of every feature, agent connectability (any agent with shell access can drive it), maintenance cost, cross-OS story. End with a decision and rationale. If the evidence contradicts the CLI+TUI hypothesis, say so and justify the alternative.
 
 ### Goal 3 — Plan
 - Turn the decision into `docs/frontend-plan.md`: target command grammar (full command tree), global flags (`--json`, `--quiet`, `--profile`, `--workspace`), output contract (human table vs JSON schema per command), error/exit-code convention, deprecation path for any renamed commands (old names alias with warning for one sprint), and the built-in loop design (`jobos loop`/watch mode semantics, how it delegates to the scheduler, ctrl-C behavior, `--max-iterations`, JSONL event output for agents).

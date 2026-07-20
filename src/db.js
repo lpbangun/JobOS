@@ -113,6 +113,7 @@ function legacyArtifactSeries(row) {
   if (row.type === 'followup') {
     let evidence = [];
     try { evidence = JSON.parse(row.evidence_json || '[]'); } catch {}
+    if (!Array.isArray(evidence)) evidence = [];
     const taskId = evidence.find(item => item && typeof item === 'object' && item.taskId)?.taskId;
     if (taskId) return `followup:${taskId}`;
   }
@@ -126,7 +127,14 @@ function migrateArtifacts(db) {
     LEFT JOIN outreach_threads ON outreach_threads.artifact_id=artifacts.id
     LEFT JOIN applications ON applications.job_id=artifacts.job_id AND applications.profile_id=artifacts.profile_id
     ORDER BY artifacts.created_at,artifacts.id`);
-  const needsBackfill = rows.some(row => !row.series_key || Number(row.revision) < 1 || !row.content_hash);
+  // outreach_threads.artifact_id is not UNIQUE, so a single artifact can appear multiple times.
+  const seen = new Set();
+  const uniqueRows = rows.filter(row => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+  const needsBackfill = uniqueRows.some(row => !row.series_key || Number(row.revision) < 1 || !row.content_hash);
   if (!needsBackfill) {
     db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_series_revision ON artifacts(series_key,revision)');
     db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_supersedes ON artifacts(supersedes_artifact_id) WHERE supersedes_artifact_id IS NOT NULL');
@@ -134,7 +142,7 @@ function migrateArtifacts(db) {
     return;
   }
   const bySeries = new Map();
-  for (const row of rows) {
+  for (const row of uniqueRows) {
     const seriesKey = row.series_key || legacyArtifactSeries(row);
     if (!bySeries.has(seriesKey)) bySeries.set(seriesKey, []);
     bySeries.get(seriesKey).push({ ...row, seriesKey });
@@ -305,7 +313,11 @@ function persistLocked(s) {
 function flushPostCommit(s) {
   const projections = s.postCommitProjections || [];
   s.postCommitProjections = [];
-  for (const project of projections) project();
+  const errors = [];
+  for (const project of projections) {
+    try { project(); } catch (e) { errors.push(e); }
+  }
+  if (errors.length) throw errors[0];
 }
 
 export async function openStore(flags={}) {
