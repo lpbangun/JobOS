@@ -1,7 +1,7 @@
 import path from 'node:path';
-import { one, all, run, save, audit } from './db.js';
-import { id, now, parseJson, slug, tokenize } from './utils.js';
-import { writeMd } from './workspace.js';
+import { one, all } from './db.js';
+import { now, parseJson, slug, tokenize } from './utils.js';
+import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 
@@ -132,11 +132,19 @@ export async function prepInterview(s, applicationId, stage = 'interview') {
   if (!content) content = fallbackPacket({ job, prof, app, stage, proofs, company, stakeholders });
   const safeStage = slug(stage);
   const rel = path.join('jobs', job.id, 'artifacts', `interview-prep-${safeStage}.md`);
-  writeMd(path.join(s.p.ws, rel), content);
-  const aid = id('artifact', `interview:${applicationId}:${stage}:${at}`);
   const evidence = proofs.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, metrics: p.metrics }));
-  run(s, 'INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?)', [aid, job.id, prof.id, 'interview_prep', rel, `Interview prep: ${stage} for ${job.title}`, content, JSON.stringify(evidence), JSON.stringify([]), 'draft_needs_human_review', at]);
-  audit(s, 'interview_prep.created', 'artifact', aid, { jobId: job.id, applicationId, profileId: prof.id, stage, path: rel });
-  save(s);
-  return { id: aid, applicationId, jobId: job.id, profileId: prof.id, stage, path: rel, approvalStatus: 'draft_needs_human_review', note: 'Interview prep packet created for human review.' };
+  const artifact = createArtifact(s, {
+    jobId: job.id,
+    profileId: prof.id,
+    type: 'interview_prep',
+    path: rel,
+    title: `Interview prep: ${stage} for ${job.title}`,
+    content,
+    evidence,
+    warnings: [],
+    series: { kind: 'interview_prep', applicationId, stage },
+    auditAction: 'interview_prep.created',
+    auditPayload: { applicationId, stage }
+  });
+  return { ...artifact, applicationId, jobId: job.id, profileId: prof.id, stage, note: 'Interview prep packet created for human review.' };
 }

@@ -6,6 +6,7 @@ import { getStakeholder } from './research.js';
 import { generateJson, llmConfig } from './llm.js';
 import { syncJob } from './jobs.js';
 import { contactSummaryForPlan } from './research/contacts.js';
+import { createArtifact } from './artifacts.js';
 
 const sentChannels = new Set(['email', 'linkedin', 'other']);
 const pausedApplicationStatuses = new Set(['interview', 'offer', 'rejected']);
@@ -383,17 +384,28 @@ function baseWarnings({ stakeholder, app, contact = null }) {
 }
 
 function saveOutreachArtifact(s, { job, profile, stakeholder, goal, content, evidence, warnings, subject, mode }) {
-  const at = now();
   const rel = path.join('jobs', job.id, 'outreach', `${stakeholder.id}-${goal}.md`);
-  const aid = id('artifact', `outreach:${job.id}:${profile.id}:${stakeholder.id}:${goal}:${at}`);
-  writeMd(path.join(s.p.ws, rel), content);
-  run(s, 'INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?)', [aid, job.id, profile.id, 'outreach', rel, `Outreach draft to ${stakeholder.name}`, content, JSON.stringify(evidence), JSON.stringify(warnings), 'draft_needs_human_review', at]);
-  const tid = id('thread', `outreach:${aid}`);
-  run(s, 'INSERT INTO outreach_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [tid, aid, job.id, profile.id, stakeholder.id, goal, '', 'drafted', null, null, null, '', at, at]);
-  audit(s, 'outreach.draft.created', 'artifact', aid, { jobId: job.id, profileId: profile.id, stakeholderId: stakeholder.id, path: rel, goal, subject, mode, approvalStatus: 'draft_needs_human_review' });
+  let threadId = null;
+  const artifact = createArtifact(s, {
+    jobId: job.id,
+    profileId: profile.id,
+    type: 'outreach',
+    path: rel,
+    title: `Outreach draft to ${stakeholder.name}`,
+    content,
+    evidence,
+    warnings,
+    series: { kind: 'outreach', stakeholderId: stakeholder.id, goal },
+    auditAction: 'outreach.draft.created',
+    auditPayload: { stakeholderId: stakeholder.id, goal, subject, mode },
+    mutate: (store, created) => {
+      const at = created.createdAt;
+      threadId = id('thread', `outreach:${created.id}`);
+      run(store, 'INSERT INTO outreach_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [threadId, created.id, job.id, profile.id, stakeholder.id, goal, '', 'drafted', null, null, null, '', at, at]);
+    }
+  });
   syncOutreachThreads(s, job.id);
-  save(s);
-  return { id: aid, threadId: tid, path: rel, approvalStatus: 'draft_needs_human_review', warnings, subject, mode };
+  return { ...artifact, threadId, warnings, subject, mode };
 }
 
 function resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planId = null, contactId = null }) {

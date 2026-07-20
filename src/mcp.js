@@ -1,15 +1,15 @@
 import { callDomainTool, DOMAIN_TOOLS } from './domain-tools.js';
 import { reload } from './db.js';
 
-const tools = DOMAIN_TOOLS;
+const MUTATION_DENY = new Set(['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
+const tools = DOMAIN_TOOLS.filter(t => !MUTATION_DENY.has(t.name));
 
 function result(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
 }
 
 async function callTool(s, name, args = {}) {
-  const source = String(process.env.JOBOS_MEDIATION || 'mcp');
-  return result(await callDomainTool(s, name, args, { source }));
+  return result(await callDomainTool(s, name, args, { source: 'mcp' }));
 }
 
 function send(message, framing = 'header') {

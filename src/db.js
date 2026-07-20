@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
 import { id, now, paths, workspaceRoot } from './utils.js';
@@ -21,7 +22,7 @@ CREATE TABLE IF NOT EXISTS company_watchlist (id TEXT PRIMARY KEY, company TEXT 
 CREATE TABLE IF NOT EXISTS stakeholders (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', links_json TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', outreach_status TEXT NOT NULL DEFAULT 'not_contacted', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, status TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', confirmation_url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(job_id,profile_id));
 CREATE TABLE IF NOT EXISTS status_changes (id TEXT PRIMARY KEY, application_id TEXT NOT NULL, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, type TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', approval_status TEXT NOT NULL DEFAULT 'draft_needs_human_review', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, type TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', approval_status TEXT NOT NULL DEFAULT 'draft_needs_human_review' CHECK(approval_status IN ('draft_needs_human_review','approved','rejected')), created_at TEXT NOT NULL, series_key TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), supersedes_artifact_id TEXT, content_hash TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT, review_note TEXT NOT NULL DEFAULT '', UNIQUE(series_key,revision), FOREIGN KEY(supersedes_artifact_id) REFERENCES artifacts(id));
 CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -33,7 +34,61 @@ CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, action_id TEXT NOT NULL, schedule TEXT NOT NULL, profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_run', consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, trigger_name TEXT NOT NULL, inputs_json TEXT NOT NULL DEFAULT '{}', outputs_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, external_side_effects TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL, automation_id TEXT, action_id TEXT, trigger_type TEXT NOT NULL DEFAULT 'manual', started_at TEXT, finished_at TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT, counts_json TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', external_side_effect TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL);`;
+CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', external_side_effect TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS application_packets (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  content_hash TEXT NOT NULL,
+  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'),
+  readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+  resume_artifact_id TEXT NOT NULL,
+  resume_content_hash TEXT NOT NULL,
+  cover_artifact_id TEXT,
+  cover_content_hash TEXT,
+  answers_json TEXT NOT NULL DEFAULT '[]',
+  identity_json TEXT NOT NULL DEFAULT '{}',
+  materials_json TEXT NOT NULL DEFAULT '{}',
+  blockers_json TEXT NOT NULL DEFAULT '[]',
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')),
+  supersedes_packet_id TEXT,
+  UNIQUE(job_id, profile_id, attempt_number, revision),
+  CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR
+        (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets(id)
+);
+CREATE INDEX IF NOT EXISTS application_packets_target_idx
+  ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC);
+CREATE TABLE IF NOT EXISTS application_receipts (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')),
+  submitted_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  external_reference TEXT NOT NULL DEFAULT '',
+  evidence_path TEXT NOT NULL DEFAULT '',
+  evidence_hash TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  receipt_hash TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
+  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'),
+  UNIQUE(packet_id, type),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id)
+);
+CREATE INDEX IF NOT EXISTS application_receipts_application_idx
+  ON application_receipts(application_id, recorded_at, id);`;
 
 function migrate(db){
   for (const sql of [
@@ -60,6 +115,13 @@ function migrate(db){
     "ALTER TABLE automation_runs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE automation_runs ADD COLUMN error TEXT",
     "ALTER TABLE automation_runs ADD COLUMN counts_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE artifacts ADD COLUMN series_key TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE artifacts ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE artifacts ADD COLUMN supersedes_artifact_id TEXT",
+    "ALTER TABLE artifacts ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE artifacts ADD COLUMN reviewed_at TEXT",
+    "ALTER TABLE artifacts ADD COLUMN reviewed_by TEXT",
+    "ALTER TABLE artifacts ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
     "CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}')",
     "CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -67,13 +129,105 @@ function migrate(db){
     "CREATE TABLE IF NOT EXISTS email_patterns (id TEXT PRIMARY KEY, company_id TEXT NOT NULL, domain TEXT NOT NULL, pattern TEXT NOT NULL, support_count INTEGER NOT NULL, support_sources_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id))"
+    "CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id))",
+    "CREATE TABLE IF NOT EXISTS application_packets (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, application_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number > 0), revision INTEGER NOT NULL CHECK(revision > 0), content_hash TEXT NOT NULL, readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'), readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3), resume_artifact_id TEXT NOT NULL, resume_content_hash TEXT NOT NULL, cover_artifact_id TEXT, cover_content_hash TEXT, answers_json TEXT NOT NULL DEFAULT '[]', identity_json TEXT NOT NULL DEFAULT '{}', materials_json TEXT NOT NULL DEFAULT '{}', blockers_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')), supersedes_packet_id TEXT, UNIQUE(job_id, profile_id, attempt_number, revision), CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(application_id) REFERENCES applications(id), FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets(id))",
+    "CREATE INDEX IF NOT EXISTS application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)",
+    "CREATE TABLE IF NOT EXISTS application_receipts (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, application_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')), submitted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, external_reference TEXT NOT NULL DEFAULT '', evidence_path TEXT NOT NULL DEFAULT '', evidence_hash TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', receipt_hash TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK(source IN ('cli','tui')), external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'), UNIQUE(packet_id, type), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(application_id) REFERENCES applications(id))",
+    "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)"
   ]) {
     try { db.run(sql); } catch (e) {
       const message = String(e?.message || e);
       if (!/duplicate column name/i.test(message) && !/already exists/i.test(message)) throw e;
     }
   }
+}
+function dbRows(db, sql, params = []) {
+  const statement = db.prepare(sql, params);
+  const rows = [];
+  try {
+    while (statement.step()) rows.push(statement.getAsObject());
+  } finally {
+    statement.free();
+  }
+  return rows;
+}
+
+function artifactContentHash(content) {
+  const value = String(content);
+  return crypto.createHash('sha256').update(value.endsWith('\n') ? value : `${value}\n`).digest('hex');
+}
+
+function legacyArtifactSeries(row) {
+  const jobId = row.job_id || 'none';
+  const profileId = row.profile_id || 'none';
+  if (row.type === 'resume' || row.type === 'cover_letter') return `${row.type}:${jobId}:${profileId}`;
+  if (row.type === 'outreach' && row.stakeholder_id) {
+    return `outreach:${jobId}:${profileId}:${row.stakeholder_id}:${encodeURIComponent(row.goal || 'informational')}`;
+  }
+  if (row.type === 'interview_prep' && row.application_id) {
+    const stage = String(row.path || '').match(/interview-prep-([^/]+)\.md$/)?.[1] || 'interview';
+    return `interview_prep:${row.application_id}:${stage}`;
+  }
+  if (row.type === 'followup') {
+    let evidence = [];
+    try { evidence = JSON.parse(row.evidence_json || '[]'); } catch {}
+    if (!Array.isArray(evidence)) evidence = [];
+    const taskId = evidence.find(item => item && typeof item === 'object' && item.taskId)?.taskId;
+    if (taskId) return `followup:${taskId}`;
+  }
+  return `legacy:${row.id}`;
+}
+
+function migrateArtifacts(db) {
+  const rows = dbRows(db, `SELECT artifacts.*,outreach_threads.stakeholder_id,outreach_threads.goal,
+      applications.id AS application_id
+    FROM artifacts
+    LEFT JOIN outreach_threads ON outreach_threads.artifact_id=artifacts.id
+    LEFT JOIN applications ON applications.job_id=artifacts.job_id AND applications.profile_id=artifacts.profile_id
+    ORDER BY artifacts.created_at,artifacts.id`);
+  // outreach_threads.artifact_id is not UNIQUE, so a single artifact can appear multiple times.
+  const seen = new Set();
+  const uniqueRows = rows.filter(row => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+  const needsBackfill = uniqueRows.some(row => !row.series_key || Number(row.revision) < 1 || !row.content_hash);
+  if (!needsBackfill) {
+    db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_series_revision ON artifacts(series_key,revision)');
+    db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_supersedes ON artifacts(supersedes_artifact_id) WHERE supersedes_artifact_id IS NOT NULL');
+    db.run('CREATE INDEX IF NOT EXISTS idx_artifacts_current ON artifacts(series_key,revision DESC)');
+    return;
+  }
+  const bySeries = new Map();
+  for (const row of uniqueRows) {
+    const seriesKey = row.series_key || legacyArtifactSeries(row);
+    if (!bySeries.has(seriesKey)) bySeries.set(seriesKey, []);
+    bySeries.get(seriesKey).push({ ...row, seriesKey });
+  }
+  for (const items of bySeries.values()) {
+    let predecessor = null;
+    let revision = 0;
+    for (const item of items) {
+      revision += 1;
+      const reviewed = ['approved', 'rejected'].includes(item.approval_status);
+      db.run(`UPDATE artifacts SET series_key=?,revision=?,supersedes_artifact_id=?,content_hash=?,
+        reviewed_at=COALESCE(reviewed_at,?),reviewed_by=COALESCE(reviewed_by,?),review_note=COALESCE(review_note,'')
+        WHERE id=?`, [
+        item.seriesKey,
+        revision,
+        predecessor,
+        item.content_hash || artifactContentHash(item.content),
+        reviewed ? item.created_at : null,
+        reviewed ? 'legacy' : null,
+        item.id
+      ]);
+      predecessor = item.id;
+    }
+  }
+  db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_series_revision ON artifacts(series_key,revision)');
+  db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_supersedes ON artifacts(supersedes_artifact_id) WHERE supersedes_artifact_id IS NOT NULL');
+  db.run('CREATE INDEX IF NOT EXISTS idx_artifacts_current ON artifacts(series_key,revision DESC)');
 }
 
 function revisionOf(db) {
@@ -171,29 +325,20 @@ function migratePolicyPreferences(db) {
   }
 }
 
-export async function openStore(flags={}){
-  const r=workspaceRoot(flags), p=paths(r); mkdirs(p);
-  if(!SQL) SQL=await initSqlJs({ locateFile: f => path.join(path.dirname(require.resolve('sql.js')), f) });
-  const existed = fs.existsSync(p.db);
-  const db=existed ? new SQL.Database(fs.readFileSync(p.db)) : new SQL.Database();
-  const baseRevision = revisionOf(db);
-  let previousSchemaVersion = '0';
-  try { previousSchemaVersion = String(db.exec("SELECT value FROM meta WHERE key='schema_version'")[0]?.values?.[0]?.[0] || '0'); } catch {}
-  db.run(schema); migrate(db); migratePolicyPreferences(db); db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','6']);
-  const store={db,p,root:r,baseRevision}; seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '6') save(store);
-  return store;
-}
-export function reload(s){
-  if(!fs.existsSync(s.p.db)) return s;
+function loadAuthoritativeStore(s) {
+  if (!fs.existsSync(s.p.db)) return s;
   try { s.db.close(); } catch {}
   s.db = new SQL.Database(fs.readFileSync(s.p.db));
-  s.db.run(schema); migrate(s.db); migratePolicyPreferences(s.db); seedDefaultAutomations(s);
+  s.db.run(schema);
+  migrate(s.db);
+  migrateArtifacts(s.db);
+  migratePolicyPreferences(s.db);
+  seedDefaultAutomations(s);
   s.baseRevision = revisionOf(s.db);
   return s;
 }
-export function save(s){
-  const release = acquireWriteLock(s);
+
+function persistLocked(s) {
   let temp = null;
   try {
     const current = diskRevision(s.p.db);
@@ -220,16 +365,112 @@ export function save(s){
     s.baseRevision = next;
   } finally {
     if (temp) try { fs.unlinkSync(temp); } catch {}
-    release();
   }
 }
+
+function flushPostCommit(s) {
+  const projections = s.postCommitProjections || [];
+  s.postCommitProjections = [];
+  const errors = [];
+  for (const project of projections) {
+    try { project(); } catch (e) { errors.push(e); }
+  }
+  if (errors.length) throw errors[0];
+}
+
+export async function openStore(flags={}) {
+  const r=workspaceRoot(flags), p=paths(r); mkdirs(p);
+  if(!SQL) SQL=await initSqlJs({ locateFile: f => path.join(path.dirname(require.resolve('sql.js')), f) });
+  const existed = fs.existsSync(p.db);
+  const db=existed ? new SQL.Database(fs.readFileSync(p.db)) : new SQL.Database();
+  const baseRevision = revisionOf(db);
+  let previousSchemaVersion = '0';
+  try { previousSchemaVersion = String(db.exec("SELECT value FROM meta WHERE key='schema_version'")[0]?.values?.[0]?.[0] || '0'); } catch {}
+  db.run(schema);
+  migrate(db);
+  migrateArtifacts(db);
+  migratePolicyPreferences(db);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','8']);
+  const store={db,p,root:r,baseRevision,postCommitProjections:[]};
+  seedDefaultAutomations(store);
+  if (!existed || previousSchemaVersion !== '8') save(store);
+  return store;
+}
+
+export function reload(s) {
+  return loadAuthoritativeStore(s);
+}
+
+export function queuePostCommit(s, projection) {
+  if (typeof projection !== 'function') throw new TypeError('Post-commit projection must be a function');
+  if (!s.postCommitProjections) s.postCommitProjections = [];
+  s.postCommitProjections.push(projection);
+}
+
+export function save(s) {
+  const release = acquireWriteLock(s);
+  try {
+    persistLocked(s);
+  } catch (error) {
+    s.postCommitProjections = [];
+    throw error;
+  } finally {
+    release();
+  }
+  flushPostCommit(s);
+}
+
+export function guardedWrite(s, mutate) {
+  const release = acquireWriteLock(s);
+  let result;
+  try {
+    loadAuthoritativeStore(s);
+    s.db.run('BEGIN IMMEDIATE');
+    try {
+      result = mutate();
+      if (result && typeof result.then === 'function') throw new TypeError('guardedWrite mutation must be synchronous');
+      s.db.run('COMMIT');
+    } catch (error) {
+      try { s.db.run('ROLLBACK'); } catch {}
+      s.postCommitProjections = [];
+      throw error;
+    }
+    try {
+      persistLocked(s);
+    } catch (error) {
+      s.postCommitProjections = [];
+      loadAuthoritativeStore(s);
+      throw error;
+    }
+  } finally {
+    release();
+  }
+  flushPostCommit(s);
+  return result;
+}
+
 export function all(s, sql, params=[]){ const st=s.db.prepare(sql,params), rows=[]; try { while(st.step()) rows.push(st.getAsObject()); } finally { st.free(); } return rows; }
 export function one(s, sql, params=[]){ return all(s,sql,params)[0] || null; }
 export function run(s, sql, params=[]){ s.db.run(sql,params); }
-export function audit(s, action, type, eid, payload={}, side='none'){
+
+export function recordAudit(s, action, type, eid, payload={}, side='none') {
   const at=now(), aid=id('audit',`${action}:${type}:${eid}:${at}:${JSON.stringify(payload)}`);
   run(s,'INSERT INTO audit_log VALUES (?,?,?,?,?,?,?)',[aid,action,type,eid,JSON.stringify(payload),side,at]);
-  const evt={id:aid,action,entityType:type,entityId:eid,payload,externalSideEffect:side,createdAt:at};
-  fs.appendFileSync(path.join(s.p.ws,'audit.log.jsonl'),JSON.stringify(evt)+'\n');
-  const jid=payload.jobId || (type==='job'?eid:null); if(jid){const d=path.join(s.p.jobs,jid); fs.mkdirSync(d,{recursive:true}); fs.appendFileSync(path.join(d,'audit.log.jsonl'),JSON.stringify(evt)+'\n');}
+  return {id:aid,action,entityType:type,entityId:eid,payload,externalSideEffect:side,createdAt:at};
+}
+
+export function projectAudit(s, event) {
+  fs.appendFileSync(path.join(s.p.ws,'audit.log.jsonl'),JSON.stringify(event)+'\n');
+  const jid=event.payload.jobId || (event.entityType==='job'?event.entityId:null);
+  if(jid){
+    const directory=path.join(s.p.jobs,jid);
+    fs.mkdirSync(directory,{recursive:true});
+    fs.appendFileSync(path.join(directory,'audit.log.jsonl'),JSON.stringify(event)+'\n');
+  }
+}
+
+export function audit(s, action, type, eid, payload={}, side='none'){
+  const event = recordAudit(s, action, type, eid, payload, side);
+  projectAudit(s, event);
+  return event;
 }

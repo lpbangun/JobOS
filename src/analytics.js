@@ -4,7 +4,6 @@ import { now, id } from './utils.js';
 import { writeMd } from './workspace.js';
 import { due } from './tracking.js';
 
-
 function sinceCutoff(days) {
   const n = Number(days || 30);
   const d = new Date(Date.now() - Math.max(1, n) * 24 * 60 * 60 * 1000);

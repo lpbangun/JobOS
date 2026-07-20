@@ -89,14 +89,29 @@ test('readiness: plan contains all top-level shape fields', () => {
   const plan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
 
   assert.equal(typeof plan.version, 'number');
-  assert.equal(plan.version, 1);
+  assert.equal(plan.version, 3);
   assert.equal(typeof plan.generatedAt, 'string');
   assert.ok(plan.generatedAt.length > 0);
   assert.equal(plan.jobId, imported.id);
   assert.equal(plan.profileId, 'pm');
-  assert.ok(['blocked', 'ready-for-review'].includes(plan.status));
+  assert.ok(['blocked', 'ready-for-review', 'approved'].includes(plan.status));
   assert.equal(typeof plan.readyForReview, 'boolean');
-
+  assert.ok(plan.review);
+  for (const key of ['requiredArtifactIds', 'approvedArtifactIds', 'pendingArtifactIds', 'rejectedArtifactIds']) {
+    assert.ok(Array.isArray(plan.review[key]), `review.${key} is an array`);
+  }
+  assert.equal(typeof plan.review.localApprovalComplete, 'boolean');
+  assert.equal(typeof plan.localApprovalComplete, 'boolean');
+  assert.deepEqual(plan.packet, {
+    currentPacketId: null,
+    contentHash: null,
+    attemptNumber: null,
+    revision: null,
+    currency: 'none',
+    receiptState: 'none',
+    attestable: false,
+    latestReceiptId: null
+  });
   // Identity section
   assert.ok(plan.identity);
   assert.equal(typeof plan.identity.identityKey, 'string');
@@ -315,6 +330,104 @@ test('readiness: ready-for-review with score, proofs, resume, matched ordinary, 
   assert.ok(Array.isArray(plan.warnings));
 });
 
+// ── Human review transitions ─────────────────────────────────────────
+
+test('readiness: current human-approved resume transitions ready-for-review to approved, then a redraft returns it to ready-for-review', async () => {
+  const { out, root } = makeRunner();
+  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
+  const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
+  out(['proof', 'add', '--profile', 'pm', '--summary', 'Led EdTech product discovery', '--evidence', 'Reduced manual review by 30%']);
+  out(['score', imported.id, '--profile', 'pm']);
+  out(['tailor', 'resume', '--job', imported.id, '--profile', 'pm']);
+  out(['applications', 'create', '--job', imported.id, '--status', 'researching']);
+
+  const { openStore, one, run, save } = await import('../src/db.js');
+  const store = await openStore({ workspace: root });
+  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', ['[]', imported.id]);
+  save(store);
+
+  out(['answers', 'add', '--profile', 'pm', '--category', 'motivation',
+    '--question', 'Why are you interested in Acme Learning Co?', '--answer', 'The mission fits my experience.',
+    '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe the experience that best prepares you for the Senior Product Manager, Learning Platform role.',
+    '--answer', 'I have relevant product experience.', '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
+    '--question', 'Are you legally authorized to work in the role location?', '--answer', 'yes',
+    '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
+    '--question', 'Will you now or later require employment sponsorship?', '--answer', 'no',
+    '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
+
+  const draftPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
+  const original = one(await openStore({ workspace: root }), `SELECT * FROM artifacts
+    WHERE job_id=? AND profile_id=? AND type='resume'`, [imported.id, 'pm']);
+  assert.equal(draftPlan.status, 'ready-for-review');
+  assert.equal(draftPlan.readyForReview, true);
+  assert.equal(draftPlan.review.localApprovalComplete, false);
+  assert.equal(draftPlan.localApprovalComplete, false);
+  assert.deepEqual(draftPlan.review.pendingArtifactIds, [original.id]);
+
+  const approval = out(['artifacts', 'approve', original.id, '--note', 'Verified against stored proof.']);
+  assert.equal(approval.approvalStatus, 'approved');
+  assert.equal(approval.externalSideEffects, 'none');
+  assert.equal(approval.submissionPerformed, false);
+  assert.equal(approval.applicationStatusChanged, false);
+  const approvedMirrorBeforePlan = readFileSync(path.join(root, 'jobos-workspace', 'jobs', imported.id, 'application-readiness.yaml'), 'utf8');
+  assert.match(approvedMirrorBeforePlan, /status: approved/);
+  assert.match(approvedMirrorBeforePlan, /localApprovalComplete: true/);
+
+  const approvedPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
+  assert.equal(approvedPlan.status, 'approved');
+  assert.equal(approvedPlan.readyForReview, true);
+  assert.equal(approvedPlan.materials.resume.status, 'approved');
+  assert.deepEqual(approvedPlan.review.requiredArtifactIds, [original.id]);
+  assert.deepEqual(approvedPlan.review.approvedArtifactIds, [original.id]);
+  assert.deepEqual(approvedPlan.review.pendingArtifactIds, []);
+  assert.equal(approvedPlan.review.localApprovalComplete, true);
+  assert.equal(approvedPlan.localApprovalComplete, true);
+  assert.equal(approvedPlan.application.status, 'researching');
+  assert.equal(approvedPlan.policy.submissionPerformed, false);
+  assert.equal(approvedPlan.policy.applicationStatusChanged, false);
+  const approvedApplication = one(await openStore({ workspace: root }),
+    'SELECT status,confirmation_url FROM applications WHERE job_id=? AND profile_id=?', [imported.id, 'pm']);
+  assert.deepEqual(approvedApplication, { status: 'researching', confirmation_url: '' });
+
+  const redraft = out(['tailor', 'resume', '--job', imported.id, '--profile', 'pm']);
+  const redraftId = redraft.id;
+  const redraftMirrorBeforePlan = readFileSync(path.join(root, 'jobos-workspace', 'jobs', imported.id, 'application-readiness.yaml'), 'utf8');
+  assert.match(redraftMirrorBeforePlan, /status: ready-for-review/);
+  assert.match(redraftMirrorBeforePlan, /localApprovalComplete: false/);
+
+  const redraftPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
+  assert.equal(redraftPlan.status, 'ready-for-review');
+  assert.equal(redraftPlan.readyForReview, true);
+  assert.equal(redraftPlan.materials.resume.status, 'reviewable-draft');
+  assert.equal(redraftPlan.materials.resume.artifactId, redraftId);
+  assert.deepEqual(redraftPlan.review.approvedArtifactIds, []);
+  assert.deepEqual(redraftPlan.review.pendingArtifactIds, [redraftId]);
+  assert.equal(redraftPlan.review.localApprovalComplete, false);
+  assert.equal(redraftPlan.localApprovalComplete, false);
+
+  const cover = out(['tailor', 'cover-letter', '--job', imported.id, '--profile', 'pm']);
+  out(['artifacts', 'reject', cover.id, '--note', 'Optional cover is not needed.']);
+  out(['artifacts', 'reject', redraftId, '--note', 'Resume needs another revision.']);
+  const rejectedCoverId = cover.id;
+
+  const rejectedPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
+  assert.equal(rejectedPlan.status, 'blocked');
+  assert.equal(rejectedPlan.readyForReview, false);
+  assert.equal(rejectedPlan.materials.resume.status, 'rejected');
+  assert.deepEqual(rejectedPlan.review.requiredArtifactIds, [redraftId]);
+  assert.deepEqual(rejectedPlan.review.rejectedArtifactIds.sort(), [redraftId, rejectedCoverId].sort());
+  assert.equal(rejectedPlan.review.localApprovalComplete, false);
+  assert.equal(rejectedPlan.localApprovalComplete, false);
+  assert.ok(rejectedPlan.blockers.some(item => item.code === 'resume_rejected'));
+  assert.ok(rejectedPlan.warnings.some(item => item.code === 'cover_letter_rejected'));
+});
+
 // ── Redaction in JSON output ──────────────────────────────────────────
 
 test('readiness: sensitive and restricted answer values are redacted in JSON plan', () => {
@@ -435,9 +548,12 @@ test('readiness: CLI and MCP return equivalent plan on stable fields', async () 
   });
   const framed = `Content-Length: ${Buffer.byteLength(request, 'utf8')}\r\n\r\n${request}`;
 
-  let mcpOutput = '';
+  let mcpOutput = Buffer.alloc(0);
   const originalWrite = process.stdout.write.bind(process.stdout);
-  const captureWrite = (chunk) => { mcpOutput += chunk; return true; };
+  const captureWrite = (chunk) => {
+    mcpOutput = Buffer.concat([mcpOutput, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))]);
+    return true;
+  };
   process.stdout.write = captureWrite;
   try {
     const input = new Readable({ read() { this.push(framed); this.push(null); } });
@@ -445,13 +561,17 @@ test('readiness: CLI and MCP return equivalent plan on stable fields', async () 
     await new Promise(resolve => setTimeout(resolve, 2000));
     process.stdout.write = originalWrite;
 
-    const responses = mcpOutput.split('\r\n\r\n').filter(Boolean).map(chunk => {
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        try { return JSON.parse(line); } catch {}
-      }
-      return null;
-    }).filter(Boolean);
+    const responses = [];
+    let offset = 0;
+    while ((offset = mcpOutput.indexOf('Content-Length:', offset)) >= 0) {
+      const headerEnd = mcpOutput.indexOf('\r\n\r\n', offset);
+      if (headerEnd < 0) break;
+      const length = Number(mcpOutput.subarray(offset, headerEnd).toString('utf8').match(/Content-Length:\s*(\d+)/i)?.[1]);
+      const bodyStart = headerEnd + 4;
+      if (!Number.isFinite(length) || mcpOutput.length - bodyStart < length) break;
+      try { responses.push(JSON.parse(mcpOutput.subarray(bodyStart, bodyStart + length).toString('utf8'))); } catch {}
+      offset = bodyStart + length;
+    }
 
     const callResult = responses.find(r => r.id === 1 && r.result);
     assert.ok(callResult, 'MCP should return a tools/call result');
@@ -629,8 +749,9 @@ test('readiness: plan policy never claims automatic submission or application', 
   // readyDoesNotMean enumerates what ready-for-review does NOT imply
   assert.ok(plan.policy.readyDoesNotMean.includes('submitted'));
   assert.ok(plan.policy.readyDoesNotMean.includes('applied'));
-  assert.ok(plan.policy.readyDoesNotMean.includes('approved'));
+  assert.ok(!plan.policy.readyDoesNotMean.includes('approved'));
   assert.ok(plan.policy.readyDoesNotMean.includes('receipt-recorded'));
+  assert.ok(plan.policy.readyDoesNotMean.includes('authorized-for-agent-submission'));
 
   // Mirror also carries policy section
   const mirrorAbs = path.join(root, 'jobos-workspace', plan.mirrorPath);

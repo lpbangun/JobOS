@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { openStore, run, save } from '../src/db.js';
 import { matchesCron, nextRunAfter, isDue } from '../src/scheduler/cron.js';
 import { createAutomation, getAutomation, listAutomations } from '../src/scheduler/store.js';
-import { acquireSchedulerLock, runAutomationByName, runDueAutomations } from '../src/scheduler/core.js';
+import { acquireSchedulerLock, dueAutomations, runAutomationByName, runDueAutomations } from '../src/scheduler/core.js';
 
 function makeRoot() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-scheduler-test-'));
@@ -25,9 +25,21 @@ test('cron parser supports lists, ranges, steps, and UTC due evaluation', () => 
   assert.equal(matchesCron('0 7 * * 1-5', mondayMorning), true);
   assert.equal(matchesCron('*/15 7-9 * * 1,3,5', new Date('2026-07-06T08:30:00.000Z')), true);
   assert.equal(matchesCron('*/15 7-9 * * 1,3,5', new Date('2026-07-06T08:31:00.000Z')), false);
+  assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-06T09:00:00.000Z')), true);
+  assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-15T09:00:00.000Z')), true);
+  assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-08T09:00:00.000Z')), false);
   assert.equal(nextRunAfter('0 7 * * 1-5', new Date('2026-07-03T07:00:00.000Z')).toISOString(), '2026-07-06T07:00:00.000Z');
   assert.equal(isDue('* * * * *', '2026-07-04T10:00:00.000Z', new Date('2026-07-04T10:01:00.000Z')), true);
   assert.equal(isDue('* * * * *', '2026-07-04T10:01:00.000Z', new Date('2026-07-04T10:01:30.000Z')), false);
+});
+
+test('due evaluation skips an unmatchable schedule without blocking other automations', async () => {
+  const root = makeRoot();
+  const s = await openStore({ workspace: root });
+  createAutomation(s, { name: 'bad_schedule', actionId: 'morning_priority_brief', schedule: '0 0 31 2 *', enabled: true });
+  createAutomation(s, { name: 'good_schedule', actionId: 'morning_priority_brief', schedule: '* * * * *', enabled: true });
+  const due = dueAutomations(s, { nowDate: new Date('2026-07-04T10:01:00.000Z') });
+  assert.deepEqual(due.map(a => a.name), ['good_schedule']);
 });
 
 test('init seeds disabled default automations and writes YAML mirror', async () => {

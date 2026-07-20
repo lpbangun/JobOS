@@ -74,9 +74,19 @@ export const commandRegistry = [
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
+  cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
+  cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
+  cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
+  cmd(['artifacts', 'reject'], 'jobos artifacts reject <artifact-id> --note <reason> [--json]', 'Reject an exact current artifact revision and require a new draft.', { flags: ['--note <reason>'], category: 'workflow' }),
   cmd(['applications', 'plan'], 'jobos applications plan --job <job-id> --profile <profile-id> [--json]', 'Compile review readiness from local score, proofs, materials, answers, and identity evidence.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['applications', 'create'], 'jobos applications create --job <job-id> --status <status> [--json]', 'Create or upsert a local application tracking record.'),
   cmd(['applications', 'update'], 'jobos applications update <application-id> --status <status> [--json]', 'Update a tracked application status.'),
+  cmd(['apply', 'packet', 'create'], 'jobos apply packet create --job <job-id> --profile <profile-id> [--json]', 'Freeze current approved materials, answers, and target into one immutable application packet.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
+  cmd(['apply', 'packet', 'show'], 'jobos apply packet show <packet-id> [--json]', 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', { category: 'workflow' }),
+  cmd(['apply', 'packet', 'list'], 'jobos apply packet list (--job <job-id> | --profile <profile-id>) [--json]', 'List application packets for a job/profile with derived currency and receipt state.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
+  cmd(['apply', 'packet', 'diff'], 'jobos apply packet diff <packet-a> <packet-b> [--json]', 'Diff two application packets by their canonical projections.', { category: 'workflow' }),
+  cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
+  cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
   cmd(['research', 'stakeholders'], 'jobos research stakeholders --job <job-id> [--json]', 'Create a source-backed stakeholder worksheet.'),
   cmd(['research', 'contacts'], 'jobos research contacts --job <job-id>|--stakeholder <stakeholder-id> [--json]', 'Discover source-backed contact points, email patterns, and public profile paths for review.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>'] }),
@@ -627,6 +637,39 @@ export async function main(argv = process.argv.slice(2)) {
     else out(r);
     return;
   }
+  if (group === 'artifacts' && action === 'queue') {
+    out(await callDomainTool(s, 'review_queue', {
+      profileId: flags.profile ? String(flags.profile) : null,
+      jobId: flags.job ? String(flags.job) : null
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'artifacts' && action === 'diff') {
+    if (!subaction) usage('Missing artifact id');
+    const result = await callDomainTool(s, 'diff_artifact', {
+      artifactId: String(subaction),
+      againstArtifactId: flags.against ? String(flags.against) : null
+    }, { source: 'cli' });
+    if (flags.json) out(result);
+    else text(result.text);
+    return;
+  }
+  if (group === 'artifacts' && action === 'approve') {
+    if (!subaction) usage('Missing artifact id');
+    out(await callDomainTool(s, 'approve_artifact', {
+      artifactId: String(subaction),
+      note: flags.note ? String(flags.note) : ''
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'artifacts' && action === 'reject') {
+    if (!subaction) usage('Missing artifact id');
+    out(await callDomainTool(s, 'reject_artifact', {
+      artifactId: String(subaction),
+      note: String(requireFlag(flags, 'note'))
+    }, { source: 'cli' }));
+    return;
+  }
   if (group === 'applications' && action === 'plan') {
     out(await callDomainTool(s, 'applications_plan', {
       jobId: String(requireFlag(flags, 'job')),
@@ -636,15 +679,76 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'applications' && action === 'create') {
     if (!flags.job || !flags.status) usage('Missing --job or --status');
-    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '');
+    const a = await callDomainTool(s, 'create_application', {
+      jobId: String(flags.job),
+      status: String(flags.status),
+      notes: flags.notes ? String(flags.notes) : ''
+    }, { source: 'cli' });
     out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
     return;
   }
   if (group === 'applications' && action === 'update') {
     if (!subaction || !flags.status) usage('Missing application id or --status');
-    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null);
+    const a = await callDomainTool(s, 'update_application_status', {
+      applicationId: String(subaction),
+      status: String(flags.status),
+      notes: flags.notes ? String(flags.notes) : null
+    }, { source: 'cli' });
     out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
     return;
+  }
+  if (group === 'apply') {
+    if (action === 'packet' && subaction === 'create') {
+      out(await callDomainTool(s, 'create_application_packet', {
+        jobId: String(requireFlag(flags, 'job')),
+        profileId: String(requireFlag(flags, 'profile'))
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'packet' && subaction === 'show') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'application_packet_show', {
+        packetId: String(rest[0])
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'packet' && subaction === 'list') {
+      const jobId = flags.job ? String(requireFlag(flags, 'job', '--job <job-id>')) : null;
+      const profileId = flags.profile ? String(requireFlag(flags, 'profile', '--profile <profile-id>')) : null;
+      if (!jobId && !profileId) usage('Missing --job <job-id> or --profile <profile-id>');
+      out(await callDomainTool(s, 'application_packets_list', {
+        jobId,
+        profileId
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'packet' && subaction === 'diff') {
+      if (!rest[0] || !rest[1]) usage('Missing packet-a or packet-b');
+      out(await callDomainTool(s, 'application_packet_diff', {
+        firstPacketId: String(rest[0]),
+        secondPacketId: String(rest[1])
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'attest-submitted') {
+      if (!subaction) usage('Missing packet id');
+      out(await callDomainTool(s, 'attest_application_submitted', {
+        packetId: String(subaction),
+        submittedAt: String(requireFlag(flags, 'submitted-at', '--submitted-at <rfc3339>')),
+        note: flags.note ? String(flags.note) : ''
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'confirm-receipt') {
+      if (!subaction) usage('Missing packet id');
+      out(await callDomainTool(s, 'confirm_application_receipt', {
+        packetId: String(subaction),
+        reference: String(requireFlag(flags, 'reference', '--reference <text>')),
+        note: flags.note ? String(flags.note) : ''
+      }, { source: 'cli' }));
+      return;
+    }
+    usage('Unknown apply command. Try: jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
   }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');

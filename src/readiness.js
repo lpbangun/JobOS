@@ -4,6 +4,7 @@ import { inspectApplicationQuestions } from './answers.js';
 import { id, now, parseJson, slug } from './utils.js';
 import { writeYaml } from './workspace.js';
 import { applicationId } from './tracking.js';
+import { readinessPacketSummary } from './packets.js';
 
 const submittedEvidenceStatuses = new Set([
   'applied',
@@ -30,8 +31,13 @@ function artifactState(artifact, proofIds, { required }) {
   const cited = [...new Set((Array.isArray(evidence) ? evidence : [])
     .map(item => String(item?.proofPointId || ''))
     .filter(proofId => proofIds.has(proofId)))];
+  const status = artifact.approval_status === 'approved'
+    ? 'approved'
+    : artifact.approval_status === 'rejected'
+      ? 'rejected'
+      : 'reviewable-draft';
   return {
-    status: artifact.approval_status === 'rejected' ? 'rejected' : 'reviewable-draft',
+    status,
     required,
     artifactId: artifact.id,
     path: artifact.path,
@@ -43,9 +49,15 @@ function artifactState(artifact, proofIds, { required }) {
 }
 
 function latestArtifacts(s, jobId, profileId) {
-  const rows = all(s, `SELECT id,type,path,evidence_json,warnings_json,approval_status,created_at
-    FROM artifacts WHERE job_id=? AND profile_id=? AND type IN ('resume','cover_letter')
-    ORDER BY created_at DESC,id DESC`, [jobId, profileId]);
+  const rows = all(s, `SELECT current.id,current.type,current.path,current.evidence_json,current.warnings_json,
+      current.approval_status,current.created_at,current.series_key,current.revision
+    FROM artifacts AS current
+    WHERE current.job_id=? AND current.profile_id=? AND current.type IN ('resume','cover_letter')
+      AND NOT EXISTS (
+        SELECT 1 FROM artifacts AS successor
+        WHERE successor.series_key=current.series_key AND successor.revision>current.revision
+      )
+    ORDER BY current.revision DESC,current.created_at DESC,current.id DESC`, [jobId, profileId]);
   const byType = new Map();
   for (const row of rows) if (!byType.has(row.type)) byType.set(row.type, row);
   return byType;
@@ -80,7 +92,7 @@ function blocker(code, message, nextAction, details = {}) {
   return { code, message, nextAction, ...details };
 }
 
-export function compileApplicationReadiness(s, { jobId, profileId }) {
+export function compileApplicationReadiness(s, { jobId, profileId, includePacket = true }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw readinessError('unknown_job', `Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT id,name FROM profiles WHERE id=?', [profileId]);
@@ -154,21 +166,51 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
     message: 'No cover-letter draft exists. It is optional because not every application requests one.',
     nextAction: `If required, run "jobos tailor cover-letter --job ${jobId} --profile ${profileId} --json".`
   });
+  else if (coverLetter.status === 'rejected') warnings.push({
+    code: 'cover_letter_rejected',
+    message: 'The current optional cover-letter revision was rejected in local review and is excluded from approval completeness.',
+    nextAction: `Create a new draft with "jobos tailor cover-letter --job ${jobId} --profile ${profileId} --json" if this application requires a cover letter.`
+  });
   if (duplicates.length) warnings.push({
     code: 'possible_duplicate_application',
     message: 'Possible duplicate evidence is based only on local job identity and application status/history.',
     nextAction: 'Verify the prior record manually; no submission receipt is inferred.'
   });
 
-  const readyForReview = blockers.length === 0;
+  const reviewableMaterials = [resume, coverLetter]
+    .filter(material => material.artifactId && (material.required || material.status !== 'rejected'));
+  const requiredArtifactIds = reviewableMaterials.map(material => material.artifactId);
+  const approvedArtifactIds = [resume, coverLetter]
+    .filter(material => material.status === 'approved')
+    .map(material => material.artifactId);
+  const pendingArtifactIds = [resume, coverLetter]
+    .filter(material => material.status === 'reviewable-draft')
+    .map(material => material.artifactId);
+  const rejectedArtifactIds = [resume, coverLetter]
+    .filter(material => material.status === 'rejected')
+    .map(material => material.artifactId);
+  const approvalsComplete = blockers.length === 0
+    && requiredArtifactIds.length > 0
+    && requiredArtifactIds.every(artifactId => approvedArtifactIds.includes(artifactId));
+  const status = blockers.length ? 'blocked' : approvalsComplete ? 'approved' : 'ready-for-review';
+  const readyForReview = status !== 'blocked';
   const mirrorPath = path.join('jobs', jobId, 'application-readiness.yaml');
+  const packetSummary = includePacket ? readinessPacketSummary(s, { jobId, profileId }) : null;
   return {
-    version: 1,
+    version: 3,
     generatedAt: now(),
     jobId,
     profileId,
-    status: readyForReview ? 'ready-for-review' : 'blocked',
+    status,
     readyForReview,
+    localApprovalComplete: status === 'approved',
+    review: {
+      requiredArtifactIds,
+      approvedArtifactIds,
+      pendingArtifactIds,
+      rejectedArtifactIds,
+      localApprovalComplete: status === 'approved'
+    },
     identity: {
       identityKey,
       employerKey,
@@ -191,19 +233,29 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
     nextActions: blockers.map(item => ({ code: item.code, action: item.nextAction })),
     warnings,
     possibleDuplicateApplications: duplicates,
+    packet: includePacket ? (packetSummary || {
+      currentPacketId: null,
+      contentHash: null,
+      attemptNumber: null,
+      revision: null,
+      currency: 'none',
+      receiptState: 'none',
+      attestable: false,
+      latestReceiptId: null
+    }) : null,
     mirrorPath,
     policy: {
-      meaning: 'Reviewable completeness from local evidence only.',
+      meaning: 'Reviewable completeness and local human approval from local evidence only.',
       externalSideEffects: 'none',
       submissionPerformed: false,
       applicationStatusChanged: false,
-      readyDoesNotMean: ['approved', 'submitted', 'applied', 'receipt-recorded']
+      readyDoesNotMean: ['submitted', 'applied', 'receipt-recorded', 'authorized-for-agent-submission']
     }
   };
 }
 
-export function planApplication(s, { jobId, profileId, writeMirror = true, policyContext = null }) {
-  const plan = compileApplicationReadiness(s, { jobId, profileId });
+export function planApplication(s, { jobId, profileId, writeMirror = true, policyContext = null, includePacket = true }) {
+  const plan = compileApplicationReadiness(s, { jobId, profileId, includePacket });
   if (policyContext) plan.policy = { ...plan.policy, ...policyContext };
   if (writeMirror) writeYaml(path.join(s.p.ws, plan.mirrorPath), plan);
   return plan;

@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { greenhouse, lever } from '../src/discovery/adapters.js';
-import { all, openStore } from '../src/db.js';
+import { all, one, openStore, run as dbRun, save } from '../src/db.js';
+import { runAllSearches } from '../src/discovery.js';
+import { importNormalized } from '../src/jobs.js';
 import { mcpToolNames } from '../src/mcp.js';
 
 function makeRunner() {
@@ -79,13 +81,14 @@ test('saved search discovery run imports, scores, dedupes, flags high fit, write
   assert.match(dbJobs[0].source_history_json, /greenhouse/);
   const runs = all(store, "SELECT * FROM automation_runs WHERE trigger_name='discover.run'");
   assert.equal(runs.length, 3);
+  assert.equal(runs[0].action_id, 'discover.run');
   assert.equal(JSON.parse(runs[0].outputs_json).counts.fetched, 1);
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'discovery', 'runs', `${first.runId}.yaml`)));
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', first.jobs[0].id, 'job.yaml')));
   assert.match(readFileSync(path.join(root, 'jobos-workspace', 'jobs', first.jobs[0].id, 'job.yaml'), 'utf8'), /highFit: true/);
 });
 
-test('discovery fetch failure records a failed run without crashing the CLI', () => {
+test('discovery fetch failure records a failed run without crashing the CLI', async () => {
   const { root, run } = makeRunner();
   run(['init', '--json']);
   const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
@@ -93,7 +96,46 @@ test('discovery fetch failure records a failed run without crashing the CLI', ()
   const result = JSON.parse(run(['discover', 'run', '--search', 'Offline Search', '--json']));
   assert.equal(result.status, 'failed');
   assert.ok(result.errors.length >= 1);
+  const store = await openStore({ workspace: root });
+  const row = one(store, 'SELECT error, action_id FROM automation_runs WHERE id=?', [result.runId]);
+  assert.match(row.error, /missing-fixture/);
+  assert.equal(row.action_id, 'discover.run');
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'discovery', 'runs', `${result.runId}.yaml`)));
+});
+
+test('run-all discovery can be scoped to one profile', async () => {
+  const { root, run } = makeRunner();
+  run(['init', '--json']);
+  const profileA = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
+  const profileB = JSON.parse(run(['profile', 'create', 'Backend', '--json']));
+  const fixture = path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json');
+  run(['searches', 'create', 'Scoped A', '--profile', profileA.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', fixture, '--json']);
+  run(['searches', 'create', 'Scoped B', '--profile', profileB.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', fixture, '--json']);
+  const store = await openStore({ workspace: root });
+  const result = await runAllSearches(store, { profileId: profileA.id });
+  assert.equal(result.count, 1);
+  assert.equal(result.runs[0].profileId, profileA.id);
+  assert.ok(all(store, 'SELECT * FROM jobs WHERE profile_id=?', [profileA.id]).length > 0);
+  assert.equal(all(store, 'SELECT * FROM jobs WHERE profile_id=?', [profileB.id]).length, 0);
+});
+
+test('job import refreshes exact URL matches but does not merge different real URLs on key alone', async () => {
+  const { root, run } = makeRunner();
+  run(['init', '--json']);
+  const profile = JSON.parse(run(['profile', 'create', 'Engineering', '--json']));
+  const store = await openStore({ workspace: root });
+  const first = importNormalized(store, { profileId: profile.id, job: { title: 'Software Engineer', company: 'Acme', location: 'Remote', url: 'https://jobs.example/acme/se-1', source: 'test', description: 'Build backend APIs.' } });
+  dbRun(store, 'UPDATE jobs SET first_seen_at=? WHERE id=?', ['2026-01-01T00:00:00.000Z', first.job.id]);
+  save(store);
+  const refreshed = importNormalized(store, { profileId: profile.id, job: { title: 'Software Engineer', company: 'Acme', location: 'Remote', url: 'https://jobs.example/acme/se-1', source: 'test', description: 'Build backend APIs and platform services.' } });
+  assert.equal(refreshed.created, false);
+  assert.match(one(store, 'SELECT description FROM jobs WHERE id=?', [first.job.id]).description, /platform services/);
+
+  const second = importNormalized(store, { profileId: profile.id, job: { title: 'Software Engineer', company: 'Acme', location: 'Remote', url: 'https://jobs.example/acme/se-2', source: 'test', description: 'Build frontend product surfaces.' } });
+  assert.equal(second.created, true);
+  assert.equal(all(store, 'SELECT * FROM jobs WHERE profile_id=?', [profile.id]).length, 2);
+  assert.equal(one(store, 'SELECT reposted FROM jobs WHERE id=?', [second.job.id]).reposted, 1);
+  assert.match(one(store, 'SELECT title FROM tasks WHERE job_id=?', [second.job.id]).title, /possible duplicate/i);
 });
 
 test('MCP discovery tools are exposed', () => {
