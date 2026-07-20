@@ -100,8 +100,10 @@ function readinessLines(readiness, width, color) {
   const blockers = Array.isArray(readiness?.blockers) ? readiness.blockers : [];
   const warnings = Array.isArray(readiness?.warnings) ? readiness.warnings : [];
   const localApprovalComplete = readiness?.localApprovalComplete || readiness?.review?.localApprovalComplete;
+  const packet = readiness?.packet;
+  const packetState = packet?.currentPacketId ? ` · packet ${packet.currency}/${packet.receiptState}` : '';
   const lines = [
-    paint(`READINESS ${status} · ${readiness?.readyForReview ? 'reviewable' : 'not reviewable'}${localApprovalComplete ? ' · locally approved' : ''}`, status === 'approved' ? 'green' : (status === 'blocked' ? 'bad' : 'warn'), color),
+    paint(`READINESS ${status} · ${readiness?.readyForReview ? 'reviewable' : 'not reviewable'}${localApprovalComplete ? ' · locally approved' : ''}${packetState}`, status === 'approved' ? 'green' : (status === 'blocked' ? 'bad' : 'warn'), color),
     crop(`next ${typeof next === 'string' ? next : JSON.stringify(next)}`, width)
   ];
   if (blockers.length) lines.push(...wrap(`blockers ${blockers.length} · ${blockers[0].code || blockers[0]}`, width).slice(0, 1).map(line => paint(line, 'bad', color)));

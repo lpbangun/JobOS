@@ -9,7 +9,8 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company/stakeholder/contact research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and an outreach draft when a sourced stakeholder is available.
-- `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
+- `jobos applications plan --job <id> --profile <id>` compiles readiness v3 from score, proofs, materials, answers, identity, and packet/receipt state, returning blocked/ready-for-review/approved with actionable blockers and a redacted YAML mirror.
+- `jobos apply packet create|list|show|diff ...`, `apply attest-submitted`, and `apply confirm-receipt` freeze exact approved application inputs and record user-supplied submission/receipt evidence without performing an external action.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
@@ -34,17 +35,17 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `sql.js` save hardening with an exclusive lock, optimistic store revision, fsync, same-directory atomic rename, stale-snapshot rejection, and lock cleanup.
 - Policy migration from obsolete `human_approval_required` wording to `user_configured`; external effects remain disabled until configured/enabled.
 - Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
-- MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, and `answers_match`.
+- MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, and redacted packet list/show/diff inspection. Packet freeze and receipt mutations are not advertised to MCP/ACP and are denied under spoofed overrides.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
-- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review/approved statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+- Application readiness compiler v3: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review/approved statuses, an always-present secret-safe packet summary, actionable blockers, YAML redaction, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution without automatic packet creation.
 
 - Human review closure: immutable artifact series/revisions with SHA-256 content identity, current-revision queue/diff, trusted CLI/TUI approval or rejection, fail-closed workspace verification, local-only review audit events, readiness `approved` semantics, redraft invalidation, explicit MCP/ACP mutation denials, and no restored web/API bypass.
+- Application packet + receipt spine: schema-v8 immutable packet/receipt rows, canonical SHA-256 input and receipt hashes, approved-only exact material pinning, non-secret answer row-version fingerprints, explicit attempt/revision lineage, deterministic packet diff, idempotent replay/conflict rejection, receipt-bound applied status history, confirmation references, guarded post-commit YAML/audit projections, and direct-applied `receiptBound: false` honesty.
 
 ### Intentionally deferred
 
 Not required for the smallest coherent CLI product:
 
-- Immutable application packet/version/receipt graphs and exception-review UIs.
 - Universal auto-apply, Workday/iCIMS/Taleo automation, or LinkedIn/Indeed DOM-specific bots.
 - SMTP auto-send, mailbox reconciliation, and hardcoded platform automation.
 - PDF/DOCX production rendering, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
@@ -52,6 +53,8 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
+- PR 10 converged in iteration 1 after classifying and correcting four integration regressions (readiness v3 expectation, lost policy-context merge, a dropped MCP registry entry, and TUI vertical-layout pressure). Focused packet/receipt acceptance suite: **16/16 passed**; `npm test`: **142/142 passed**.
+- `npm run smoke`: passed the extended `ready-for-review` → exact approvals → immutable packet → user attestation → receipt confirmation path. Observed two canonical receipt rows, `receiptState: confirmed`, packet/hash/receipt-bound `applied` history, redacted packet YAML, `submissionPerformed: false`, and `externalSideEffects: none`; the subsequent interview analytics, scheduler, and export flow also completed.
 - PR 9 converged after the TUI-focus web-interface cutover: affected artifact/readiness/CLI/TUI/discovery/scheduler checks **53/53 passed**; `npm test` **126/126 passed**. No unresolved acceptance failure remains.
 - `npm run smoke`: passed the extended local human-review path (`ready-for-review` → exact resume/cover diffs → local approvals → `approved`) with unchanged application/status state, exactly two approval audit events, and `external_side_effect='none'`; the existing applied/interview analytics, scheduler, and workspace-export flow then completed without the removed web interface.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.

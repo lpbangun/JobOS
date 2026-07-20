@@ -34,7 +34,61 @@ CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, action_id TEXT NOT NULL, schedule TEXT NOT NULL, profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_run', consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, trigger_name TEXT NOT NULL, inputs_json TEXT NOT NULL DEFAULT '{}', outputs_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, external_side_effects TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL, automation_id TEXT, action_id TEXT, trigger_type TEXT NOT NULL DEFAULT 'manual', started_at TEXT, finished_at TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT, counts_json TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', external_side_effect TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL);`;
+CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', external_side_effect TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS application_packets (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  content_hash TEXT NOT NULL,
+  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'),
+  readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+  resume_artifact_id TEXT NOT NULL,
+  resume_content_hash TEXT NOT NULL,
+  cover_artifact_id TEXT,
+  cover_content_hash TEXT,
+  answers_json TEXT NOT NULL DEFAULT '[]',
+  identity_json TEXT NOT NULL DEFAULT '{}',
+  materials_json TEXT NOT NULL DEFAULT '{}',
+  blockers_json TEXT NOT NULL DEFAULT '[]',
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')),
+  supersedes_packet_id TEXT,
+  UNIQUE(job_id, profile_id, attempt_number, revision),
+  CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR
+        (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets(id)
+);
+CREATE INDEX IF NOT EXISTS application_packets_target_idx
+  ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC);
+CREATE TABLE IF NOT EXISTS application_receipts (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')),
+  submitted_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  external_reference TEXT NOT NULL DEFAULT '',
+  evidence_path TEXT NOT NULL DEFAULT '',
+  evidence_hash TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  receipt_hash TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
+  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'),
+  UNIQUE(packet_id, type),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id)
+);
+CREATE INDEX IF NOT EXISTS application_receipts_application_idx
+  ON application_receipts(application_id, recorded_at, id);`;
 
 function migrate(db){
   for (const sql of [
@@ -75,7 +129,11 @@ function migrate(db){
     "CREATE TABLE IF NOT EXISTS email_patterns (id TEXT PRIMARY KEY, company_id TEXT NOT NULL, domain TEXT NOT NULL, pattern TEXT NOT NULL, support_count INTEGER NOT NULL, support_sources_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id))"
+    "CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id))",
+    "CREATE TABLE IF NOT EXISTS application_packets (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, application_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number > 0), revision INTEGER NOT NULL CHECK(revision > 0), content_hash TEXT NOT NULL, readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'), readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3), resume_artifact_id TEXT NOT NULL, resume_content_hash TEXT NOT NULL, cover_artifact_id TEXT, cover_content_hash TEXT, answers_json TEXT NOT NULL DEFAULT '[]', identity_json TEXT NOT NULL DEFAULT '{}', materials_json TEXT NOT NULL DEFAULT '{}', blockers_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')), supersedes_packet_id TEXT, UNIQUE(job_id, profile_id, attempt_number, revision), CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(application_id) REFERENCES applications(id), FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets(id))",
+    "CREATE INDEX IF NOT EXISTS application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)",
+    "CREATE TABLE IF NOT EXISTS application_receipts (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, application_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')), submitted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, external_reference TEXT NOT NULL DEFAULT '', evidence_path TEXT NOT NULL DEFAULT '', evidence_hash TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', receipt_hash TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK(source IN ('cli','tui')), external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'), UNIQUE(packet_id, type), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(application_id) REFERENCES applications(id))",
+    "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)"
   ]) {
     try { db.run(sql); } catch (e) {
       const message = String(e?.message || e);
@@ -332,10 +390,10 @@ export async function openStore(flags={}) {
   migrate(db);
   migrateArtifacts(db);
   migratePolicyPreferences(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','7']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','8']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '7') save(store);
+  if (!existed || previousSchemaVersion !== '8') save(store);
   return store;
 }
 

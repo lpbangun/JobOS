@@ -69,7 +69,43 @@ try {
   if (JSON.stringify(applicationAfterReview) !== JSON.stringify(applicationBeforeReview) || statusChangesAfterReview !== statusChangesBeforeReview) throw new Error('Local artifact approval changed application tracking state');
   if (auditsAfterReview !== auditsBeforeReview + 2 || approvalAudits.length !== 2 || approvalAudits.some(event => event.external_side_effect !== 'none')) throw new Error('Approval audit events were missing or claimed an external side effect');
 
-  JSON.parse(run(['applications', 'update', app.id, '--status', 'applied', '--json']));
+  const applicationPacket = JSON.parse(run(['apply', 'packet', 'create', '--job', job.id, '--profile', profile.id, '--json']));
+  const resumeReview = reviewQueue.find(item => item.type === 'resume');
+  const coverReview = reviewQueue.find(item => item.type === 'cover_letter');
+  if (applicationPacket.resumeContentHash !== resumeReview.contentHash || applicationPacket.coverContentHash !== coverReview.contentHash || applicationPacket.receiptState !== 'none') {
+    throw new Error('Application packet did not freeze the exact approved material hashes');
+  }
+  const submittedAt = new Date().toISOString();
+  const attestation = JSON.parse(run(['apply', 'attest-submitted', applicationPacket.id, '--submitted-at', submittedAt, '--note', 'Smoke user attestation.', '--json']));
+  if (!attestation.receiptBound || !attestation.applicationStatusChanged || attestation.currentStatus !== 'applied' || attestation.externalSideEffects !== 'none' || attestation.submissionPerformed !== false) {
+    throw new Error('Submission attestation did not bind the exact packet honestly');
+  }
+  const attestedPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (attestedPlan.packet.currentPacketId !== applicationPacket.id || attestedPlan.packet.receiptState !== 'attested' || attestedPlan.policy.submissionPerformed !== false) {
+    throw new Error('Readiness did not expose user attestation without claiming adapter submission');
+  }
+  const confirmation = JSON.parse(run(['apply', 'confirm-receipt', applicationPacket.id, '--reference', 'https://board.example/smoke-confirmation', '--note', 'Smoke external confirmation.', '--json']));
+  if (confirmation.receiptState !== 'confirmed' || confirmation.externalSideEffects !== 'none' || confirmation.submissionPerformed !== false) {
+    throw new Error('Receipt confirmation reported unsafe semantics');
+  }
+  const confirmedPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (confirmedPlan.packet.receiptState !== 'confirmed' || confirmedPlan.policy.submissionPerformed !== false) {
+    throw new Error('Confirmed readiness invented submission behavior or lost receipt state');
+  }
+  const receiptStore = await openStore({ workspace: root });
+  const receiptRows = all(receiptStore, 'SELECT type,external_side_effect FROM application_receipts WHERE packet_id=? ORDER BY type', [applicationPacket.id]);
+  const receiptApplication = one(receiptStore, 'SELECT status,confirmation_url FROM applications WHERE id=?', [app.id]);
+  const boundChange = one(receiptStore, 'SELECT note FROM status_changes WHERE application_id=? AND to_status=? ORDER BY created_at DESC,id DESC LIMIT 1', [app.id, 'applied']);
+  const receiptAudits = all(receiptStore, `SELECT action,external_side_effect,payload_json FROM audit_log
+    WHERE action IN ('application_packet.created','application.submission_attested','application.receipt_confirmed') ORDER BY created_at,id`);
+  receiptStore.db.close();
+  if (receiptRows.length !== 2 || receiptRows.some(row => row.external_side_effect !== 'none')) throw new Error('Canonical receipt rows missing or unsafe');
+  if (receiptApplication.status !== 'applied' || receiptApplication.confirmation_url !== 'https://board.example/smoke-confirmation') throw new Error('Receipt-bound application tracking is inconsistent');
+  if (!boundChange?.note.includes(applicationPacket.id) || !boundChange.note.includes(applicationPacket.contentHash) || !boundChange.note.includes(attestation.receipt.id)) throw new Error('Applied status history is not bound to packet/hash/receipt');
+  if (receiptAudits.length !== 3 || receiptAudits.some(event => event.external_side_effect !== 'none' || JSON.parse(event.payload_json).submissionPerformed !== false)) throw new Error('Packet/receipt audit spine is incomplete or claims submission');
+  const packetYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'packets', `${applicationPacket.id}.yaml`), 'utf8');
+  if (!packetYaml.includes('receiptState: confirmed') || /^\s+answer(?:Text)?:/m.test(packetYaml)) throw new Error('Packet mirror is stale or contains answer plaintext fields');
+
   JSON.parse(run(['applications', 'update', app.id, '--status', 'interview', '--json']));
   const interviewPacket = run(['interview', 'prep', '--application', app.id, '--stage', 'hiring-manager', '--output', 'markdown'], true);
   if (!interviewPacket.includes('STAR story') || !interviewPacket.includes('Questions to ask the interviewer')) throw new Error('Interview prep packet missing useful sections');
@@ -87,7 +123,7 @@ try {
   if (!briefPath || !readFileSync(path.join(root, 'jobos-workspace', briefPath), 'utf8').includes('Morning priority brief')) throw new Error('Scheduler did not write priority brief export');
   const runDay = schedulerRun.runs[0].createdAt.slice(0, 10);
   if (!readFileSync(path.join(root, 'jobos-workspace', 'automations', `runs-${runDay}.jsonl`), 'utf8').includes('smoke_brief')) throw new Error('Scheduler did not append automation run JSONL');
-  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, humanReview: { readyForReview: reviewPlan.status, approved: approvedPlan.status, reviewedArtifactIds: reviewQueue.map(item => item.id), applicationStatusChanged: false, externalSideEffects: 'none' }, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
+  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, humanReview: { readyForReview: reviewPlan.status, approved: approvedPlan.status, reviewedArtifactIds: reviewQueue.map(item => item.id), applicationStatusChanged: false, externalSideEffects: 'none' }, receiptSpine: { packetId: applicationPacket.id, contentHash: applicationPacket.contentHash, receiptState: confirmedPlan.packet.receiptState, receiptCount: receiptRows.length, appliedStatusBound: true, submissionPerformed: false, externalSideEffects: 'none' }, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
 } finally {
   if (!process.env.KEEP_JOBOS_SMOKE) rmSync(root, { recursive: true, force: true });
 }
