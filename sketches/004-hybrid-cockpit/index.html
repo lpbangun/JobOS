@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS TUI — Hybrid Cockpit</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0a0e13;
+      --panel: #10161f;
+      --panel2: #0d1219;
+      --border: #253141;
+      --text: #e2e8f0;
+      --muted: #8794a8;
+      --accent: #5eead4;
+      --agent: #c4b5fd;
+      --blue: #7dd3fc;
+      --ok: #86efac;
+      --warn: #fbbf24;
+      --bad: #fca5a5;
+      --sel: #162230;
+      --focus: #1e3a4f;
+    }
+    body {
+      font-family: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      background: #05070a;
+      color: var(--text);
+      min-height: 100vh;
+      padding: 14px;
+      font-size: 12.5px;
+      line-height: 1.35;
+    }
+    .stance {
+      max-width: 1440px;
+      margin: 0 auto 10px;
+      font-family: system-ui, sans-serif;
+      color: #9aa7b8;
+      font-size: 13px;
+    }
+    .frame {
+      max-width: 1440px;
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: 0 24px 70px rgba(0,0,0,.5);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto auto;
+      min-height: 860px;
+    }
+    .titlebar, .statusbar, .cmdbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      background: #0c1118;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .statusbar, .cmdbar { border-bottom: none; border-top: 1px solid var(--border); }
+    .titlebar strong { color: var(--accent); }
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 8px;
+      margin-left: 4px;
+    }
+    .badge.ok { color: var(--ok); border-color: #2f5d45; }
+    .badge.warn { color: var(--warn); border-color: #6b5418; }
+    .badge.agent { color: var(--agent); border-color: #4c3d78; }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      padding: 8px 10px;
+      background: #0c1118;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .tab {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .tab:hover { color: var(--text); border-color: #3a4d66; }
+    .tab.active { color: var(--text); background: var(--sel); border-color: #3d5a78; }
+    .tab .k { color: var(--accent); margin-right: 4px; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 210px minmax(0, 1.15fr) minmax(280px, 0.95fr);
+      min-height: 620px;
+    }
+    .workspace.agent-hidden {
+      grid-template-columns: 210px minmax(0, 1fr);
+    }
+    .workspace.agent-hidden .agent-pane { display: none; }
+
+    .rail, .main, .agent-pane {
+      border-right: 1px solid var(--border);
+      min-height: 100%;
+      background: var(--panel2);
+    }
+    .agent-pane { border-right: none; background: #0b1017; }
+    .rail, .main, .agent-pane { padding: 10px; overflow: auto; }
+    .main { background: var(--bg); }
+
+    .section {
+      color: var(--muted);
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin: 8px 0 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .row, .card, .job, .nav {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 7px 8px;
+      cursor: pointer;
+    }
+    .row:hover, .card:hover, .job:hover, .nav:hover { background: var(--sel); }
+    .nav.active, .job.selected, .card.selected, .row.selected {
+      background: var(--sel);
+      border-color: #35506b;
+    }
+    .nav .k { color: var(--accent); width: 16px; display: inline-block; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .agent { color: var(--agent); }
+
+    .brief, .panel, .detail, .drawer {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .brief li { margin: 5px 0 5px 16px; }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0 7px;
+      font-size: 10px;
+      color: var(--muted);
+      margin-right: 4px;
+    }
+    .pill.due { color: var(--warn); border-color: #6b5418; }
+    .pill.new { color: var(--ok); border-color: #2f5d45; }
+    .pill.iv { color: var(--blue); border-color: #2a4d66; }
+
+    .kanban {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .lane {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      min-height: 210px;
+    }
+    .lane h3 {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .card .co { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .score { color: var(--ok); font-size: 11px; margin-top: 2px; }
+    .score.mid { color: var(--warn); }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .btn {
+      border: 1px solid var(--border);
+      background: #15202b;
+      color: var(--text);
+      border-radius: 7px;
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { border-color: #2f6f68; color: var(--accent); }
+    .btn.ghost { background: transparent; }
+
+    .table { width: 100%; border-collapse: collapse; }
+    .table th, .table td {
+      text-align: left;
+      padding: 5px 4px;
+      border-bottom: 1px solid #1a2430;
+      vertical-align: top;
+    }
+    .table th { color: var(--muted); font-weight: 500; }
+    .table tr { cursor: pointer; }
+    .table tr:hover, .table tr.active { background: var(--sel); }
+
+    .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .filter {
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 3px 8px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .filter.on { color: var(--accent); border-color: #2f6f68; }
+
+    .messages {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 360px;
+      overflow: auto;
+      margin-bottom: 8px;
+    }
+    .msg {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: var(--panel);
+      max-width: 96%;
+    }
+    .msg.user { align-self: flex-end; border-color: #31415f; }
+    .msg.agent { align-self: flex-start; border-color: #3d3460; }
+    .msg .who { font-size: 10.5px; color: var(--muted); margin-bottom: 4px; }
+    .msg.agent .who { color: var(--agent); }
+    .tool {
+      margin-top: 6px;
+      border-left: 2px solid var(--blue);
+      padding: 5px 8px;
+      background: #0b1220;
+      color: #b8c7e6;
+      font-size: 11.5px;
+    }
+    .composer {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0d1219;
+      padding: 8px;
+    }
+    .composer textarea {
+      width: 100%;
+      min-height: 56px;
+      resize: vertical;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+    }
+    .composer-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .chips { margin-bottom: 6px; }
+    .chip {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin: 0 4px 4px 0;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .chip:hover { color: var(--text); border-color: #4a5b78; }
+
+    .stage-list div {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 6px;
+      border-radius: 6px;
+      margin-bottom: 2px;
+    }
+    .stage-list div:hover { background: var(--sel); }
+
+    .cmdbar {
+      gap: 8px;
+    }
+    .cmdbar form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+    }
+    .cmdbar input {
+      flex: 1;
+      background: #0a1017;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font: inherit;
+      padding: 7px 9px;
+      border-radius: 8px;
+      outline: none;
+    }
+    .cmdbar input:focus { border-color: #3d5a78; }
+    .prompt { color: var(--accent); }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      background: #12352f;
+      border: 1px solid #2f6f68;
+      color: #b2f5ea;
+      padding: 10px 12px;
+      border-radius: 8px;
+      display: none;
+      z-index: 20;
+      max-width: 420px;
+    }
+    .hidden { display: none !important; }
+    kbd {
+      color: var(--accent);
+      border: 1px solid #2c4a5f;
+      border-radius: 4px;
+      padding: 0 5px;
+      margin-right: 3px;
+    }
+    .split-label {
+      font-size: 10px;
+      color: var(--muted);
+      border: 1px dashed #334155;
+      border-radius: 999px;
+      padding: 1px 7px;
+    }
+    .map {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+    .map .panel h4 { margin-bottom: 6px; font-size: 12px; }
+    .map li { margin: 4px 0 4px 14px; color: var(--muted); }
+    .map .primary li { color: var(--text); }
+    @media (max-width: 1100px) {
+      .workspace { grid-template-columns: 180px 1fr; }
+      .agent-pane { grid-column: 1 / -1; border-top: 1px solid var(--border); max-height: 320px; }
+      .workspace.agent-hidden { grid-template-columns: 180px 1fr; }
+      .kanban { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .map { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="stance">
+    <strong>Variant D — Hybrid Cockpit (practical surface)</strong>
+    · A structure (pipeline + today + selection) · B agent pane · C command bar / escape hatch.
+    · Primary views only; long-tail via agent or <code>:</code> command. Keys: 1–5 views, <code>a</code> toggle agent, <code>:</code> command, <code>p</code> pursue, <code>d</code> daily.
+  </div>
+
+  <div class="frame">
+    <div class="titlebar">
+      <div>
+        <strong>jobos</strong>
+        <span class="badge">pm-edtech</span>
+        <span class="badge ok">local</span>
+        <span class="badge agent">hermes ready</span>
+        <span class="badge">mcp 26 tools</span>
+      </div>
+      <div>
+        external side-effects: <span class="ok">off</span>
+        · drafts gated
+        · <button class="btn ghost" id="toggle-agent" style="margin-left:6px">[a] agent pane</button>
+      </div>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-view="today"><span class="k">1</span>Today</button>
+      <button class="tab" data-view="pipeline"><span class="k">2</span>Pipeline</button>
+      <button class="tab" data-view="jobs"><span class="k">3</span>Jobs</button>
+      <button class="tab" data-view="review"><span class="k">4</span>Review</button>
+      <button class="tab" data-view="system"><span class="k">5</span>System</button>
+      <span class="split-label">secondary lives in drawers / agent / :</span>
+    </div>
+
+    <div class="workspace" id="workspace">
+      <!-- LEFT RAIL: always-on status + secondary entry -->
+      <aside class="rail">
+        <div class="section">Always on</div>
+        <div class="nav active" data-jump="today"><span class="k">•</span> Today brief</div>
+        <div class="nav" data-jump="pipeline"><span class="k">•</span> Pipeline</div>
+        <div class="nav" data-jump="review"><span class="k">•</span> Review queue <span class="warn" style="float:right">4</span></div>
+
+        <div class="section">Counts</div>
+        <div class="row">Open apps <span style="float:right">7</span></div>
+        <div class="row">High-fit new <span class="ok" style="float:right">3</span></div>
+        <div class="row">Due follow-ups <span class="warn" style="float:right">2</span></div>
+        <div class="row">Interviews <span style="float:right">1</span></div>
+
+        <div class="section">Secondary (on demand)</div>
+        <div class="nav" data-secondary="network"><span class="k">n</span> Network</div>
+        <div class="nav" data-secondary="outreach"><span class="k">o</span> Outreach</div>
+        <div class="nav" data-secondary="answers"><span class="k">q</span> Answers</div>
+        <div class="nav" data-secondary="discovery"><span class="k">s</span> Sources</div>
+        <div class="nav" data-secondary="analytics"><span class="k">f</span> Funnel</div>
+
+        <div class="section">Agent / run</div>
+        <div class="row"><span class="agent">hermes</span> · ready</div>
+        <div class="row"><span class="agent">codex</span> · ready</div>
+        <div class="row muted">last: pursue acme · 5/10 ok</div>
+        <div class="row muted">browser · unavailable</div>
+      </aside>
+
+      <!-- MAIN: primary surfaces -->
+      <main class="main">
+        <!-- TODAY -->
+        <section id="view-today" class="view">
+          <div class="brief">
+            <div class="section">Today / priority brief <span>core</span></div>
+            <ul>
+              <li><span class="pill due">due</span> Follow up Jane @ Acme — warm path ready · 16:00</li>
+              <li><span class="pill iv">interview</span> Acme HM tomorrow 2pm — prep packet needs review</li>
+              <li><span class="pill new">new</span> 3 high-fit from daily (portfolio + ashby; career-page timeout)</li>
+            </ul>
+            <div class="actions">
+              <button class="btn primary" data-run="daily --profile pm-edtech">[d] run daily</button>
+              <button class="btn" data-run="tasks due">open due tasks</button>
+              <button class="btn" data-prompt="Summarize only high-fit roles from the last daily run.">ask agent: high-fit</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="section">Selected job context <span>always with selection</span></div>
+            <div id="selection-card">
+              <strong id="sel-title">PM, Learning Platform · Acme Learning</strong>
+              <div class="muted" id="sel-sub">job_acme · fit 84 · interview · agent ready</div>
+              <p style="margin-top:8px" id="sel-body">
+                Next: review HM prep + optional warm intro via Jane (shared employer).
+                Drafts gated. No external send.
+              </p>
+              <div class="actions">
+                <button class="btn primary" data-run="pursue job_acme --agent hermes">[p] pursue</button>
+                <button class="btn" data-run="score job_acme">score</button>
+                <button class="btn" data-secondary="network">network</button>
+                <button class="btn" data-run="open draft resume-job_acme.md">open draft</button>
+                <button class="btn" data-prompt="Prepare HM interview packet for Acme using stored proof points only.">agent: interview</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="drawer hidden" id="drawer">
+            <div class="section" id="drawer-title">Secondary drawer</div>
+            <div id="drawer-body" class="muted">Pick Network / Outreach / Answers / Sources / Funnel from the rail.</div>
+          </div>
+
+          <div class="panel">
+            <div class="section">Surface map (what this UI claims) <span>not a feature dump</span></div>
+            <div class="map">
+              <div class="panel primary" style="margin:0">
+                <h4 class="ok">Primary (always)</h4>
+                <ul>
+                  <li>Today brief</li>
+                  <li>Pipeline / Jobs</li>
+                  <li>Selected job context</li>
+                  <li>Review queue</li>
+                  <li>Agent + run status</li>
+                </ul>
+              </div>
+              <div class="panel" style="margin:0">
+                <h4 class="warn">Secondary (drawer)</h4>
+                <ul>
+                  <li>Network paths/contacts</li>
+                  <li>Outreach due/plans</li>
+                  <li>Answers match</li>
+                  <li>Discovery sources</li>
+                  <li>Funnel / weekly</li>
+                </ul>
+              </div>
+              <div class="panel" style="margin:0">
+                <h4 class="agent">Agent / : command</h4>
+                <ul>
+                  <li>Full pursue with steering</li>
+                  <li>Research synthesis</li>
+                  <li>Bulk triage</li>
+                  <li>Browser / rare config</li>
+                  <li>Any remaining CLI</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- PIPELINE -->
+        <section id="view-pipeline" class="view hidden">
+          <div class="section">Pipeline board <span>core · stage triage</span></div>
+          <div class="kanban" id="kanban">
+            <div class="lane">
+              <h3>Review <span>3</span></h3>
+              <article class="card job" data-id="job_nova"><strong>Founding PM</strong><div class="co">NovaWork</div><div class="score">79 high</div></article>
+              <article class="card job" data-id="job_orbit"><strong>Product Lead</strong><div class="co">Orbit Labs</div><div class="score mid">71</div></article>
+              <article class="card job" data-id="job_kind"><strong>Learning Designer</strong><div class="co">Kindling</div><div class="score mid">59</div></article>
+            </div>
+            <div class="lane">
+              <h3>Materials <span>2</span></h3>
+              <article class="card job" data-id="job_lumen"><strong>Education PM</strong><div class="co">Lumen</div><div class="score mid">68</div></article>
+              <article class="card job" data-id="job_ridge_m"><strong>PM Talent Ops</strong><div class="co">Ridge AI</div><div class="score">82</div></article>
+            </div>
+            <div class="lane">
+              <h3>Applied <span>1</span></h3>
+              <article class="card job" data-id="job_field"><strong>PM Workforce</strong><div class="co">Fieldnote</div><div class="score">77</div></article>
+            </div>
+            <div class="lane">
+              <h3>Interview <span>1</span></h3>
+              <article class="card job selected" data-id="job_acme"><strong>PM Learning</strong><div class="co">Acme · HM tomorrow</div><div class="score">84 high</div></article>
+            </div>
+          </div>
+          <div class="detail" style="margin-top:10px">
+            <div class="section">Selection actions <span>same model everywhere</span></div>
+            <div class="actions">
+              <button class="btn primary" data-run="pursue job_acme --agent hermes">[p] pursue</button>
+              <button class="btn" data-run="applications update --status materials-ready">move stage</button>
+              <button class="btn" data-secondary="network">network drawer</button>
+              <button class="btn" data-prompt="Archive everything under fit 65 and explain why.">agent: bulk triage</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- JOBS TABLE (C density, still primary) -->
+        <section id="view-jobs" class="view hidden">
+          <div class="section">Jobs table <span>core · scan mode</span></div>
+          <div class="filters">
+            <div class="filter on" data-f="all">all</div>
+            <div class="filter" data-f="high">high-fit</div>
+            <div class="filter" data-f="interview">interview</div>
+            <div class="filter" data-f="due">due action</div>
+          </div>
+          <div class="panel" style="padding:6px 8px">
+            <table class="table" id="jobs-table">
+              <thead>
+                <tr><th>id</th><th>role</th><th>co</th><th>fit</th><th>stage</th><th>next</th><th>src</th></tr>
+              </thead>
+              <tbody>
+                <tr class="active" data-tags="high interview due" data-id="job_acme"><td class="muted">acme</td><td>PM Learning</td><td>Acme</td><td class="ok">84</td><td>interview</td><td class="warn">prep review</td><td>portfolio</td></tr>
+                <tr data-tags="high" data-id="job_nova"><td class="muted">nova</td><td>Founding PM</td><td>NovaWork</td><td class="ok">79</td><td>review</td><td>pursue</td><td>ashby</td></tr>
+                <tr data-tags="high due" data-id="job_ridge"><td class="muted">ridge</td><td>PM Talent Ops</td><td>Ridge</td><td class="ok">82</td><td>applied</td><td class="warn">follow-up</td><td>greenhouse</td></tr>
+                <tr data-tags="" data-id="job_orbit"><td class="muted">orbit</td><td>Product Lead</td><td>Orbit</td><td class="warn">71</td><td>review</td><td>score deeper</td><td>career</td></tr>
+                <tr data-tags="due" data-id="job_field"><td class="muted">field</td><td>PM Workforce</td><td>Fieldnote</td><td class="ok">77</td><td>applied</td><td class="warn">nudge</td><td>lever</td></tr>
+                <tr data-tags="" data-id="job_lumen"><td class="muted">lumen</td><td>Education PM</td><td>Lumen</td><td class="warn">68</td><td>materials</td><td>human review</td><td>portfolio</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- REVIEW -->
+        <section id="view-review" class="view hidden">
+          <div class="section">Review queue <span>core · human gate</span></div>
+          <div class="panel">
+            <article class="card selected">
+              <strong>resume-job_acme.md</strong>
+              <div class="muted">draft_needs_human_review · proof-grounded</div>
+              <div class="actions">
+                <button class="btn primary" data-run="artifact approve resume-job_acme">approve</button>
+                <button class="btn" data-run="open draft resume-job_acme.md">open</button>
+                <button class="btn" data-prompt="Rewrite Acme resume to emphasize product strategy over engineering, still only using proof points.">agent: revise</button>
+              </div>
+            </article>
+            <article class="card">
+              <strong>cover-job_acme.md</strong>
+              <div class="muted">draft_needs_human_review</div>
+            </article>
+            <article class="card">
+              <strong>interview-hm-acme.md</strong>
+              <div class="muted">draft · STAR × 3 linked to proofs</div>
+            </article>
+            <article class="card">
+              <strong>outreach-jane.md</strong>
+              <div class="muted">draft only · not sent · warm path</div>
+            </article>
+          </div>
+        </section>
+
+        <!-- SYSTEM -->
+        <section id="view-system" class="view hidden">
+          <div class="section">System <span>core light · not full ops console</span></div>
+          <div class="panel">
+            <table class="table">
+              <tr><td>hermes</td><td class="ok">ready</td><td class="muted">prompt-arg</td></tr>
+              <tr><td>codex</td><td class="ok">ready</td><td class="muted">stdin-json</td></tr>
+              <tr><td>mcp</td><td class="ok">26 tools</td><td class="muted">stdio</td></tr>
+              <tr><td>browser</td><td class="bad">unavailable</td><td class="muted">npx playwright install chromium</td></tr>
+              <tr><td>scheduler</td><td class="warn">daily_discovery disabled</td><td class="muted">:automation enable daily_discovery</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="section">Event log tail <span>from C</span></div>
+            <pre id="log" class="muted" style="white-space:pre-wrap;line-height:1.45">14:01 daily_discovery · high_fit=3 · career-page timeout
+14:03 pursue job_acme · score 84 · network Jane Chen
+14:04 artifact resume draft_needs_human_review
+14:10 agent hermes authenticated protocol=1</pre>
+          </div>
+        </section>
+      </main>
+
+      <!-- AGENT PANE (B) -->
+      <aside class="agent-pane" id="agent-pane">
+        <div class="section">Agent pair <span class="agent">hermes</span></div>
+        <div class="messages" id="messages">
+          <div class="msg agent">
+            <div class="who">hermes · job coach</div>
+            <div>Cockpit loaded. I can drive MCP tools; you keep pipeline + review. What should we do with Acme?</div>
+          </div>
+          <div class="msg user">
+            <div class="who">you</div>
+            <div>Pursue Acme but keep outreach draft-only. Then show me the warm path.</div>
+          </div>
+          <div class="msg agent">
+            <div class="who">hermes · tools</div>
+            <div class="tool">→ pursue_job { jobId: "job_acme", profileId: "pm-edtech" }</div>
+            <div class="tool">→ map_reachable_network { jobId: "job_acme" }</div>
+            <div style="margin-top:6px">Score 84. Resume/cover staged for review. Warm path: you → Jane Chen (shared employer) → HM. Nothing sent.</div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-bottom:8px">
+          <div class="section">Live pursue stages <span>selected job</span></div>
+          <div class="stage-list">
+            <div><span>score</span><span class="ok">ok 84</span></div>
+            <div><span>company</span><span class="ok">ok</span></div>
+            <div><span>network</span><span class="ok">Jane Chen</span></div>
+            <div><span>resume</span><span class="warn">draft</span></div>
+            <div><span>outreach</span><span class="warn">draft only</span></div>
+            <div class="muted"><span>browser apply</span><span>not in default UI</span></div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="chips">
+            <span class="chip" data-prompt="Run daily and summarize only high-fit roles.">daily high-fit</span>
+            <span class="chip" data-prompt="Show network paths for the selected job.">network paths</span>
+            <span class="chip" data-prompt="Match my answers for Acme; block restricted questions.">answers match</span>
+            <span class="chip" data-prompt="Revise Acme resume toward product strategy using only proof points.">revise resume</span>
+          </div>
+          <textarea id="input" placeholder="Steer the agent… e.g. research Acme stakeholders, don't invent contacts"></textarea>
+          <div class="composer-bar">
+            <div>MCP · no silent fallback</div>
+            <button class="btn primary" id="send">Send</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="cmdbar">
+      <form id="cmd-form">
+        <span class="prompt">:</span>
+        <input id="cmd" placeholder="pursue job_acme --agent hermes   |   daily --profile pm-edtech   |   network paths --job job_acme   |   answers match …" />
+        <button class="btn" type="submit">run</button>
+      </form>
+      <div class="muted">escape hatch → full CLI parity</div>
+    </div>
+
+    <div class="statusbar">
+      <div>
+        <kbd>1-5</kbd>views
+        <kbd>j/k</kbd>select
+        <kbd>p</kbd>pursue
+        <kbd>d</kbd>daily
+        <kbd>a</kbd>agent
+        <kbd>:</kbd>command
+        <kbd>n/o/q</kbd>drawers
+      </div>
+      <div id="status">ready · primary surfaces only · long-tail via agent or :</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const jobs = {
+      job_acme: {
+        title: 'PM, Learning Platform · Acme Learning',
+        sub: 'job_acme · fit 84 · interview · agent ready',
+        body: 'Next: review HM prep + optional warm intro via Jane (shared employer). Drafts gated. No external send.'
+      },
+      job_nova: {
+        title: 'Founding PM · NovaWork',
+        sub: 'job_nova · fit 79 · review · high fit',
+        body: 'Early-stage WorkTech match. Network thin — research stakeholders before outreach draft.'
+      },
+      job_orbit: {
+        title: 'Product Lead · Orbit Labs',
+        sub: 'job_orbit · fit 71 · review',
+        body: 'Mid-high education fit. Consider deeper scoring before materials.'
+      },
+      job_field: {
+        title: 'PM Workforce · Fieldnote',
+        sub: 'job_field · fit 77 · applied',
+        body: 'Applied 4d ago. Follow-up due. No interview yet.'
+      },
+      job_lumen: {
+        title: 'Education PM · Lumen',
+        sub: 'job_lumen · fit 68 · materials-ready',
+        body: 'Drafts exist; proof grounding thinner — human review first.'
+      },
+      job_ridge: {
+        title: 'PM Talent Ops · Ridge AI',
+        sub: 'job_ridge · fit 82 · applied',
+        body: 'Follow-up due tomorrow. Materials already used.'
+      },
+      job_ridge_m: {
+        title: 'PM Talent Ops · Ridge AI',
+        sub: 'job_ridge · fit 82 · materials-ready',
+        body: 'Resume/cover ready for final review before apply tracking.'
+      },
+      job_kind: {
+        title: 'Learning Designer · Kindling',
+        sub: 'job_kind · fit 59 · review',
+        body: 'Below usual bar. Candidate for archive or agent bulk triage.'
+      }
+    };
+
+    const secondary = {
+      network: {
+        title: 'Network (secondary drawer)',
+        html: `<div class="ok">warm path · high</div>
+          <div style="margin-top:6px">you → <strong>Jane Chen</strong> (shared_employer) → hiring manager</div>
+          <div class="muted" style="margin-top:8px">Contacts ranked · no send · import CSV via :network import</div>
+          <div class="actions">
+            <button class="btn" data-run="network paths --job job_acme">refresh paths</button>
+            <button class="btn" data-prompt="Explain why Jane is the best path and draft a short intro ask.">agent: draft intro ask</button>
+          </div>`
+      },
+      outreach: {
+        title: 'Outreach (secondary drawer)',
+        html: `<div>Plan: email · path strength high · warnings: none</div>
+          <div class="warn" style="margin-top:6px">draft only · mark-sent records human action outside JobOS</div>
+          <div class="muted" style="margin-top:8px">Due: Jane follow-up today 16:00</div>
+          <div class="actions">
+            <button class="btn" data-run="outreach plan --job job_acme">plan</button>
+            <button class="btn" data-run="outreach draft --job job_acme">draft</button>
+          </div>`
+      },
+      answers: {
+        title: 'Answers match (secondary drawer)',
+        html: `<div>matched 4 · blocked 1 restricted (sensitive_prompt)</div>
+          <div class="muted" style="margin-top:6px">Why Acme? → verified personal answer</div>
+          <div class="bad" style="margin-top:4px">SSN / work auth → never auto-filled</div>
+          <div class="actions">
+            <button class="btn" data-run="answers match --profile pm-edtech">re-match</button>
+          </div>`
+      },
+      discovery: {
+        title: 'Discovery sources (secondary drawer)',
+        html: `<div>portfolio · ok · imported 2</div>
+          <div>ashby · ok · imported 1</div>
+          <div class="bad">career-page · timeout · retry via :daily</div>
+          <div class="actions">
+            <button class="btn primary" data-run="daily --profile pm-edtech">run daily</button>
+          </div>`
+      },
+      analytics: {
+        title: 'Funnel / weekly (secondary drawer)',
+        html: `<div>30d: discovered 42 · high-fit 11 · applied 5 · interview 2 · offer 0</div>
+          <div class="muted" style="margin-top:6px">Full weekly review narrative → agent or :review weekly</div>
+          <div class="actions">
+            <button class="btn" data-run="analytics funnel --profile pm-edtech">funnel json</button>
+            <button class="btn" data-prompt="Write my weekly review from funnel + open tasks.">agent: weekly review</button>
+          </div>`
+      }
+    };
+
+    const toast = document.getElementById('toast');
+    const status = document.getElementById('status');
+    const log = document.getElementById('log');
+    const messages = document.getElementById('messages');
+    const input = document.getElementById('input');
+    const drawer = document.getElementById('drawer');
+    let selected = 'job_acme';
+
+    function flash(msg) {
+      toast.textContent = msg;
+      toast.style.display = 'block';
+      status.textContent = msg;
+      clearTimeout(flash._t);
+      flash._t = setTimeout(() => { toast.style.display = 'none'; }, 1600);
+    }
+    function appendLog(line) {
+      log.textContent += '\n' + line;
+    }
+    function setSelection(id) {
+      selected = id;
+      const j = jobs[id] || jobs.job_acme;
+      document.getElementById('sel-title').textContent = j.title;
+      document.getElementById('sel-sub').textContent = j.sub;
+      document.getElementById('sel-body').textContent = j.body;
+      document.querySelectorAll('.job').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
+      document.querySelectorAll('#jobs-table tbody tr').forEach(tr => tr.classList.toggle('active', tr.dataset.id === id));
+      flash('selected ' + id);
+    }
+    function showView(name) {
+      document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
+      const el = document.getElementById('view-' + name);
+      if (el) el.classList.remove('hidden');
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
+      document.querySelectorAll('.rail .nav[data-jump]').forEach(n => n.classList.toggle('active', n.dataset.jump === name));
+      // keep drawer available on today; hide on pure system maybe still ok on today only
+      if (name !== 'today') drawer.classList.add('hidden');
+      flash('view → ' + name);
+    }
+    function openSecondary(key) {
+      showView('today');
+      const data = secondary[key];
+      if (!data) return;
+      drawer.classList.remove('hidden');
+      document.getElementById('drawer-title').textContent = data.title;
+      document.getElementById('drawer-body').innerHTML = data.html;
+      bindDynamic();
+      flash('drawer → ' + key);
+    }
+    function runCmd(line) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      appendLog(ts + ' exec ' + line);
+      flash('ran: ' + line);
+      if (/daily/.test(line)) appendLog(ts + ' daily ok · high_fit=3 · failures=1');
+      if (/pursue/.test(line)) appendLog(ts + ' pursue queued · agent=hermes · drafts gated');
+      if (/network/.test(line)) appendLog(ts + ' network paths=1 · Jane Chen');
+    }
+    function addMsg(who, html, cls, escape = false) {
+      const el = document.createElement('div');
+      el.className = 'msg ' + cls;
+      const whoDiv = document.createElement('div');
+      whoDiv.className = 'who';
+      whoDiv.textContent = who;
+      const contentDiv = document.createElement('div');
+      if (escape) contentDiv.textContent = html;
+      else contentDiv.innerHTML = html;
+      el.appendChild(whoDiv);
+      el.appendChild(contentDiv);
+      messages.appendChild(el);
+      messages.scrollTop = messages.scrollHeight;
+    }
+    function agentPrompt(text) {
+      addMsg('you', text, 'user', true);
+      status.textContent = 'agent working…';
+      setTimeout(() => {
+        let reply = 'Routed through JobOS tools. No invented claims; external actions remain off.';
+        if (/daily/i.test(text)) {
+          reply = `<div class="tool">→ daily_discovery { profileId: "pm-edtech" }</div>
+                   High-fit: Acme 84, Ridge 82, NovaWork 79. career-page timed out (isolated).`;
+        } else if (/network/i.test(text)) {
+          reply = `<div class="tool">→ map_reachable_network { jobId: "${selected}" }</div>
+                   Warm path: you → Jane Chen → HM (shared_employer).`;
+        } else if (/answer/i.test(text)) {
+          reply = `<div class="tool">→ answers_match { profileId: "pm-edtech" }</div>
+                   Matched 4 · blocked 1 restricted.`;
+        } else if (/interview/i.test(text)) {
+          reply = `<div class="tool">→ interview_prep { applicationId: "app_acme", stage: "hiring-manager" }</div>
+                   Packet drafted with 3 STAR stories grounded in proof points.`;
+        } else if (/revise|resume/i.test(text)) {
+          reply = `<div class="tool">→ tailor_resume { jobId: "job_acme", profileId: "pm-edtech" }</div>
+                   New draft staged for Review. Still draft_needs_human_review.`;
+        } else if (/bulk|archive/i.test(text)) {
+          reply = `Would archive Kindling (59). Orbit (71) keep for manual look. No deletes without your confirm.`;
+        } else if (/weekly/i.test(text)) {
+          reply = `<div class="tool">→ weekly_review { profileId: "pm-edtech" }</div>
+                   Funnel + open tasks written to exports/weekly-….md`;
+        } else if (/intro/i.test(text)) {
+          reply = `Draft intro ask for Jane staged as outreach artifact. Not sent.`;
+        }
+        addMsg('hermes · tools', reply, 'agent');
+        status.textContent = 'agent idle · review still human-gated';
+      }, 400);
+    }
+    function bindDynamic() {
+      document.querySelectorAll('[data-run]').forEach(btn => {
+        btn.onclick = () => runCmd(btn.dataset.run);
+      });
+      document.querySelectorAll('[data-prompt]').forEach(btn => {
+        btn.onclick = () => {
+          document.getElementById('workspace').classList.remove('agent-hidden');
+          agentPrompt(btn.dataset.prompt);
+        };
+      });
+      document.querySelectorAll('[data-secondary]').forEach(btn => {
+        btn.onclick = () => openSecondary(btn.dataset.secondary);
+      });
+    }
+
+    // tabs
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => showView(tab.dataset.view));
+    });
+    document.querySelectorAll('.rail .nav[data-jump]').forEach(nav => {
+      nav.addEventListener('click', () => showView(nav.dataset.jump));
+    });
+    document.querySelectorAll('.rail .nav[data-secondary]').forEach(nav => {
+      nav.addEventListener('click', () => openSecondary(nav.dataset.secondary));
+    });
+
+    // selection
+    document.querySelectorAll('.job').forEach(el => {
+      el.addEventListener('click', () => setSelection(el.dataset.id));
+    });
+    document.querySelectorAll('#jobs-table tbody tr').forEach(tr => {
+      tr.addEventListener('click', () => setSelection(tr.dataset.id));
+    });
+
+    // filters
+    document.querySelectorAll('.filter').forEach(f => {
+      f.addEventListener('click', () => {
+        document.querySelectorAll('.filter').forEach(x => x.classList.remove('on'));
+        f.classList.add('on');
+        const mode = f.dataset.f;
+        document.querySelectorAll('#jobs-table tbody tr').forEach(tr => {
+          const tags = tr.dataset.tags || '';
+          tr.style.display = (mode === 'all' || tags.split(/\s+/).includes(mode)) ? '' : 'none';
+        });
+      });
+    });
+
+    // agent
+    document.getElementById('toggle-agent').addEventListener('click', () => {
+      document.getElementById('workspace').classList.toggle('agent-hidden');
+      flash(document.getElementById('workspace').classList.contains('agent-hidden') ? 'agent pane hidden' : 'agent pane shown');
+    });
+    document.getElementById('send').addEventListener('click', () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      agentPrompt(text);
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById('send').click();
+      }
+    });
+    document.querySelectorAll('.chip').forEach(chip => {
+      chip.addEventListener('click', () => agentPrompt(chip.dataset.prompt));
+    });
+
+    // command bar
+    document.getElementById('cmd-form').addEventListener('submit', e => {
+      e.preventDefault();
+      const line = document.getElementById('cmd').value.trim();
+      if (!line) return;
+      runCmd(line);
+      document.getElementById('cmd').value = '';
+    });
+
+    // keys
+    window.addEventListener('keydown', e => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        if (e.key === 'Escape') document.activeElement.blur();
+        return;
+      }
+      const map = { '1': 'today', '2': 'pipeline', '3': 'jobs', '4': 'review', '5': 'system' };
+      if (map[e.key]) showView(map[e.key]);
+      if (e.key === 'a') document.getElementById('toggle-agent').click();
+      if (e.key === 'p') runCmd('pursue ' + selected + ' --agent hermes');
+      if (e.key === 'd') runCmd('daily --profile pm-edtech');
+      if (e.key === 'n') openSecondary('network');
+      if (e.key === 'o') openSecondary('outreach');
+      if (e.key === 'q') openSecondary('answers');
+      if (e.key === 's') openSecondary('discovery');
+      if (e.key === 'f') openSecondary('analytics');
+      if (e.key === ':') {
+        e.preventDefault();
+        document.getElementById('cmd').focus();
+      }
+      if (e.key === 'j' || e.key === 'k') {
+        const rows = [...document.querySelectorAll('#jobs-table tbody tr')].filter(r => r.style.display !== 'none');
+        if (!rows.length) return;
+        let i = rows.findIndex(r => r.classList.contains('active'));
+        if (i < 0) i = 0;
+        i = e.key === 'j' ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
+        setSelection(rows[i].dataset.id);
+      }
+    });
+
+    bindDynamic();
+  </script>
+</body>
+</html>

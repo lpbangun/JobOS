@@ -32,6 +32,11 @@ function syncWatchlist(s, row) {
   writeYaml(path.join(s.p.watchlist, 'index.yaml'), listWatchlist(s));
 }
 
+function discoveryErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return [error?.source, error?.url, error?.message].filter(Boolean).join(' — ') || String(error);
+}
+
 function runSummary(outputs) {
   return `# Discovery run ${outputs.runId}
 
@@ -50,7 +55,7 @@ Created: ${outputs.createdAt}
 ## Human gate
 Discovered jobs were queued for review only. JobOS did not apply, submit forms, send outreach, or touch external accounts.
 
-${outputs.errors?.length ? `## Errors\n${outputs.errors.map(e => `- ${e}`).join('\n')}\n` : ''}
+${outputs.errors?.length ? `## Errors\n${outputs.errors.map(e => `- ${discoveryErrorMessage(e)}`).join('\n')}\n` : ''}
 `;
 }
 
@@ -66,7 +71,7 @@ export function createSearch(s, { name, profileId, adapter, config = {}, minFit 
   if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
   getAdapter(adapter);
   const at = now(), sid = id('search', name);
-  run(s, 'INSERT OR REPLACE INTO saved_searches (id,name,profile_id,adapter,config_json,min_fit,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)', [sid, name, profileId, adapter, JSON.stringify(parseConfig(config)), Number(minFit || 70), one(s, 'SELECT last_run_at FROM saved_searches WHERE id=?', [sid])?.last_run_at || null, one(s, 'SELECT created_at FROM saved_searches WHERE id=?', [sid])?.created_at || at, at]);
+  run(s, 'INSERT OR REPLACE INTO saved_searches (id,name,profile_id,adapter,config_json,min_fit,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)', [sid, name, profileId, adapter, JSON.stringify(parseConfig(config)), Number.isFinite(minFit) ? minFit : 70, one(s, 'SELECT last_run_at FROM saved_searches WHERE id=?', [sid])?.last_run_at || null, one(s, 'SELECT created_at FROM saved_searches WHERE id=?', [sid])?.created_at || at, at]);
   const row = one(s, 'SELECT * FROM saved_searches WHERE id=?', [sid]);
   audit(s, 'search.saved', 'saved_search', sid, { profileId, adapter, name });
   syncSearch(s, row); save(s);
@@ -117,7 +122,14 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
   const outputs = { runId, searchId: row.id, searchName: row.name, profileId: row.profile_id, adapter: row.adapter, config: cfg, status: 'succeeded', counts: { fetched: 0, imported: 0, deduped: 0, highFit: 0 }, jobs: [], errors: [], createdAt };
   try {
     const adapter = getAdapter(row.adapter);
-    const jobs = await adapter.fetchJobs(cfg, opts);
+    const result = await adapter.fetchJobs(cfg, opts);
+    const jobs = Array.isArray(result) ? result : result?.jobs;
+    if (!Array.isArray(jobs)) throw Error(`Discovery adapter ${row.adapter} returned an invalid result`);
+    const metadata = Array.isArray(result) ? result.metadata : result?.metadata;
+    if (metadata && typeof metadata === 'object') {
+      outputs.metadata = metadata;
+      if (Array.isArray(metadata.errors)) outputs.errors.push(...metadata.errors);
+    }
     outputs.counts.fetched = jobs.length;
     for (const job of jobs) {
       const imported = importNormalized(s, { profileId: row.profile_id, job, source: job.source || row.adapter, status: 'new', runId });
@@ -159,8 +171,23 @@ export function reviewQueue(s) {
 
 export function configFromFlags(flags = {}) {
   const cfg = flags.config ? parseConfig(flags.config) : {};
-  for (const [flag, key] of [['board-token','boardToken'], ['board_token','boardToken'], ['company','company'], ['handle','handle'], ['fixture','fixture'], ['location','location']]) {
-    if (flags[flag]) cfg[key] = String(flags[flag]);
+  for (const [flag, key] of [
+    ['board-token', 'boardToken'], ['board_token', 'boardToken'], ['boardToken', 'boardToken'],
+    ['company', 'company'], ['company-label', 'companyLabel'], ['companyLabel', 'companyLabel'],
+    ['handle', 'handle'], ['fixture', 'fixture'], ['location', 'location'], ['url', 'url']
+  ]) {
+    if (flags[flag] !== undefined && flags[flag] !== null && flags[flag] !== '') cfg[key] = String(flags[flag]);
+  }
+  for (const [flag, key, maximum] of [
+    ['max-companies', 'maxCompanies', 30], ['maxCompanies', 'maxCompanies', 30],
+    ['max-requests', 'maxRequests', 90], ['maxRequests', 'maxRequests', 90],
+    ['request-timeout-ms', 'requestTimeoutMs', 10_000], ['requestTimeoutMs', 'requestTimeoutMs', 10_000],
+    ['total-timeout-ms', 'totalTimeoutMs', 60_000], ['totalTimeoutMs', 'totalTimeoutMs', 60_000]
+  ]) {
+    if (flags[flag] === undefined || flags[flag] === null || flags[flag] === '') continue;
+    const value = Math.floor(Number(flags[flag]));
+    if (!Number.isFinite(value) || value <= 0) throw Error(`Invalid --${flag}: expected a positive number`);
+    cfg[key] = Math.min(value, maximum);
   }
   if (flags.keywords) cfg.keywords = splitCsv(flags.keywords);
   if (flags.notes) cfg.notes = String(flags.notes);

@@ -2,7 +2,8 @@ import * as cheerio from 'cheerio';
 
 function timeoutMs(provider, env) {
   const key = `JOBOS_SEARCH_${provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_TIMEOUT_MS`;
-  return Math.max(1000, Number(env[key] || env.JOBOS_SEARCH_TIMEOUT_MS || 15000));
+  const raw = Number(env[key] || env.JOBOS_SEARCH_TIMEOUT_MS || 15000);
+  return Number.isFinite(raw) && raw >= 1000 ? raw : 15000;
 }
 
 function searchUrl(base, query, params = {}) {
@@ -80,13 +81,40 @@ function htmlResults(html, options) {
 }
 
 async function fetchText(url, { provider, env, headers = {} }) {
-  const response = await fetch(url, {
-    headers: { 'accept': 'application/json,text/html;q=0.9,*/*;q=0.8', 'user-agent': 'JobOS local research (+human-initiated search)', ...headers },
-    signal: AbortSignal.timeout(timeoutMs(provider, env))
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs(provider, env));
+  timer.unref?.();
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { 'accept': 'application/json,text/html;q=0.9,*/*;q=0.8', 'user-agent': 'JobOS local research (+human-initiated search)', ...headers },
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
   const text = await response.text();
   return { text, type: response.headers.get('content-type') || '' };
+}
+
+async function fetchJsonWithTimeout(url, { provider, env, headers = {}, body }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs(provider, env));
+  timer.unref?.();
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  return await response.json();
 }
 
 async function duckduckgoSearch(query, { limit, env }) {
@@ -119,10 +147,80 @@ async function searxngSearch(query, { limit, env }) {
   return jsonResults(JSON.parse(text), { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: url.origin });
 }
 
+async function exaSearch(query, { limit, env }) {
+  const provider = 'exa';
+  const apiKey = env.EXA_API_KEY || env.JOBOS_EXA_API_KEY || '';
+  if (!apiKey) throw new Error('Missing EXA_API_KEY or JOBOS_EXA_API_KEY');
+  const base = env.JOBOS_EXA_SEARCH_URL || 'https://api.exa.ai/search';
+  const data = await fetchJsonWithTimeout(base, {
+    provider,
+    env,
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey
+    },
+    body: JSON.stringify({
+      query,
+      type: env.JOBOS_EXA_SEARCH_TYPE || 'auto',
+      numResults: limit,
+      contents: { text: { maxCharacters: 600 }, highlights: true }
+    })
+  });
+  const items = (data.results || []).map(item => ({
+    title: item.title || item.url,
+    url: item.url,
+    snippet: item.text || (Array.isArray(item.highlights) ? item.highlights.join(' ') : '')
+  }));
+  return normalizeResults(items, { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://exa.ai' });
+}
+
+async function tavilySearch(query, { limit, env }) {
+  const provider = 'tavily';
+  const apiKey = env.TAVILY_API_KEY || env.JOBOS_TAVILY_API_KEY || '';
+  if (!apiKey) throw new Error('Missing TAVILY_API_KEY or JOBOS_TAVILY_API_KEY');
+  const base = env.JOBOS_TAVILY_SEARCH_URL || 'https://api.tavily.com/search';
+  const data = await fetchJsonWithTimeout(base, {
+    provider,
+    env,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      api_key: apiKey,
+      query,
+      max_results: limit,
+      search_depth: env.JOBOS_TAVILY_SEARCH_DEPTH || 'basic',
+      include_raw_content: false
+    })
+  });
+  return normalizeResults(data.results || [], { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://tavily.com' });
+}
+
+async function perplexitySearch(query, { limit, env }) {
+  const provider = 'perplexity';
+  const apiKey = env.PERPLEXITY_API_KEY || env.JOBOS_PERPLEXITY_API_KEY || '';
+  if (!apiKey) throw new Error('Missing PERPLEXITY_API_KEY or JOBOS_PERPLEXITY_API_KEY');
+  const base = env.JOBOS_PERPLEXITY_SEARCH_URL || 'https://api.perplexity.ai/search';
+  const data = await fetchJsonWithTimeout(base, {
+    provider,
+    env,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({ query, max_results: limit })
+  });
+  return normalizeResults(resultItems(data), { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://perplexity.ai' });
+}
+
 export const searchProviders = {
   duckduckgo: { name: 'duckduckgo', search: duckduckgoSearch },
   brave: { name: 'brave', search: braveSearch },
-  searxng: { name: 'searxng', search: searxngSearch }
+  searxng: { name: 'searxng', search: searxngSearch },
+  exa: { name: 'exa', search: exaSearch },
+  tavily: { name: 'tavily', search: tavilySearch },
+  perplexity: { name: 'perplexity', search: perplexitySearch }
 };
 
 function splitProviderNames(value) {
@@ -135,10 +233,14 @@ function addUnique(items, name) {
 
 export function providerChain(env = process.env) {
   const explicit = splitProviderNames(env.JOBOS_SEARCH_PROVIDERS || env.JOBOS_SEARCH_PROVIDER);
+  if (explicit.length === 1 && ['none', 'disabled', 'off'].includes(explicit[0])) return [];
   const chain = [];
   const requested = explicit.length ? explicit : ['duckduckgo'];
   for (const name of requested) {
     if (name === 'auto') {
+      if (env.EXA_API_KEY || env.JOBOS_EXA_API_KEY) addUnique(chain, 'exa');
+      if (env.TAVILY_API_KEY || env.JOBOS_TAVILY_API_KEY) addUnique(chain, 'tavily');
+      if (env.PERPLEXITY_API_KEY || env.JOBOS_PERPLEXITY_API_KEY) addUnique(chain, 'perplexity');
       if (env.JOBOS_BRAVE_API_KEY || env.BRAVE_SEARCH_API_KEY) addUnique(chain, 'brave');
       if (env.JOBOS_SEARXNG_URL) addUnique(chain, 'searxng');
       addUnique(chain, 'duckduckgo');

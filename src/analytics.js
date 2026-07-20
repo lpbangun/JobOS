@@ -6,6 +6,7 @@ import { due } from './tracking.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
 import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
 import { listOutreachThreads, outreachDue } from './outreach.js';
+import { listContactPoints } from './research/contacts.js';
 
 export function state(s) {
   return {
@@ -17,6 +18,11 @@ export function state(s) {
     tasks: due(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
+    sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
+    personCandidates: all(s, 'SELECT * FROM person_candidates ORDER BY updated_at DESC'),
+    contactPoints: listContactPoints(s),
+    emailPatterns: all(s, 'SELECT * FROM email_patterns ORDER BY updated_at DESC'),
+    outreachPlans: all(s, 'SELECT * FROM outreach_plans ORDER BY created_at DESC').map(x => ({ ...x, reasoning: parseJson(x.reasoning_json, {}), warnings: parseJson(x.warnings_json, []) })),
     outreachThreads: listOutreachThreads(s),
     outreachDue: outreachDue(s),
     searches: listSearches(s),
@@ -26,7 +32,7 @@ export function state(s) {
     audit: all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 50').map(a => ({ ...a, payload: parseJson(a.payload_json, {}) })),
     automations: listAutomations(s),
     automationRuns: listRuns(s, { limit: 25 }),
-    policy: { externalApply: 'human_approval_required', externalSend: 'human_approval_required', autoApply: 'disabled', autoSend: 'disabled' }
+    policy: { externalApply: 'user_configured', externalSend: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' }
   };
 }
 
@@ -106,7 +112,7 @@ export function funnel(s, profileId, days = 30) {
     if (applied && interviews === 0) insights.push('Applications are not yet converting to interviews; review fit scoring, company targeting, and outreach before increasing volume.');
     if (interviews > 0) insights.push(`Interview conversion is ${pct(interviews, applied || apps.length)}%; inspect the role families and sources that produced those interviews.`);
     const stuck = byStage.find(x => ['saved', 'researching', 'materials-ready'].includes(x.stage) && x.count > 0);
-    if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next human-gated action for each.`);
+    if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next action and use an explicitly configured external tool if one is needed.`);
     if (stale) insights.push(`${stale} active application(s) have not moved in 14+ days; schedule follow-up, prep for the next touchpoint, or mark them withdrawn/ghosted.`);
   }
   return {

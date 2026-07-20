@@ -1,59 +1,107 @@
 # JobOS Build Progress
 
-## Status
-- 2026-07-02: Repo/spec inspection completed. Initial workspace contained product/research specs and no app scaffold.
-- 2026-07-02: MVP stack selected: Node.js CLI + sql.js-backed SQLite file + agent-readable workspace files + local HTTP dashboard. Rationale: works in this empty repo with Node 22/npm available and no system sqlite3 dependency.
-- 2026-07-02: Planner, designer, and advisor handoffs completed.
-- 2026-07-02: Working MVP scaffold implemented: CLI, SQLite schema, workspace sync, scoring, tailoring, research worksheets, application tracking, weekly review, dashboard, tests, smoke script, README.
-- 2026-07-02: Vision UI blocker pass addressed with navigable dashboard shell, route sections, artifact review modal, gate modal, command palette/CLI copy helpers, responsive CSS, accessibility labels, audit/automation state, and route hardening.
-- 2026-07-04: Sprint 6 discovery module implemented: Greenhouse/Lever public ATS adapters, saved searches, company watchlist, dedupe/review queue, discovery AutomationRun records, workspace sync, dashboard/API/MCP surfaces, tests, and smoke coverage.
-- 2026-07-04: Sprint 7 scheduler implemented: automations table/YAML sync, seeded disabled defaults, cron parser, run-once/start/manual triggers, action registry, audited AutomationRun rows, JSONL run mirror, dashboard/API/MCP surfaces, failure auto-disable, targeted tests, and smoke coverage.
-- 2026-07-07: Sprint 9 Goal 1 frontend surface audit completed in `docs/frontend-audit.md`; full test suite rerun passed after one transient API fetch failure passed on targeted rerun.
-- 2026-07-07: Sprint 9 Goal 2 frontend architecture options completed in `docs/frontend-options.md`; decision remains CLI-primary with web as a companion after exemplar CLI pattern review.
-- 2026-07-07: Sprint 9 Goal 3 CLI-primary frontend plan completed in `docs/frontend-plan.md`, including command registry, exit-code, auto-workspace, loop/watch, and agent-guide contracts.
-- 2026-07-07: Sprint 9 Goal 4 CLI frontend implementation completed: registry-generated help, typed JSON errors, auto-workspace bootstrap notice, agent guide command, scheduler-backed loops, and tasks watch mode.
-- 2026-07-07: Sprint 9 Goal 5 frontend evals completed: Sprint 9 registry/bootstrap/loop tests, blind-agent JSON eval, human usability checklist, and smoke auto-workspace coverage.
-- 2026-07-07: Sprint 8 Goal 1 approach dossier completed for LLM-grounded research/outreach: search provider recommendation, multi-query dossier pipeline, stakeholder source policy, outreach lifecycle design, and Phase C eval rubric.
-- 2026-07-07: Sprint 8 Goal 2 pluggable search provider registry implemented: DuckDuckGo default, Brave API provider, SearXNG provider, env-selected provider chains, per-provider timeouts, normalized provider metadata, and fallback warnings.
-- 2026-07-07: Sprint 8 Goal 3 LLM-synthesized company dossiers implemented: five-query company research, source-pooled LLM claims/open questions/outreach angles, unsupported-claim dropping, multi-query no-LLM fallback, and refreshed `companies.facts_json`.
-- 2026-07-07: Sprint 8 Goal 4 honest stakeholder pipeline implemented: source-required pasted stakeholder records, confidence/source labels, LinkedIn/private-profile exclusion for search promotion, LLM relevance filtering, and stakeholder worksheet warnings.
-- 2026-07-07: Sprint 8 Goal 5 personalized outreach lifecycle implemented: LLM evidence-backed outreach drafts, proof/style-aware deterministic fallback, local outreach threads, human-sent recording, follow-up scheduling, due follow-up listing, and CLI/API/MCP/dashboard surfaces.
-- 2026-07-07: Sprint 8 Goal 6 research/outreach eval harness implemented: local fake search/LLM providers, dossier/stakeholder/outreach rubric scoring, hard human-gate/audit/no-live-network assertions, and `npm test` coverage.
-- 2026-07-07: Sprint 8 close-out completed: README command/env/API/MCP/eval docs updated, research eval scores reached 10/10 on every dossier/stakeholder/outreach axis with 33/33 hard assertions, and the final test/smoke gates passed.
+## Current status — 2026-07-16
 
-## Handoffs
-- PlannerSpec: `.hermes/jobos-mvp-architecture-handoff.md`
-- DesignerSpec: `jobos-dashboard-uiux-handoff.md`
-- AdvisorChecklist: `jobos-mvp-review-checklist.md`
-- FinalAdvisor: PASS after targeted checks.
-- VisionUICheck: initial BLOCKED; fixes implemented and regate requested.
+JobOS now has a data-bound terminal product as its primary local control surface. The CLI and dashboard remain supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
-## Verification log
-- `npm install` completed successfully.
-- `npm test` passed after Sprint 7: 24/24 Node tests.
-- `npm run smoke` passed after Sprint 7: initialized workspace, ran fixture-backed discovery, created profile/job/application, scored/tailored/interview-prepped, generated weekly review, ran due scheduler automation, verified priority brief export, AutomationRun JSONL, dashboard `/api/state`, dashboard shell navigation, and route hardening for unknown/traversal paths.
-- Additional URL smoke passed: `jobs import-url` with a data URL creates one idempotent job and duplicate import returns `created:false`.
-- Sprint 6 targeted test passed: `node --test tests/sprint6-discovery.test.js`.
-- Sprint 7 targeted test passed: `node --test tests/sprint7-scheduler.test.js`.
-- Sprint 8 Goal 1 gate passed: `npm test` (27/27) and `npm run smoke`.
-- Sprint 8 Goal 2 gate passed: `node --test tests/sprint8-search.test.js`, `node --test tests/sprint3-research.test.js`, `npm test` (30/30), and `npm run smoke`.
-- Sprint 8 Goal 3 gate passed: `node --test tests/sprint3-research.test.js`, `npm test` (31/31), and `npm run smoke`.
-- Sprint 9 Goal 4/5 gate passed: `node --test tests/sprint9-frontend.test.js`, `node run_eval.js`, `npm test` (39/39), and `npm run smoke`.
-- Sprint 8 Goal 4 gate passed: `node --test tests/sprint3-research.test.js` (5/5), `npm test` (39/39), and `npm run smoke`.
-- Sprint 8 Goal 5 gate passed: `node --test tests/sprint3-research.test.js` (6/6), `node --test tests/sprint4-interview-analytics-mcp.test.js` (4/4), `npm test` (40/40), and `npm run smoke`.
-- Sprint 8 Goal 6 gate passed: `node run_eval_research.js`, `node --test tests/sprint8-research-eval.test.js` (1/1), `npm test` (41/41 after rerun; one transient API fetch failure passed on targeted and full rerun), and `npm run smoke`.
-- Sprint 8 final close-out gate passed: `node run_eval_research.js`, `npm test` (41/41), and `npm run smoke`.
+### Primary workflows
 
-## Current implementation notes
-- Core flow is local-only and API-key-free.
-- Generated artifacts are `draft_needs_human_review` and include evidence warnings when proof points are absent or unmatched.
-- External actions remain human-gated: no auto-apply, no auto-send, no browser automation.
-- Scheduler actions are internal-only, run sequentially behind a PID guard, and write audit/run records for every attempted automation.
+- `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
+- `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
+- `jobos pursue <job-id> --profile <id>` composes fit scoring, company/stakeholder/contact research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and an outreach draft when a sourced stakeholder is available.
+- `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
+- `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
+- `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
+- `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
+
+### Implemented in the ACP host and lean CLI passes
+
+- Real ACP v1 client lifecycle for Hermes 0.18.2: initialize, session creation, event streaming, mediated MCP tools, cancellation, timeout/crash typing, redacted stderr, and restart.
+- Cancelled or timed-out ACP sessions quarantine later updates and start a clean process/session before the next prompt; raw TUI and ACP drills verify uncontaminated recovery.
+- One `domain-tools` facade serves CLI/TUI actions, the ACP session's inward MCP door, and the independent external `jobos mcp` door.
+- Data-bound locked 011 terminal shell: priority strip, dense job list, selected detail stack, default-on agent pane, review/log overlays, responsive narrow/empty/failure states, and clean raw-terminal shutdown.
+- Scripted real-client evidence: multi-turn ACP cancel/recover/restart/policy/timeout/missing-binary drill and external MCP initialize/list/call/exit drill.
+- Concise root help grouped into Setup, Workflows, and Extend; the complete low-level registry remains behind `help --all` and `agent-guide --json`.
+- Ashby, public career-page, and bounded VC/startup portfolio discovery in addition to Greenhouse and Lever.
+- Hard portfolio caps: 30 companies, 90 requests, 10 seconds per request, and 60 seconds total; partial results retain structured source failures.
+- Cron-friendly `daily` and dependency-aware `pursue` workflow orchestration with dry-run, stage selection, elapsed times, result paths/IDs, skip reasons, and recovery guidance.
+- Profile/job ownership validation in scoring, tailoring, and pursue.
+- Reusable answer bank with normalized matching, employer scoping, status/reuse policy, redacted mirrors, restricted-question blockers, and proof-grounded agent/LLM draft suggestions.
+- Warm relationship edges integrated into outreach-plan selection; source-backed warm paths can outrank cold contact routes.
+- Generic local-agent registry and protocol with built-in Codex/Hermes manifests, executable checks, strict JSON stdout, 50 KiB output cap, timeout/kill, typed failures, and no silent fallback for explicit agent runtime failures.
+- Agent routing across scoring, research, application-question drafting, tailoring, and outreach; generated modes identify `agent` versus `llm`.
+- Optional Playwright integration with private permissions, login/auth failure classification, cookie import/export, CAPTCHA detection, script hash verification, and two-key side-effect authorization.
+- `sql.js` save hardening with an exclusive lock, optimistic store revision, fsync, same-directory atomic rename, stale-snapshot rejection, and lock cleanup.
+- Policy migration from obsolete `human_approval_required` wording to `user_configured`; external effects remain disabled until configured/enabled.
+- Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
+- MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, and `answers_match`.
+- README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
+- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+
+### Intentionally deferred
+
+Not required for the smallest coherent CLI product:
+
+- Immutable application packet/version/receipt graphs and exception-review UIs.
+- Universal auto-apply, Workday/iCIMS/Taleo automation, or LinkedIn/Indeed DOM-specific bots.
+- SMTP auto-send, mailbox reconciliation, and hardcoded platform automation.
+- PDF/DOCX production rendering, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
+- Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
+
+## Verification
+
+- `npm test`: **118/118 passed** after readiness rebase onto PR #6 main (ACP host + domain-tools + readiness suite).
+- `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
+- Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
+- Real external MCP drill: initialize, 31-tool list (includes `applications_plan`), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
+- Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
+- Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
+- Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
+- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
+
+## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
+
+Final independent score: **9.2/10 overall**; **9 of 10** dimensions scored at least 9.
+
+| Dimension | Score |
+|---|---:|
+| Functionality | 9/10 |
+| Integration | 10/10 |
+| CLI usability | 9/10 |
+| Out-of-box operation | 8/10 |
+| Reliability and failure handling | 10/10 |
+| PR #4 feature selection | 9/10 |
+| Networking | 9/10 |
+| Pluggable agents | 10/10 |
+| Authenticated browser | 9/10 |
+| Clutter elimination | 9/10 |
+
+The sole 8/10 is the deliberate browser-install tradeoff: Playwright and Chromium are optional so `npm install` remains lean; authenticated-browser users run `npm install playwright` and `npx playwright install chromium`.
+
+## ACP finished-product critic gate
+
+Final independent score after two evidence-driven iterations: **87/90 (9.67/10)**. Every major criterion is at least 9/10; Bars A–F, evidence gates, and trust/security gates pass.
+
+| Major criterion | Score |
+|---|---:|
+| Host/guest boundary | 10/10 |
+| Real ACP lifecycle | 10/10 |
+| Shared domain tools/state | 10/10 |
+| Locked real-data TUI | 9/10 |
+| Dual ACP/MCP/CLI door | 10/10 |
+| Trust/local-first/security | 10/10 |
+| Operations/recovery/responsiveness | 9/10 |
+| Regression/artifact/non-skeleton proof | 10/10 |
+| Operator reproducibility | 9/10 |
+
+Iteration 1 exposed missing raw evidence and then cancel-stream contamination. Iteration 2 quarantined cancel/timeout updates at send time, restarted the guest before the next prompt, strengthened the fake and real drills, corrected the artifact evidence ID, and finished with no critic findings.
 
 ## Known limitations
-- SQLite is via `sql.js`, so concurrent write locking is simpler than a native SQLite/WAL setup; avoid simultaneous write-heavy CLI processes.
-- Dashboard is local and functional but still intentionally lightweight; richer persisted approve/reject commands, editable profile forms, and full artifact diffs are next steps.
-- URL import fetches public page text when available and otherwise records a manual-enrichment job; no ATS/private-account scraping.
-- Research commands create honest worksheets, not fabricated dossiers.
-- Discovery uses direct public ATS APIs (Greenhouse/Lever) or local fixtures; no LinkedIn/Indeed/private-account scraping and no auto-apply behavior.
-- Default automations are seeded disabled; humans must opt in before scheduled discovery or briefs run.
+
+- No real Chromium binary is installed in this headless environment. Headed login needs a display; headless hosts may import a user-owned Playwright storage-state file.
+- Registered browser scripts are trusted, unsandboxed Node.js modules.
+- Public research is best-effort and source-grounded; offline mode produces explicit open questions rather than fabricated facts.
+- `sql.js` does not merge concurrent writes. A stale writer receives retryable `stale_snapshot` and must reopen/retry.
+- Hermes ACP needs configured provider authentication for live conversation; absent/crashed backends leave the JobOS pipeline usable with typed recovery.
+- Codex app-server is cataloged as a distinct future adapter, not mislabeled as ACP.
+- Generated materials remain reviewable drafts unless a user separately configures an enabled external consumer.

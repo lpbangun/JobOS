@@ -1,323 +1,424 @@
-# JobOS local-first MVP
+# JobOS
 
-JobOS is a local-first, agent-native job application operating system MVP. It provides a CLI, a SQLite-backed local data store, an agent-readable workspace, direct public ATS discovery adapters, an audited automation scheduler, provider-backed LLM fit scoring/tailoring/interview prep with deterministic degraded-mode fallback, evidence-grounded Markdown artifact drafts, application tracking with status history, funnel analytics, weekly review automation, an interactive local web dashboard, REST API endpoints, and an MCP stdio server for agent integrations.
+JobOS is a local-first, agent-native job application operating system. Its terminal product binds a real pipeline, job detail, review/log overlays, and an embedded guest-agent session to the same local state. SQLite is canonical; an agent-readable Markdown/YAML/JSONL mirror is written under `jobos-workspace/`.
 
-The implementation deliberately does **not** auto-apply to jobs, submit forms, send outreach, scrape private accounts, or require paid APIs.
+The core product is offline-capable and deterministic. Public web discovery, LLMs, local agents, and authenticated Playwright sessions are optional. External effects are disabled by default and occur only through an explicitly configured tool or a trusted browser script run with `--allow-side-effects`.
 
-## Stack
+## Requirements and install
 
 - Node.js 22+
-- `sql.js` for a file-backed SQLite database at `.jobos/jobos.sqlite`
-- `cheerio` for human-initiated HTML/job-page parsing
-- Provider-backed LLM calls through OpenAI-compatible, Ollama Cloud, or Anthropic chat APIs
-- YAML/Markdown/JSONL workspace mirror at `jobos-workspace/`
-- Node `http` local dashboard; no build step
-- Node's built-in test runner
-
-`sql.js` is used instead of a native SQLite binding because the workstation does not have a system `sqlite3` binary and this keeps install/runtime portable.
-
-## Install
+- npm
 
 ```bash
 npm install
+npm run jobos -- --help
 ```
 
-No API keys or cloud accounts are required for the offline core flow. To enable LLM scoring, tailoring, research synthesis, stakeholder structuring, and outreach drafting, set `JOBOS_LLM_PROVIDER` (`openai`, `ollama-cloud`, or `anthropic`), `JOBOS_LLM_MODEL`, and `JOBOS_LLM_API_KEY`. `JOBOS_LLM_BASE_URL` is optional for OpenAI-compatible local/fake/test endpoints. Without credentials, JobOS clearly marks LLM-enhanced work as deterministic degraded mode.
+### Optional Hermes ACP backend
 
-Search defaults to keyless DuckDuckGo HTML. Optional configured search providers:
+The embedded pane supports ACP protocol v1 and the current product drill is verified with **Hermes Agent 0.18.2**. Other versions were not exercised here; use `hermes acp --check` before launch. Install Hermes from the upstream Nous Research installer, then configure one model provider:
 
 ```bash
-export JOBOS_SEARCH_PROVIDER=auto              # or duckduckgo, brave, searxng
-export JOBOS_BRAVE_API_KEY=...                 # Brave Search API
-export JOBOS_SEARXNG_URL=https://search.local  # self-hosted SearXNG JSON endpoint
-export JOBOS_SEARCH_TIMEOUT_MS=15000
+# Linux, macOS, or WSL2. Inspect the upstream script first if required by policy.
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+source ~/.bashrc
+
+# Choose one setup path. Provider credentials remain in Hermes' private config.
+hermes setup
+hermes setup --portal       # Nous Portal OAuth alternative
+hermes setup model          # provider/model section only
+hermes acp --version
+hermes acp --check
 ```
 
-Optional workspace selection:
+Hermes also accepts its documented provider environment variables. JobOS does not mirror credentials into `jobos-workspace/`; its ACP child environment is allowlisted and transcripts are redacted. If `hermes` is not on `PATH`, point JobOS at the ACP v1 executable without changing the workspace:
 
 ```bash
-export JOBOS_HOME=/path/to/private/jobos-root
-# or pass --workspace /path/to/private/jobos-root on any command
+JOBOS_ACP_COMMAND=/absolute/path/to/hermes npm run tui -- --profile pm-edtech
 ```
 
-## Quick start
+Run provider setup in a trusted terminal before a headless session. A missing/unconfigured backend leaves the pipeline usable and shows reconnect guidance instead of substituting a fake agent.
+
+## Launch the terminal product
 
 ```bash
-# Any successful command auto-creates the local DB and agent-readable workspace.
-# init remains available for explicit setup or path inspection.
+# Optional but recommended for the embedded live agent pane.
+hermes acp --check
+
+# Start the data-bound 011 terminal shell. The agent pane is on by default.
+npm run tui -- --profile pm-edtech
+
+# Useful for SSH checks, CI, or a host without an ACP backend.
+npm run jobos -- tui --profile pm-edtech --agent off
+npm run jobos -- tui --profile pm-edtech --snapshot --width 140 --height 42
+npm run jobos -- tui --profile pm-edtech --json
+```
+
+The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, `?`, and `v` open network, documents, answers, discovery, system, and profile surfaces. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+
+An empty workspace is valid: the shell gives profile/import commands rather than fabricated sample data. If Hermes is absent or crashes, pipeline navigation and direct JobOS actions remain available with a visible reconnect message.
+
+A browser is optional. Install it only when authenticated browser work is needed:
+
+```bash
+npm install playwright
+npx playwright install chromium
+npm run jobos -- browser status --json
+```
+
+Core commands remain usable when Playwright or Chromium is absent; browser commands return `browser_unavailable` with recovery commands.
+
+## Five-minute workflow
+
+```bash
+# 1. Create local state and a proof-backed target profile.
 npm run jobos -- init --json
-npm run jobos -- agent-guide --json
+npm run jobos -- profile create "PM EdTech" \
+  --from-resume samples/resume-proof-points.md --json
 
-# Create a profile and import proof points from a local resume/proof file
-npm run jobos -- profile create "PM EdTech" --from-resume samples/resume-proof-points.md --json
+# 2. Configure one or more public discovery sources.
+npm run jobos -- searches create "Acme Greenhouse" \
+  --profile pm-edtech --adapter greenhouse --board-token acme \
+  --keywords product,learning --location remote --json
 
-# Import a job description from text
-npm run jobos -- jobs import-text --profile pm-edtech --file samples/job-description.md --json
+# Hidden-source examples:
+npm run jobos -- searches create "Startup portfolio" \
+  --profile pm-edtech --adapter portfolio \
+  --url https://example.vc/portfolio --max-companies 30 --json
+npm run jobos -- searches create "Target career page" \
+  --profile pm-edtech --adapter career-page \
+  --url https://example.com/careers --json
+npm run jobos -- searches create "Ashby target" \
+  --profile pm-edtech --adapter ashby --handle example --json
 
-# Create and run a saved public-ATS discovery search
-npm run jobos -- searches create "Acme Discovery" --profile pm-edtech --adapter greenhouse --board-token acme --keywords product,learning --location remote --min-fit 70 --json
-npm run jobos -- discover run --search "Acme Discovery" --json
-npm run jobos -- jobs dedupe --json
-
-# List imported jobs
+# 3. Run every source, isolate failures, dedupe, score, and rank results.
+npm run jobos -- daily --profile pm-edtech --json
 npm run jobos -- jobs list --json
 
-# Score the imported job; replace <job-id> with the ID from import/list
-npm run jobos -- score <job-id> --profile pm-edtech --json
+# 4. Prepare one role end to end.
+npm run jobos -- pursue <job-id> --profile pm-edtech --json
 
-# Create evidence-grounded drafts; both write Markdown artifacts under jobos-workspace/jobs/<job-id>/artifacts/
-npm run jobos -- tailor resume --job <job-id> --profile pm-edtech --output markdown
-npm run jobos -- tailor cover-letter --job <job-id> --profile pm-edtech --output markdown
-
-# Track the application and create a human review task
-npm run jobos -- applications create --job <job-id> --status materials-ready --json
-npm run jobos -- applications update <application-id> --status applied --json
-
-# Public web-search-backed research and human-gated outreach drafts
-npm run jobos -- research company --job <job-id> --json
-npm run jobos -- research stakeholders --job <job-id> --json
-npm run jobos -- research add-stakeholder --job <job-id> --source-url https://example.com/person --name "Maya Chen" --text "Source-backed stakeholder context." --json
-npm run jobos -- outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile pm-edtech --json
-npm run jobos -- outreach mark-sent --artifact <artifact-id> --channel email --json
-npm run jobos -- outreach schedule-followup --thread <thread-id> --after 7 --json
-npm run jobos -- outreach due --json
-
-# Due tasks and weekly review
-npm run jobos -- tasks due --json
-npm run jobos -- interview prep --application <application-id> --stage hiring-manager --output markdown
-npm run jobos -- analytics funnel --profile pm-edtech --since 30 --output markdown
-npm run jobos -- review weekly --profile pm-edtech --output markdown
-
-# Audited scheduler: defaults are seeded disabled; enable only what you want
-npm run jobos -- automation list --json
-npm run jobos -- automation enable daily_discovery --json
-npm run jobos -- automation enable morning_priority_brief --json
-npm run jobos -- scheduler run-once --json
-npm run jobos -- scheduler start --interval 60
-npm run jobos -- loop scheduler --max-iterations 1 --json
-npm run jobos -- tasks due --watch --max-iterations 1 --json
-
-# Local interactive dashboard
-npm run web -- --port 4317
-# open http://127.0.0.1:4317
-# The dashboard includes a kanban board, create/edit forms, and artifact approve/reject UI.
-# machine-readable state: http://127.0.0.1:4317/api/state
-# REST scaffold examples:
-#   GET  /api/profiles
-#   GET  /api/jobs
-#   GET  /api/searches
-#   POST /api/searches/:id/run
-#   GET  /api/discovery/runs
-#   GET  /api/automations
-#   POST /api/automations/:id/run
-#   GET  /api/runs
-#   POST /api/outreach/draft
-#   POST /api/outreach/mark-sent
-#   POST /api/outreach/schedule-followup
-#   GET  /api/outreach/due
-#   POST /api/tasks {"title":"Follow up","priority":"high"}
-
-# MCP server for agents that speak stdio JSON-RPC/MCP framing
-npm run jobos -- mcp
+# 5. Inspect first-class networking results.
+npm run jobos -- network paths --job <job-id> --json
+npm run jobos -- network contacts --job <job-id> --json
 ```
 
-You can also run the CLI directly after install:
+`pursue` runs this coherent pipeline:
+
+```text
+fit score
+  -> company, stakeholder, and contact research
+  -> user-owned network path ranking
+  -> application-question preparation
+  -> proof-grounded resume and cover-letter drafts
+  -> local application tracking
+  -> outreach path selection and source-grounded draft
+```
+
+Each stage reports `ok`, `failed`, or `skipped`, elapsed time, output IDs/paths, and recovery guidance. Independent stages continue after an unrelated failure.
+
+Useful controls:
 
 ```bash
-npx jobos init --json
+# Preview the graph without writes or network calls.
+npm run jobos -- pursue <job-id> --profile pm-edtech --dry-run --json
+
+# Re-run one stage and its dependencies.
+npm run jobos -- pursue <job-id> --profile pm-edtech \
+  --stage questions --json
 ```
 
-## Implemented CLI contract
+## Application readiness
 
-- `jobos init`
-- `jobos agent-guide`
-- `jobos profile create <name> [--from-resume file]`
-- `jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b]`
-- `jobos jobs import-url <url> --profile <profile>`
-- `jobos jobs import-text --profile <profile> --file <path>`
-- `jobos jobs list --json`
-- `jobos jobs dedupe [--apply]`
-- `jobos searches create <name> --profile <profile> --adapter greenhouse|lever [--board-token <token>|--company <handle>] [--keywords a,b] [--location <text>] [--min-fit 70]`
-- `jobos searches list`
-- `jobos watchlist add --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes <text>]`
-- `jobos watchlist list`
-- `jobos discover run --search <name-or-id>`
-- `jobos discover run-all`
-- `jobos score <job-id> --profile <profile> --json`
-- `jobos tailor resume --job <job-id> --profile <profile> --output markdown`
-- `jobos tailor cover-letter --job <job-id> --profile <profile> --output markdown`
-- `jobos applications create --job <job-id> --status <status>`
-- `jobos applications update <application-id> --status <status>`
-- `jobos research company --job <job-id>`
-- `jobos research stakeholders --job <job-id>`
-- `jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>]`
-- `jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational]`
-- `jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes <text>]`
-- `jobos outreach schedule-followup --thread <thread-id> --after <days>`
-- `jobos outreach due`
-- `jobos interview prep --application <application-id> --stage <stage> [--output markdown]`
-- `jobos analytics funnel --profile <profile-id> [--since 30] [--output markdown]`
-- `jobos tasks due --json`
-- `jobos review weekly --profile <profile> --output markdown`
-- `jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled]`
-- `jobos automation list`
-- `jobos automation enable <name>`
-- `jobos automation disable <name>`
-- `jobos automation run <name>`
-- `jobos scheduler run-once`
-- `jobos scheduler start [--interval 60]`
-- `jobos scheduler status`
-- `jobos runs list`
-- `jobos loop scheduler [--interval N] [--max-iterations N]`
-- `jobos loop automation <name> [--interval N] [--max-iterations N]`
-- `jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N]`
-- `jobos mcp`
-- `jobos web [--port 4317]`
+Check whether your local materials are complete for human review:
 
-Commands are non-interactive and are documented from a command registry that also powers `jobos --help`, per-command help, and `jobos agent-guide`. Most successful commands emit parseable JSON with `--json`; loop/watch commands emit JSONL. Usage errors exit `2`, runtime/domain errors exit `1`, and successes exit `0`. With `--json`, errors are written to stderr as a stable object: `{"ok":false,"error":{"code":"usage_error","type":"usage","message":"..."}}`.
+```bash
+npm run jobos -- applications plan --job <job-id> --profile <profile-id> --json
+```
 
-On the first successful command in an empty workspace, JobOS creates `.jobos/` and `jobos-workspace/` automatically and prints a one-line bootstrap notice to stderr unless `--quiet` is set. `init` is optional and remains useful for explicit/custom setup.
+The plan returns one of two statuses:
 
-## Workspace layout
+- **`blocked`** — one or more blockers prevent review readiness. Blockers include missing stored proof points (`missing_proofs`), no persisted fit score (`missing_score`), no tailored resume (`missing_resume_material`), a rejected or ungrounded resume (`resume_rejected` / `resume_missing_proof_grounding`), unmatched ordinary questions (`unmatched_questions`), unresolved restricted questions (`restricted_questions_require_input`), and a possible prior application detected from local status evidence (`possible_duplicate_application`). Each blocker includes a recovery `nextAction`.
+- **`ready-for-review`** — no blockers remain. This is reviewable local completeness; it does **not** mean approved, submitted, applied, or receipt-recorded (`policy.submissionPerformed: false`, `applicationStatusChanged: false`, `readyDoesNotMean` lists the excluded actions).
 
-Runtime state is local to the selected workspace root:
+### Identity and duplicate detection
+
+The plan emits stable identity keys (`identityKey`, `employerKey`, `sourceKey`, `applicationKey`) for cross-session reference. Duplicate checking uses two precision-first signals—exact source URL match and exact dedupe-key (company|title|location) match—both gated on local status or status-history evidence that the matched job reached `applied` or a later outcome. Results appear under `possibleDuplicateApplications` with the matching signals and a disclaimer that no submission receipt is inferred.
+
+### Restricted input redaction
+
+Sensitive and restricted answer values are always redacted in JSON and YAML output (answer text is `null`, `redacted: true`). Restricted questions (`work_authorization`, `demographic`, `legal_attestation`) are never auto-filled. A direct response clears a readiness blocker only when it is recorded for that exact job with `--sensitivity restricted --reuse never_auto_fill --source job:<job-id>`; its value remains redacted in plans and mirrors and is never populated into forms or draft assertions.
+
+### Mirror
+
+The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call and during the `application` stage of `pursue`. The mirror carries the same redaction guarantee as the JSON output.
+
+### MCP parity
+
+The MCP tool `applications_plan` returns the identical plan structure. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
+
+## Daily automatic discovery
+
+`daily` is the cron-friendly one-shot command. Existing scheduler support can run it every day:
+
+```bash
+npm run jobos -- automation enable daily_discovery --json
+npm run jobos -- scheduler start --interval 60
+```
+
+For a host scheduler, invoke this command on the desired cadence:
+
+```bash
+npm run jobos -- daily --profile pm-edtech --json
+```
+
+Discovery sources:
+
+- `greenhouse`: direct public Greenhouse board API.
+- `lever`: direct public Lever postings API.
+- `ashby`: direct public Ashby job-board API.
+- `career-page`: public Schema.org `JobPosting` and direct job-link extraction.
+- `portfolio`: bounded VC/startup routing across up to 30 companies and recognized ATS targets.
+
+Portfolio runs cap each request at 10 seconds, the run at 60 seconds, and total requests at 90. A cap or child-source failure returns partial jobs plus structured failure metadata instead of discarding completed work. Public-page adapters reject private, loopback, link-local, credential-bearing, and unsafe redirect targets.
+
+## Networking and outreach
+
+Import user-owned relationship data:
+
+```csv
+from_type,from_id,to_type,to_id,edge_type,confidence,evidence
+profile,pm-edtech,company,acme,shared_employer,high,Worked with an Acme alum
+profile,pm-edtech,person,person_123,direct_connection,high,Former colleague
+```
+
+Valid `edge_type` values are `direct_connection`, `shared_employer`, `shared_school`, `shared_investor`, `shared_event`, `shared_open_source`, `shared_customer_domain`, and `manual_note`. Confidence is `low`, `medium`, or `high`.
+
+```bash
+npm run jobos -- network import --file relationships.csv --json
+npm run jobos -- network list --json
+npm run jobos -- network paths --job <job-id> --json
+npm run jobos -- outreach plan --job <job-id> --profile pm-edtech --json
+```
+
+Research and networking share one evidence model. Contact discovery records source observations, stages person candidates, extracts public email/contact points, labels confidence, and combines approved contact quality with user-owned relationship edges. Warm introduction paths outrank cold routes when evidence supports them.
+
+Outreach drafting remains local by default. Marking a thread sent records what the user did elsewhere; it does not pretend JobOS delivered the message:
+
+```bash
+npm run jobos -- outreach draft --job <job-id> \
+  --stakeholder <stakeholder-id> --profile pm-edtech --json
+npm run jobos -- outreach mark-sent --artifact <artifact-id> \
+  --channel email --json
+```
+
+## Reusable application answers
+
+```bash
+npm run jobos -- answers add --profile pm-edtech \
+  --category motivation \
+  --question "Why are you interested in this company?" \
+  --answer "My source-backed reason." \
+  --sensitivity personal --json
+npm run jobos -- answers list --profile pm-edtech --json
+npm run jobos -- answers match --profile pm-edtech \
+  --questions questions.json --employer Acme --json
+```
+
+Answers are profile-scoped and may be `verified`, `unverified`, `stale`, or `retired`. Sensitive/restricted values are redacted from lists and workspace mirrors. Work authorization, sponsorship, demographic, and legal-attestation questions always emit `sensitive_prompt`; JobOS does not infer or auto-select them. Unanswered non-restricted questions may receive a draft only when every assertion is linked to stored proof-point IDs.
+
+## Pluggable agents: Hermes, Codex, and compatible tools
+
+### Host, guest, and the two tool doors
+
+JobOS is the host and source of truth; it is not a general agent harness. `jobos tui` starts an ACP v1 client, launches the real `hermes acp` binary in the selected JobOS workspace, opens a multi-turn session, and attaches JobOS as a session-scoped MCP server. Hermes is the guest. The host sends only the selected job's IDs, fit, proof references, path, artifact metadata, next actions, and policy—not the database or browser secrets. ACP filesystem/terminal capabilities are disabled, permission requests are denied, subprocess environment variables are allowlisted, and streamed events/stderr are secret-redacted.
+
+```text
+interactive:  JobOS TUI -> ACP client -> Hermes guest -> session MCP -> domain-tools -> SQLite/workspace
+direct:       JobOS TUI/CLI ---------------------------> domain-tools -> SQLite/workspace
+external:     external agent -> jobos mcp ------------> domain-tools -> SQLite/workspace
+```
+
+Both doors expose the same domain semantics. Agent tool completions reload the authoritative database into list/detail; optimistic revisions reject colliding writers instead of silently merging them. External apply/send or human-confirmation attestations are denied in ACP/MCP mediation unless the operator explicitly enables `JOBOS_ALLOW_AGENT_ATTESTATION=1`. Drafts still default to `draft_needs_human_review`.
+
+Hermes ACP is the primary embedded backend. The System overlay reports the runtime capability matrix. An installed Codex app-server is detected honestly as a separate adapter that is not selected by this ACP client; it is not mislabeled as ACP. The structured subprocess runner below remains a noninteractive batch fallback, not the architecture of the agent pane.
+
+### Noninteractive batch agents
+
+
+Built-in batch manifests are available when their executables are installed:
+
+```bash
+npm run jobos -- agents list --json
+npm run jobos -- agents test codex --json
+npm run jobos -- agents test hermes --json
+
+# Use one agent for structured generation across score, research,
+# application questions, tailoring, and outreach.
+npm run jobos -- pursue <job-id> --profile pm-edtech \
+  --agent codex --json
+```
+
+Register another compatible executable:
+
+```bash
+npm run jobos -- agents add my-agent \
+  --command /absolute/path/to/my-agent \
+  --args '["--json"]' --transport stdin-json --json
+```
+
+Generic `stdin-json` contract:
+
+```json
+{
+  "protocolVersion": 1,
+  "stage": "jobos_fit_score",
+  "systemPrompt": "...",
+  "userPrompt": "...",
+  "schema": { "type": "object" }
+}
+```
+
+This batch process must exit `0` and write one JSON object to stdout. Missing executables, timeouts, non-zero exits, malformed/oversized output, and failed connection tests return typed `agent_error`; explicit agent selection never silently falls back to another provider. `--agent` overrides `JOBOS_AGENT` for batch workflow generation. Without either, existing HTTP LLM configuration remains available; without any provider, deterministic degraded mode remains.
+
+External agents can run `jobos mcp`. The server accepts standard Content-Length framing and ACP-session JSONL framing, and exposes `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, selection/review/discovery reads, and the lower-level scoring, research, networking, tailoring, application, and scheduler tools through the same `domain-tools` facade.
+
+The repository includes a real external-client drill—not a tool-list unit test. It initializes `jobos mcp`, discovers the live tool catalog, calls `score_job` and `get_job_context`, closes the server, and verifies the same stored score:
+
+```bash
+npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/mcp-demo-transcript.jsonl
+```
+
+## Authenticated Playwright profiles
+
+```bash
+# On a machine with a display, log in and close the browser when done.
+npm run jobos -- browser login work --url https://example.com/login --json
+
+# Reuse the private persistent profile headlessly.
+npm run jobos -- browser fetch work \
+  --url https://example.com/member/jobs --json
+
+# Synchronize a user-owned Playwright storage-state/cookie file.
+npm run jobos -- browser cookies import work \
+  --file ./storage-state.json --json
+npm run jobos -- browser cookies export work \
+  --file ./jobos-cookies.json --json
+```
+
+Browser state stays under `.jobos/browser/` with private permissions and is never mirrored to `jobos-workspace/`. Cookie values never appear in command results, audit logs, or error messages. Login redirects, expired auth, blocked responses, CAPTCHA, timeouts, missing packages, and missing browser binaries have distinct typed failures and recovery commands. CAPTCHA bypass is not supported.
+
+On a headless VPS, the TUI, ACP session, CLI, discovery adapters, and external MCP server work without Chromium. A headed `browser login` does not: authenticate on a trusted machine and import an explicit storage-state file, or use a host with a display. Imported sessions can still expire or encounter MFA, CAPTCHA, bot defenses, or site changes; JobOS returns a typed failure and requires manual recovery rather than claiming success. The TUI System overlay deliberately reports browser support as optional/unavailable and never treats the embedded agent as a hidden browser login path.
+
+For site-specific inspection, autofill, or configured application actions, register a trusted local Playwright module:
+
+```bash
+npm run jobos -- browser script add fill-supported-form \
+  --file ./fill-supported-form.mjs --side-effecting --json
+npm run jobos -- browser run work \
+  --url https://example.com/apply \
+  --script fill-supported-form \
+  --input ./packet.json \
+  --allow-side-effects --json
+```
+
+Registered modules are copied into `.jobos/browser/scripts/` and SHA-256 pinned. They are trusted unsandboxed Node.js code with full process privileges. Side-effecting modules require both registration as side-effecting and the per-run `--allow-side-effects` flag. JobOS audits script/hash/URL/outcome hash without storing script input or browser credentials.
+
+## Optional HTTP LLM and search providers
+
+No API key is required for the deterministic core. Optional structured LLM calls:
+
+```bash
+export JOBOS_LLM_PROVIDER=openai       # openai, ollama-cloud, anthropic
+export JOBOS_LLM_MODEL=...
+export JOBOS_LLM_API_KEY=...
+export JOBOS_LLM_BASE_URL=...          # optional OpenAI-compatible endpoint
+```
+
+Public search defaults to keyless DuckDuckGo HTML. Optional providers:
+
+```bash
+export JOBOS_SEARCH_PROVIDER=auto
+export JOBOS_BRAVE_API_KEY=...
+export JOBOS_SEARXNG_URL=https://search.local
+export EXA_API_KEY=...
+export TAVILY_API_KEY=...
+export PERPLEXITY_API_KEY=...
+```
+
+Set `JOBOS_SEARCH_PROVIDER=none` for deterministic offline pursuit/research; worksheets then contain explicit open questions instead of network-derived claims.
+
+Optional public contact-research adapters:
+
+```bash
+export JOBOS_RESEARCH_ADAPTERS=github,gdelt,wayback
+```
+
+## CLI contract and local state
+
+- `--workspace <dir>` overrides `JOBOS_HOME`; otherwise the current directory is used.
+- Successful one-shot commands support `--json` where practical.
+- Validation/usage failures exit `2`; runtime/domain failures exit `1`.
+- JSON errors are written to stderr as `{ "ok": false, "error": { "code", "type", "message" } }`.
+- Database saves use an exclusive lock, optimistic revision check, fsync, and same-directory atomic rename. A stale writer returns retryable `stale_snapshot` instead of overwriting newer state.
 
 ```text
 .jobos/
-  jobos.sqlite                  # canonical SQLite database
+  jobos.sqlite
+  agents.json
+  browser/                    # credential material; never mirrored
 jobos-workspace/
-  audit.log.jsonl               # global audit log
-  profiles/<profile-id>.yaml
-  proof-points/<profile-id>.md
-  automations/
-    automations.yaml
-    scheduler-design.json
-    runs-YYYY-MM-DD.jsonl
+  profiles/
+  proof-points/
   searches/
-    index.yaml
-    <search-id>.yaml
-  watchlist/
-    index.yaml
-    <watch-id>.yaml
-  discovery/
-    runs/
-      <run-id>.yaml
-      <run-id>.md
+  discovery/runs/
   jobs/<job-id>/
-    job.yaml
-    description.md
-    score.md
-    application.yaml
-    tasks.yaml
-    status history is stored in SQLite and exposed via /api/status_changes
-    company-dossier.md
-    stakeholders.md
-    audit.log.jsonl
+    research/
     artifacts/
-      resume-tailored.md
-      cover-letter.md
-      interview-prep-<stage>.md
     outreach/
-      <stakeholder-id>-informational.md
-      threads.yaml
-  exports/
-    weekly-review-<profile-id>-<date>.md
-    morning-priority-brief-<profile-id>-<date>.md
+    application-readiness.yaml   # redacted plan mirror
+  automations/
+  audit.log.jsonl
 ```
 
-SQLite is canonical for queries and the web dashboard. Workspace files are regenerated on writes so agents can inspect state without running the web server.
+Default help is intentionally small:
 
-## Architecture notes
+```bash
+npm run jobos -- --help
+npm run jobos -- help --all
+npm run jobos -- agent-guide --json
+```
 
-- `src/cli.js` is now a thin command router. Domain logic lives in modules such as `src/db.js`, `src/profiles.js`, `src/jobs.js`, `src/discovery.js`, `src/discovery/adapters.js`, `src/scoring.js`, `src/tailoring.js`, `src/research.js`, `src/outreach.js`, `src/tracking.js`, `src/interview.js`, `src/analytics.js`, `src/api.js`, `src/mcp.js`, and `src/web.js`.
-- The CLI has a command registry that generates root help, per-command help, and `jobos agent-guide`; registry metadata is covered by Sprint 9 tests.
-- Discovery supports direct public Greenhouse and Lever API adapters, saved searches, company watchlist entries, client-side keyword/location filtering, dedupe by URL and normalized company/title/location, scored review queue entries, and `automation_runs` records. Network or fixture fetch failures produce failed run records rather than crashing the discovery command.
-- The scoring engine uses provider-backed structured LLM JSON when configured. It scores role fit, domain fit, seniority, location/work model, compensation, mission/interest, network access, red flags, overall score, reasoning, and confidence. If no LLM is configured or a call fails, it falls back to clearly marked deterministic degraded mode.
-- Tailoring uses provider-backed LLM JSON when configured and only allows claims grounded in stored proof point IDs. If proof points are missing or the LLM returns unsupported mappings, generated Markdown includes evidence warnings and refuses to invent accomplishments.
-- Research commands use a pluggable public web-search provider chain, write source URLs into company/stakeholder dossiers, and drop unsupported LLM claims or angles instead of publishing them.
-- Outreach drafts use validated stakeholder/company/proof evidence when LLMs are configured and proof/style-aware deterministic fallback otherwise. Outreach lifecycle state is local only: `mark-sent` records that a human sent a draft elsewhere, `schedule-followup` creates a local task, and `due` lists reminders. JobOS never sends outreach.
-- Interview prep creates role/stage-specific packets with likely questions, proof-linked STAR story prompts, questions to ask, company/role refresh, and a human gate. LLM-generated interview packets render stored proof summaries/metrics rather than freeform accomplishment details.
-- Analytics uses application status history for stages reached, conversion, source/role-family performance, and stale active-application warnings.
-- The scheduler stores disabled default automations in SQLite and mirrors them to `jobos-workspace/automations/automations.yaml`. It supports five-field cron expressions, one-shot `scheduler run-once`, long-running `scheduler start`, sequential execution with a PID guard, failed run recording, failure auto-disable after three consecutive failures, and per-day automation run JSONL. Built-in actions are `daily_discovery`, `followup_watch`, `stale_application_check`, `weekly_retrospective`, and `morning_priority_brief`.
-- Built-in loops reuse scheduler machinery: `loop scheduler`, `loop automation <name>`, `loop action <action-id>`, and `tasks due --watch` support `--interval`, `--max-iterations`, and JSONL output for agents.
-- The dashboard reads the same SQLite database and exposes `/api/state` for agents or smoke checks. It now supports local create/edit forms, discovery review queue accept/archive actions, kanban status movement, and artifact approve/reject review.
-- The REST API includes `GET/POST /api/searches`, `POST /api/searches/:id/run`, `GET /api/discovery/runs`, `GET/POST /api/automations`, `POST /api/automations/:id/run`, `GET /api/runs`, and outreach draft/mark-sent/schedule/due endpoints in addition to local CRUD-style core resources.
-- The MCP server (`jobos mcp`) exposes core operations to agent clients over stdio JSON-RPC/MCP framing: score_job, tailor_resume, draft_cover_letter, research_company, draft_outreach, mark_outreach_sent, schedule_outreach_followup, list_outreach_due, create_application, update_application_status, list_tasks, interview_prep, weekly_review, list_saved_searches, search_jobs, import_job_url, list_automations, run_automation, and list_automation_runs.
+The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, MCP, API, and local dashboard—remains available for composition. Dashboard work is not the product focus.
 
-## Human-gating and safety policy
+`jobos tui --json` exposes the same presentation model for machine inspection; `jobos tui --snapshot` renders the terminal shell without starting an agent process.
 
-- No command submits applications, sends messages, posts to job boards, or performs account actions.
-- Generated resumes, cover letters, outreach drafts, and interview prep packets are marked `draft_needs_human_review` unless explicitly approved in local state.
-- Application status `applied` is manual; JobOS does not capture or fake confirmation.
-- URL import is human-initiated. If a URL cannot be fetched, JobOS records the URL and requires manual enrichment instead of failing the whole workspace.
-- Discovery adapters use direct public ATS APIs or local fixtures. JobOS does not scrape LinkedIn, Indeed, Glassdoor, private accounts, or ToS-sensitive boards.
-- No telemetry or cloud sync exist in the MVP. External LLM calls happen only when the user explicitly configures provider credentials through environment variables.
+## Safety and honest limitations
 
-## Tests and smoke checks
+- Core state is local; there is no telemetry or required cloud sync.
+- Generated claims must trace to stored proof points or cited public sources.
+- Draft artifacts default to `draft_needs_human_review`; users may separately configure how trusted external tools consume them.
+- External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
+- No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
+- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
+- `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
+- A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
+- `ready-for-review` indicates reviewable local completeness from stored evidence; it does not mean approved, submitted, applied, or receipt-recorded. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.
+- Trusted browser scripts are not sandboxed.
+
+## Verification
 
 ```bash
 npm test
 npm run smoke
-node run_eval_research.js
+
+# Each demo requires one real local job in <dir>.
+npm run acp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/acp-demo-transcript.jsonl
+npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
+  --output .tmp/mcp-demo-transcript.jsonl
 ```
+The ACP drill launches the installed backend, performs same-session tool turns, denies an applied-status policy probe, cancels a live turn, proves zero leaked post-cancel events, starts a clean recovery session, completes an exact `get_job_context` call, restarts again, checks a real deadline and missing-backend typing, and verifies sentinel redaction. Set a throwaway `JOBOS_LLM_API_KEY` value only when explicitly running the transcript-redaction probe; the summary reports whether that sentinel was configured and absent.
 
-Current smoke coverage verifies:
-
-1. Installable Node dependencies.
-2. `jobos init` creates DB/workspace.
-3. Profile creation with local proof import.
-4. Job text import.
-5. Fixture-backed saved discovery search run.
-6. Scoring JSON, including degraded-mode fallback in smoke and provider-backed LLM behavior in tests.
-7. Resume and cover-letter Markdown artifacts.
-8. Application create/update and due task listing.
-9. Interview prep packet creation.
-10. Status-history-backed analytics and weekly review export.
-11. Scheduler run-once for a due morning priority brief, AutomationRun row, workspace JSONL, and human-review-gated drafts.
-12. Web dashboard startup, discovery/automation section render, interactive shell render, and `/api/state` reading the same local data.
-13. MCP tool-list/framing coverage.
-14. Route hardening for unknown and traversal-style workspace paths.
-
-## Implemented vs. next steps
-
-Implemented:
-
-- Local SQLite + workspace mirror.
-- Core entities: profiles, proof points, companies, jobs, stakeholders schema, applications, artifacts, tasks, automation runs, audit log.
-- Discovery entities: saved searches, company watchlist entries, discovery run summaries, high-fit review queue metadata, source history, and last-seen/repost metadata on jobs.
-- CLI JSON surfaces for the required MVP commands.
-- Modular code foundation under `src/`.
-- REST API scaffold with local CRUD-style routes for core entities.
-- Structured proof-point import with metrics, skills, source, and metadata fields.
-- Expanded profile preferences.
-- Provider-backed LLM fit scoring with deterministic degraded-mode fallback.
-- Provider-backed, proof-grounded resume and cover-letter drafts with deterministic degraded-mode fallback.
-- Web-search-backed company dossiers and stakeholder research with source URLs.
-- LLM-enhanced company dossiers and stakeholder research with source URLs, provider metadata, confidence labels, and unsupported-claim dropping.
-- Human-gated outreach draft artifacts connected to researched stakeholders, plus local outreach threads, human-sent logging, follow-up scheduling, and due follow-up listing.
-- Manual application tracking.
-- Append-only application status history for stage-reached analytics.
-- Interview prep packets grounded in stored proof points.
-- Funnel analytics and weekly review insights.
-- Weekly review automation command.
-- Audited automation scheduler with cron parsing, run-once/start/manual trigger commands, disabled seeded defaults, dashboard/API/MCP surfaces, failure auto-disable, and workspace run JSONL.
-- Interactive local web dashboard with kanban board, create/edit forms, and artifact approval UI.
-- MCP stdio server exposing core operations for agents.
-- Greenhouse and Lever public ATS discovery adapters with fixture-backed tests.
-- Targeted tests and end-to-end smoke script.
-
-Next steps:
-
-- Extend scoring/tailoring evals against live configured providers, not only OpenAI-compatible fake provider tests.
-- Add richer profile preference editing and answer-bank commands.
-- Add artifact approval/diff CLI commands; dashboard/API approval already exists.
-- Add explicit export archive command; current data is already portable as files plus SQLite.
-- Validate `jobos mcp` against a real external MCP client in addition to stdio framing tests.
-- Add browser extension/autofill dry-run only after approval model and answer bank mature.
-
-## Specialist handoffs
-
-- Architecture handoff: `.hermes/jobos-mvp-architecture-handoff.md`
-- UI/UX handoff: `jobos-dashboard-uiux-handoff.md`
-- Advisor review checklist: `jobos-mvp-review-checklist.md`
-- Build progress: `BUILD_PROGRESS.md`
+The test suite covers the established CLI/domain behavior plus real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, application readiness, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.
