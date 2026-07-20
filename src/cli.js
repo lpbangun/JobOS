@@ -23,8 +23,6 @@ import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
 import { callDomainTool } from './domain-tools.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
-import { buildTuiModel } from './tui-model.js';
-import { defaultTuiState, renderTui, startTui } from './tui.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -485,6 +483,10 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'tui') {
+    const [
+      { buildTuiModel },
+      { defaultTuiState, renderTui, startTui }
+    ] = await Promise.all([import('./tui-model.js'), import('./tui.js')]);
     const profileId = flags.profile ? String(flags.profile) : null;
     const model = buildTuiModel(s, { profileId });
     if (flags.json) {

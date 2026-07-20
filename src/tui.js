@@ -1,8 +1,22 @@
+import stripAnsiText from 'strip-ansi';
+import stringWidth from 'string-width';
+import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
 import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
-import { reload } from './db.js';
+import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
+import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
+import { updateJobStatus } from './jobs.js';
+import { appCreate, appUpdate } from './tracking.js';
+import { validStatuses } from './utils.js';
+import {
+  openArtifactEditor as runArtifactEditor,
+  parseEditorCommand,
+  renderArtifactDiff,
+  renderArtifactMarkdown,
+  sanitizeTerminalText
+} from './tui-artifacts.js';
 
 const ESC = '\x1b[';
 const COLORS = {
@@ -22,19 +36,33 @@ export const TUI_DOMAIN_ACTIONS = Object.freeze({
   network: 'map_reachable_network'
 });
 
+export const stageOrder = Array.from(validStatuses);
+export const TUI_KEYMAP = Object.freeze({
+  global: Object.freeze([
+    ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
+    ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
+    ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
+    ['s', 'sources'], ['?', 'system'], [':', 'command'], ['Q', 'quit']
+  ]),
+  review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
+  docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
+  discovery: Object.freeze([['j/k', 'select'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
+});
+
 function stripAnsi(value) {
-  return String(value ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+  return stripAnsiText(String(value ?? ''));
 }
 
 function crop(value, width) {
   const text = String(value ?? '').replace(/[\r\n]+/g, ' ');
-  if (text.length <= width) return text;
-  return width <= 1 ? text.slice(0, width) : `${text.slice(0, width - 1)}…`;
+  if (stringWidth(text) <= width) return text;
+  return width <= 1 ? sliceAnsi(text, 0, Math.max(0, width)) : `${sliceAnsi(text, 0, width - 1)}…`;
 }
 
 function fit(value, width, align = 'left') {
   const text = crop(value, Math.max(0, width));
-  const pad = Math.max(0, width - text.length);
+  const pad = Math.max(0, width - stringWidth(text));
   return align === 'right' ? `${' '.repeat(pad)}${text}` : `${text}${' '.repeat(pad)}`;
 }
 
@@ -44,17 +72,18 @@ function paint(value, color, enabled) {
 
 function wrap(value, width) {
   const limit = Math.max(8, width);
-  const paragraphs = String(value ?? '').split(/\r?\n/);
+  const paragraphs = sanitizeTerminalText(value).split('\n');
   const lines = [];
   for (const paragraph of paragraphs) {
-    if (!paragraph) {
+    let remaining = paragraph.trim();
+    if (!remaining) {
       lines.push('');
       continue;
     }
-    let remaining = paragraph.trim();
-    while (remaining.length > limit) {
-      let split = remaining.lastIndexOf(' ', limit);
-      if (split < Math.floor(limit / 2)) split = limit;
+    while (stringWidth(remaining) > limit) {
+      const clipped = sliceAnsi(remaining, 0, limit);
+      let split = clipped.lastIndexOf(' ');
+      if (split < Math.floor(clipped.length / 2)) split = clipped.length;
       lines.push(remaining.slice(0, split).trimEnd());
       remaining = remaining.slice(split).trimStart();
     }
@@ -77,8 +106,7 @@ function mergeColumns(columns, widths, color, separator = '│') {
   for (let index = 0; index < rows; index++) {
     const parts = columns.map((column, columnIndex) => {
       const value = column[index] || '';
-      const visible = stripAnsi(value);
-      const pad = Math.max(0, widths[columnIndex] - visible.length);
+      const pad = Math.max(0, widths[columnIndex] - stringWidth(value));
       return `${value}${' '.repeat(pad)}`;
     });
     output.push(parts.join(paint(separator, 'green', color)));
@@ -250,6 +278,7 @@ function agentPanel(model, state, width, height, color) {
     lines.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
     lines.push(...wrap(message.text, width - 4).slice(-4));
   }
+  if (state.agentState === 'offline' || !state.agentOn) lines.splice(1, 0, 'agent off');
   if (!messages.length) lines.push('Agent pane is on by default.', 'Press i to prompt. Press a to toggle.', 'Press c to reconnect after a failure.');
   if (state.mode === 'agent') lines.push('', paint(`> ${state.input}█`, 'green', color));
   else if (state.agentState === 'working') lines.push('', paint('working · navigation remains active · x cancels', 'warn', color));
@@ -269,6 +298,84 @@ function visibleWindow(items, selectedIndex, limit) {
   return { start, items: items.slice(start, start + size) };
 }
 
+function keyHints(scope) {
+  return (TUI_KEYMAP[scope] || TUI_KEYMAP.global).map(([key, label]) => `${key} ${label}`).join(' · ');
+}
+
+function selectedDoc(model, state) {
+  const docs = model.selected?.docs || [];
+  const index = Math.max(0, state.selectedArtifactId
+    ? docs.findIndex(doc => doc.id === state.selectedArtifactId)
+    : Math.min(state.overlayIndex || 0, Math.max(0, docs.length - 1)));
+  return { docs, index, doc: docs[index] || null };
+}
+
+function renderedLines(value) {
+  if (Array.isArray(value)) return value.map(String);
+  if (value && Array.isArray(value.lines)) return value.lines.map(String);
+  if (value && typeof value.text === 'string') return value.text.split(/\r?\n/);
+  return String(value ?? '').split(/\r?\n/);
+}
+
+function evidenceLines(doc, width) {
+  if (!doc) return [];
+  const lines = ['', 'EVIDENCE'];
+  if (!doc.evidence?.length) lines.push('No evidence stored for this artifact.');
+  for (const item of doc.evidence || []) {
+    if (item?.missing) {
+      lines.push(`Missing proof: ${item.proofPointId}`);
+      continue;
+    }
+    if (item?.proofPointId) {
+      lines.push(`Proof ${item.proofPointId}`);
+      if (item.summary) lines.push(...wrap(`Summary: ${item.summary}`, width));
+      if (item.evidence) lines.push(...wrap(`Evidence: ${item.evidence}`, width));
+      if (item.metrics?.length) lines.push(`Metrics: ${item.metrics.join(', ')}`);
+      continue;
+    }
+    if (item?.url) lines.push(...wrap(`Source: ${item.label || item.type || 'URL'} ${item.url}`, width));
+    else lines.push(...wrap(`Source: ${JSON.stringify(item)}`, width));
+  }
+  if (doc.warnings?.length) lines.push('', 'WARNINGS', ...doc.warnings.flatMap(value => wrap(String(value), width)));
+  return lines;
+}
+
+function documentLines(doc, state, width, color) {
+  if (!doc) return ['No documents for this job.', 'Run pursue to stage proof-grounded drafts.'];
+  let lines;
+  if (state.docsView === 'diff') {
+    if (!doc.previousDraft) {
+      lines = ['First draft — no previous draft to compare.'];
+    } else {
+      const rendered = renderArtifactDiff(doc.previousDraft.content, doc.content, { width, color });
+      lines = [`Previous draft → Current · +${rendered.added} -${rendered.removed}`, ...renderedLines(rendered)];
+    }
+  } else {
+    lines = renderedLines(renderArtifactMarkdown(doc.content, { width, color }));
+  }
+  if (state.docsEvidenceExpanded) lines.push(...evidenceLines(doc, width));
+  return lines;
+}
+
+function docsPanel(model, state, width, height, color) {
+  const { docs, index, doc } = selectedDoc(model, state);
+  const title = `DOCUMENTS · ${model.selected?.job.id || 'NO JOB'} · ${state.docsView === 'diff' ? 'DIFF' : 'DOCUMENT'}`;
+  if (!doc) return panel(title, ['No documents for this job.', 'Run pursue to stage proof-grounded drafts.', '', keyHints('docs')], width, color);
+  const innerWidth = Math.min(width - 4, 110);
+  const content = documentLines(doc, state, innerWidth, color);
+  const scroll = state.docsView === 'diff' ? state.docsDiffScroll : state.docsScroll;
+  const available = Math.max(3, height - 8);
+  const body = [
+    `${index + 1}/${docs.length} · ${doc.title} · ${doc.approvalStatus}`,
+    `${doc.path}`,
+    '',
+    ...content.slice(Math.max(0, scroll), Math.max(0, scroll) + available),
+    '',
+    keyHints('docs')
+  ];
+  return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
+}
+
 function overlayPanel(model, state, width, height, color) {
   const selected = model.selected;
   let title = String(state.overlay || 'overlay').toUpperCase();
@@ -278,7 +385,7 @@ function overlayPanel(model, state, width, height, color) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.approvalStatus} · ${item.jobId || 'no job'}`);
     } else body = ['Review queue empty.', 'Drafts stay human-gated.'];
-    body.push('', 'j/k select · Enter opens job documents · Esc closes');
+    body.push('', keyHints('review'));
   } else if (state.overlay === 'log') {
     if (model.log.length) {
       const visible = visibleWindow(model.log, state.overlayIndex, Math.max(3, height - 9));
@@ -294,36 +401,7 @@ function overlayPanel(model, state, width, height, color) {
       : ['No ranked warm path yet.', 'Press m to run the shared map_reachable_network tool.'];
     body.push('', 'm map/refresh · Esc closes');
   } else if (state.overlay === 'docs') {
-    title = `DOCUMENTS · ${selected?.job.id || 'NO JOB'}`;
-    const docs = selected?.docs || [];
-    if (!docs.length) body = ['No documents for this job.', 'Run pursue to stage proof-grounded drafts.'];
-    else {
-      const index = Math.min(state.overlayIndex, docs.length - 1);
-      const doc = docs[index];
-      const visible = visibleWindow(docs, index, Math.min(7, Math.max(2, height - 14)));
-      const previous = docs.find(item => item.id === doc.supersedesArtifactId)
-        || docs.filter(item => item.seriesKey === doc.seriesKey && item.revision < doc.revision)
-          .sort((left, right) => right.revision - left.revision)[0];
-      const content = state.docsDiff && previous
-        ? documentDiff(previous, doc, width - 4)
-        : wrap(doc.content, Math.min(width - 4, 100));
-      body = [
-        ...visible.items.map((item, offset) => `${visible.start + offset === index ? '▶' : ' '} ${item.title} · r${item.revision} · ${item.approvalStatus}`),
-        '',
-        doc.path,
-        `hash ${doc.contentHash || 'unavailable'} · series ${doc.seriesKey || 'unavailable'} · r${doc.revision}`,
-        `history ${documentHistory(docs, doc).join(' · ')}`,
-        ...(doc.evidence?.length ? [`evidence ${JSON.stringify(doc.evidence)}`] : ['evidence none recorded']),
-        ...(doc.warnings?.length ? doc.warnings.map(value => `warning ${typeof value === 'string' ? value : JSON.stringify(value)}`) : []),
-        ...(doc.reviewedAt ? [`reviewed ${doc.reviewedAt}${doc.reviewedBy ? ` by ${doc.reviewedBy}` : ''}${doc.reviewNote ? ` · ${doc.reviewNote}` : ''}`] : []),
-        '',
-        ...content.slice(0, Math.max(3, height - visible.items.length - 14))
-      ];
-      if (state.mode === 'approve-confirm') body.push('', `Approve r${doc.revision} locally? y commits · n/Esc cancels`);
-      if (state.mode === 'reject-note') body.push('', `Rejection note: ${state.input}█`, 'Enter confirms · Esc cancels');
-      if (state.mode === 'reject-confirm') body.push('', `Reject r${doc.revision} locally with this note? y commits · n/Esc cancels`);
-    }
-    body.push('', 'j/k choose · D diff · A approve · X reject · Esc closes');
+    return docsPanel(model, state, width, height, color);
   } else if (state.overlay === 'answers') {
     title = `ANSWERS · ${model.profileId || 'NO PROFILE'}`;
     body = [
@@ -335,11 +413,16 @@ function overlayPanel(model, state, width, height, color) {
     ];
   } else if (state.overlay === 'discovery') {
     body = [
+      'SAVED SEARCHES / RUNS',
       ...model.discovery.searches.map(item => `${item.name || item.id} · ${item.adapter} · last ${item.lastRunAt || item.last_run_at || 'never'}`),
-      ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`)
+      ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
+      '',
+      'NEW JOB REVIEW',
+      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
     ];
-    if (!body.length) body = ['No discovery searches configured.', 'Create one with jobos searches create, then press d.'];
-    body.push('', 'd runs daily discovery · Esc closes');
+    if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
+    if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');
+    body.push('', keyHints('discovery'));
   } else if (state.overlay === 'system') {
     body = [
       ...state.catalog.map(item => `${item.name} · ${item.available ? 'available' : 'unavailable'} · ${item.protocol} · ${item.role}`),
@@ -360,28 +443,36 @@ function overlayPanel(model, state, width, height, color) {
 }
 
 function footerLines(width) {
-  if (width >= 90) {
-    return [
-      ' j/k select · 1 today 2 all 3 high · p pursue z score d daily · a agent i prompt',
-      ' r review l log · n network o docs (D diff A approve X reject) · q answers · : command Q quit'
-    ];
-  }
+  const format = entries => ` ${entries.map(([key, label]) => `${key} ${label}`).join(' · ')}`;
+  const entries = TUI_KEYMAP.global;
+  if (width >= 116) return [format(entries.slice(0, 9)), format(entries.slice(9))];
   return [
-    ' j/k select · 1 today · 2 all · 3 high',
-    ' p pursue · z score · d daily · a agent · i prompt',
-    ' r review · l log · n network · o docs',
-    ' docs: D diff A approve X reject · q answers',
-    ' s sources · ? system · : command · Q quit'
+    format(entries.slice(0, 4)),
+    format(entries.slice(4, 9)),
+    format(entries.slice(9, 14)),
+    format(entries.slice(14))
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search']);
+  const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, safeWidth, color)];
-  const trailingRows = footers.length + 1 + (state.mode === 'command' ? 1 : 0);
+  const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(9, safeHeight - lines.length - trailingRows);
-  if (state.overlay) {
+  if (state.overlay === 'docs' && safeWidth >= 116) {
+    const sideWidth = Math.max(38, Math.floor(safeWidth * 0.36));
+    const docsWidth = safeWidth - sideWidth - 1;
+    const side = state.agentOn
+      ? agentPanel(model, state, sideWidth, bodyHeight, color)
+      : panel('AGENT', ['agent off', '', 'Chat/activity remains available when the agent is enabled.', 'Ctrl+A toggles shell/viewer focus.'], sideWidth, color);
+    lines.push(...mergeColumns([
+      side,
+      docsPanel(model, state, docsWidth, bodyHeight, color)
+    ], [sideWidth, docsWidth], color));
+  } else if (state.overlay) {
     lines.push(...overlayPanel(model, state, safeWidth, bodyHeight, color));
   } else if (safeWidth >= 116 && state.agentOn) {
     const listWidth = Math.max(30, Math.floor(safeWidth * 0.27));
@@ -410,7 +501,14 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     lines.push(...detailPanel(model, safeWidth, detailHeight, color));
     if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
   }
-  if (state.mode === 'command') lines.push(paint(fit(`: ${state.input}█`, safeWidth), 'green', color));
+  if (state.pendingConfirm) {
+    lines.push(paint(fit('Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
+  } else if (state.mode === 'stage') {
+    lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
+  } else if (inputModes.has(state.mode)) {
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search' };
+    lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
+  }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
   lines.push(...footers.map(footer => paint(fit(footer, safeWidth), 'green', color)));
   return lines.slice(0, safeHeight).join('\n');
@@ -421,12 +519,24 @@ export function defaultTuiState() {
     selectedJobId: null,
     selectedArtifactId: null,
     profileId: null,
+    selectedArtifactId: null,
+    selectedDiscoveryJobId: null,
     agentOn: true,
     agentState: 'connecting',
     sessionId: null,
     overlay: null,
     overlayIndex: 0,
-    docsDiff: false,
+    docsScroll: 0,
+    docsDiffScroll: 0,
+    docsQuery: '',
+    docsMatchIndex: 0,
+    docsView: 'document',
+    docsEvidenceExpanded: false,
+    focusTarget: 'shell',
+    pendingAutoOpenArtifactId: null,
+    editorActive: false,
+    stageIndex: 0,
+    pendingConfirm: null,
     mode: 'normal',
     input: '',
     status: 'starting JobOS host',
@@ -458,6 +568,8 @@ export class JobosTui {
     this.boundKeypress = (value, key) => this.onKeypress(value, key);
     this.boundResize = () => this.render();
     this.stopped = false;
+    this.notedArtifactIds = new Set();
+    this.parseEditorCommand = parseEditorCommand;
   }
   selectedDocument() {
     const docs = this.model.selected?.docs || [];
@@ -486,12 +598,19 @@ export class JobosTui {
   }
 
   render() {
-    if (this.stopped) return;
+    if (this.stopped || this.state.editorActive) return;
     const screen = renderTui(this.model, this.state, this.dimensions());
     this.stdout.write(`${ESC}H${ESC}2J${screen}`);
   }
 
   refresh({ disk = true } = {}) {
+    if (this.state.editorActive) return false;
+    const previousModel = this.model;
+    const previousArtifactId = this.state.selectedArtifactId;
+    const previousDocs = previousModel?.selected?.docs || [];
+    const previousDocIndex = Math.max(0, previousDocs.findIndex(doc => doc.id === previousArtifactId));
+    const previousReviewIndex = Math.max(0, previousModel?.review?.findIndex(item => item.id === previousArtifactId) ?? 0);
+    const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
     this.model = buildTuiModel(this.store, {
       profileId: this.state.profileId,
@@ -499,8 +618,127 @@ export class JobosTui {
     });
     this.state.profileId = this.model.profileId;
     this.state.selectedJobId = this.model.selectedJobId;
-    this.syncDocumentSelection();
+
+    const docs = this.model.selected?.docs || [];
+    const shouldClampArtifact = Boolean(this.state.selectedArtifactId) || this.state.overlay === 'review' || this.state.overlay === 'docs';
+    if (shouldClampArtifact && !docs.some(doc => doc.id === this.state.selectedArtifactId)) {
+      const candidates = this.state.overlay === 'review' ? this.model.review : docs;
+      const index = this.state.overlay === 'review' ? previousReviewIndex : previousDocIndex;
+      this.setSelectedArtifact(candidates[Math.min(index, Math.max(0, candidates.length - 1))]?.id || null);
+    }
+    const queue = this.model.discovery.queue;
+    if (!queue.some(item => item.id === this.state.selectedDiscoveryJobId)) {
+      this.state.selectedDiscoveryJobId = queue[Math.min(previousDiscoveryIndex, Math.max(0, queue.length - 1))]?.id || null;
+    }
+    if (this.state.overlay === 'review') this.state.overlayIndex = Math.max(0, this.model.review.findIndex(item => item.id === this.state.selectedArtifactId));
+    if (this.state.overlay === 'docs') {
+      this.state.overlayIndex = Math.max(0, docs.findIndex(doc => doc.id === this.state.selectedArtifactId));
+      if (this.dimensions().width < 116) this.state.focusTarget = 'viewer';
+    }
+    this.applyPendingAutoOpen();
     this.render();
+  }
+
+  setSelectedArtifact(artifactId, { reset = true } = {}) {
+    const changed = this.state.selectedArtifactId !== artifactId;
+    this.state.selectedArtifactId = artifactId || null;
+    if (changed && reset) {
+      this.state.docsScroll = 0;
+      this.state.docsDiffScroll = 0;
+      this.state.docsMatchIndex = 0;
+      this.state.docsQuery = '';
+    }
+  }
+
+  selectedDocument() {
+    return selectedDoc(this.model, this.state).doc;
+  }
+
+  moveArtifactSelection(delta) {
+    let docs = this.model.selected?.docs || [];
+    let index = docs.findIndex(doc => doc.id === this.state.selectedArtifactId);
+    if (index < 0 && this.state.selectedArtifactId) {
+      const artifact = one(this.store, 'SELECT job_id FROM artifacts WHERE id=?', [this.state.selectedArtifactId]);
+      if (artifact?.job_id && artifact.job_id !== this.state.selectedJobId) {
+        this.state.selectedJobId = artifact.job_id;
+        this.refresh({ disk: false });
+        docs = this.model.selected?.docs || [];
+        index = docs.findIndex(doc => doc.id === this.state.selectedArtifactId);
+      }
+    }
+    if (!docs.length) return;
+    if (index < 0) index = 0;
+    index = Math.max(0, Math.min(docs.length - 1, index + delta));
+    this.setSelectedArtifact(docs[index].id);
+    this.state.overlayIndex = index;
+    this.render();
+  }
+
+  moveReviewSelection(delta) {
+    const items = this.model.review;
+    if (!items.length) return;
+    let index = items.findIndex(item => item.id === this.state.selectedArtifactId);
+    if (index < 0) index = this.state.overlayIndex || 0;
+    index = Math.max(0, Math.min(items.length - 1, index + delta));
+    this.state.overlayIndex = index;
+    this.setSelectedArtifact(items[index].id, { reset: false });
+    this.render();
+  }
+
+  moveDiscoverySelection(delta) {
+    const items = this.model.discovery.queue;
+    if (!items.length) return;
+    let index = items.findIndex(item => item.id === this.state.selectedDiscoveryJobId);
+    if (index < 0) index = 0;
+    index = Math.max(0, Math.min(items.length - 1, index + delta));
+    this.state.selectedDiscoveryJobId = items[index].id;
+    this.render();
+  }
+
+  docsViewerActive() {
+    return this.state.overlay === 'docs' && (this.dimensions().width < 116 || this.state.focusTarget === 'viewer');
+  }
+
+  artifactSnapshot() {
+    return all(this.store, 'SELECT id,path,job_id AS jobId,created_at AS createdAt,title FROM artifacts ORDER BY created_at,id');
+  }
+
+  applyPendingAutoOpen() {
+    const artifactId = this.state.pendingAutoOpenArtifactId;
+    if (!artifactId || this.state.mode !== 'normal' || this.state.pendingConfirm || this.state.busy || this.state.editorActive) return false;
+    const row = one(this.store, 'SELECT id,job_id FROM artifacts WHERE id=?', [artifactId]);
+    this.state.pendingAutoOpenArtifactId = null;
+    if (!row || row.job_id !== this.state.selectedJobId) return false;
+    this.setSelectedArtifact(row.id);
+    this.state.overlay = 'docs';
+    this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+    return true;
+  }
+
+  noteArtifactChanges(before = [], after = []) {
+    const beforeIds = new Set(before.map(item => item.id));
+    const beforePaths = new Set(before.map(item => `${item.jobId || item.job_id}\0${item.path}`));
+    const changed = after
+      .filter(item => !beforeIds.has(item.id) && !this.notedArtifactIds.has(item.id))
+      .filter(item => (item.jobId || item.job_id) === this.state.selectedJobId)
+      .sort((a, b) => String(a.createdAt || a.created_at).localeCompare(String(b.createdAt || b.created_at)) || String(a.id).localeCompare(String(b.id)));
+    for (const item of changed) {
+      this.notedArtifactIds.add(item.id);
+      const row = one(this.store, 'SELECT title FROM artifacts WHERE id=?', [item.id]);
+      const kind = beforePaths.has(`${item.jobId || item.job_id}\0${item.path}`) ? 'Updated' : 'Created';
+      this.addMessage('tool', `${kind}: ${row?.title || item.title || item.path} (Press Ctrl+A to focus viewer).`);
+    }
+    const newest = changed.at(-1);
+    if (!newest) return [];
+    if (this.state.mode === 'normal' && !this.state.pendingConfirm && !this.state.busy && !this.state.editorActive) {
+      this.setSelectedArtifact(newest.id);
+      this.state.overlay = 'docs';
+      this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+    } else {
+      this.state.pendingAutoOpenArtifactId = newest.id;
+    }
+    this.render();
+    return changed;
   }
 
   filtered() {
@@ -512,7 +750,7 @@ export class JobosTui {
     if (!jobs.length) return;
     let index = jobs.findIndex(job => job.id === this.state.selectedJobId);
     if (index < 0) index = 0;
-    index = Math.max(0, Math.min(jobs.length - 1, index + delta));
+    index = (index + delta + jobs.length) % jobs.length;
     this.state.selectedJobId = jobs[index].id;
     this.refresh({ disk: false });
   }
@@ -530,16 +768,40 @@ export class JobosTui {
     this.state.docsDiff = false;
     this.state.mode = 'normal';
     this.state.input = '';
-    if (name === 'docs') this.syncDocumentSelection();
+    if (name === 'review') {
+      const first = this.model.review[0];
+      this.setSelectedArtifact(first?.id || null, { reset: false });
+    } else if (name === 'discovery') {
+      const queue = this.model.discovery.queue;
+      if (!queue.some(item => item.id === this.state.selectedDiscoveryJobId)) this.state.selectedDiscoveryJobId = queue[0]?.id || null;
+    } else if (name === 'docs') {
+      const docs = this.model.selected?.docs || [];
+      if (!docs.some(doc => doc.id === this.state.selectedArtifactId)) this.setSelectedArtifact(docs[0]?.id || null);
+      this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+    }
     this.state.status = `${name} overlay · Esc closes`;
     this.render();
   }
 
   closeTransient() {
     if (this.state.mode !== 'normal') {
+      if (this.state.mode === 'review-note' && this.state.input) {
+        this.state.pendingConfirm = { kind: 'discard-review-note', next: 'close' };
+        this.render();
+        return true;
+      }
       this.state.mode = 'normal';
       this.state.input = '';
       this.state.status = 'input cancelled';
+      this.applyPendingAutoOpen();
+      this.render();
+      return true;
+    }
+    if (this.state.overlay) {
+      this.state.overlay = null;
+      this.state.overlayIndex = 0;
+      this.state.focusTarget = 'shell';
+      this.state.status = 'overlay closed';
       this.render();
       return true;
     }
@@ -637,12 +899,12 @@ export class JobosTui {
     }
     const jobId = this.state.selectedJobId;
     const context = jobId ? selectedJobContext(this.store, jobId) : null;
+    const before = this.artifactSnapshot();
     this.state.busy = 'agent';
     this.state.status = `agent working on ${jobId || 'workspace'} · navigation stays active`;
     this.render();
     try {
       const result = await this.client.prompt(text, { context });
-      this.refresh();
       this.state.status = result?.stopReason === 'cancelled'
         ? 'agent turn cancelled · late guest output quarantined · next prompt starts clean'
         : 'agent turn complete · authoritative state refreshed';
@@ -652,7 +914,14 @@ export class JobosTui {
       this.state.status = `${error.message} · press c to reconnect or continue using JobOS directly`;
     } finally {
       this.state.busy = null;
-      this.render();
+      try {
+        this.refresh();
+        this.noteArtifactChanges(before, this.artifactSnapshot());
+      } catch (error) {
+        this.state.error = error.message;
+        this.state.status = `refresh failed: ${error.message}`;
+        this.render();
+      }
     }
   }
 
@@ -681,13 +950,13 @@ export class JobosTui {
       ? { profileId }
       : (name === 'network' ? { jobId } : { jobId, profileId });
     if (!tool) return;
+    const before = this.artifactSnapshot();
     this.state.busy = name;
     this.state.status = `${name} running asynchronously`;
     this.state.error = null;
     this.render();
     try {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
-      this.refresh({ disk: false });
       this.state.status = `${name} complete · local state refreshed`;
     } catch (error) {
       if (error?.code === 'stale_snapshot') {
@@ -697,10 +966,10 @@ export class JobosTui {
         this.state.status = `${name} failed: ${error.message}`;
       }
       this.state.error = error.message;
-      this.refresh({ disk: false });
     } finally {
       this.state.busy = null;
-      this.render();
+      this.refresh({ disk: false });
+      this.noteArtifactChanges(before, this.artifactSnapshot());
     }
   }
 
@@ -753,28 +1022,345 @@ export class JobosTui {
     this.render();
   }
 
-  onOverlayKey(value, key) {
-    if (key.name === 'escape') return this.closeTransient();
-    if (this.state.overlay === 'docs') {
-      const docs = this.model.selected?.docs || [];
-      if (value === 'j' && docs.length) {
-        this.state.overlayIndex = Math.min(docs.length - 1, this.state.overlayIndex + 1);
-        this.state.selectedArtifactId = docs[this.state.overlayIndex].id;
-        this.state.docsDiff = false;
-      } else if (value === 'k' && docs.length) {
-        this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
-        this.state.selectedArtifactId = docs[this.state.overlayIndex].id;
-        this.state.docsDiff = false;
-      } else if (value === 'D') {
-        this.state.docsDiff = !this.state.docsDiff;
-      } else if (value === 'A' && this.selectedDocument()) {
-        this.state.mode = 'approve-confirm';
-      } else if (value === 'X' && this.selectedDocument()) {
-        this.state.mode = 'reject-note';
-        this.state.input = '';
+  currentReviewItem() {
+    if (this.state.overlay === 'review') return this.model.review[this.state.overlayIndex] || null;
+    return this.model.review.find(item => item.id === this.state.selectedArtifactId) || null;
+  }
+
+  reviewCurrentArtifact(approvalStatus, note = '') {
+    const artifactId = this.currentReviewItem()?.id || this.state.selectedArtifactId;
+    if (!artifactId) {
+      this.state.error = 'No artifact selected';
+      this.state.status = 'No artifact selected.';
+      this.render();
+      return null;
+    }
+    const previousIndex = Math.max(0, this.model.review.findIndex(item => item.id === artifactId));
+    try {
+      const reviewed = reviewArtifact(this.store, { artifactId, approvalStatus, note, source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      if (this.state.overlay === 'review') {
+        const next = this.model.review[Math.min(previousIndex, Math.max(0, this.model.review.length - 1))];
+        this.setSelectedArtifact(next?.id || null, { reset: false });
+        this.state.overlayIndex = Math.max(0, this.model.review.findIndex(item => item.id === this.state.selectedArtifactId));
+      } else {
+        this.setSelectedArtifact(artifactId, { reset: false });
       }
+      this.state.status = `Artifact ${approvalStatus}.`;
+      this.render();
+      return reviewed;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Artifact review failed: ${error.message}`;
+      this.render();
+      return null;
+    }
+  }
+
+  beginReject() {
+    const item = this.currentReviewItem();
+    const artifactId = item?.id || this.state.selectedArtifactId;
+    if (!artifactId) return;
+    this.setSelectedArtifact(artifactId, { reset: false });
+    this.state.mode = 'review-note';
+    this.state.input = '';
+    this.state.status = 'Rejection feedback is required before saving.';
+    this.render();
+  }
+
+  async submitReviewNote() {
+    const note = this.state.input.trim();
+    if (!note) {
+      this.state.status = 'Rejection feedback is required.';
+      this.render();
+      return;
+    }
+    const artifactId = this.state.selectedArtifactId;
+    const row = one(this.store, 'SELECT id,job_id,path FROM artifacts WHERE id=?', [artifactId]);
+    this.state.mode = 'normal';
+    this.state.input = '';
+    const reviewed = this.reviewCurrentArtifact('rejected', note);
+    if (!reviewed || !row) return;
+    if (this.client?.state === 'ready' && !this.state.busy) {
+      await this.promptAgent(`Revise artifact ${row.id} (${row.path}) for job ${row.job_id} using only stored proof points. Human rejection feedback: ${note}`);
+    } else {
+      this.state.status = 'Rejection saved; redraft skipped because the agent is not ready.';
+      this.applyPendingAutoOpen();
+      this.render();
+    }
+  }
+
+  openReviewDocument() {
+    const item = this.currentReviewItem();
+    if (!item) return;
+    this.state.selectedJobId = item.jobId;
+    this.refresh({ disk: false });
+    this.setSelectedArtifact(item.id);
+    this.state.docsView = 'document';
+    this.state.docsScroll = 0;
+    this.state.docsDiffScroll = 0;
+    this.state.docsQuery = '';
+    this.state.docsMatchIndex = 0;
+    this.state.overlay = 'docs';
+    this.state.overlayIndex = Math.max(0, (this.model.selected?.docs || []).findIndex(doc => doc.id === item.id));
+    this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+    this.state.status = `Documents · ${item.title}`;
+    this.render();
+  }
+
+  decideDiscovery(status) {
+    const jobId = this.state.selectedDiscoveryJobId;
+    const row = jobId ? one(this.store, 'SELECT id,status FROM jobs WHERE id=?', [jobId]) : null;
+    if (!row || row.status !== 'new') {
+      this.refresh();
+      this.state.status = 'Discovery selection is stale; queue refreshed without changes.';
+      this.render();
+      return;
+    }
+    try {
+      updateJobStatus(this.store, jobId, status);
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = status === 'saved' ? 'Discovery job accepted and saved.' : 'Discovery job archived.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Discovery decision failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  beginStage() {
+    if (!this.state.selectedJobId) {
+      this.state.error = 'No job selected';
+      this.state.status = 'Select a job before changing its application stage.';
+      this.render();
+      return;
+    }
+    const current = this.model.selected?.job.applicationStatus;
+    const index = stageOrder.indexOf(current);
+    this.state.stageIndex = index >= 0 ? index : 0;
+    this.state.mode = 'stage';
+    this.state.input = '';
+    this.state.status = 'Choose the human-tracked application stage.';
+    this.render();
+  }
+
+  persistStage() {
+    const status = stageOrder[this.state.stageIndex];
+    const note = this.state.input.trim();
+    this.state.mode = 'normal';
+    this.state.input = '';
+    try {
+      if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
+      const application = one(this.store, 'SELECT id FROM applications WHERE job_id=? AND profile_id=?', [this.state.selectedJobId, this.model.profileId]);
+      if (application) {
+        appUpdate(this.store, application.id, status, note || undefined);
+      } else {
+        appCreate(this.store, this.state.selectedJobId, status, note || undefined);
+      }
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = status === 'applied'
+        ? 'Tracking only — JobOS did not submit this application.'
+        : `Application stage tracked as ${status}.`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Application stage failed: ${error.message}`;
+      this.refresh({ disk: false });
+    }
+    this.applyPendingAutoOpen();
+    this.render();
+  }
+
+  currentDocumentLines() {
+    const doc = this.selectedDocument();
+    return documentLines(doc, this.state, Math.max(20, this.dimensions().width - 6), false).map(stripAnsi);
+  }
+
+  scrollDocument(delta) {
+    const field = this.state.docsView === 'diff' ? 'docsDiffScroll' : 'docsScroll';
+    const page = Math.max(1, this.dimensions().height - 12);
+    const maximum = Math.max(0, this.currentDocumentLines().length - page);
+    this.state[field] = Math.max(0, Math.min(maximum, this.state[field] + delta));
+    this.render();
+  }
+
+  commitDocsSearch() {
+    const query = sanitizeTerminalText(this.state.input).trim();
+    this.state.docsQuery = query;
+    this.state.mode = 'normal';
+    this.state.input = '';
+    if (!query) {
+      this.state.docsMatchIndex = 0;
+      this.state.status = 'Search cleared.';
+      this.render();
+      return;
+    }
+    const matches = this.currentDocumentLines()
+      .map((line, index) => line.toLocaleLowerCase().includes(query.toLocaleLowerCase()) ? index : -1)
+      .filter(index => index >= 0);
+    if (!matches.length) {
+      this.state.docsMatchIndex = -1;
+      this.state.status = `no match for "${query}".`;
+    } else {
+      this.state.docsMatchIndex = 0;
+      const field = this.state.docsView === 'diff' ? 'docsDiffScroll' : 'docsScroll';
+      this.state[field] = matches[0];
+      this.state.status = `Match 1/${matches.length} for "${query}".`;
+    }
+    this.render();
+  }
+
+  moveDocsMatch(delta) {
+    if (!this.state.docsQuery) {
+      this.state.status = 'Press / to search this artifact.';
+      this.render();
+      return;
+    }
+    const matches = this.currentDocumentLines()
+      .map((line, index) => line.toLocaleLowerCase().includes(this.state.docsQuery.toLocaleLowerCase()) ? index : -1)
+      .filter(index => index >= 0);
+    if (!matches.length) {
+      this.state.docsMatchIndex = -1;
+      this.state.status = `no match for "${this.state.docsQuery}".`;
+    } else {
+      const current = this.state.docsMatchIndex < 0 ? 0 : this.state.docsMatchIndex;
+      this.state.docsMatchIndex = (current + delta + matches.length) % matches.length;
+      const field = this.state.docsView === 'diff' ? 'docsDiffScroll' : 'docsScroll';
+      this.state[field] = matches[this.state.docsMatchIndex];
+      this.state.status = `Match ${this.state.docsMatchIndex + 1}/${matches.length} for "${this.state.docsQuery}".`;
+    }
+    this.render();
+  }
+
+  async openArtifactEditor(store = this.store, artifactId = this.state.selectedArtifactId, options = {}) {
+    const row = one(store, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+    if (!row) {
+      const error = `Unknown artifact: ${artifactId}`;
+      this.state.error = error;
+      this.state.status = `Editor failed: ${error}`;
+      this.render();
+      return { error };
+    }
+    const wasRaw = Boolean(this.stdin.isRaw);
+    const wasPaused = this.stdin.isPaused?.() ?? true;
+    this.state.editorActive = true;
+    this.stdout.write(`${ESC}?25h${ESC}?1049l`);
+    if (this.stdin.isTTY) this.stdin.setRawMode(false);
+    this.stdin.pause?.();
+    let editorReadCount = 0;
+    const injectedRead = options.readFile || options.readFileImpl;
+    const readFileImpl = injectedRead
+      ? file => editorReadCount++ === 0 ? row.content : injectedRead(file)
+      : undefined;
+    try {
+      const result = await runArtifactEditor(store, row, {
+        ...options,
+        fsImpl: options.fs || options.fsImpl,
+        readFileImpl,
+        env: options.editor
+          ? { ...(options.env || process.env), VISUAL: Array.isArray(options.editor) ? options.editor.join(' ') : String(options.editor) }
+          : options.env
+      });
+      const exitCode = result?.exitCode ?? result?.status ?? 0;
+      if (exitCode !== 0 || result?.error) {
+        const message = typeof result?.error === 'string' ? result.error : (result?.error?.message || `Editor exited with status ${exitCode}`);
+        this.state.error = message;
+        this.state.status = `Editor failed: ${message}`;
+        return result;
+      }
+      if (result?.changed && typeof result.content === 'string') {
+        const edited = ingestEditedArtifact(store, { artifactId, content: result.content, source: 'tui' });
+        this.setSelectedArtifact(edited.id);
+        this.state.status = `Edited draft ingested: ${edited.title}`;
+      } else {
+        this.state.status = 'Editor closed with no artifact changes.';
+      }
+      this.state.error = null;
+      return result;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Editor failed: ${error.message}`;
+      return { error: error.message };
+    } finally {
+      this.stdout.write(`${ESC}?1049h${ESC}?25l`);
+      if (this.stdin.isTTY) this.stdin.setRawMode(wasRaw);
+      if (!wasPaused) this.stdin.resume?.();
+      this.state.editorActive = false;
+      this.refresh({ disk: false });
+    }
+  }
+
+  onDocsKey(value, key) {
+    if (key.name === 'escape') return this.closeTransient();
+    if (value === 'j') return this.moveArtifactSelection(1);
+    if (value === 'k') return this.moveArtifactSelection(-1);
+    if (key.name === 'down') return this.scrollDocument(1);
+    if (key.name === 'up') return this.scrollDocument(-1);
+    if (key.name === 'pagedown') return this.scrollDocument(Math.max(1, this.dimensions().height - 12));
+    if (key.name === 'pageup') return this.scrollDocument(-Math.max(1, this.dimensions().height - 12));
+    if (value === '/') {
+      this.state.mode = 'docs-search';
+      this.state.input = '';
       this.render();
       return true;
+    }
+    if (value === 'n') return this.moveDocsMatch(1);
+    if (value === 'N' || (key.shift && key.name === 'n')) return this.moveDocsMatch(-1);
+    if (value === 'A') return this.reviewCurrentArtifact('approved');
+    if (value === 'R') return this.beginReject();
+    if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
+    if (value === 'E') {
+      void this.openArtifactEditor();
+      return true;
+    }
+    if (value === 'V') {
+      this.state.docsView = this.state.docsView === 'diff' ? 'document' : 'diff';
+      const doc = this.selectedDocument();
+      this.state.status = this.state.docsView === 'diff'
+        ? (doc?.previousDraft ? 'Previous draft comparison.' : 'First draft — no previous draft to compare.')
+        : 'Document view.';
+      this.render();
+      return true;
+    }
+    if (value === 'I') {
+      this.state.docsEvidenceExpanded = !this.state.docsEvidenceExpanded;
+      this.state.status = this.state.docsEvidenceExpanded ? 'Evidence and warnings expanded.' : 'Evidence and warnings collapsed.';
+      this.render();
+      return true;
+    }
+    return false;
+  }
+
+  onOverlayKey(value, key) {
+    if (key.name === 'escape') return this.closeTransient();
+    if (this.state.overlay === 'review') {
+      if (value === 'j') return this.moveReviewSelection(1);
+      if (value === 'k') return this.moveReviewSelection(-1);
+      if (key.name === 'return' || key.name === 'enter') return this.openReviewDocument();
+      if (value === 'A') return this.reviewCurrentArtifact('approved');
+      if (value === 'R') return this.beginReject();
+      if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
+      if (value === 'E') {
+        this.openReviewDocument();
+        void this.openArtifactEditor();
+        return true;
+      }
+      if (value === 'V' || value === 'I') {
+        this.openReviewDocument();
+        return this.onDocsKey(value, key);
+      }
+    }
+    if (this.state.overlay === 'discovery') {
+      if (value === 'j') return this.moveDiscoverySelection(1);
+      if (value === 'k') return this.moveDiscoverySelection(-1);
+      if (value === 'A') return this.decideDiscovery('saved');
+      if (value === 'X') return this.decideDiscovery('archived');
+      if (value === 'd') {
+        void this.runAction('daily');
+        return true;
+      }
     }
     if (value === 'r') return this.openOverlay('review');
     if (value === 'l') return this.openOverlay('log');
@@ -786,14 +1372,7 @@ export class JobosTui {
     const items = overlayItems(this.model, this.state);
     if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
     else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
-    else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
-      const artifact = items[this.state.overlayIndex];
-      this.state.selectedJobId = artifact.jobId;
-      this.state.selectedArtifactId = artifact.id;
-      this.refresh({ disk: false });
-      this.openDocuments(artifact.id);
-      return true;
-    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'profile' && items[this.state.overlayIndex]) {
+    else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'profile' && items[this.state.overlayIndex]) {
       this.state.profileId = items[this.state.overlayIndex].id;
       this.state.selectedJobId = null;
       this.state.overlay = null;
@@ -801,9 +1380,6 @@ export class JobosTui {
       return true;
     } else if (value === 'm' && this.state.overlay === 'network') {
       void this.runAction('network');
-      return true;
-    } else if (value === 'd' && this.state.overlay === 'discovery') {
-      void this.runAction('daily');
       return true;
     }
     this.render();
@@ -842,10 +1418,23 @@ export class JobosTui {
     else if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
+      if (mode === 'review-note') {
+        void this.submitReviewNote();
+        return true;
+      }
+      if (mode === 'stage-note') {
+        this.persistStage();
+        return true;
+      }
+      if (mode === 'docs-search') {
+        this.commitDocsSearch();
+        return true;
+      }
       this.state.mode = 'normal';
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
       else if (mode === 'command') this.executeCommand(text);
+      else this.applyPendingAutoOpen();
       return true;
     } else if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) {
       this.state.input += value;
@@ -854,13 +1443,88 @@ export class JobosTui {
     return true;
   }
 
+  onConfirmKey(value, key) {
+    const confirm = this.state.pendingConfirm;
+    if (!confirm) return false;
+    if (value === 'n' || key.name === 'escape') {
+      this.state.pendingConfirm = null;
+      this.state.status = 'Discard cancelled; feedback preserved.';
+      this.render();
+      return true;
+    }
+    if (value === 'y' || key.name === 'return' || key.name === 'enter') {
+      this.state.pendingConfirm = null;
+      this.state.mode = 'normal';
+      this.state.input = '';
+      if (confirm.kind === 'editor-with-note' || confirm.next === 'editor') void this.openArtifactEditor();
+      else this.applyPendingAutoOpen();
+      this.state.status = confirm.kind === 'editor-with-note' ? 'Feedback discarded; opening editor.' : 'Feedback discarded.';
+      this.render();
+      return true;
+    }
+    return true;
+  }
+
+  onStageKey(value, key) {
+    if (key.name === 'escape') {
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = 'Stage change cancelled.';
+      this.applyPendingAutoOpen();
+      this.render();
+      return true;
+    }
+    if (key.name === 'left' || value === 'h') this.state.stageIndex = (this.state.stageIndex - 1 + stageOrder.length) % stageOrder.length;
+    else if (key.name === 'right' || value === 'l') this.state.stageIndex = (this.state.stageIndex + 1) % stageOrder.length;
+    else if (key.name === 'return' || key.name === 'enter') {
+      const status = stageOrder[this.state.stageIndex];
+      if (!validStatuses.has(status)) {
+        this.state.mode = 'normal';
+        this.state.error = `Invalid status: ${status}`;
+        this.state.status = `Invalid status: ${status}`;
+      } else {
+        this.state.mode = 'stage-note';
+        this.state.input = '';
+        this.state.status = `Optional note for ${status}.`;
+      }
+    }
+    this.render();
+    return true;
+  }
 
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
-    if (this.state.mode !== 'normal') return this.onInputKey(value, key);
+    if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
+    if (this.state.overlay === 'docs' && key.ctrl && key.name === 'a') {
+      if (this.dimensions().width >= 116) {
+        this.state.focusTarget = this.state.focusTarget === 'viewer' ? 'shell' : 'viewer';
+        this.state.status = `Artifact focus: ${this.state.focusTarget}.`;
+      } else {
+        this.state.focusTarget = 'viewer';
+      }
+      this.render();
+      return true;
+    }
+    if (this.state.pendingConfirm) return this.onConfirmKey(value, key);
+    if (this.state.mode === 'review-note' && value === 'E' && this.state.input) {
+      this.state.pendingConfirm = { kind: 'editor-with-note', next: 'editor' };
+      this.render();
+      return true;
+    }
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (this.state.mode === 'stage') return this.onStageKey(value, key);
+    if (this.docsViewerActive()) {
+      const handled = this.onDocsKey(value, key);
+      if (handled !== false) return handled;
+    }
+    if (this.state.overlay === 'docs' && ['A', 'R', 'B', 'E', 'V', 'I'].includes(value)) return this.onDocsKey(value, key);
+    if (this.state.overlay === 'docs' && this.dimensions().width >= 116) {
+      if (value === 'j') return this.moveSelection(1);
+      if (value === 'k') return this.moveSelection(-1);
+      if (value === 'n') return this.openOverlay('network');
+    }
     if (this.state.overlay) return this.onOverlayKey(value, key);
     if (key.name === 'escape') return this.closeTransient();
-    if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
     if (value === 'j') this.moveSelection(1);
     else if (value === 'k') this.moveSelection(-1);
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
@@ -880,7 +1544,8 @@ export class JobosTui {
       this.state.mode = 'agent';
       this.state.input = '';
       this.render();
-    } else if (value === 'r') this.openOverlay('review');
+    } else if (value === 't') this.beginStage();
+    else if (value === 'r') this.openOverlay('review');
     else if (value === 'l') this.openOverlay('log');
     else if (value === 'n') this.openOverlay('network');
     else if (value === 'o') this.openDocuments();
@@ -900,6 +1565,7 @@ export class JobosTui {
       this.state.status = 'cancelling agent turn';
       this.render();
     }
+    return true;
   }
 
   async start() {
@@ -912,7 +1578,7 @@ export class JobosTui {
     this.stdout.write(`${ESC}?1049h${ESC}?25l`);
     this.render();
     this.refreshTimer = setInterval(() => {
-      if (!this.state.busy) {
+      if (!this.state.busy && !this.state.editorActive) {
         try { this.refresh(); } catch (error) {
           this.state.error = error.message;
           this.state.status = `refresh failed: ${error.message}`;

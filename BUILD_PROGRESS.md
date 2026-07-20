@@ -20,7 +20,8 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Real ACP v1 client lifecycle for Hermes 0.18.2: initialize, session creation, event streaming, mediated MCP tools, cancellation, timeout/crash typing, redacted stderr, and restart.
 - Cancelled or timed-out ACP sessions quarantine later updates and start a clean process/session before the next prompt; raw TUI and ACP drills verify uncontaminated recovery.
 - One `domain-tools` facade serves CLI/TUI actions, the ACP session's inward MCP door, and the independent external `jobos mcp` door.
-- Data-bound locked 011 terminal shell: priority strip, dense job list, selected detail stack, default-on agent pane, review/log overlays, responsive narrow/empty/failure states, and clean raw-terminal shutdown.
+- Data-bound locked 011 terminal shell: priority strip, dense job list, selected detail stack, default-on agent pane, human-gated review/discovery/stage actions, responsive artifact documents, and clean raw-terminal shutdown.
+- Artifact review lifecycle: sanitized Markdown/diffs, selected-artifact evidence, predecessor-aware versions, workspace-confined `$VISUAL`/`$EDITOR` round-trips, auditable approve/reject/draft decisions, and input-safe agent-created artifact auto-open.
 - Scripted real-client evidence: multi-turn ACP cancel/recover/restart/policy/timeout/missing-binary drill and external MCP initialize/list/call/exit drill.
 - Concise root help grouped into Setup, Workflows, and Extend; the complete low-level registry remains behind `help --all` and `agent-guide --json`.
 - Ashby, public career-page, and bounded VC/startup portfolio discovery in addition to Greenhouse and Lever.
@@ -53,13 +54,13 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- PR 10 converged in iteration 1 after classifying and correcting four integration regressions (readiness v3 expectation, lost policy-context merge, a dropped MCP registry entry, and TUI vertical-layout pressure). Focused packet/receipt acceptance suite: **16/16 passed**; `npm test`: **142/142 passed**.
-- `npm run smoke`: passed the extended `ready-for-review` → exact approvals → immutable packet → user attestation → receipt confirmation path. Observed two canonical receipt rows, `receiptState: confirmed`, packet/hash/receipt-bound `applied` history, redacted packet YAML, `submissionPerformed: false`, and `externalSideEffects: none`; the subsequent interview analytics, scheduler, and export flow also completed.
-- PR 9 converged after the TUI-focus web-interface cutover: affected artifact/readiness/CLI/TUI/discovery/scheduler checks **53/53 passed**; `npm test` **126/126 passed**. No unresolved acceptance failure remains.
-- `npm run smoke`: passed the extended local human-review path (`ready-for-review` → exact resume/cover diffs → local approvals → `approved`) with unchanged application/status state, exactly two approval audit events, and `external_side_effect='none'`; the existing applied/interview analytics, scheduler, and workspace-export flow then completed without the removed web interface.
+- `npm test`: **120/120 passed**, including the critic-authored T1–T13 artifact-review contract suite.
+- `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 37-tool list (includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
+- Artifact-review PTY exercises: approve/draft/reject feedback, evidence/diff/search/scroll, external-editor version creation, application-stage tracking, input-safe deferred agent artifact open, and clean exit `0`.
+- Wide (140×42) and narrow (90×32) snapshots rendered successfully; targeted ACP/TUI/scheduler plus artifact-review integration suites passed **34/34**.
 - Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
 - Human-review suite `tests/human-review.test.js`: **6/6 passed**, covering current-only queueing, exact/idempotent/local-only decisions, redraft invalidation, workspace divergence, MCP/ACP denials, optimistic two-store races, and legacy lineage migration. Readiness review transitions, restricted-value redaction, and YAML refresh passed in the focused readiness checks.
@@ -101,6 +102,8 @@ Final independent score after two evidence-driven iterations: **87/90 (9.67/10)*
 | Operator reproducibility | 9/10 |
 
 Iteration 1 exposed missing raw evidence and then cancel-stream contamination. Iteration 2 quarantined cancel/timeout updates at send time, restarted the guest before the next prompt, strengthened the fake and real drills, corrected the artifact evidence ID, and finished with no critic findings.
+
+The 2026-07-20 artifact-review convergence used a critic-authored T1–T13 red suite and three independent critic passes. Iteration 1 found editor teardown, terminal-sanitization, stage-audit, and job-scoping defects. Iteration 2 found remaining editor TTY ownership during refresh/resize. Iteration 3 confirmed all blockers fixed and approved full verification.
 
 ## Known limitations
 
