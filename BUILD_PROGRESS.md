@@ -52,7 +52,7 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- PR 9 convergence iteration 1: focused artifact/readiness/policy/TUI/scheduler checks **40/40 passed**, plus targeted human-review readiness/redaction/YAML cases **3/3 passed**; `npm test` **128/128 passed** before the TUI-focus web-interface removal was reconciled. No unresolved acceptance failure remains.
+- PR 9 converged after the TUI-focus web-interface cutover: affected artifact/readiness/CLI/TUI/discovery/scheduler checks **53/53 passed**; `npm test` **126/126 passed**. No unresolved acceptance failure remains.
 - `npm run smoke`: passed the extended local human-review path (`ready-for-review` → exact resume/cover diffs → local approvals → `approved`) with unchanged application/status state, exactly two approval audit events, and `external_side_effect='none'`; the existing applied/interview analytics, scheduler, and workspace-export flow then completed without the removed web interface.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 31-tool list (includes `applications_plan`), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
