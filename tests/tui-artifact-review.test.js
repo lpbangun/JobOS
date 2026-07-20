@@ -1027,14 +1027,23 @@ test('T11 — Editor lifecycle and versioning', async t => {
   const fileContent = readFileSync(wsFile, 'utf8');
   assert.ok(fileContent.includes('Resume'), 'T11: workspace resume.md exists');
 
-  // ── Intended: E with unsent review-note prompts confirmation ──
+  // ── Intended: Ctrl+E with unsent review-note prompts confirmation ──
   tui.state.mode = 'review-note';
   tui.state.input = 'needs revision';
-  tui.onKeypress('E', { name: 'e', shift: true });
+  tui.onKeypress('\x05', { name: 'e', ctrl: true });
   assert.equal(tui.state.pendingConfirm?.kind, 'editor-with-note',
-    'T11: E with unsent note sets pendingConfirm editor-with-note');
+    'T11: Ctrl+E with unsent note sets pendingConfirm editor-with-note');
   // Confirm clears note and continues to editor
   assert.equal(typeof tui.state.pendingConfirm?.next, 'string');
+
+  // Regression: uppercase E is ordinary text in review-note, not the editor shortcut
+  tui.state.pendingConfirm = null;
+  tui.state.input = 'needs revision';
+  tui.onKeypress('E', { name: 'e', shift: true });
+  assert.equal(tui.state.input, 'needs revisionE',
+    'T11: uppercase E is typed into review-note');
+  assert.equal(tui.state.pendingConfirm, null,
+    'T11: uppercase E does not open editor confirmation');
 
   // ── Intended: parseEditorCommand handles quotes/backslashes/= ──
   assert.equal(typeof tui.parseEditorCommand, 'function',
@@ -1206,6 +1215,40 @@ test('T11 — Editor lifecycle and versioning', async t => {
     // Error state set on tui
     assert.ok(tui.state.error || /editor failed|error/.test(tui.state.status || ''),
       'T11: nonzero exit produces error');
+  }
+
+  // Regression: signal exit is treated as failure, not success
+  {
+    const preCount = all(store, 'SELECT COUNT(*) c FROM artifacts WHERE job_id=? AND path=?', [jobA.id, 'resume.md'])[0].c;
+    const child = new EventEmitter();
+    const signalSpawn = async () => child;
+    const pending = tui.openArtifactEditor(store, artifacts.resumeV2.id,
+      { spawnImpl: signalSpawn, readFile: () => 'content', editor: ['cat'] });
+    await new Promise(resolve => setImmediate(resolve));
+    child.emit('exit', null, 'SIGTERM');
+    await pending;
+
+    const postCount = all(store, 'SELECT COUNT(*) c FROM artifacts WHERE job_id=? AND path=?', [jobA.id, 'resume.md'])[0].c;
+    assert.equal(postCount, preCount,
+      'T11: signal exit creates no new artifact row');
+    assert.ok(tui.state.error || /SIGTERM|signal|error/i.test(tui.state.status || ''),
+      'T11: signal exit produces error');
+  }
+
+  // Regression: spawn error with exitCode 0 is still treated as failure
+  {
+    const preCount = all(store, 'SELECT COUNT(*) c FROM artifacts WHERE job_id=? AND path=?', [jobA.id, 'resume.md'])[0].c;
+    const zeroErrorSpawn = async () => {
+      return { exitCode: 0, signal: null, error: new Error('spawn killed') };
+    };
+    await tui.openArtifactEditor(store, artifacts.resumeV2.id,
+      { spawnImpl: zeroErrorSpawn, readFile: () => 'content', editor: ['cat'] });
+
+    const postCount = all(store, 'SELECT COUNT(*) c FROM artifacts WHERE job_id=? AND path=?', [jobA.id, 'resume.md'])[0].c;
+    assert.equal(postCount, preCount,
+      'T11: spawn error with exitCode 0 creates no new artifact row');
+    assert.ok(tui.state.error || /spawn killed|error/i.test(tui.state.status || ''),
+      'T11: spawn error with exitCode 0 produces error');
   }
 
   // ── Intended: terminal mode restored (raw/alt/cursor) ──

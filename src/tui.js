@@ -1506,7 +1506,7 @@ export class JobosTui {
       return true;
     }
     if (this.state.pendingConfirm) return this.onConfirmKey(value, key);
-    if (this.state.mode === 'review-note' && value === 'E' && this.state.input) {
+    if (this.state.mode === 'review-note' && key.ctrl && key.name === 'e' && this.state.input) {
       this.state.pendingConfirm = { kind: 'editor-with-note', next: 'editor' };
       this.render();
       return true;

@@ -328,6 +328,7 @@ export async function openArtifactEditor(store, artifact, deps = {}) {
   // 4. Spawn editor with terminal lifecycle
   let suspended = false;
   let exitCode = null;
+  let childError = undefined;
   const [cmd, ...args] = editorArgs;
 
   try {
@@ -340,6 +341,7 @@ export async function openArtifactEditor(store, artifact, deps = {}) {
       env: env_,
       cwd: path.dirname(resolved),
     }));
+    childError = child && typeof child === 'object' ? child.error : undefined;
     if (typeof child === 'number') {
       exitCode = child;
     } else if (child && typeof child.exitCode === 'number') {
@@ -348,7 +350,7 @@ export async function openArtifactEditor(store, artifact, deps = {}) {
       exitCode = child.status;
     } else {
       exitCode = await new Promise((resolve, reject) => {
-        child.on('exit', resolve);
+        child.on('exit', (code, signal) => resolve(signal ? { code, signal } : code));
         child.on('error', reject);
       });
     }
@@ -358,7 +360,14 @@ export async function openArtifactEditor(store, artifact, deps = {}) {
     if (suspended && onResume) { try { onResume(); } catch { /* swallow resume error */ } }
   }
 
-  if (exitCode !== 0) return { exitCode };
+  const signal = typeof exitCode === 'object' && exitCode?.signal ? exitCode.signal : null;
+  const code = typeof exitCode === 'number' ? exitCode : (signal ? null : exitCode);
+  if (code !== 0 || childError || signal) {
+    const message = childError?.message
+      || (signal ? `Editor exited with signal ${signal}` : undefined)
+      || (typeof code === 'number' ? `Editor exited with status ${code}` : 'Editor exited without status');
+    return { error: message, exitCode: code };
+  }
 
   // 5. Read content after edit
   let after;
