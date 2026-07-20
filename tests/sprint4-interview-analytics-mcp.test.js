@@ -60,7 +60,7 @@ test('analytics funnel reports conversion by source, stage, and role family', ()
   assert.match(review, /Recommended experiments/);
 });
 
-test('dashboard exposes interactive forms and artifact approval API', async () => {
+test('dashboard exposes interactive forms and denies the direct artifact approval API bypass', async () => {
   const { root, env, run } = makeRunner();
   const { app, profile, job } = seed(run, root);
   const packet = JSON.parse(run(['interview', 'prep', '--application', app.id, '--stage', 'recruiter-screen', '--json']));
@@ -84,11 +84,13 @@ test('dashboard exposes interactive forms and artifact approval API', async () =
     const html = await fetch(`http://127.0.0.1:${port}/`).then(r => r.text());
     assert.match(html, /Kanban-style application status board/);
     assert.match(html, /Create job/);
-    assert.match(html, /Artifact review UI/);
+    assert.match(html, /Artifact review status/);
     assert.match(html, /data-api="\/api\/jobs"/);
     assert.match(html, /data-api="\/api\/outreach\/draft"/);
-    const approved = await fetch(`http://127.0.0.1:${port}/api/artifacts/${packet.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalStatus: 'approved' }) }).then(r => r.json());
-    assert.equal(approved.approval_status, 'approved');
+    const approvalResponse = await fetch(`http://127.0.0.1:${port}/api/artifacts/${packet.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalStatus: 'approved' }) });
+    const approvalDenied = await approvalResponse.json();
+    assert.equal(approvalResponse.status, 403);
+    assert.equal(approvalDenied.code, 'human_review_required');
     const outreach = await fetch(`http://127.0.0.1:${port}/api/outreach/draft`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.id, profileId: profile.id, stakeholderId: stakeholder.id, goal: 'informational' }) }).then(r => r.json());
     assert.match(outreach.threadId, /^thread_/);
     const marked = await fetch(`http://127.0.0.1:${port}/api/outreach/mark-sent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ artifactId: outreach.id, channel: 'other', notes: 'Human sent elsewhere.' }) }).then(r => r.json());

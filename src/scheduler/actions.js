@@ -5,6 +5,7 @@ import { weekly } from '../analytics.js';
 import { id, now, parseJson, slug } from '../utils.js';
 import { writeMd } from '../workspace.js';
 import { syncJob } from '../jobs.js';
+import { createArtifact } from '../artifacts.js';
 
 const activeApplicationStatuses = new Set(['saved', 'researching', 'materials-ready', 'applied', 'recruiter-screen', 'interview']);
 const suppressedFollowupStatuses = new Set(['interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
@@ -29,12 +30,19 @@ function profilesFor(s, profileId) {
 }
 
 function insertArtifact(s, { jobId = null, profileId = null, type, rel, title, content, evidence = [], warnings = [] }) {
-  const existing = one(s, 'SELECT id,path,approval_status FROM artifacts WHERE path=?', [rel]);
-  if (existing) return { id: existing.id, path: existing.path, approvalStatus: existing.approval_status, created: false };
-  const at = now(), aid = id('artifact', `${type}:${rel}:${at}`);
-  writeMd(path.join(s.p.ws, rel), content);
-  run(s, 'INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?)', [aid, jobId, profileId, type, rel, title, content, JSON.stringify(evidence), JSON.stringify(warnings), 'draft_needs_human_review', at]);
-  return { id: aid, path: rel, approvalStatus: 'draft_needs_human_review', created: true };
+  const taskId = evidence.find(item => item && typeof item === 'object' && item.taskId)?.taskId;
+  return createArtifact(s, {
+    jobId,
+    profileId,
+    type,
+    path: rel,
+    title,
+    content,
+    evidence,
+    warnings,
+    series: { kind: type, taskId, producerId: taskId || rel },
+    dedupePath: true
+  }, { persist: false });
 }
 
 async function dailyDiscovery(s, automation) {

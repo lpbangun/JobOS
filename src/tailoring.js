@@ -1,8 +1,7 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { one, all, run, save, audit } from './db.js';
-import { id, now, parseJson, tokenize } from './utils.js';
-import { writeMd } from './workspace.js';
+import { one, all } from './db.js';
+import { parseJson, tokenize } from './utils.js';
+import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 
@@ -16,12 +15,18 @@ function relevant(job, proofs) {
 }
 
 function saveArtifact(s, { job, prof, type, title, file, content, evidence, warnings }) {
-  const rel = path.join('jobs', job.id, 'artifacts', file), abs = path.join(s.p.ws, rel), at = now(), aid = id('artifact', `${type}:${job.id}:${prof.id}:${at}`);
-  writeMd(abs, content);
-  run(s, 'INSERT INTO artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?)', [aid, job.id, prof.id, type, rel, title, content, JSON.stringify(evidence), JSON.stringify(warnings), 'draft_needs_human_review', at]);
-  audit(s, 'artifact.created', 'artifact', aid, { jobId: job.id, profileId: prof.id, type, path: rel, approvalStatus: 'draft_needs_human_review' });
-  save(s);
-  return { id: aid, path: rel, approvalStatus: 'draft_needs_human_review', warnings };
+  const rel = path.join('jobs', job.id, 'artifacts', file);
+  return createArtifact(s, {
+    jobId: job.id,
+    profileId: prof.id,
+    type,
+    path: rel,
+    title,
+    content,
+    evidence,
+    warnings,
+    series: { kind: type }
+  });
 }
 
 function fallbackResume({ job, prof, chosen, warnings }) {

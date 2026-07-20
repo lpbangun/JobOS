@@ -54,7 +54,7 @@ npm run jobos -- tui --profile pm-edtech --snapshot --width 140 --height 42
 npm run jobos -- tui --profile pm-edtech --json
 ```
 
-The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, `?`, and `v` open network, documents, answers, discovery, system, and profile surfaces. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job readiness/blockers/proofs/path/current artifact revisions/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` opens the current review queue and `l` opens the audit log; `n`, `o`, `q`, `s`, `?`, and `v` open network, documents, answers, discovery, system, and profile surfaces. In review, Enter opens the exact queued revision with its content hash, evidence, warnings, history, and local-readiness policy; `D` opens a cancellable diff, while `A` starts approval confirmation and `X` starts rejection with a note. Escape cancels either flow. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade outside document review. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting input.
 
 An empty workspace is valid: the shell gives profile/import commands rather than fabricated sample data. If Hermes is absent or crashes, pipeline navigation and direct JobOS actions remain available with a visible reconnect message.
 
@@ -136,10 +136,29 @@ Check whether your local materials are complete for human review:
 npm run jobos -- applications plan --job <job-id> --profile <profile-id> --json
 ```
 
-The plan returns one of two statuses:
+The plan returns one of three statuses:
 
 - **`blocked`** — one or more blockers prevent review readiness. Blockers include missing stored proof points (`missing_proofs`), no persisted fit score (`missing_score`), no tailored resume (`missing_resume_material`), a rejected or ungrounded resume (`resume_rejected` / `resume_missing_proof_grounding`), unmatched ordinary questions (`unmatched_questions`), unresolved restricted questions (`restricted_questions_require_input`), and a possible prior application detected from local status evidence (`possible_duplicate_application`). Each blocker includes a recovery `nextAction`.
-- **`ready-for-review`** — no blockers remain. This is reviewable local completeness; it does **not** mean approved, submitted, applied, or receipt-recorded (`policy.submissionPerformed: false`, `applicationStatusChanged: false`, `readyDoesNotMean` lists the excluded actions).
+- **`ready-for-review`** — local evidence and required materials are complete, but at least one current required artifact revision still needs trusted human review.
+- **`approved`** — every current required artifact revision is locally human-approved. This means only reviewable completeness plus local approval; it does **not** mean submitted, applied, sent, receipt-recorded, or authorized for an agent to perform an external action (`policy.submissionPerformed: false`, `applicationStatusChanged: false`).
+
+### Exact-revision human review
+
+```bash
+# Current pending revisions only.
+npm run jobos -- artifacts queue --profile <profile-id> --job <job-id> --json
+
+# Diff an exact revision against its predecessor, or choose another revision
+# from the same immutable series with --against.
+npm run jobos -- artifacts diff <artifact-id> [--against <artifact-id>] --json
+
+# Trusted local human decisions. Neither command submits, applies, sends,
+# changes application status, or records a receipt.
+npm run jobos -- artifacts approve <artifact-id> [--note <text>] --json
+npm run jobos -- artifacts reject <artifact-id> [--note <text>] --json
+```
+
+Each artifact has a stable `seriesKey`, increasing `revision`, predecessor ID, and SHA-256 `contentHash`. Review is allowed only for the exact current revision when its SQLite content and workspace mirror both match that hash. Approval is idempotent; rejection is terminal for that revision. A redraft creates a successor, makes the prior approval stale for current readiness, and returns the packet to `ready-for-review`. Review audit events are `artifact.approved` or `artifact.rejected` with `externalSideEffect: "none"`.
 
 ### Identity and duplicate detection
 
@@ -151,11 +170,11 @@ Sensitive and restricted answer values are always redacted in JSON and YAML outp
 
 ### Mirror
 
-The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call and during the `application` stage of `pursue`. The mirror carries the same redaction guarantee as the JSON output.
+The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call, during the `application` stage of `pursue`, and after resume/cover creation or review. The mirror carries the same redaction guarantee as the JSON output.
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical plan structure. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
+The MCP tool `applications_plan` returns the identical plan structure, and agents may inspect `review_queue` and `diff_artifact` to recommend a human action. MCP and the embedded ACP guest cannot call `approve_artifact` or `reject_artifact`, even with spoofed mediation metadata or agent-attestation configuration; the dashboard HTTP artifact-mutation route also returns `403 human_review_required`. Approval and rejection are intentionally limited to the trusted CLI/TUI human flow. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
 
 ## Daily automatic discovery
 
@@ -398,13 +417,13 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 
 - Core state is local; there is no telemetry or required cloud sync.
 - Generated claims must trace to stored proof points or cited public sources.
-- Draft artifacts default to `draft_needs_human_review`; users may separately configure how trusted external tools consume them.
+- Draft artifacts default to `draft_needs_human_review`. Local approval or rejection is bound to an exact current revision and never triggers an external effect.
 - External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
 - LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
-- `ready-for-review` indicates reviewable local completeness from stored evidence; it does not mean approved, submitted, applied, or receipt-recorded. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.
+- `ready-for-review` indicates complete local evidence awaiting human review; `approved` adds only trusted local approval of every current required revision. Neither status means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.
 - Trusted browser scripts are not sandboxed.
 
 ## Verification
@@ -421,4 +440,4 @@ npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
 ```
 The ACP drill launches the installed backend, performs same-session tool turns, denies an applied-status policy probe, cancels a live turn, proves zero leaked post-cancel events, starts a clean recovery session, completes an exact `get_job_context` call, restarts again, checks a real deadline and missing-backend typing, and verifies sentinel redaction. Set a throwaway `JOBOS_LLM_API_KEY` value only when explicitly running the transcript-redaction probe; the summary reports whether that sentinel was configured and absent.
 
-The test suite covers the established CLI/domain behavior plus real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, application readiness, agent failure handling, browser session contracts, networking paths, profile isolation, and concurrent snapshot defense.
+The test suite covers the established CLI/domain behavior plus exact artifact lineage/hash/diff/review contracts, readiness approval and redraft invalidation, MCP/ACP/HTTP review denials, optimistic two-store races, real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, and profile isolation.

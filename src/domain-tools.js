@@ -13,9 +13,10 @@ import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
 import { matchAnswers } from './answers.js';
 import { runDaily, runPursuit } from './workflows.js';
-import { planApplication } from './readiness.js';
+import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { all, one } from './db.js';
 import { parseJson } from './utils.js';
+import { approveArtifact, artifactQueue, diffArtifact, rejectArtifact } from './artifacts.js';
 
 export class DomainToolError extends Error {
   constructor(code, message, details = {}) {
@@ -39,6 +40,9 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_jobs', description: 'List local JobOS jobs and their current fit and application state.', inputSchema: object({ profileId: text, status: text }) },
   { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one selected job.', inputSchema: required({ jobId: text }, ['jobId']) },
   { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text }) },
+  { name: 'diff_artifact', description: 'Inspect a line diff for an exact artifact revision without changing local state.', inputSchema: required({ artifactId: text, againstArtifactId: text }, ['artifactId']) },
+  { name: 'approve_artifact', description: 'Record trusted local human approval of an exact current artifact revision; never submit or apply.', inputSchema: required({ artifactId: text, note: text }, ['artifactId']) },
+  { name: 'reject_artifact', description: 'Record trusted local human rejection of an exact current artifact revision; a reason is required.', inputSchema: required({ artifactId: text, note: text }, ['artifactId', 'note']) },
   { name: 'discovery_health', description: 'Inspect saved discovery sources and recent isolated run failures.', inputSchema: object({ profileId: text }) },
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
@@ -82,6 +86,13 @@ function allowAgentAttestation(options) {
 
 function enforcePolicy(name, args, options) {
   const source = mediationSource(options);
+  if (['approve_artifact', 'reject_artifact'].includes(name) && ['acp', 'mcp'].includes(source)) {
+    throw new DomainToolError(
+      'human_review_required',
+      'Artifact approval and rejection require the trusted CLI or TUI human review flow. Agent inspection and diff remain available.',
+      { tool: name, source, artifactId: args.artifactId || null, externalSideEffects: 'none' }
+    );
+  }
   if (!['acp', 'mcp'].includes(source) || allowAgentAttestation(options)) return;
   const status = String(args.status || '').trim().toLowerCase();
   const denied = name === 'approve_contact'
@@ -121,27 +132,8 @@ export function listJobSummaries(s, { profileId = null, status = null } = {}) {
     .map(publicJob);
 }
 
-export function reviewQueue(s, { profileId = null } = {}) {
-  const params = [];
-  const where = ["artifacts.approval_status='draft_needs_human_review'"];
-  if (profileId) {
-    where.push('artifacts.profile_id=?');
-    params.push(profileId);
-  }
-  return all(s, `SELECT artifacts.id,artifacts.job_id,artifacts.profile_id,artifacts.type,artifacts.path,artifacts.title,artifacts.approval_status,artifacts.created_at,jobs.title AS job_title,jobs.company
-    FROM artifacts LEFT JOIN jobs ON jobs.id=artifacts.job_id WHERE ${where.join(' AND ')} ORDER BY artifacts.created_at DESC`, params)
-    .map(row => ({
-      id: row.id,
-      jobId: row.job_id || null,
-      profileId: row.profile_id || null,
-      type: row.type,
-      path: row.path,
-      title: row.title,
-      approvalStatus: row.approval_status,
-      jobTitle: row.job_title || '',
-      company: row.company || '',
-      createdAt: row.created_at
-    }));
+export function reviewQueue(s, { profileId = null, jobId = null } = {}) {
+  return artifactQueue(s, { profileId, jobId });
 }
 
 export function discoveryHealth(s, { profileId = null } = {}) {
@@ -167,15 +159,25 @@ export function selectedJobContext(s, jobId) {
   const scoreData = parseJson(job.score_json, {});
   const tasks = all(s, "SELECT id,title,type,due_at,priority,status FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 8", [jobId])
     .map(row => ({ id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority }));
-  const artifacts = all(s, 'SELECT id,type,path,title,evidence_json,warnings_json,approval_status,created_at FROM artifacts WHERE job_id=? ORDER BY created_at DESC', [jobId])
+  const artifacts = all(s, `SELECT artifacts.*,
+      (SELECT MAX(revision) FROM artifacts current WHERE current.series_key=artifacts.series_key) AS current_revision
+    FROM artifacts WHERE job_id=? ORDER BY created_at DESC,revision DESC`, [jobId])
     .map(row => ({
       id: row.id,
       type: row.type,
       path: row.path,
       title: row.title,
       proofIds: parseJson(row.evidence_json, []).map(value => typeof value === 'string' ? value : (value?.proofPointId || value?.id)).filter(Boolean),
-      warnings: parseJson(row.warnings_json, []).map(String),
+      warnings: parseJson(row.warnings_json, []).map(value => typeof value === 'string' ? value : JSON.stringify(value)),
       approvalStatus: row.approval_status,
+      seriesKey: row.series_key,
+      revision: Number(row.revision),
+      revisionState: Number(row.revision) === Number(row.current_revision) ? 'current' : 'superseded',
+      effectiveReviewStatus: Number(row.revision) === Number(row.current_revision)
+        ? (row.approval_status === 'draft_needs_human_review' ? 'pending' : row.approval_status)
+        : 'stale',
+      contentHash: row.content_hash,
+      reviewedAt: row.reviewed_at || null,
       createdAt: row.created_at
     }));
   const proofIds = [...new Set(artifacts.flatMap(item => item.proofIds))];
@@ -185,7 +187,7 @@ export function selectedJobContext(s, jobId) {
     : [];
   const path = one(s, 'SELECT id,path_strength,channel,reasoning_json,warnings_json,created_at FROM outreach_plans WHERE job_id=? ORDER BY recommended DESC,created_at DESC LIMIT 1', [jobId]);
   return {
-    version: 1,
+    version: 2,
     job: {
       id: job.id,
       profileId: job.profile_id,
@@ -214,10 +216,15 @@ export function selectedJobContext(s, jobId) {
       warnings: parseJson(path.warnings_json, [])
     } : null,
     artifacts,
+    readiness: compileApplicationReadiness(s, { jobId, profileId: job.profile_id }),
     policy: {
       drafts: 'draft_needs_human_review',
+      localReview: 'trusted_cli_or_tui_only',
       externalApply: 'user_configured_default_off',
-      externalSend: 'user_configured_default_off'
+      externalSend: 'user_configured_default_off',
+      externalSideEffects: 'none',
+      submissionPerformed: false,
+      applicationStatusChanged: false
     }
   };
 }
@@ -230,6 +237,9 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'list_jobs') return listJobSummaries(s, args);
   if (name === 'get_job_context') return selectedJobContext(s, args.jobId);
   if (name === 'review_queue') return reviewQueue(s, args);
+  if (name === 'diff_artifact') return diffArtifact(s, args.artifactId, { againstArtifactId: args.againstArtifactId || null });
+  if (name === 'approve_artifact') return approveArtifact(s, args.artifactId, { reviewedBy: mediationSource(options), note: args.note || '' });
+  if (name === 'reject_artifact') return rejectArtifact(s, args.artifactId, { reviewedBy: mediationSource(options), note: args.note || '' });
   if (name === 'discovery_health') return discoveryHealth(s, args);
   if (name === 'score_job') return await score(s, args.jobId, args.profileId);
   if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume');

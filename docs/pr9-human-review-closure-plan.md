@@ -1,4 +1,4 @@
-# OMP execution plan — JobOS PR 8: Human Review Closure
+# OMP execution plan — JobOS PR 9: Human Review Closure
 
 ## Role and finish condition
 Run this plan as the lead session inside OMP. Branch from `main` only after PR 7 is present. Keep shared contracts and integration under the lead session; use OMP subagents only when slices are genuinely independent.
@@ -69,7 +69,7 @@ Bump the public readiness plan to version 2 because the status enum expands.
 - Policy exclusions always include submitted/applied/receipt-recorded/authorized-for-agent-submission and must not contradict an `approved` local state.
 
 ### Trusted mediation
-CLI and TUI are the only trusted human review sources. MCP source classification must be hardcoded to `mcp` or `acp`; never trust `JOBOS_MEDIATION=cli|tui`. Deny `approve_artifact` and `reject_artifact` before any attestation override. Remove or deny the direct unauthenticated artifact-approval PATCH in `src/api.js` unless a genuine trusted human web-confirmation flow is added through the same service; for PR 8, prefer disabling that bypass and its web control.
+CLI and TUI are the only trusted human review sources. MCP source classification must be hardcoded to `mcp` or `acp`; never trust `JOBOS_MEDIATION=cli|tui`. Deny `approve_artifact` and `reject_artifact` before any attestation override. The local web/API interface is removed by the TUI-focus cutover; do not add an HTTP review-mutation surface.
 
 ### Failure atomicity
 Approval must not emit a false audit/mirror projection if optimistic save fails:
@@ -177,11 +177,11 @@ Work:
 ## Verification loop — convergence or two iterations maximum
 
 A complete iteration is:
-1. Run the focused PR 8 behavioral suite against the current implementation.
+1. Run the focused PR 9 behavioral suite against the current implementation.
 2. Classify each failure as a product defect, test defect, integration issue, or unmet prerequisite.
 3. Correct legitimate product and test defects without weakening the observable contract.
 4. Review and integrate all subagent handoffs.
-5. Run the focused PR 8 suite, `npm test`, and `npm run smoke`.
+5. Run the focused PR 9 suite, `npm test`, and `npm run smoke`.
 6. Record exact results and unresolved acceptance failures.
 
 Stop immediately when the suite converges. If it does not converge in iteration 1, run one second and final iteration. Close the loop after iteration 2 regardless of outcome.
@@ -213,7 +213,7 @@ Update:
 - `BUILD_PROGRESS.md`
 
 Final commands:
-- focused PR 8 behavioral tests;
+- focused PR 9 behavioral tests;
 - `npm test`;
 - `npm run smoke`;
 - `npm run jobos -- tui --profile <fixture-profile> --agent off --snapshot --width 140 --height 42`;

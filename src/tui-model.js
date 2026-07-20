@@ -2,6 +2,7 @@ import { all, one } from './db.js';
 import { discoveryHealth, listJobSummaries, reviewQueue, selectedJobContext } from './domain-tools.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
+import { compileApplicationReadiness } from './readiness.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
 
@@ -23,7 +24,17 @@ function signals(s, jobId) {
 function stageState(s, context) {
   if (!context) return [];
   const jobId = context.job.id;
-  const types = new Set(context.artifacts.map(item => item.type));
+  const currentArtifacts = new Map();
+  for (const artifact of context.artifacts) {
+    const key = artifact.seriesKey || artifact.series_key || `${artifact.type}:${artifact.path}`;
+    const prior = currentArtifacts.get(key);
+    if (!prior || Number(artifact.revision || 0) > Number(prior.revision || 0)) currentArtifacts.set(key, artifact);
+  }
+  const types = new Map();
+  for (const artifact of currentArtifacts.values()) {
+    const prior = types.get(artifact.type);
+    if (!prior || Number(artifact.revision || 0) > Number(prior.revision || 0)) types.set(artifact.type, artifact);
+  }
   const audits = new Set(all(s, 'SELECT action FROM audit_log WHERE entity_id=? ORDER BY created_at', [jobId]).map(row => row.action));
   const hasContacts = Boolean(one(s, `SELECT contact_points.id FROM contact_points
     LEFT JOIN person_candidates ON person_candidates.id=contact_points.person_id
@@ -31,17 +42,21 @@ function stageState(s, context) {
     WHERE person_candidates.job_id=? OR stakeholders.job_id=? LIMIT 1`, [jobId, jobId]));
   const application = context.job.applicationStatus;
   const done = value => value ? 'done' : 'empty';
+  const material = type => {
+    const artifact = types.get(type);
+    return artifact ? artifact.approvalStatus || 'draft_needs_human_review' : 'empty';
+  };
   return [
     { name: 'score', state: done(Boolean(context.fit)) },
     { name: 'company', state: done([...audits].some(action => action.startsWith('research.company'))) },
     { name: 'contacts', state: done(hasContacts) },
     { name: 'network', state: done(Boolean(context.path)) },
     { name: 'answers', state: done(audits.has('application.questions.prepared')) },
-    { name: 'resume', state: types.has('resume') ? 'draft' : 'empty' },
-    { name: 'cover', state: types.has('cover_letter') ? 'draft' : 'empty' },
+    { name: 'resume', state: material('resume') },
+    { name: 'cover', state: material('cover_letter') },
     { name: 'application', state: application ? application : 'empty' },
-    { name: 'outreach', state: types.has('outreach') ? 'draft' : 'empty' },
-    { name: 'interview', state: types.has('interview_prep') ? 'draft' : 'empty' }
+    { name: 'outreach', state: material('outreach') },
+    { name: 'interview', state: material('interview_prep') }
   ];
 }
 
@@ -77,15 +92,26 @@ function priorityStrip(s, jobs, at) {
 
 function artifactDocs(s, jobId) {
   if (!jobId) return [];
-  return all(s, 'SELECT id,type,path,title,content,approval_status,created_at FROM artifacts WHERE job_id=? ORDER BY created_at DESC', [jobId])
+  return all(s, `SELECT id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,
+    series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note
+    FROM artifacts WHERE job_id=? ORDER BY series_key,revision DESC,created_at DESC`, [jobId])
     .map(row => ({
       id: row.id,
       type: row.type,
       path: row.path,
       title: row.title,
       content: row.content,
+      evidence: redactSensitive(parseJson(row.evidence_json, [])),
+      warnings: redactSensitive(parseJson(row.warnings_json, [])),
       approvalStatus: row.approval_status,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      seriesKey: row.series_key,
+      revision: Number(row.revision || 0),
+      supersedesArtifactId: row.supersedes_artifact_id || null,
+      contentHash: row.content_hash || '',
+      reviewedAt: row.reviewed_at || null,
+      reviewedBy: row.reviewed_by || null,
+      reviewNote: row.review_note || ''
     }));
 }
 
@@ -108,6 +134,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   const selectedId = jobs.some(job => job.id === selectedJobId) ? selectedJobId : (jobs[0]?.id || null);
   const selected = selectedId ? selectedJobContext(s, selectedId) : null;
   const selectedRow = selectedId ? one(s, 'SELECT description,requirements_json,compensation,work_model FROM jobs WHERE id=?', [selectedId]) : null;
+  const readiness = selected?.job.profileId
+    ? compileApplicationReadiness(s, { jobId: selectedId, profileId: selected.job.profileId })
+    : null;
   const details = selected ? {
     ...selected,
     narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
@@ -115,7 +144,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     compensation: selectedRow?.compensation || '',
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),
-    docs: artifactDocs(s, selectedId)
+    docs: artifactDocs(s, selectedId),
+    readiness: redactSensitive(readiness || selected.readiness || {}),
+    policy: redactSensitive({ ...(selected.policy || {}), ...(readiness?.policy || {}) })
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
   const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
@@ -137,7 +168,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   } : { verified: 0, restricted: 0 };
 
   return {
-    version: 1,
+    version: 2,
     generatedAt: at,
     workspace: s.root,
     profiles,
