@@ -1,8 +1,7 @@
 import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawnSync, spawn } from 'node:child_process';
-import http from 'node:http';
+import { spawnSync } from 'node:child_process';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
 const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
@@ -12,19 +11,6 @@ function run(args, raw = false) {
   return raw ? result.stdout : result.stdout.trim();
 }
 
-function requestRaw(pathname) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port: webPort, path: pathname, method: 'GET' }, res => {
-      let body = '';
-      res.on('data', chunk => { body += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-const webPort = 4399 + Math.floor(Math.random() * 1000);
-let server;
 try {
   const guide = JSON.parse(run(['agent-guide', '--json']));
   if (!guide.commands?.length || !existsSync(path.join(root, '.jobos', 'jobos.sqlite')) || !existsSync(path.join(root, 'jobos-workspace'))) throw new Error('First command did not auto-create the JobOS workspace');
@@ -59,26 +45,7 @@ try {
   if (!briefPath || !readFileSync(path.join(root, 'jobos-workspace', briefPath), 'utf8').includes('Morning priority brief')) throw new Error('Scheduler did not write priority brief export');
   const runDay = schedulerRun.runs[0].createdAt.slice(0, 10);
   if (!readFileSync(path.join(root, 'jobos-workspace', 'automations', `runs-${runDay}.jsonl`), 'utf8').includes('smoke_brief')) throw new Error('Scheduler did not append automation run JSONL');
-  server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(webPort)], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] });
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
-    server.stdout.on('data', data => { if (String(data).includes('JobOS dashboard running')) { clearTimeout(timeout); resolve(); } });
-    server.stderr.on('data', data => reject(new Error(String(data))));
-  });
-  const response = await fetch(`http://127.0.0.1:${webPort}/api/state`);
-  const state = await response.json();
-  if (!state.jobs.length || !state.profiles.length) throw new Error('Dashboard API did not expose state');
-  if (!state.audit.length || !state.automationRuns.length) throw new Error('Dashboard API missing audit or automation state');
-  if (!state.automations.some(a => a.name === 'smoke_brief')) throw new Error('Dashboard API missing configured automation');
-  if (!state.artifacts.every(a => a.approval_status === 'draft_needs_human_review')) throw new Error('Draft artifacts must remain human-review gated');
-  const dashboard = await requestRaw('/');
-  if (dashboard.status !== 200 || !dashboard.body.includes('Profile & Proof') || !dashboard.body.includes('Kanban-style application status board') || !dashboard.body.includes('Artifact review UI') || !dashboard.body.includes('Discovery')) throw new Error('Dashboard shell did not render expected interactive navigation');
-  const traversal = await requestRaw('/workspace/../README.md');
-  const unknown = await requestRaw('/README.md');
-  if (![400, 404].includes(traversal.status) || unknown.status !== 404) throw new Error(`Dashboard route hardening failed: traversal=${traversal.status}, unknown=${unknown.status}`);
-  server.kill('SIGTERM');
-  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews, dashboardApiJobs: state.jobs.length, dashboardShell: true, interactiveDashboard: true, routeHardening: true }, null, 2));
+  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
 } finally {
-  if (server && !server.killed) server.kill('SIGTERM');
   if (!process.env.KEEP_JOBOS_SMOKE) rmSync(root, { recursive: true, force: true });
 }

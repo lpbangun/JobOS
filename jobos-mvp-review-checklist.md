@@ -23,7 +23,6 @@
   - Status transitions are validated.
 - [ ] **Task smoke:** `jobos tasks due --json` returns due tasks; tasks created by imports/automation link to parent entities.
 - [ ] **Weekly review smoke:** `jobos review weekly --profile <profile> --output markdown` produces a non-empty report.
-- [ ] **Web dashboard smoke:** Dashboard starts locally, reads same data store, and lists profiles/jobs/applications/artifacts.
 - [ ] **Import/round-trip smoke:** Create profile → import job → score → tailor → create application → list application → run weekly review; end-to-end works with only local data.
 
 ---
@@ -36,9 +35,9 @@
 - [ ] **Profile mismatch:** Score/tailor commands without valid `--profile` fail explicitly.
 - [ ] **Workspace path issues:** `--workspace` flag resolves correctly; multiple workspaces do not leak state.
 - [ ] **Broken JSON output:** `--json` output is parseable even for errors (or a separate documented error envelope is used).
-- [ ] **Status machine errors:** Invalid application status transitions are rejected; status enum is consistent across CLI, API, and web.
+- [ ] **Status machine errors:** Invalid application status transitions are rejected; status enum is consistent across CLI and MCP.
 - [ ] **Markdown/template injection:** Tailored output treats user profile/job description as data, not trusted template source.
-- [ ] **Concurrency/race on SQLite:** If web and CLI run concurrently, SQLite WAL mode or file locking prevents corruption.
+- [ ] **Concurrency/race on SQLite:** Simultaneous local writers (CLI, scheduler, and MCP) are serialized or rejected without corruption.
 - [ ] **Empty proof-point warnings:** Tailoring must surface "needs user input" warnings, never silently hallucinate claims.
 
 ---
@@ -96,7 +95,6 @@
 | No paid API dependency for core functionality | Section 5 + fallback tests. |
 | No uncontrolled auto-apply/auto-send | Section 4. |
 | README with setup, usage, architecture | Deliverable; verify exists. |
-| Web dashboard starts locally | Section 1 web dashboard smoke. |
 
 ---
 
@@ -138,10 +136,9 @@
 ## 10. Final Gate Questions
 
 - [ ] Can a user run the entire MVP with zero API keys?
-- [ ] Can an agent read the workspace state without running the web server?
+- [ ] Can an agent read the workspace state without a running service?
 - [ ] Is every generated resume/cover-letter claim either sourced or flagged?
 - [ ] Is there any command that performs an external side effect without explicit user action?
-- [ ] Does the web dashboard show the same data as the CLI?
 - [ ] Are status transitions and automation policies documented?
 - [ ] Is the project in a commit-ready state?
 
@@ -152,10 +149,9 @@
 1. Auto-apply or auto-send implemented in MVP.
 2. Generated resume/cover letter fabricates unsupported claims.
 3. Core CLI commands require paid API key with no fallback.
-4. Web dashboard and CLI use separate/inconsistent data stores.
-5. No evidence-warning when proof points are missing.
-6. Sensitive personal data sent to cloud by default.
-7. No README or no usage examples.
+4. No evidence-warning when proof points are missing.
+5. Sensitive personal data sent to cloud by default.
+6. No README or no usage examples.
 
 ---
 

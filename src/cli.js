@@ -13,7 +13,6 @@ import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from '
 import { approveContact, createOutreachPlan, discoverContacts, promoteStakeholder, suppressContact } from './research/contacts.js';
 import { importNetworkCsv, mapReachableNetwork } from './research/network.js';
 import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
-import { web } from './web.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
 import { addWatchlist, configFromFlags, createSearch, listSearches, listWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
@@ -122,7 +121,6 @@ export const commandRegistry = [
   cmd(['browser', 'script', 'add'], 'jobos browser script add <name> --file <module> [--side-effecting] [--json]', 'Register and hash-pin a trusted local Playwright task module.', { flags: ['--file <module>', '--side-effecting'], category: 'extend' }),
   cmd(['browser', 'run'], 'jobos browser run <profile> --url <url> --script <name> [--input <json-file>] [--allow-side-effects] [--json]', 'Run a trusted registered Playwright task against an authenticated page.', { flags: ['--url <url>', '--script <name>', '--input <json-file>', '--allow-side-effects'], category: 'extend' }),
   cmd(['mcp'], 'jobos mcp', 'Start the MCP stdio server for agent clients.', { output: 'mcp-protocol' }),
-  cmd(['web'], 'jobos web [--port 4317] [--host 127.0.0.1]', 'Start the local web dashboard and REST API.', { output: 'server' })
 ];
 
 export class UsageError extends Error {
@@ -463,7 +461,7 @@ export async function main(argv = process.argv.slice(2)) {
   const s = await openStore(flags);
   s.bootstrapCreated = boot.created;
   s.bootstrapNoticeEmitted = false;
-  s.suppressBootstrapNotice = ['mcp', 'web', 'tui'].includes(group);
+  s.suppressBootstrapNotice = ['mcp', 'tui'].includes(group);
   const out = value => output(value, flags, s);
   const text = value => printText(value, flags, s);
 
@@ -935,14 +933,6 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'mcp') {
     startMcp(s);
-    return;
-  }
-  if (group === 'web') {
-    const port = flags.port ? Number(flags.port) : 4317;
-    const host = flags.host ? String(flags.host) : '127.0.0.1';
-    const server = web(s, { port, host, onReady: () => console.log(`JobOS dashboard running at http://${host}:${port}`) });
-    process.on('SIGTERM', () => server.close(() => process.exit(0)));
-    process.on('SIGINT', () => server.close(() => process.exit(0)));
     return;
   }
   usage(`Unknown command: ${argv.join(' ')}`);

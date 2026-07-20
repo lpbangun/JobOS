@@ -390,7 +390,7 @@ npm run jobos -- help --all
 npm run jobos -- agent-guide --json
 ```
 
-The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, MCP, API, and local dashboard—remains available for composition. Dashboard work is not the product focus.
+The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, and MCP—remains available for composition.
 
 `jobos tui --json` exposes the same presentation model for machine inspection; `jobos tui --snapshot` renders the terminal shell without starting an agent process.
 

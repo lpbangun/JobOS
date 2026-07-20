@@ -9,16 +9,16 @@ The relevant CLI UX patterns are stable across `git`, `gh`, `kubectl`, Claude Co
 - Prefer predictable command grammar: noun groups with verbs (`jobs list`, `applications update`) and a small number of legacy verb aliases where needed.
 - Make every workflow scriptable: flags instead of required prompts, stdout for primary output, stderr for diagnostics, stable exit codes.
 - Support machine output intentionally: `--json` for structured output, JSONL for streams, and stable field names.
-- Generate help from a command registry so docs, completion, agent guides, API/MCP metadata, and tests do not drift.
+- Generate help from a command registry so docs, completion, agent guides, MCP metadata, and tests do not drift.
 - Separate human and machine rendering: concise tables/Markdown for people, schemas and IDs for agents.
 - Use config precedence that agents can reason about: command flags > environment (`JOBOS_HOME`) > current directory defaults.
 - Make long-running behavior explicit and bounded when requested: `--watch`, `--interval`, `--max-iterations`, Ctrl-C cleanup.
 - Treat shell completion as a registry product rather than handwritten docs.
 - Preserve human approval gates for external side effects.
 
-## Option A: CLI-Primary, Web Companion
+## Option A: CLI-Primary
 
-Description: The CLI is the canonical frontend. The web dashboard reads/writes the same local SQLite state for review, local editing, kanban movement, and artifact approval. API and MCP remain integration surfaces generated or cross-checked against the command registry where feasible.
+Description: The CLI is the canonical frontend. MCP provides a native agent protocol, and the agent-readable workspace mirrors local SQLite state for inspection and portable workflows.
 
 Evaluation:
 
@@ -32,7 +32,7 @@ Evaluation:
 
 Risks:
 
-- Human users who dislike terminals may need a richer dashboard later.
+- Human users who dislike terminals may need a richer interface later.
 - CLI grammar cleanup must preserve backwards-compatible aliases for at least one sprint.
 
 ## Option B: TUI-First
@@ -75,13 +75,13 @@ Risks:
 
 ## Decision
 
-Choose Option A: CLI-primary with the web dashboard as a companion.
+Choose Option A: CLI-primary, supported by MCP and workspace files without a companion dashboard.
 
 Rationale:
 
-- The current code already has the strongest coverage in CLI commands, with API/MCP/web catching subsets.
+- The current code has the strongest coverage in CLI commands, with MCP and workspace files supporting agent workflows.
 - A CLI is the only surface equally usable by humans, tests, and arbitrary external agents without requiring browser automation or a running server.
 - The Hermes-style path is appropriate here: harden the command substrate first, then layer a richer GUI later over the same registry/contracts.
 - The sprint's hard constraints map directly to CLI primitives: `--json`, exit codes, non-interactive flags, workspace bootstrap, loops/watch modes, JSONL events, and generated agent documentation.
 
-The evidence does not contradict the CLI-primary hypothesis. It narrows the dashboard's role: review, local editing, and visual status, not full workflow ownership.
+The evidence supports CLI-primary without a companion dashboard: MCP provides native agent integration, and workspace files provide inspectable local state.

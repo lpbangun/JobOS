@@ -14,7 +14,6 @@ The product principle to preserve: agents may draft, score, summarize, stage, an
 - Main implementation: `src/cli.js`.
 - Database: `sql.js` writing `.jobos/jobos.sqlite`.
 - Agent-readable mirror: `jobos-workspace/` YAML/Markdown/JSONL files.
-- Local dashboard: Node `http`, no frontend build step.
 - Tests: Node's built-in test runner.
 
 Common commands:
@@ -24,15 +23,14 @@ npm install
 npm test
 npm run smoke
 npm run jobos -- init --json
-npm run web -- --port 4317
 ```
 
-Use targeted checks first. For meaningful behavior changes, run `npm test`; for end-to-end CLI/dashboard behavior, run `npm run smoke`.
+Use targeted checks first. For meaningful behavior changes, run `npm test`; for end-to-end CLI behavior, run `npm run smoke`.
 
 ## Important files
 
 - `README.md` - user-facing install, quick start, CLI contract, safety policy, and current limitations.
-- `src/cli.js` - CLI parser, schema/migrations, persistence, workspace sync, scoring, tailoring, research worksheets, weekly review, and web server.
+- `src/cli.js` - CLI parser, schema/migrations, persistence, workspace sync, scoring, tailoring, research worksheets, and weekly review.
 - `tests/cli.test.js` - targeted behavioral tests.
 - `scripts/smoke.js` - end-to-end local smoke check.
 - `BUILD_PROGRESS.md` - implementation status, verification log, and known limitations.
@@ -48,7 +46,7 @@ Do not commit or hand-edit generated runtime state unless a task explicitly asks
 - `.jobos/`
 - `jobos-workspace/`
 
-SQLite is canonical for dashboard queries. Workspace files are regenerated on writes so agents and humans can inspect state without a running server.
+SQLite is canonical. Workspace files are regenerated on writes so agents and humans can inspect state without a running service.
 
 ## Product invariants
 
@@ -73,7 +71,6 @@ Preserve these unless the user explicitly changes the product direction:
 ## Common gotchas
 
 - This project intentionally uses `sql.js`, not native `sqlite3`.
-- The dashboard and CLI read/write the same local database.
 - URL import is best-effort and human-initiated. If fetch fails, record the URL/manual-enrichment path instead of pretending success.
 - Application status `applied` can be set by auto-apply adapters or manual tracking. When auto-apply is enabled, the adapter records the submission confirmation; when disabled, status is manual.
 - Runtime paths are ignored by git; tests/smoke scripts should create their own temporary workspaces.

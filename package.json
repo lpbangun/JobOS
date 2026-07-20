@@ -9,7 +9,6 @@
   "scripts": {
     "jobos": "node src/cli.js",
     "tui": "node src/cli.js tui",
-    "web": "node src/cli.js web",
     "test": "node --test tests/*.test.js",
     "smoke": "node scripts/smoke.js",
     "acp-demo": "node scripts/acp-demo.js",

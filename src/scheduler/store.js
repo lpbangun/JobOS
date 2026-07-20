@@ -174,7 +174,7 @@ export function syncAutomationsWorkspace(s) {
   writeYaml(path.join(s.p.automations, 'automations.yaml'), { version: 1, policy, automations });
   fs.writeFileSync(path.join(s.p.automations, 'scheduler-design.json'), JSON.stringify({
     version: 2,
-    note: 'Implemented scheduler. Canonical editable mirror is automations.yaml; SQLite remains canonical for dashboard/API queries.',
+    note: 'Implemented scheduler. Canonical editable mirror is automations.yaml; SQLite remains canonical.',
     configFile: 'automations.yaml',
     policy
   }, null, 2) + '\n');

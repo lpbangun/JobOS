@@ -2,7 +2,7 @@
 
 ## Current status — 2026-07-16
 
-JobOS now has a data-bound terminal product as its primary local control surface. The CLI and dashboard remain supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
+JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
 ### Primary workflows
 
