@@ -93,7 +93,7 @@ function priorityStrip(s, jobs, at) {
 
 export function artifactDocs(s, jobId) {
   if (!jobId) return [];
-  const rows = all(s, `SELECT id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at
+  const rows = all(s, `SELECT id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,content_hash,reviewed_at,reviewed_by,review_note
     FROM artifacts WHERE job_id=? ORDER BY created_at DESC,id DESC`, [jobId]);
   const proofIds = [...new Set(rows.flatMap(row => parseJson(row.evidence_json, []))
     .map(value => typeof value === 'string' ? value : (value?.proofPointId || value?.id))
@@ -134,13 +134,20 @@ export function artifactDocs(s, jobId) {
       warnings: parseJson(row.warnings_json, []).map(String),
       approvalStatus: row.approval_status,
       createdAt: row.created_at,
+      seriesKey: row.series_key,
+      revision: row.revision,
+      contentHash: row.content_hash,
+      reviewedAt: row.reviewed_at || null,
+      reviewedBy: row.reviewed_by || null,
+      reviewNote: row.review_note || '',
       previousDraft: previous ? {
         id: previous.id,
         title: previous.title,
         path: previous.path,
         content: previous.content,
         approvalStatus: previous.approval_status,
-        createdAt: previous.created_at
+        createdAt: previous.created_at,
+        revision: previous.revision
       } : null
     };
   });

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,14 @@ import { importText, importNormalized } from '../../src/jobs.js';
 import { appCreate } from '../../src/tracking.js';
 import { id, now, paths } from '../../src/utils.js';
 import { mkdirs } from '../../src/workspace.js';
+
+function artifactHash(content) {
+  const normalized = content.endsWith('\n') ? content : `${content}\n`;
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+function artifactSeriesKey(type, jobId, profileId, artifactPath) {
+  return `${type}:${jobId || 'none'}:${profileId || 'none'}:${artifactPath}`;
+}
 
 // Deterministic timestamps for artifact ordering
 const T1 = '2025-06-01T00:00:00.000Z';
@@ -212,53 +221,64 @@ pm.candidate@example.com`;
   const resumeEvidence = JSON.stringify([{ proofPointId: proofA.id }]);
   const resumeWarnings = JSON.stringify(['gen-warn']);
 
-  // ── INSERT artifacts ──
+  // ── INSERT artifacts (with main schema columns) ──
+  const resumeSeries = artifactSeriesKey('resume', jobA.id, profile.id, 'resume.md');
+  const coverSeries = artifactSeriesKey('cover', jobA.id, profile.id, 'cover.md');
+  const orphanSeries = artifactSeriesKey('resume', jobA.id, profile.id, 'other-resume.md');
+  const staleSeries = artifactSeriesKey('other', jobA.id, profile.id, 'stale-evidence.md');
+  const sourceSeries = artifactSeriesKey('other', jobA.id, profile.id, 'source-url.md');
+  const emptySeries = artifactSeriesKey('other', jobA.id, profile.id, 'empty-evidence.md');
+  const jobBResumeSeries = artifactSeriesKey('resume', jobB.id, profile.id, 'jobB-resume.md');
+
+  const cols = 'id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note';
+  const vals = '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)';
+
   // resume v1 (earlier)
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [resumeV1Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v1', resumeBaseContent, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T1]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [resumeV1Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v1', resumeBaseContent, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T1, resumeSeries, 1, null, artifactHash(resumeBaseContent), null, null, '']
   );
 
   // resume v2 (same path, later) — adds ADDED_LINE_V2
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [resumeV2Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v2', resumeBaseContent + resumeV2Addition, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T2]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [resumeV2Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v2', resumeBaseContent + resumeV2Addition, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T2, resumeSeries, 2, resumeV1Id, artifactHash(resumeBaseContent + resumeV2Addition), null, null, '']
   );
 
   // cover letter (different path, same type)
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [coverId, jobA.id, profile.id, 'cover', 'cover.md', 'Cover Letter', coverContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T2]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [coverId, jobA.id, profile.id, 'cover', 'cover.md', 'Cover Letter', coverContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T2, coverSeries, 1, null, artifactHash(coverContent), null, null, '']
   );
 
   // orphan resume — same type 'resume' but different path 'other-resume.md'
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [orphanResumeId, jobA.id, profile.id, 'resume', 'other-resume.md', 'Other Resume', orphanResumeContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T1]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [orphanResumeId, jobA.id, profile.id, 'resume', 'other-resume.md', 'Other Resume', orphanResumeContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T1, orphanSeries, 1, null, artifactHash(orphanResumeContent), null, null, '']
   );
 
   // stale evidence artifact
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [staleEvidenceId, jobA.id, profile.id, 'other', 'stale-evidence.md', 'Stale Evidence', staleEvidenceContent, JSON.stringify([{ proofPointId: 'proof_missing_zzz' }]), JSON.stringify([]), 'draft_needs_human_review', T1]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [staleEvidenceId, jobA.id, profile.id, 'other', 'stale-evidence.md', 'Stale Evidence', staleEvidenceContent, JSON.stringify([{ proofPointId: 'proof_missing_zzz' }]), JSON.stringify([]), 'draft_needs_human_review', T1, staleSeries, 1, null, artifactHash(staleEvidenceContent), null, null, '']
   );
 
   // source URL evidence artifact
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [sourceUrlId, jobA.id, profile.id, 'other', 'source-url.md', 'Source URL Evidence', sourceUrlContent, JSON.stringify([{ url: 'https://example.test/src', label: 'source' }]), JSON.stringify([]), 'draft_needs_human_review', T1]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [sourceUrlId, jobA.id, profile.id, 'other', 'source-url.md', 'Source URL Evidence', sourceUrlContent, JSON.stringify([{ url: 'https://example.test/src', label: 'source' }]), JSON.stringify([]), 'draft_needs_human_review', T1, sourceSeries, 1, null, artifactHash(sourceUrlContent), null, null, '']
   );
 
   // empty evidence artifact
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [emptyEvidenceId, jobA.id, profile.id, 'other', 'empty-evidence.md', 'Empty Evidence', emptyEvidenceContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T1]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [emptyEvidenceId, jobA.id, profile.id, 'other', 'empty-evidence.md', 'Empty Evidence', emptyEvidenceContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T1, emptySeries, 1, null, artifactHash(emptyEvidenceContent), null, null, '']
   );
 
   // jobB resume (for multi-artifact navigation on a different job)
   run(store,
-    'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-    [jobBResumeId, jobB.id, profile.id, 'resume', 'jobB-resume.md', 'Job B Resume', jobBResumeContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T2]
+    `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
+    [jobBResumeId, jobB.id, profile.id, 'resume', 'jobB-resume.md', 'Job B Resume', jobBResumeContent, JSON.stringify([]), JSON.stringify([]), 'draft_needs_human_review', T2, jobBResumeSeries, 1, null, artifactHash(jobBResumeContent), null, null, '']
   );
 
   // ── Write workspace files for editor path resolution ──

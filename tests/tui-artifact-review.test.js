@@ -1,11 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { openStore, all, one, run, save, audit, reload } from '../src/db.js';
+
+function artifactHash(content) {
+  const normalized = content.endsWith('\n') ? content : `${content}\n`;
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+function artifactSeriesKey(type, jobId, profileId, artifactPath) {
+  return `${type}:${jobId || 'none'}:${profileId || 'none'}:${artifactPath}`;
+}
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText, importNormalized, updateJobStatus } from '../src/jobs.js';
 import { appCreate, appUpdate } from '../src/tracking.js';
@@ -544,10 +553,10 @@ test('T6 — Auto-open and focus deferral', async t => {
     const atLater = new Date(Date.now() + 1).toISOString();
     const createdId = 't6_created_' + Date.now();
     const updatedId = 't6_updated_' + Date.now();
-    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-      [createdId, jobA.id, profile.id, 'resume', 't6-new.md', 'T6 Created', 'c', '[]', '[]', 'draft_needs_human_review', atNow]);
-    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-      [updatedId, jobA.id, profile.id, 'resume', 'resume.md', 'T6 Updated', 'c', '[]', '[]', 'draft_needs_human_review', atLater]);
+    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [createdId, jobA.id, profile.id, 'resume', 't6-new.md', 'T6 Created', 'c', '[]', '[]', 'draft_needs_human_review', atNow, artifactSeriesKey('resume', jobA.id, profile.id, 't6-new.md'), 1, null, artifactHash('c'), null, null, '']);
+    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [updatedId, jobA.id, profile.id, 'resume', 'resume.md', 'T6 Updated', 'c', '[]', '[]', 'draft_needs_human_review', atLater, artifactSeriesKey('resume', jobA.id, profile.id, 'resume.md'), 3, null, artifactHash('c'), null, null, '']);
     save(store);
 
     const after = all(store, 'SELECT id,path,job_id as jobId,created_at as createdAt FROM artifacts WHERE job_id=?', [jobA.id]);
@@ -588,8 +597,8 @@ test('T6 — Auto-open and focus deferral', async t => {
     const before2 = all(store, 'SELECT id,path,job_id as jobId,created_at as createdAt FROM artifacts WHERE job_id=?', [jobA.id]);
     const atNow2 = new Date().toISOString();
     const deferId = 't6_defer_' + Date.now();
-    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-      [deferId, jobA.id, profile.id, 'resume', 't6-defer.md', 'T6 Defer', 'c', '[]', '[]', 'draft_needs_human_review', atNow2]);
+    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [deferId, jobA.id, profile.id, 'resume', 't6-defer.md', 'T6 Defer', 'c', '[]', '[]', 'draft_needs_human_review', atNow2, artifactSeriesKey('resume', jobA.id, profile.id, 't6-defer.md'), 1, null, artifactHash('c'), null, null, '']);
     save(store);
     const after2 = all(store, 'SELECT id,path,job_id as jobId,created_at as createdAt FROM artifacts WHERE job_id=?', [jobA.id]);
 
@@ -638,8 +647,8 @@ test('T6 — Auto-open and focus deferral', async t => {
     tui3.refresh({ disk: false });
     const beforeAll = all(store, 'SELECT id,path,job_id as jobId,created_at as createdAt FROM artifacts');
     const crossJobId = `t6_cross_job_${Date.now()}`;
-    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-      [crossJobId, jobB.id, profile.id, 'resume', 'resume.md', 'T6 Cross-job Created', 'c', '[]', '[]', 'draft_needs_human_review', new Date().toISOString()]);
+    run(store, 'INSERT INTO artifacts (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [crossJobId, jobB.id, profile.id, 'resume', 'resume.md', 'T6 Cross-job Created', 'c', '[]', '[]', 'draft_needs_human_review', new Date().toISOString(), artifactSeriesKey('resume', jobB.id, profile.id, 'resume.md'), 1, null, artifactHash('c'), null, null, '']);
     save(store);
     const afterAll = all(store, 'SELECT id,path,job_id as jobId,created_at as createdAt FROM artifacts');
     const messageCount = tui3.state.messages.length;
@@ -1155,7 +1164,8 @@ test('T11 — Editor lifecycle and versioning', async t => {
   // ── Intended: changed file → new draft row + artifact.edited audit ──
   {
     const preCount = all(store, 'SELECT COUNT(*) c FROM artifacts WHERE job_id=? AND path=?', [jobA.id, 'resume.md'])[0].c;
-    const newContent = '# Edited Resume\n\nChanged content via editor';
+    const rawNewContent = '# Edited Resume\n\nChanged content via editor';
+    const newContent = rawNewContent.endsWith('\n') ? rawNewContent : `${rawNewContent}\n`;
     const changedSpawn = async () => {
       return { exitCode: 0, signal: null, error: null };
     };
@@ -1276,7 +1286,8 @@ test('T12 — Human-gate mediation and shared mutation', async t => {
   // ── Setup: DOMAIN_TOOLS and MCP tool names ──
   const toolNames = DOMAIN_TOOLS.map(dt => dt.name);
   const mcpNames = mcpToolNames();
-  assert.deepEqual(mcpNames, toolNames);
+  const deniedMcp = new Set(['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
+  assert.deepEqual(mcpNames, toolNames.filter(name => !deniedMcp.has(name)));
   assert.ok(toolNames.length > 0);
 
   // ── Intended: TUI and API artifact actions use same service ──

@@ -348,7 +348,7 @@ function documentLines(doc, state, width, color) {
       lines = ['First draft — no previous draft to compare.'];
     } else {
       const rendered = renderArtifactDiff(doc.previousDraft.content, doc.content, { width, color });
-      lines = [`Previous draft → Current · +${rendered.added} -${rendered.removed}`, ...renderedLines(rendered)];
+      lines = [`DIFF r${doc.previousDraft.revision} → r${doc.revision} · +${rendered.added} -${rendered.removed}`, ...renderedLines(rendered)];
     }
   } else {
     lines = renderedLines(renderArtifactMarkdown(doc.content, { width, color }));
@@ -364,14 +364,27 @@ function docsPanel(model, state, width, height, color) {
   const innerWidth = Math.min(width - 4, 110);
   const content = documentLines(doc, state, innerWidth, color);
   const scroll = state.docsView === 'diff' ? state.docsDiffScroll : state.docsScroll;
-  const available = Math.max(3, height - 8);
-  const body = [
+  const meta = [
     `${index + 1}/${docs.length} · ${doc.title} · ${doc.approvalStatus}`,
     `${doc.path}`,
+    `hash ${doc.contentHash}`,
+    `history ${doc.previousDraft ? `r${doc.previousDraft.revision} → r${doc.revision}` : 'r1'}`
+  ];
+  const evidence = doc.evidence.length ? [`evidence ${doc.evidence.map(e => e.summary || e.proofPointId || 'unknown').join(' · ')}`] : [];
+  const warnings = doc.warnings.length ? doc.warnings.map(w => `warning ${w}`) : [];
+  const header = [
+    ...meta,
     '',
+    ...evidence,
+    ...warnings,
+    ...(evidence.length || warnings.length ? [''] : [])
+  ];
+  const footer = ['', keyHints('docs')];
+  const available = Math.max(1, height - 2 - header.length - footer.length);
+  const body = [
+    ...header,
     ...content.slice(Math.max(0, scroll), Math.max(0, scroll) + available),
-    '',
-    keyHints('docs')
+    ...footer
   ];
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -846,6 +859,7 @@ export class JobosTui {
       this.state.status = `Hermes ACP ready · session ${this.state.sessionId.slice(0, 8)} · JobOS tools mediated`;
       this.state.error = null;
     } catch (error) {
+
       this.state.agentState = 'failed';
       this.state.error = error.message;
       this.state.status = `ACP unavailable: ${error.message} · press c to retry; CLI/TUI state remains usable`;
@@ -865,6 +879,7 @@ export class JobosTui {
         try {
           this.refresh();
         } catch (error) {
+
           this.state.error = error.message;
           this.state.status = `refresh failed: ${error.message} · press g to retry`;
         }
@@ -918,6 +933,7 @@ export class JobosTui {
         this.refresh();
         this.noteArtifactChanges(before, this.artifactSnapshot());
       } catch (error) {
+
         this.state.error = error.message;
         this.state.status = `refresh failed: ${error.message}`;
         this.render();
@@ -959,6 +975,7 @@ export class JobosTui {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
       this.state.status = `${name} complete · local state refreshed`;
     } catch (error) {
+
       if (error?.code === 'stale_snapshot') {
         reload(this.store);
         this.state.status = `${name} stopped: workspace changed; refreshed safely, retry when ready`;
@@ -1308,15 +1325,29 @@ export class JobosTui {
     }
     if (value === 'n') return this.moveDocsMatch(1);
     if (value === 'N' || (key.shift && key.name === 'n')) return this.moveDocsMatch(-1);
-    if (value === 'A') return this.reviewCurrentArtifact('approved');
+    if (value === 'A') {
+      this.state.mode = 'approve-confirm';
+      this.state.input = '';
+      this.state.status = 'Approve current artifact revision? (y/n)';
+      this.render();
+      return true;
+    }
     if (value === 'R') return this.beginReject();
+    if (value === 'X') {
+      this.state.mode = 'reject-note';
+      this.state.input = '';
+      this.state.status = 'Reject: type feedback, then Enter to confirm.';
+      this.render();
+      return true;
+    }
     if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
     if (value === 'E') {
       void this.openArtifactEditor();
       return true;
     }
-    if (value === 'V') {
+    if (value === 'V' || value === 'D') {
       this.state.docsView = this.state.docsView === 'diff' ? 'document' : 'diff';
+      this.state.docsDiff = this.state.docsView === 'diff';
       const doc = this.selectedDocument();
       this.state.status = this.state.docsView === 'diff'
         ? (doc?.previousDraft ? 'Previous draft comparison.' : 'First draft — no previous draft to compare.')
@@ -1511,13 +1542,13 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);
       if (handled !== false) return handled;
     }
-    if (this.state.overlay === 'docs' && ['A', 'R', 'B', 'E', 'V', 'I'].includes(value)) return this.onDocsKey(value, key);
+    if (this.state.overlay === 'docs' && ['A', 'R', 'B', 'E', 'V', 'I', 'D', 'X'].includes(value)) return this.onDocsKey(value, key);
     if (this.state.overlay === 'docs' && this.dimensions().width >= 116) {
       if (value === 'j') return this.moveSelection(1);
       if (value === 'k') return this.moveSelection(-1);
@@ -1580,6 +1611,7 @@ export class JobosTui {
     this.refreshTimer = setInterval(() => {
       if (!this.state.busy && !this.state.editorActive) {
         try { this.refresh(); } catch (error) {
+
           this.state.error = error.message;
           this.state.status = `refresh failed: ${error.message}`;
           this.render();
