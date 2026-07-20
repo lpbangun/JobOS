@@ -8,7 +8,6 @@ import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { createArtifact, approveArtifact, rejectArtifact, artifactQueue, diffArtifact } from '../src/artifacts.js';
 import { callDomainTool, DomainToolError } from '../src/domain-tools.js';
-import { handleApi } from '../src/api.js';
 
 async function seeded(t) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-human-review-'));
@@ -115,26 +114,6 @@ test('MCP and ACP cannot approve or reject even with spoofed mediation and attes
   }
 });
 
-test('direct HTTP artifact review mutation is denied without changing canonical state', async t => {
-  const fixture = await seeded(t);
-  const draft = createArtifact(fixture.store, resumeInput({ ...fixture, content: '# Resume\n\nReview through trusted UI only.' }));
-  let responseStatus = null;
-  let responseBody = '';
-  const req = {
-    method: 'PATCH',
-    headers: {},
-    async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ approvalStatus: 'approved' })); }
-  };
-  const res = {
-    writeHead(status) { responseStatus = status; },
-    end(value = '') { responseBody = String(value); }
-  };
-  const handled = await handleApi(fixture.store, req, res, new URL(`http://localhost/api/artifacts/${draft.id}`));
-  assert.notEqual(handled, false);
-  assert.equal(responseStatus, 403);
-  assert.equal(JSON.parse(responseBody).code, 'human_review_required');
-  assert.equal(one(fixture.store, 'SELECT approval_status FROM artifacts WHERE id=?', [draft.id]).approval_status, 'draft_needs_human_review');
-});
 
 test('two-store race rejects stale persistence and emits no queued approval projection', async t => {
   const fixture = await seeded(t);

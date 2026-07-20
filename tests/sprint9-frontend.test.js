@@ -51,6 +51,21 @@ test('command registry drives root, JSON, and per-command help metadata', () => 
   assert.equal(registry.commands.length, commandRegistry.length);
 });
 
+test('removed web command is absent and returns a usage error', () => {
+  assert.equal(commandRegistry.some(item => item.name === 'web'), false);
+  const result = cli(makeRoot(), ['web', '--json']);
+  assert.equal(result.status, 2);
+  assert.equal(result.stdout, '');
+  assert.deepEqual(parseJson(result.stderr), {
+    ok: false,
+    error: {
+      code: 'usage_error',
+      type: 'usage',
+      message: 'Unknown command: web --json'
+    }
+  });
+});
+
 test('first successful command auto-creates workspace and preserves JSON stdout', () => {
   const root = makeRoot();
   const result = cli(root, ['jobs', 'list', '--json']);

@@ -1,40 +1,8 @@
 import path from 'node:path';
 import { one, all, run, save, audit } from './db.js';
-import { now, id, parseJson } from './utils.js';
+import { now, id } from './utils.js';
 import { writeMd } from './workspace.js';
 import { due } from './tracking.js';
-import { listAutomations, listRuns } from './scheduler/store.js';
-import { discoveryRuns, listSearches, listWatchlist, reviewQueue } from './discovery.js';
-import { listOutreachThreads, outreachDue } from './outreach.js';
-import { listContactPoints } from './research/contacts.js';
-
-export function state(s) {
-  return {
-    profiles: all(s, 'SELECT id,name,preferences_json,created_at,updated_at FROM profiles ORDER BY created_at'),
-    jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: parseJson(x.score_json, null), requirements: parseJson(x.requirements_json, []) })),
-    applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
-    statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
-    artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
-    tasks: due(s),
-    companies: all(s, 'SELECT * FROM companies ORDER BY name'),
-    stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
-    sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
-    personCandidates: all(s, 'SELECT * FROM person_candidates ORDER BY updated_at DESC'),
-    contactPoints: listContactPoints(s),
-    emailPatterns: all(s, 'SELECT * FROM email_patterns ORDER BY updated_at DESC'),
-    outreachPlans: all(s, 'SELECT * FROM outreach_plans ORDER BY created_at DESC').map(x => ({ ...x, reasoning: parseJson(x.reasoning_json, {}), warnings: parseJson(x.warnings_json, []) })),
-    outreachThreads: listOutreachThreads(s),
-    outreachDue: outreachDue(s),
-    searches: listSearches(s),
-    watchlist: listWatchlist(s),
-    discoveryRuns: discoveryRuns(s),
-    reviewQueue: reviewQueue(s),
-    audit: all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 50').map(a => ({ ...a, payload: parseJson(a.payload_json, {}) })),
-    automations: listAutomations(s),
-    automationRuns: listRuns(s, { limit: 25 }),
-    policy: { externalApply: 'user_configured', externalSend: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' }
-  };
-}
 
 function sinceCutoff(days) {
   const n = Number(days || 30);

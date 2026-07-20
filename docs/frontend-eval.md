@@ -34,6 +34,5 @@ Total: 18/30 before, 27/30 after.
 
 ## Residual Risk
 
-- The command registry is implemented in `src/cli.js`; a future cleanup could move it to a small shared module if MCP/API generation needs direct imports without CLI dependencies.
-- The web dashboard remains a companion surface. It should continue to read/write canonical state rather than grow a separate model.
+- The command registry is implemented in `src/cli.js`; a future cleanup could move it to a small shared module if MCP generation needs direct imports without CLI dependencies.
 - Shell completion is not implemented yet, but the registry now makes it straightforward to generate later.

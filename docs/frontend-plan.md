@@ -49,7 +49,6 @@ jobos loop scheduler
 jobos loop automation <name>
 jobos loop action <action-id>
 jobos mcp
-jobos web
 ```
 
 Legacy note: `jobos score <job-id>` stays for compatibility even though `jobs score <job-id>` would be more noun-first. A future sprint can add `jobs score` as an alias and deprecate direct `score`.
@@ -111,7 +110,7 @@ Command-specific JSON remains intentionally plain arrays/objects for backwards c
 - output schema summary
 - handler test marker
 
-The registry is used to generate root help, per-command help, `agent-guide`, and completeness tests. MCP/API metadata can be cross-checked against the same command list in later sprints; Sprint 9 keeps existing API and MCP behavior stable.
+The registry is used to generate root help, per-command help, `agent-guide`, and completeness tests. MCP metadata can be cross-checked against the same command list in later sprints; Sprint 9 keeps existing MCP behavior stable.
 
 ## Built-In Loop Design
 

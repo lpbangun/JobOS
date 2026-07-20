@@ -174,7 +174,7 @@ The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical plan structure, and agents may inspect `review_queue` and `diff_artifact` to recommend a human action. MCP and the embedded ACP guest cannot call `approve_artifact` or `reject_artifact`, even with spoofed mediation metadata or agent-attestation configuration; the dashboard HTTP artifact-mutation route also returns `403 human_review_required`. Approval and rejection are intentionally limited to the trusted CLI/TUI human flow. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
+The MCP tool `applications_plan` returns the identical plan structure, and agents may inspect `review_queue` and `diff_artifact` to recommend a human action. MCP and the embedded ACP guest cannot call `approve_artifact` or `reject_artifact`, even with spoofed mediation metadata or agent-attestation configuration. The removed local web/API interface provides no review-mutation bypass. Approval and rejection are intentionally limited to the trusted CLI/TUI human flow. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
 
 ## Daily automatic discovery
 
@@ -409,7 +409,7 @@ npm run jobos -- help --all
 npm run jobos -- agent-guide --json
 ```
 
-The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, MCP, API, and local dashboard—remains available for composition. Dashboard work is not the product focus.
+The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, and MCP—remains available for composition.
 
 `jobos tui --json` exposes the same presentation model for machine inspection; `jobos tui --snapshot` renders the terminal shell without starting an agent process.
 
@@ -440,4 +440,4 @@ npm run mcp-demo -- --workspace <dir> --profile <profile-id> --job <job-id> \
 ```
 The ACP drill launches the installed backend, performs same-session tool turns, denies an applied-status policy probe, cancels a live turn, proves zero leaked post-cancel events, starts a clean recovery session, completes an exact `get_job_context` call, restarts again, checks a real deadline and missing-backend typing, and verifies sentinel redaction. Set a throwaway `JOBOS_LLM_API_KEY` value only when explicitly running the transcript-redaction probe; the summary reports whether that sentinel was configured and absent.
 
-The test suite covers the established CLI/domain behavior plus exact artifact lineage/hash/diff/review contracts, readiness approval and redraft invalidation, MCP/ACP/HTTP review denials, optimistic two-store races, real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, and profile isolation.
+The test suite covers the established CLI/domain behavior plus exact artifact lineage/hash/diff/review contracts, readiness approval and redraft invalidation, MCP/ACP review denials, absence of the removed HTTP mutation surface, optimistic two-store races, real ACP framing/lifecycle contracts, locked TUI state binding and responsive controls, external MCP framing, routed discovery, workflow integration, answer safety, agent failure handling, browser session contracts, networking paths, and profile isolation.

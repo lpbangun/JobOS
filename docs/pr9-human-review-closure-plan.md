@@ -115,9 +115,7 @@ Files:
 - `src/domain-tools.js`
 - `src/cli.js`
 - `src/mcp.js`
-- `src/api.js`
-- `src/web.js` if it exposes the unsafe PATCH control
-- affected API/MCP tests
+- affected MCP/ACP policy tests
 
 Domain tools:
 - Enrich existing `review_queue` with current revision, hash, evidence/warning counts, and job/profile metadata.
@@ -134,7 +132,7 @@ Policy:
 - CLI/TUI use trusted internal source labels.
 - MCP/ACP expose inspect/diff but return typed human-review denial for approve/reject.
 - Denial survives `JOBOS_ALLOW_AGENT_ATTESTATION=1` and `JOBOS_MEDIATION=cli`.
-- Direct HTTP approval mutation is denied/removed; update existing API tests and controls.
+- The removed local web/API interface is not restored; no HTTP review-mutation route exists.
 
 All mutation output states local-only, `externalSideEffects: none`, `submissionPerformed: false`, and `applicationStatusChanged: false`.
 
@@ -187,11 +185,11 @@ A complete iteration is:
 Stop immediately when the suite converges. If it does not converge in iteration 1, run one second and final iteration. Close the loop after iteration 2 regardless of outcome.
 
 Convergence means:
-- Focused artifact, readiness, policy, API, and TUI checks pass.
+- Focused artifact, readiness, policy, CLI, and TUI checks pass.
 - `npm test` passes.
 - `npm run smoke` passes.
 - No unresolved acceptance failure remains.
-- MCP/ACP and direct HTTP approval bypass tests pass.
+- MCP/ACP approval bypass tests pass, and the removed HTTP mutation surface remains absent.
 - Redraft invalidation and optimistic-race checks pass.
 - Approval causes no application-status or external-side-effect mutation.
 
@@ -221,7 +219,7 @@ Final commands:
 
 ## Final acceptance
 - Human can see readiness/blockers and approve or reject an exact current revision through CLI/TUI.
-- Agent can inspect queue/diff and recommend a human action but cannot decide it through MCP/ACP or HTTP bypass.
+- Agent can inspect queue/diff and recommend a human action but cannot decide it through MCP/ACP; the removed HTTP interface provides no bypass.
 - Audit distinguishes created, approved, and rejected with no external side effect.
 - Redrafting makes prior approval effectively stale and returns the current packet to `ready-for-review`.
 - Readiness `approved` means only locally human-reviewed completeness.

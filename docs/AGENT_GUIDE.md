@@ -11,7 +11,7 @@ JobOS is a local-first CLI for job discovery, networking, and application prepar
 - Exit codes: `0` success, `1` runtime/domain error, `2` usage error.
 - JSON errors have `{ "ok": false, "error": { "code", "type", "message" } }`.
 - Select a registered local agent with `--agent <name>` or `JOBOS_AGENT`; the flag wins. Explicit agent failures never fall back silently.
-- SQLite is canonical. Use CLI/API/MCP writes instead of hand-editing runtime mirrors.
+- SQLite is canonical. Use CLI/MCP writes instead of hand-editing runtime mirrors.
 
 ## Safety
 
@@ -50,7 +50,7 @@ Generic agents receive one protocol-v1 JSON request on stdin and must emit exact
 
 ## Agent-readable files
 
-Useful mirrors include:
+SQLite is canonical. Useful mirrors include:
 
 - `jobos-workspace/profiles/*.yaml`
 - `jobos-workspace/proof-points/*.md`
@@ -66,3 +66,4 @@ Useful mirrors include:
 - `jobos-workspace/audit.log.jsonl`
 
 Browser profiles, cookie files, and registered browser scripts are deliberately absent from the mirror.
+Workspace files are mirrors. Use CLI/MCP writes instead of hand-editing runtime state.

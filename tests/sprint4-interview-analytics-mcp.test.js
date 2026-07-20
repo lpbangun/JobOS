@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mcpToolNames } from '../src/mcp.js';
 
 function makeRunner() {
@@ -58,58 +58,6 @@ test('analytics funnel reports conversion by source, stage, and role family', ()
   const review = run(['review', 'weekly', '--profile', profile.id, '--output', 'markdown']);
   assert.match(review, /Funnel analytics/);
   assert.match(review, /Recommended experiments/);
-});
-
-test('dashboard exposes interactive forms and denies the direct artifact approval API bypass', async () => {
-  const { root, env, run } = makeRunner();
-  const { app, profile, job } = seed(run, root);
-  const packet = JSON.parse(run(['interview', 'prep', '--application', app.id, '--stage', 'recruiter-screen', '--json']));
-  const stakeholder = JSON.parse(run([
-    'research', 'add-stakeholder',
-    '--job', job.id,
-    '--source-url', 'https://acme.example/team/maya-chen',
-    '--name', 'Maya Chen',
-    '--role', 'Head of Product',
-    '--text', 'Maya Chen leads product at Acme Learning.',
-    '--json'
-  ]));
-  const port = 4700 + Math.floor(Math.random() * 300);
-  const server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(port)], { cwd: process.cwd(), env, encoding: 'utf8' });
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
-    server.stdout.on('data', data => { if (String(data).includes('JobOS dashboard running')) { clearTimeout(timeout); resolve(); } });
-    server.stderr.on('data', data => reject(new Error(String(data))));
-  });
-  try {
-    const html = await fetch(`http://127.0.0.1:${port}/`).then(r => r.text());
-    assert.match(html, /Kanban-style application status board/);
-    assert.match(html, /Create job/);
-    assert.match(html, /Artifact review status/);
-    assert.match(html, /data-api="\/api\/jobs"/);
-    assert.match(html, /data-api="\/api\/outreach\/draft"/);
-    const approvalResponse = await fetch(`http://127.0.0.1:${port}/api/artifacts/${packet.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approvalStatus: 'approved' }) });
-    const approvalDenied = await approvalResponse.json();
-    assert.equal(approvalResponse.status, 403);
-    assert.equal(approvalDenied.code, 'human_review_required');
-    const outreach = await fetch(`http://127.0.0.1:${port}/api/outreach/draft`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.id, profileId: profile.id, stakeholderId: stakeholder.id, goal: 'informational' }) }).then(r => r.json());
-    assert.match(outreach.threadId, /^thread_/);
-    const marked = await fetch(`http://127.0.0.1:${port}/api/outreach/mark-sent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ artifactId: outreach.id, channel: 'other', notes: 'Human sent elsewhere.' }) }).then(r => r.json());
-    assert.equal(marked.status, 'sent_by_human');
-    const followup = await fetch(`http://127.0.0.1:${port}/api/outreach/schedule-followup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ threadId: outreach.threadId, afterDays: 0 }) }).then(r => r.json());
-    assert.match(followup.taskId, /^task_/);
-    const due = await fetch(`http://127.0.0.1:${port}/api/outreach/due`).then(r => r.json());
-    assert.ok(due.some(item => item.threadId === outreach.threadId));
-    const created = await fetch(`http://127.0.0.1:${port}/api/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', title: 'Talent PM', company: 'Beta Learning', description: 'Title: Talent PM\nCompany: Beta Learning\n\nLead hiring workflows and product discovery.' }) }).then(r => r.json());
-    assert.match(created.id, /^job_/);
-    const createdPlain = await fetch(`http://127.0.0.1:${port}/api/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profileId: 'pm-edtech', title: 'Plain Description PM', company: 'Gamma Learning', description: 'Lead roadmap discovery without explicit title headers.' }) }).then(r => r.json());
-    const savedPlain = await fetch(`http://127.0.0.1:${port}/api/jobs/${createdPlain.id}`).then(r => r.json());
-    assert.equal(savedPlain.title, 'Plain Description PM');
-    assert.equal(savedPlain.company, 'Gamma Learning');
-    const roundTrip = await fetch(`http://127.0.0.1:${port}/api/jobs/${createdPlain.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: savedPlain.title, company: savedPlain.company, url: '' }) }).then(r => r.json());
-    assert.match(roundTrip.url, /^jobos:text:/);
-  } finally {
-    server.kill('SIGTERM');
-  }
 });
 
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {

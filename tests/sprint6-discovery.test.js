@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { greenhouse, lever } from '../src/discovery/adapters.js';
 import { all, one, openStore, run as dbRun, save } from '../src/db.js';
 import { runAllSearches } from '../src/discovery.js';
@@ -138,29 +138,6 @@ test('job import refreshes exact URL matches but does not merge different real U
   assert.match(one(store, 'SELECT title FROM tasks WHERE job_id=?', [second.job.id]).title, /possible duplicate/i);
 });
 
-test('API discovery routes and MCP discovery tools are exposed', async () => {
-  const { root, run } = makeRunner();
-  run(['init', '--json']);
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
-  const port = 4700 + Math.floor(Math.random() * 500);
-  const server = spawn(process.execPath, ['src/cli.js', 'web', '--port', String(port)], { cwd: process.cwd(), env: { ...process.env, JOBOS_HOME: root }, encoding: 'utf8' });
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('web server did not start')), 5000);
-    server.stdout.on('data', data => { if (String(data).includes('JobOS dashboard running')) { clearTimeout(timeout); resolve(); } });
-    server.stderr.on('data', data => reject(new Error(String(data))));
-  });
-  try {
-    const fixture = path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json');
-    const created = await fetch(`http://127.0.0.1:${port}/api/searches`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'API Discovery', profileId: profile.id, adapter: 'greenhouse', minFit: 50, config: { fixture, company: 'Acme Learning', keywords: ['Product'], location: 'Remote' } }) }).then(r => r.json());
-    assert.match(created.id, /^search_/);
-    const apiSearches = await fetch(`http://127.0.0.1:${port}/api/searches`).then(r => r.json());
-    assert.equal(apiSearches.length, 1);
-    const runResult = await fetch(`http://127.0.0.1:${port}/api/searches/${created.id}/run`, { method: 'POST', headers: { 'content-type': 'application/json' } }).then(r => r.json());
-    assert.equal(runResult.status, 'succeeded');
-    const runs = await fetch(`http://127.0.0.1:${port}/api/discovery/runs`).then(r => r.json());
-    assert.equal(runs[0].id, runResult.runId);
-  } finally {
-    server.kill('SIGTERM');
-  }
+test('MCP discovery tools are exposed', () => {
   for (const name of ['search_jobs', 'list_saved_searches', 'import_job_url']) assert.ok(mcpToolNames().includes(name));
 });
