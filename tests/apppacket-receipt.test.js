@@ -672,7 +672,8 @@ test('AP15 packet CLI list show and diff are filterable parseable historical and
 
   const missingFilter = cli(fixture.root, ['apply', 'packet', 'list', '--json']);
   assert.notEqual(missingFilter.status, 0);
-  assert.equal(missingFilter.json?.error?.code, 'packet_list_filter_required');
+  assert.equal(missingFilter.status, 2);
+  assert.equal(missingFilter.json?.error?.code, 'usage_error');
   const byJob = cliOk(fixture.root, ['apply', 'packet', 'list', '--job', fixture.job.id, '--json']);
   const byProfile = cliOk(fixture.root, ['apply', 'packet', 'list', '--profile', fixture.profile.id, '--json']);
   const byBoth = cliOk(fixture.root, ['apply', 'packet', 'list', '--job', fixture.job.id, '--profile', fixture.profile.id, '--json']);

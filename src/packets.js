@@ -70,7 +70,7 @@ function buildPacketProjection(s, { jobId, profileId }) {
 
   // Current resume and cover artifacts
   const currentResume = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='resume' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
-  const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
+  const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId]);
 
   if (!currentResume) {
     throw packetError('artifact_unapproved', 'No approved resume artifact found');
@@ -93,8 +93,8 @@ function buildPacketProjection(s, { jobId, profileId }) {
     responseMode: answer.sensitivity === 'restricted' ? 'direct_input_redacted' : 'auto_fill'
   }));
 
-  // Cover letter only when an approved revision exists
-  const coverEntry = currentCover ? {
+  // Cover letter only when the current revision is approved
+  const coverEntry = currentCover && currentCover.approval_status === 'approved' ? {
     artifactId: currentCover.id,
     seriesKey: currentCover.series_key,
     revision: Number(currentCover.revision),
@@ -173,7 +173,7 @@ function packetCurrency(s, packet, currentProjectionHash) {
   if (newer) return 'superseded';
 
   // Check staleness — compare stored hash with current projection
-  if (currentProjectionHash && currentProjectionHash !== packet.content_hash) return 'stale';
+  if (currentProjectionHash == null || currentProjectionHash !== packet.content_hash) return 'stale';
 
   return 'current';
 }
@@ -314,9 +314,9 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
   if (!resumeArtifact) throw packetError('artifact_unapproved', `No approved resume artifact for job ${jobId}`);
   verifyArtifact(resumeArtifact, 'Resume');
 
-  // Optional cover
-  const coverArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
-  if (coverArtifact) verifyArtifact(coverArtifact, 'Cover letter');
+  // Optional cover: use the latest revision only if it is approved
+  const coverArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId]);
+  if (coverArtifact && coverArtifact.approval_status === 'approved') verifyArtifact(coverArtifact, 'Cover letter');
 
   // Build the canonical projection
   const projection = buildPacketProjection(s, { jobId, profileId });
@@ -337,8 +337,8 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
     const resumeArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='resume' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
     if (!resumeArtifact) throw packetError('artifact_unapproved', `No approved resume artifact for job ${jobId}`);
     verifyArtifact(resumeArtifact, 'Resume');
-    const coverArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
-    if (coverArtifact) verifyArtifact(coverArtifact, 'Cover letter');
+    const coverArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId]);
+    if (coverArtifact && coverArtifact.approval_status === 'approved') verifyArtifact(coverArtifact, 'Cover letter');
     const projection = buildPacketProjection(s, { jobId, profileId });
     const contentHash = packetContentHash(projection);
     // Reload authoritative state inside lock

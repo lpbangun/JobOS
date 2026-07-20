@@ -81,7 +81,7 @@ export const commandRegistry = [
   cmd(['applications', 'plan'], 'jobos applications plan --job <job-id> --profile <profile-id> [--json]', 'Compile review readiness from local score, proofs, materials, answers, and identity evidence.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['applications', 'create'], 'jobos applications create --job <job-id> --status <status> [--json]', 'Create or upsert a local application tracking record.'),
   cmd(['applications', 'update'], 'jobos applications update <application-id> --status <status> [--json]', 'Update a tracked application status.'),
-  cmd(['apply', 'packet', 'create'], 'jobos apply packet create --job <job-id> --profile <profile-id> [--json]', 'Freeze current approved materials, answers, and target into one immutable application packet.', { flags: ['--job <job-id>'], category: 'workflow' }),
+  cmd(['apply', 'packet', 'create'], 'jobos apply packet create --job <job-id> --profile <profile-id> [--json]', 'Freeze current approved materials, answers, and target into one immutable application packet.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
   cmd(['apply', 'packet', 'show'], 'jobos apply packet show <packet-id> [--json]', 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', { category: 'workflow' }),
   cmd(['apply', 'packet', 'list'], 'jobos apply packet list (--job <job-id> | --profile <profile-id>) [--json]', 'List application packets for a job/profile with derived currency and receipt state.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
   cmd(['apply', 'packet', 'diff'], 'jobos apply packet diff <packet-a> <packet-b> [--json]', 'Diff two application packets by their canonical projections.', { category: 'workflow' }),
@@ -679,27 +679,29 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'applications' && action === 'create') {
     if (!flags.job || !flags.status) usage('Missing --job or --status');
-    out(await callDomainTool(s, 'create_application', {
+    const a = await callDomainTool(s, 'create_application', {
       jobId: String(flags.job),
       status: String(flags.status),
       notes: flags.notes ? String(flags.notes) : ''
-    }, { source: 'cli' }));
+    }, { source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
     return;
   }
   if (group === 'applications' && action === 'update') {
     if (!subaction || !flags.status) usage('Missing application id or --status');
-    out(await callDomainTool(s, 'update_application_status', {
+    const a = await callDomainTool(s, 'update_application_status', {
       applicationId: String(subaction),
       status: String(flags.status),
       notes: flags.notes ? String(flags.notes) : null
-    }, { source: 'cli' }));
+    }, { source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
     return;
   }
   if (group === 'apply') {
     if (action === 'packet' && subaction === 'create') {
       out(await callDomainTool(s, 'create_application_packet', {
         jobId: String(requireFlag(flags, 'job')),
-        profileId: needProfile(flags)
+        profileId: String(requireFlag(flags, 'profile'))
       }, { source: 'cli' }));
       return;
     }
@@ -711,9 +713,12 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     if (action === 'packet' && subaction === 'list') {
+      const jobId = flags.job ? String(requireFlag(flags, 'job', '--job <job-id>')) : null;
+      const profileId = flags.profile ? String(requireFlag(flags, 'profile', '--profile <profile-id>')) : null;
+      if (!jobId && !profileId) usage('Missing --job <job-id> or --profile <profile-id>');
       out(await callDomainTool(s, 'application_packets_list', {
-        jobId: flags.job ? String(flags.job) : null,
-        profileId: flags.profile ? String(flags.profile) : null
+        jobId,
+        profileId
       }, { source: 'cli' }));
       return;
     }
@@ -727,20 +732,18 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (action === 'attest-submitted') {
       if (!subaction) usage('Missing packet id');
-      if (!flags['submitted-at']) usage('Missing --submitted-at <rfc3339>');
       out(await callDomainTool(s, 'attest_application_submitted', {
         packetId: String(subaction),
-        submittedAt: String(flags['submitted-at']),
+        submittedAt: String(requireFlag(flags, 'submitted-at', '--submitted-at <rfc3339>')),
         note: flags.note ? String(flags.note) : ''
       }, { source: 'cli' }));
       return;
     }
     if (action === 'confirm-receipt') {
       if (!subaction) usage('Missing packet id');
-      if (!flags.reference) usage('Missing --reference <text>');
       out(await callDomainTool(s, 'confirm_application_receipt', {
         packetId: String(subaction),
-        reference: String(flags.reference),
+        reference: String(requireFlag(flags, 'reference', '--reference <text>')),
         note: flags.note ? String(flags.note) : ''
       }, { source: 'cli' }));
       return;

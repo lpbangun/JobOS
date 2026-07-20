@@ -74,7 +74,9 @@ export function _writeApp(s, jobId, profileId, status, notes = '', { receiptBoun
 // ---------------------------------------------------------------------------
 export function appCreate(s, jid, status, notes = '') {
   return guardedWrite(s, () => {
-    const { application, auditEvents } = _writeApp(s, jid, one(s, 'SELECT * FROM jobs WHERE id=?', [jid]).profile_id, status, notes, { receiptBound: false });
+    const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+    if (!job) throw Error(`Unknown job: ${jid}`);
+    const { application, auditEvents } = _writeApp(s, jid, job.profile_id, status, notes, { receiptBound: false });
     queuePostCommit(s, () => {
       for (const evt of auditEvents) {
         if (evt) projectAudit(s, evt);
