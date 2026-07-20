@@ -58,7 +58,7 @@ Not required for the smallest coherent CLI product:
 - PR 9 converged after the TUI-focus web-interface cutover: affected artifact/readiness/CLI/TUI/discovery/scheduler checks **53/53 passed**; `npm test` **126/126 passed**. No unresolved acceptance failure remains.
 - `npm run smoke`: passed the extended local human-review path (`ready-for-review` → exact resume/cover diffs → local approvals → `approved`) with unchanged application/status state, exactly two approval audit events, and `external_side_effect='none'`; the existing applied/interview analytics, scheduler, and workspace-export flow then completed without the removed web interface.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
-- Real external MCP drill: initialize, 31-tool list (includes `applications_plan`), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
+- Real external MCP drill: initialize, 37-tool list (includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
