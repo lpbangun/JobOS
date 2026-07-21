@@ -10,6 +10,7 @@ import { setNetworkIntent } from './profiles.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
+import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
 import {
   openArtifactEditor as runArtifactEditor,
@@ -50,6 +51,62 @@ export const TUI_KEYMAP = Object.freeze({
   discovery: Object.freeze([['j/k', 'select'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
+
+/**
+ * Atomic keys each KEYMAP binding expands to. Used by invariant tests so
+ * advertised keys stay a subset of live handlers (no silent KEYMAP lies).
+ * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
+ */
+export const TUI_HANDLED_KEYS = Object.freeze({
+  global: Object.freeze(['j', 'k', '1', '2', '3', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', ':', 'Q']),
+  review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
+  docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
+  discovery: Object.freeze(['j', 'k', 'A', 'X', 'd', 'escape']),
+  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
+});
+
+/** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
+export function expandKeymapBinding(binding) {
+  const table = {
+    'j/k': ['j', 'k'],
+    'n/N': ['n', 'N'],
+    '↑/↓': ['up', 'down'],
+    '←/→': ['left', 'right', 'h', 'l'],
+    'Ctrl+A': ['ctrl+a'],
+    Enter: ['return'],
+    Esc: ['escape'],
+    Q: ['Q'],
+    ':': [':'],
+    '?': ['?'],
+    '/': ['/']
+  };
+  if (table[binding]) return table[binding];
+  if (binding.length === 1) return [binding];
+  return [binding];
+}
+
+/** Keypress args for one handler token (for automated KEYMAP drills). */
+export function keypressForToken(token) {
+  if (token === 'ctrl+a') return { value: 'a', key: { name: 'a', ctrl: true } };
+  if (token === 'return') return { value: '', key: { name: 'return' } };
+  if (token === 'escape') return { value: '', key: { name: 'escape' } };
+  if (token === 'up' || token === 'down' || token === 'left' || token === 'right') {
+    return { value: '', key: { name: token } };
+  }
+  if (token === 'N') return { value: 'N', key: { name: 'n', shift: true } };
+  if (token === 'Q') return { value: 'Q', key: { name: 'q', shift: true } };
+  if (token.length === 1 && token >= 'A' && token <= 'Z') {
+    return { value: token, key: { name: token.toLowerCase(), shift: true } };
+  }
+  return { value: token, key: { name: token.length === 1 ? token.toLowerCase() : token } };
+}
+
+function redraftCliHint(artifact, profileId) {
+  const jobId = artifact?.jobId || artifact?.job_id || '<job-id>';
+  const profile = profileId || '<profile-id>';
+  const type = artifact?.type === 'cover_letter' ? 'cover-letter' : 'resume';
+  return `jobos tailor ${type} --job ${jobId} --profile ${profile} --json`;
+}
 
 function stripAnsi(value) {
   return stripAnsiText(String(value ?? ''));
@@ -123,9 +180,18 @@ function filteredJobs(model, filter) {
   return model.jobs.filter(job => job.stage === filter);
 }
 
+function packetCtaLine(row) {
+  const currency = row?.currency || 'none';
+  const receiptState = row?.receiptState || 'none';
+  if (currency !== 'current') return 'next :packet create — freeze a packet from the approved materials';
+  if (receiptState === 'none') return 'next submit externally, then :attest <rfc3339> (or :attest for now)';
+  if (receiptState === 'attested') return 'next :receipt <external-reference> once the site confirms receipt';
+  return 'receipt confirmed · follow-ups only (outreach, interview prep)';
+}
+
 function readinessLines(readiness, width, color) {
   const status = readiness?.status || 'blocked';
-  const next = readiness?.nextAction || readiness?.next || readiness?.nextActions?.[0]?.action || 'Complete readiness checks';
+  const next = readiness?.nextAction || readiness?.next || readiness?.nextActions?.[0]?.action || 'Review the readiness details above.';
   const blockers = Array.isArray(readiness?.blockers) ? readiness.blockers : [];
   const warnings = Array.isArray(readiness?.warnings) ? readiness.warnings : [];
   const localApprovalComplete = readiness?.localApprovalComplete || readiness?.review?.localApprovalComplete;
@@ -588,6 +654,35 @@ function overlayPanel(model, state, width, height, color) {
         body.push('j/k move · Enter edit field/toggle · Enter on Save only saves · b Save and build · Esc closes');
       }
     }
+  } else if (state.overlay === 'packet') {
+    title = `PACKET · ${selected?.job.id || 'NO JOB'}`;
+    const detail = state.packetDetail;
+    const meta = selected?.readiness?.packet;
+    if (detail?.empty || (!detail && !meta?.currentPacketId)) {
+      body = [
+        'No application packet is frozen for this job.',
+        'Freeze one once readiness is approved:',
+        ':packet create',
+        `CLI parity: jobos apply packet create --job ${selected?.job.id || '<job-id>'} --profile ${model.profileId || '<profile-id>'} --json`,
+        '',
+        'Then submit externally, :attest <rfc3339>, and :receipt <reference> once confirmed.'
+      ];
+    } else {
+      const row = detail && !detail.empty ? detail : meta;
+      body = [
+        `id ${row.id || row.currentPacketId || '—'}`,
+        `currency ${row.currency || '—'} · receipt ${row.receiptState || '—'}`,
+        `attempt ${row.attemptNumber ?? '—'} · revision ${row.revision ?? '—'}`,
+        `contentHash ${String(row.contentHash || '').slice(0, 16) || '—'}…`,
+        `attestable ${row.attestable == null ? '—' : row.attestable}`,
+        row.resumeArtifactId ? `resume ${row.resumeArtifactId}` : (meta ? `packet summary from readiness` : ''),
+        row.applicationId ? `application ${row.applicationId}` : '',
+        '',
+        packetCtaLine(row),
+        'Esc closes · :packet refreshes · :packet create / :attest / :receipt run the trusted human mutations'
+      ].filter(Boolean);
+    }
+    body.push('', 'Esc closes');
   }
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -672,7 +767,6 @@ export function defaultTuiState() {
     selectedJobId: null,
     selectedArtifactId: null,
     profileId: null,
-    selectedArtifactId: null,
     selectedDiscoveryJobId: null,
     agentOn: true,
     agentState: 'connecting',
@@ -690,6 +784,7 @@ export function defaultTuiState() {
     editorActive: false,
     stageIndex: 0,
     pendingConfirm: null,
+    packetDetail: null,
     mode: 'normal',
     input: '',
     status: 'starting JobOS host',
@@ -1130,8 +1225,24 @@ export class JobosTui {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
       this.state.mode = 'normal';
       this.state.input = '';
-      this.state.status = `${decision} locally · queue, readiness, and audit log refreshed`;
       this.refresh({ disk: false });
+      if (decision === 'rejected') {
+        const hint = redraftCliHint(
+          { ...artifact, jobId: artifact.jobId || this.state.selectedJobId, job_id: this.state.selectedJobId },
+          this.model.profileId
+        );
+        if (this.client?.state === 'ready' && !this.state.busy) {
+          this.state.status = `rejected · agent redraft requested · or CLI: ${hint}`;
+          this.render();
+          await this.promptAgent(
+            `Revise artifact ${artifact.id} (${artifact.path || artifact.type}) for job ${this.state.selectedJobId} using only stored proof points. Human rejection feedback: ${args.note || ''}`
+          );
+        } else {
+          this.state.status = `rejected · redraft next: ${hint}`;
+        }
+      } else {
+        this.state.status = `${decision} locally · queue, readiness, and audit log refreshed`;
+      }
     } catch (error) {
       this.state.error = error.message;
       this.state.status = `${decision} failed: ${error.message}`;
@@ -1214,8 +1325,51 @@ export class JobosTui {
     }
   }
 
+  async showPacketSummary() {
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    const meta = this.model.selected?.readiness?.packet;
+    if (!jobId) {
+      this.state.error = 'No job selected';
+      this.state.status = 'Select a job before inspecting its application packet.';
+      this.render();
+      return;
+    }
+    if (!meta?.currentPacketId) {
+      this.state.packetDetail = { empty: true, jobId, profileId };
+      this.state.overlay = 'packet';
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = `No packet · freeze with :packet create (or CLI: jobos apply packet create --job ${jobId} --profile ${profileId || '<profile>'} --json)`;
+      this.render();
+      return;
+    }
+    this.state.busy = 'packet_show';
+    this.state.error = null;
+    this.state.status = `Loading packet ${meta.currentPacketId}`;
+    this.render();
+    try {
+      const detail = await callDomainTool(this.store, 'application_packet_show', { packetId: meta.currentPacketId }, { source: 'tui' });
+      this.state.packetDetail = detail;
+      this.state.overlay = 'packet';
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = `Packet ${detail.id} · ${detail.currency}/${detail.receiptState} · ${packetCtaLine(detail).replace(/^next /, 'next: ')}`;
+    } catch (error) {
+      this.state.packetDetail = { ...meta, id: meta.currentPacketId, fallback: true };
+      this.state.overlay = 'packet';
+      this.state.error = error.message;
+      this.state.status = `Packet summary from readiness (${error.message})`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   executeCommand(value) {
-    const [command] = String(value || '').trim().split(/\s+/);
+    const trimmed = String(value || '').trim();
+    const [command] = trimmed.split(/\s+/);
+    const argText = trimmed.slice((command || '').length).trim();
     this.state.mode = 'normal';
     this.state.input = '';
     if (!command) return this.render();
@@ -1223,6 +1377,14 @@ export class JobosTui {
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile') return this.openOverlay(command);
     if (command === 'build-network') return this.openOverlay('build-network');
+    if (command === 'packet' || command === 'packet-show' || command === 'show-packet') {
+      const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
+      if (command === 'packet' && (sub === 'create' || sub === 'freeze')) return void this.packetMutate('create');
+      return void this.showPacketSummary();
+    }
+    if (command === 'freeze') return void this.packetMutate('create');
+    if (command === 'attest') return void this.packetMutate('attest', argText);
+    if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1233,8 +1395,65 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${command}`;
-    this.state.status = 'Commands: pursue score daily network review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt review log docs answers system profile agent refresh reconnect quit';
     this.render();
+  }
+
+  async packetMutate(kind, argText = '') {
+    if (this.state.busy) return;
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    if (!jobId) {
+      this.state.error = 'No job selected';
+      this.state.status = 'Select a job before packet actions.';
+      return this.render();
+    }
+    if (kind === 'receipt' && !argText) {
+      this.state.error = 'Missing reference';
+      this.state.status = 'Usage: :receipt <external-reference> — a confirmation id or URL from the job site.';
+      return this.render();
+    }
+    this.state.busy = `packet_${kind}`;
+    this.state.error = null;
+    this.state.status = kind === 'create' ? `Freezing packet for ${jobId}`
+      : kind === 'attest' ? `Attesting submission for ${jobId}`
+        : `Confirming receipt for ${jobId}`;
+    this.render();
+    try {
+      let done;
+      if (kind === 'create') {
+        await callDomainTool(this.store, 'create_application_packet', { jobId, profileId }, { source: 'tui' });
+        done = 'packet frozen';
+      } else {
+        const summary = readinessPacketSummary(this.store, { jobId, profileId });
+        if (!summary?.currentPacketId) throw new Error('no frozen packet for this job yet — run :packet create first');
+        const packetId = summary.currentPacketId;
+        if (kind === 'attest') {
+          const submittedAt = argText || new Date().toISOString();
+          await callDomainTool(this.store, 'attest_application_submitted', { packetId, submittedAt, note: '' }, { source: 'tui' });
+          done = `submission attested at ${submittedAt}`;
+        } else {
+          await callDomainTool(this.store, 'confirm_application_receipt', { packetId, reference: argText, note: '' }, { source: 'tui' });
+          done = `receipt confirmed (${argText})`;
+        }
+      }
+      this.refresh({ disk: false });
+      if (this.state.overlay === 'packet') await this.showPacketSummary();
+      this.state.status = kind === 'create' ? `${done} · next: submit externally, then :attest <rfc3339>`
+        : kind === 'attest' ? `${done} · next: :receipt <external-reference> once the site confirms`
+          : `${done} · application loop complete locally`;
+    } catch (error) {
+      if (error?.code === 'stale_snapshot') {
+        reload(this.store);
+        this.state.status = `packet ${kind} stopped: workspace changed; refreshed safely, retry when ready`;
+      } else {
+        this.state.status = `packet ${kind} failed: ${error.message}`;
+      }
+      this.state.error = error.message;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
   }
 
   currentReviewItem() {
@@ -1292,15 +1511,21 @@ export class JobosTui {
       return;
     }
     const artifactId = this.state.selectedArtifactId;
-    const row = one(this.store, 'SELECT id,job_id,path FROM artifacts WHERE id=?', [artifactId]);
+    const row = one(this.store, 'SELECT id,job_id,path,type FROM artifacts WHERE id=?', [artifactId]);
     this.state.mode = 'normal';
     this.state.input = '';
     const reviewed = this.reviewCurrentArtifact('rejected', note);
     if (!reviewed || !row) return;
+    const hint = redraftCliHint(
+      { type: row.type, jobId: row.job_id, job_id: row.job_id, path: row.path },
+      this.model.profileId
+    );
     if (this.client?.state === 'ready' && !this.state.busy) {
+      this.state.status = `rejected · agent redraft requested · or CLI: ${hint}`;
+      this.render();
       await this.promptAgent(`Revise artifact ${row.id} (${row.path}) for job ${row.job_id} using only stored proof points. Human rejection feedback: ${note}`);
     } else {
-      this.state.status = 'Rejection saved; redraft skipped because the agent is not ready.';
+      this.state.status = `Rejection saved · redraft next: ${hint}`;
       this.applyPendingAutoOpen();
       this.render();
     }

@@ -92,6 +92,31 @@ function blocker(code, message, nextAction, details = {}) {
   return { code, message, nextAction, ...details };
 }
 
+function topLevelNextAction({ status, blockers, pendingArtifactIds, packet, jobId, profileId }) {
+  if (status === 'blocked') {
+    return blockers[0]?.nextAction || 'Resolve the first blocker listed above, then re-run readiness.';
+  }
+  if (status === 'ready-for-review') {
+    return pendingArtifactIds.length
+      ? `Approve the pending draft revision(s) after review: ${pendingArtifactIds.map(artifactId => `"jobos artifacts approve ${artifactId} --json"`).join(', ')}.`
+      : 'Review the current material revisions and approve them with "jobos artifacts approve <artifact-id> --json".';
+  }
+  // status === 'approved': local approval is complete; guidance follows the packet receipt lifecycle.
+  const currency = packet?.currency || 'none';
+  const receiptState = packet?.receiptState || 'none';
+  if (!packet?.currentPacketId || currency !== 'current') {
+    const staleNote = packet?.currentPacketId && currency !== 'none' ? ` The latest packet is ${currency}; a new one must be frozen.` : '';
+    return `Freeze an immutable application packet from the approved materials: "jobos apply packet create --job ${jobId} --profile ${profileId} --json".${staleNote}`;
+  }
+  if (receiptState === 'none') {
+    return `Submit the packet on the external job site yourself, then record the human submission: "jobos apply attest-submitted ${packet.currentPacketId} --submitted-at <rfc3339> --json".`;
+  }
+  if (receiptState === 'attested') {
+    return `Submission attested. Once the external system confirms receipt, record it: "jobos apply confirm-receipt ${packet.currentPacketId} --reference <external-reference> --json".`;
+  }
+  return 'Receipt confirmed — the application loop is complete locally. Follow-ups only (outreach, interview prep).';
+}
+
 export function compileApplicationReadiness(s, { jobId, profileId, includePacket = true }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw readinessError('unknown_job', `Unknown job: ${jobId}`);
@@ -196,6 +221,17 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
   const readyForReview = status !== 'blocked';
   const mirrorPath = path.join('jobs', jobId, 'application-readiness.yaml');
   const packetSummary = includePacket ? readinessPacketSummary(s, { jobId, profileId }) : null;
+  const packetView = includePacket ? (packetSummary || {
+    currentPacketId: null,
+    contentHash: null,
+    attemptNumber: null,
+    revision: null,
+    currency: 'none',
+    receiptState: 'none',
+    attestable: false,
+    latestReceiptId: null
+  }) : null;
+  const nextAction = topLevelNextAction({ status, blockers, pendingArtifactIds, packet: packetView, jobId, profileId });
   return {
     version: 3,
     generatedAt: now(),
@@ -230,19 +266,11 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     },
     answers,
     blockers,
+    nextAction,
     nextActions: blockers.map(item => ({ code: item.code, action: item.nextAction })),
     warnings,
     possibleDuplicateApplications: duplicates,
-    packet: includePacket ? (packetSummary || {
-      currentPacketId: null,
-      contentHash: null,
-      attemptNumber: null,
-      revision: null,
-      currency: 'none',
-      receiptState: 'none',
-      attestable: false,
-      latestReceiptId: null
-    }) : null,
+    packet: packetView,
     mirrorPath,
     policy: {
       meaning: 'Reviewable completeness and local human approval from local evidence only.',
