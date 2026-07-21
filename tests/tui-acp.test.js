@@ -13,6 +13,7 @@ import { defaultTuiState, JobosTui, renderTui, TUI_DOMAIN_ACTIONS } from '../src
 import { callDomainTool } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runMcpDemo } from '../scripts/mcp-demo.js';
+import { createArtifact } from '../src/artifacts.js';
 
 function workspace() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-tui-test-'));
@@ -92,6 +93,96 @@ test('agent is default-on, Escape does not hide it, overlays stay overlays, and 
   assert.equal(tui.state.agentOn, false);
   tui.onKeypress('a', { name: 'a' });
   assert.equal(tui.state.agentOn, true);
+});
+
+test('review queue opens the exact artifact revision, shows local readiness policy, and keeps document diff cancellable', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1 });
+  const first = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id }).selected.docs[0];
+  const revision = createArtifact(store, {
+    jobId: jobs[0].id,
+    profileId: profile.id,
+    type: 'resume',
+    path: `jobs/${jobs[0].id}/artifacts/resume-tailored.md`,
+    title: 'Tailored resume revision',
+    content: 'Revised proof-grounded resume content.',
+    evidence: [{ proofPointId: 'proof-current' }],
+    warnings: ['Review every claim before use.'],
+    seriesKey: first.seriesKey
+  });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+
+  tui.openOverlay('review');
+  const queuedIndex = tui.model.review.findIndex(item => item.id === revision.id);
+  assert.ok(queuedIndex >= 0);
+  tui.state.overlayIndex = queuedIndex;
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.overlay, 'docs');
+  assert.equal(tui.state.selectedArtifactId, revision.id);
+  assert.equal(tui.selectedDocument().id, revision.id);
+
+  let screen = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(screen, new RegExp(`hash ${revision.contentHash}`));
+  assert.match(screen, /history r1 .*r2/);
+  assert.match(screen, /evidence/);
+  assert.match(screen, /warning Review every claim/);
+  tui.onKeypress('D', { name: 'd', shift: true });
+  screen = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(screen, /DIFF r1 → r2/);
+  tui.onKeypress('D', { name: 'd', shift: true });
+  assert.equal(tui.state.docsDiff, false);
+
+  const selected = tui.model.selected;
+  assert.match(renderTui(tui.model, { ...tui.state, overlay: null }, { width: 150, height: 46, color: false }), /READINESS/);
+  assert.ok(selected.policy);
+  assert.equal(selected.policy.externalApply, 'user_configured_default_off');
+});
+
+test('document approval and rejection confirm locally, refresh review state, and retain Escape cancellation', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1 });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  const first = tui.model.review[0];
+  tui.openOverlay('review');
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.selectedDocument().id, first.id);
+
+  tui.onKeypress('A', { name: 'a', shift: true });
+  assert.equal(tui.state.mode, 'approve-confirm');
+  tui.onKeypress('', { name: 'escape' });
+  assert.equal(tui.state.overlay, 'docs');
+  assert.equal(tui.state.mode, 'normal');
+  tui.onKeypress('A', { name: 'a', shift: true });
+  tui.onKeypress('y', { name: 'y' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tui.model.selected.docs.find(item => item.id === first.id).approvalStatus, 'approved');
+  assert.equal(tui.model.review.some(item => item.id === first.id), false);
+  assert.equal(tui.model.selected.job.applicationStatus, null);
+
+  const rejected = createArtifact(store, {
+    jobId: jobs[0].id,
+    profileId: profile.id,
+    type: 'cover_letter',
+    path: `jobs/${jobs[0].id}/artifacts/cover-letter.md`,
+    title: 'Cover letter',
+    content: 'Draft cover letter.',
+    evidence: [],
+    warnings: []
+  });
+  tui.refresh({ disk: false });
+  tui.openDocuments(rejected.id);
+  tui.onKeypress('X', { name: 'x', shift: true });
+  assert.equal(tui.state.mode, 'reject-note');
+  for (const char of 'Missing evidence') tui.onKeypress(char, { name: char.toLowerCase() });
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.mode, 'reject-confirm');
+  tui.onKeypress('y', { name: 'y' });
+  await new Promise(resolve => setImmediate(resolve));
+  const rejectedDoc = tui.model.selected.docs.find(item => item.id === rejected.id);
+  assert.equal(rejectedDoc.approvalStatus, 'rejected');
+  assert.equal(rejectedDoc.reviewNote, 'Missing evidence');
+  assert.equal(tui.model.review.some(item => item.id === rejected.id), false);
+  assert.match(tui.state.status, /queue, readiness, and audit log refreshed/);
 });
 
 test('review, log, network, documents, answers, discovery, system, and profile surfaces render real state', async t => {

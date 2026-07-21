@@ -14,12 +14,23 @@ function pidAlive(pid) {
 export function acquireSchedulerLock(s) {
   fs.mkdirSync(s.p.state, { recursive: true });
   const file = path.join(s.p.state, 'scheduler.pid');
-  if (fs.existsSync(file)) {
-    const pid = Number(fs.readFileSync(file, 'utf8').trim());
+  try {
+    const fd = fs.openSync(file, 'wx');
+    fs.writeFileSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let pid;
+    try {
+      pid = Number(fs.readFileSync(file, 'utf8').trim());
+    } catch (readErr) {
+      if (readErr.code !== 'ENOENT') throw readErr;
+      return acquireSchedulerLock(s);
+    }
     if (pidAlive(pid)) throw Error(`Scheduler already running with PID ${pid}`);
     fs.rmSync(file, { force: true });
+    return acquireSchedulerLock(s);
   }
-  fs.writeFileSync(file, String(process.pid));
   return () => {
     try {
       if (fs.existsSync(file) && Number(fs.readFileSync(file, 'utf8').trim()) === process.pid) fs.rmSync(file, { force: true });
@@ -28,7 +39,23 @@ export function acquireSchedulerLock(s) {
 }
 
 export function dueAutomations(s, { nowDate = new Date() } = {}) {
-  return listAutomations(s, { includeNext: false }).filter(a => a.enabled && isDue(a.schedule, a.lastRunAt, nowDate));
+  const due = [];
+  let recordedInvalid = false;
+  for (const automation of listAutomations(s, { includeNext: false })) {
+    if (!automation.enabled) continue;
+    try {
+      if (isDue(automation.schedule, automation.lastRunAt, nowDate)) due.push(automation);
+    } catch (e) {
+      audit(s, 'automation.schedule_invalid', 'automation', automation.id, { schedule: automation.schedule, error: e.message });
+      recordedInvalid = true;
+    }
+  }
+  if (recordedInvalid) {
+    try { save(s); } catch (e) {
+      if (e?.code !== 'stale_snapshot') throw e;
+    }
+  }
+  return due;
 }
 
 function createReviewTaskForFailure(s, automation, error, at) {
@@ -158,13 +185,29 @@ export async function schedulerStatus(s) {
 export async function startScheduler(s, { intervalSeconds = 60, onTick = null } = {}) {
   const release = acquireSchedulerLock(s);
   let stopped = false;
-  const stop = () => { stopped = true; release(); };
-  process.once('SIGINT', () => { stop(); process.exit(0); });
-  process.once('SIGTERM', () => { stop(); process.exit(0); });
-  while (!stopped) {
-    const result = await runDueAutomations(s, { nowDate: new Date(), locked: true });
-    onTick?.(result);
-    await new Promise(resolve => setTimeout(resolve, Math.max(1, Number(intervalSeconds) || 60) * 1000));
+  let wake = null, timer = null;
+  const stop = () => {
+    stopped = true;
+    clearTimeout(timer);
+    timer = null;
+    wake?.();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    while (!stopped) {
+      const result = await runDueAutomations(s, { nowDate: new Date(), locked: true });
+      onTick?.(result);
+      if (stopped) break;
+      await new Promise(resolve => {
+        wake = resolve;
+        timer = setTimeout(resolve, Math.max(1, Number(intervalSeconds) || 60) * 1000);
+      });
+      wake = null;
+      timer = null;
+    }
+  } finally {
+    release();
   }
 }
 

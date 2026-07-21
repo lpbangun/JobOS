@@ -94,6 +94,50 @@ function filteredJobs(model, filter) {
   return model.jobs.filter(job => job.stage === filter);
 }
 
+function readinessLines(readiness, width, color) {
+  const status = readiness?.status || 'blocked';
+  const next = readiness?.nextAction || readiness?.next || readiness?.nextActions?.[0]?.action || 'Complete readiness checks';
+  const blockers = Array.isArray(readiness?.blockers) ? readiness.blockers : [];
+  const warnings = Array.isArray(readiness?.warnings) ? readiness.warnings : [];
+  const localApprovalComplete = readiness?.localApprovalComplete || readiness?.review?.localApprovalComplete;
+  const lines = [
+    paint(`READINESS ${status} · ${readiness?.readyForReview ? 'reviewable' : 'not reviewable'}${localApprovalComplete ? ' · locally approved' : ''}`, status === 'approved' ? 'green' : (status === 'blocked' ? 'bad' : 'warn'), color),
+    crop(`next ${typeof next === 'string' ? next : JSON.stringify(next)}`, width)
+  ];
+  if (blockers.length) lines.push(...wrap(`blockers ${blockers.length} · ${blockers[0].code || blockers[0]}`, width).slice(0, 1).map(line => paint(line, 'bad', color)));
+  if (warnings.length) lines.push(...wrap(`warnings ${warnings.length} · ${warnings[0].code || warnings[0]}`, width).slice(0, 1).map(line => paint(line, 'warn', color)));
+  return lines;
+}
+
+function policyLines(policy, width, color) {
+  const values = Object.entries(policy || {});
+  if (!values.length) return [paint('POLICY local review gate enforced', 'muted', color)];
+  return [
+    paint('POLICY', 'cyan', color),
+    ...values.flatMap(([key, value]) => wrap(`${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`, width)).slice(0, 2)
+  ];
+}
+
+function documentHistory(docs, doc) {
+  return docs
+    .filter(item => item.seriesKey === doc.seriesKey)
+    .sort((left, right) => Number(left.revision) - Number(right.revision))
+    .map(item => `r${item.revision} ${item.approvalStatus}${item.id === doc.id ? ' · current' : ''}`);
+}
+
+function documentDiff(before, after, width) {
+  const beforeLines = String(before?.content || '').split(/\r?\n/);
+  const afterLines = String(after?.content || '').split(/\r?\n/);
+  const lines = [`DIFF r${before?.revision || 0} → r${after.revision}`];
+  const limit = Math.max(3, Math.floor(width / 16));
+  for (let index = 0; index < Math.max(beforeLines.length, afterLines.length) && lines.length <= limit; index++) {
+    if (beforeLines[index] === afterLines[index]) continue;
+    if (beforeLines[index] != null) lines.push(`- ${beforeLines[index]}`);
+    if (afterLines[index] != null) lines.push(`+ ${afterLines[index]}`);
+  }
+  return lines.length === 1 ? [...lines, 'No textual changes from previous revision.'] : lines;
+}
+
 function headerLine(model, state, width, color) {
   const agentState = state.agentOn ? state.agentState : 'off';
   if (width < 140) {
@@ -159,7 +203,7 @@ function detailPanel(model, width, height, color) {
   const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.confidence || 'confidence —'}` : 'not scored';
   const next = item.next[0];
   const proofs = item.proofs.length ? item.proofs.map(proof => `${proof.id} ${proof.summary}`) : ['No matched proof IDs yet'];
-  const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · ${doc.path}`) : ['No artifacts — pursue to stage drafts'];
+  const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No artifacts — pursue to stage drafts'];
   const stages = item.stages.map(stage => `${stage.name}:${stage.state}`).join('  ');
   const lines = [
     paint(`${item.job.title}`, 'green', color),
@@ -167,6 +211,10 @@ function detailPanel(model, width, height, color) {
     '',
     paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
     ...wrap(item.narrative, width - 4).slice(0, 3),
+    '',
+    ...readinessLines(item.readiness, width - 4, color),
+    '',
+    ...policyLines(item.policy, width - 4, color),
     '',
     paint('NEXT', 'cyan', color),
     next ? `${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
@@ -250,15 +298,30 @@ function overlayPanel(model, state, width, height, color) {
     else {
       const index = Math.min(state.overlayIndex, docs.length - 1);
       const doc = docs[index];
-      const visible = visibleWindow(docs, index, Math.min(8, Math.max(2, height - 10)));
+      const visible = visibleWindow(docs, index, Math.min(7, Math.max(2, height - 14)));
+      const previous = docs.find(item => item.id === doc.supersedesArtifactId)
+        || docs.filter(item => item.seriesKey === doc.seriesKey && item.revision < doc.revision)
+          .sort((left, right) => right.revision - left.revision)[0];
+      const content = state.docsDiff && previous
+        ? documentDiff(previous, doc, width - 4)
+        : wrap(doc.content, Math.min(width - 4, 100));
       body = [
-        ...visible.items.map((item, offset) => `${visible.start + offset === index ? '▶' : ' '} ${item.title} · ${item.approvalStatus}`),
+        ...visible.items.map((item, offset) => `${visible.start + offset === index ? '▶' : ' '} ${item.title} · r${item.revision} · ${item.approvalStatus}`),
         '',
-        `${doc.path}`,
-        ...wrap(doc.content, Math.min(width - 4, 100)).slice(0, Math.max(4, height - visible.items.length - 8))
+        doc.path,
+        `hash ${doc.contentHash || 'unavailable'} · series ${doc.seriesKey || 'unavailable'} · r${doc.revision}`,
+        `history ${documentHistory(docs, doc).join(' · ')}`,
+        ...(doc.evidence?.length ? [`evidence ${JSON.stringify(doc.evidence)}`] : ['evidence none recorded']),
+        ...(doc.warnings?.length ? doc.warnings.map(value => `warning ${typeof value === 'string' ? value : JSON.stringify(value)}`) : []),
+        ...(doc.reviewedAt ? [`reviewed ${doc.reviewedAt}${doc.reviewedBy ? ` by ${doc.reviewedBy}` : ''}${doc.reviewNote ? ` · ${doc.reviewNote}` : ''}`] : []),
+        '',
+        ...content.slice(0, Math.max(3, height - visible.items.length - 14))
       ];
+      if (state.mode === 'approve-confirm') body.push('', `Approve r${doc.revision} locally? y commits · n/Esc cancels`);
+      if (state.mode === 'reject-note') body.push('', `Rejection note: ${state.input}█`, 'Enter confirms · Esc cancels');
+      if (state.mode === 'reject-confirm') body.push('', `Reject r${doc.revision} locally with this note? y commits · n/Esc cancels`);
     }
-    body.push('', 'j/k choose document · Esc closes');
+    body.push('', 'j/k choose · D diff · A approve · X reject · Esc closes');
   } else if (state.overlay === 'answers') {
     title = `ANSWERS · ${model.profileId || 'NO PROFILE'}`;
     body = [
@@ -278,7 +341,7 @@ function overlayPanel(model, state, width, height, color) {
   } else if (state.overlay === 'system') {
     body = [
       ...state.catalog.map(item => `${item.name} · ${item.available ? 'available' : 'unavailable'} · ${item.protocol} · ${item.role}`),
-      `browser · optional/unavailable is honest on headless VPS`,
+      'browser · optional/unavailable is honest on headless VPS',
       `side-effects · ${model.policy.sideEffects}`,
       `drafts · ${model.policy.drafts}`,
       '',
@@ -298,17 +361,17 @@ function footerLines(width) {
   if (width >= 90) {
     return [
       ' j/k select · 1 today 2 all 3 high · p pursue z score d daily · a agent i prompt',
-      ' r review l log · n network o docs q answers · s sources ? system · : command Q quit'
+      ' r review l log · n network o docs (D diff A approve X reject) · q answers · : command Q quit'
     ];
   }
   return [
     ' j/k select · 1 today · 2 all · 3 high',
     ' p pursue · z score · d daily · a agent · i prompt',
-    ' r review · l log · n network · o docs · q answers',
+    ' r review · l log · n network · o docs',
+    ' docs: D diff A approve X reject · q answers',
     ' s sources · ? system · : command · Q quit'
   ];
 }
-
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
@@ -354,12 +417,14 @@ export function defaultTuiState() {
   return {
     filter: 'today',
     selectedJobId: null,
+    selectedArtifactId: null,
     profileId: null,
     agentOn: true,
     agentState: 'connecting',
     sessionId: null,
     overlay: null,
     overlayIndex: 0,
+    docsDiff: false,
     mode: 'normal',
     input: '',
     status: 'starting JobOS host',
@@ -392,6 +457,23 @@ export class JobosTui {
     this.boundResize = () => this.render();
     this.stopped = false;
   }
+  selectedDocument() {
+    const docs = this.model.selected?.docs || [];
+    return docs[this.state.overlayIndex] || null;
+  }
+
+  syncDocumentSelection() {
+    const docs = this.model.selected?.docs || [];
+    const index = docs.findIndex(item => item.id === this.state.selectedArtifactId);
+    if (index >= 0) this.state.overlayIndex = index;
+    else if (docs.length) {
+      this.state.overlayIndex = Math.min(this.state.overlayIndex, docs.length - 1);
+      this.state.selectedArtifactId = docs[this.state.overlayIndex].id;
+    } else {
+      this.state.overlayIndex = 0;
+      this.state.selectedArtifactId = null;
+    }
+  }
 
   dimensions() {
     return {
@@ -415,6 +497,7 @@ export class JobosTui {
     });
     this.state.profileId = this.model.profileId;
     this.state.selectedJobId = this.model.selectedJobId;
+    this.syncDocumentSelection();
     this.render();
   }
 
@@ -432,27 +515,37 @@ export class JobosTui {
     this.refresh({ disk: false });
   }
 
+  openDocuments(artifactId = null) {
+    this.state.selectedArtifactId = artifactId || this.state.selectedArtifactId;
+    this.openOverlay('docs');
+    this.syncDocumentSelection();
+    this.render();
+  }
+
   openOverlay(name) {
     this.state.overlay = name;
     this.state.overlayIndex = 0;
+    this.state.docsDiff = false;
     this.state.mode = 'normal';
     this.state.input = '';
+    if (name === 'docs') this.syncDocumentSelection();
     this.state.status = `${name} overlay · Esc closes`;
     this.render();
   }
 
   closeTransient() {
-    if (this.state.overlay) {
-      this.state.overlay = null;
-      this.state.overlayIndex = 0;
-      this.state.status = 'overlay closed';
-      this.render();
-      return true;
-    }
     if (this.state.mode !== 'normal') {
       this.state.mode = 'normal';
       this.state.input = '';
       this.state.status = 'input cancelled';
+      this.render();
+      return true;
+    }
+    if (this.state.overlay) {
+      this.state.overlay = null;
+      this.state.overlayIndex = 0;
+      this.state.docsDiff = false;
+      this.state.status = 'overlay closed';
       this.render();
       return true;
     }
@@ -609,6 +702,33 @@ export class JobosTui {
     }
   }
 
+  async commitArtifactReview(decision) {
+    const artifact = this.selectedDocument();
+    if (!artifact || this.state.busy) return;
+    const tool = decision === 'approved' ? 'approve_artifact' : 'reject_artifact';
+    const args = decision === 'approved'
+      ? { artifactId: artifact.id }
+      : { artifactId: artifact.id, note: this.state.input.trim() };
+    this.state.busy = tool;
+    this.state.error = null;
+    this.state.status = `${decision} r${artifact.revision} locally`;
+    this.render();
+    try {
+      await callDomainTool(this.store, tool, args, { source: 'tui' });
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = `${decision} locally · queue, readiness, and audit log refreshed`;
+      this.refresh({ disk: false });
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${decision} failed: ${error.message}`;
+      this.render();
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   executeCommand(value) {
     const [command] = String(value || '').trim().split(/\s+/);
     this.state.mode = 'normal';
@@ -633,10 +753,31 @@ export class JobosTui {
 
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
+    if (this.state.overlay === 'docs') {
+      const docs = this.model.selected?.docs || [];
+      if (value === 'j' && docs.length) {
+        this.state.overlayIndex = Math.min(docs.length - 1, this.state.overlayIndex + 1);
+        this.state.selectedArtifactId = docs[this.state.overlayIndex].id;
+        this.state.docsDiff = false;
+      } else if (value === 'k' && docs.length) {
+        this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+        this.state.selectedArtifactId = docs[this.state.overlayIndex].id;
+        this.state.docsDiff = false;
+      } else if (value === 'D') {
+        this.state.docsDiff = !this.state.docsDiff;
+      } else if (value === 'A' && this.selectedDocument()) {
+        this.state.mode = 'approve-confirm';
+      } else if (value === 'X' && this.selectedDocument()) {
+        this.state.mode = 'reject-note';
+        this.state.input = '';
+      }
+      this.render();
+      return true;
+    }
     if (value === 'r') return this.openOverlay('review');
     if (value === 'l') return this.openOverlay('log');
     if (value === 'n') return this.openOverlay('network');
-    if (value === 'o') return this.openOverlay('docs');
+    if (value === 'o') return this.openDocuments();
     if (value === 'q') return this.openOverlay('answers');
     if (value === 's') return this.openOverlay('discovery');
     if (value === '?') return this.openOverlay('system');
@@ -644,9 +785,11 @@ export class JobosTui {
     if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
     else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
     else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
-      this.state.selectedJobId = items[this.state.overlayIndex].jobId;
+      const artifact = items[this.state.overlayIndex];
+      this.state.selectedJobId = artifact.jobId;
+      this.state.selectedArtifactId = artifact.id;
       this.refresh({ disk: false });
-      this.openOverlay('docs');
+      this.openDocuments(artifact.id);
       return true;
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'profile' && items[this.state.overlayIndex]) {
       this.state.profileId = items[this.state.overlayIndex].id;
@@ -667,6 +810,32 @@ export class JobosTui {
 
   onInputKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
+    if (this.state.mode === 'approve-confirm' || this.state.mode === 'reject-confirm') {
+      if (value === 'y') {
+        void this.commitArtifactReview(this.state.mode === 'approve-confirm' ? 'approved' : 'rejected');
+        return true;
+      }
+      if (value === 'n') {
+        this.state.mode = 'normal';
+        this.state.input = '';
+        this.state.status = 'review decision cancelled';
+        this.render();
+        return true;
+      }
+      // Ignore other keys (Enter, backspace, etc.) so they do not silently cancel the confirmation.
+      this.render();
+      return true;
+    }
+    if (this.state.mode === 'reject-note') {
+      if (key.name === 'backspace') this.state.input = this.state.input.slice(0, -1);
+      else if (key.name === 'return' || key.name === 'enter') {
+        this.state.mode = 'reject-confirm';
+        this.render();
+        return true;
+      } else if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) this.state.input += value;
+      this.render();
+      return true;
+    }
     if (key.name === 'backspace') this.state.input = this.state.input.slice(0, -1);
     else if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
@@ -682,6 +851,7 @@ export class JobosTui {
     this.render();
     return true;
   }
+
 
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
@@ -711,7 +881,7 @@ export class JobosTui {
     } else if (value === 'r') this.openOverlay('review');
     else if (value === 'l') this.openOverlay('log');
     else if (value === 'n') this.openOverlay('network');
-    else if (value === 'o') this.openOverlay('docs');
+    else if (value === 'o') this.openDocuments();
     else if (value === 'q') this.openOverlay('answers');
     else if (value === 's') this.openOverlay('discovery');
     else if (value === '?') this.openOverlay('system');

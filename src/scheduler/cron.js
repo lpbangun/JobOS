@@ -37,8 +37,10 @@ export function parseCron(expr) {
     minute: expandField(minute, 0, 59),
     hour: expandField(hour, 0, 23),
     dayOfMonth: expandField(dayOfMonth, 1, 31),
+    dayOfMonthAny: dayOfMonth === '*',
     month: expandField(month, 1, 12),
-    dayOfWeek: expandField(dayOfWeek, 0, 7, { allowSevenAsSunday: true })
+    dayOfWeek: expandField(dayOfWeek, 0, 7, { allowSevenAsSunday: true }),
+    dayOfWeekAny: dayOfWeek === '*'
   };
 }
 
@@ -51,11 +53,19 @@ export function floorMinute(date) {
 export function matchesCron(expr, date = new Date()) {
   const c = typeof expr === 'string' ? parseCron(expr) : expr;
   const d = floorMinute(date);
+  const domMatches = c.dayOfMonth.has(d.getUTCDate());
+  const dowMatches = c.dayOfWeek.has(d.getUTCDay());
+  const dayMatches = c.dayOfMonthAny && c.dayOfWeekAny
+    ? true
+    : c.dayOfMonthAny
+      ? dowMatches
+      : c.dayOfWeekAny
+        ? domMatches
+        : domMatches || dowMatches;
   return c.minute.has(d.getUTCMinutes())
     && c.hour.has(d.getUTCHours())
-    && c.dayOfMonth.has(d.getUTCDate())
+    && dayMatches
     && c.month.has(d.getUTCMonth() + 1)
-    && c.dayOfWeek.has(d.getUTCDay());
 }
 
 export function nextRunAfter(expr, after = new Date()) {

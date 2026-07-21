@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-16
+## Current status — 2026-07-20
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -36,7 +36,9 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
 - MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, and `answers_match`.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
-- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review/approved statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+
+- Human review closure: immutable artifact series/revisions with SHA-256 content identity, current-revision queue/diff, trusted CLI/TUI approval or rejection, fail-closed workspace verification, local-only review audit events, readiness `approved` semantics, redraft invalidation, explicit MCP/ACP mutation denials, and no restored web/API bypass.
 
 ### Intentionally deferred
 
@@ -50,14 +52,15 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- `npm test`: **118/118 passed** after readiness rebase onto PR #6 main (ACP host + domain-tools + readiness suite).
-- `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
+- PR 9 converged after the TUI-focus web-interface cutover: affected artifact/readiness/CLI/TUI/discovery/scheduler checks **53/53 passed**; `npm test` **126/126 passed**. No unresolved acceptance failure remains.
+- `npm run smoke`: passed the extended local human-review path (`ready-for-review` → exact resume/cover diffs → local approvals → `approved`) with unchanged application/status state, exactly two approval audit events, and `external_side_effect='none'`; the existing applied/interview analytics, scheduler, and workspace-export flow then completed without the removed web interface.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 31-tool list (includes `applications_plan`), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
-- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
+- Human-review suite `tests/human-review.test.js`: **6/6 passed**, covering current-only queueing, exact/idempotent/local-only decisions, redraft invalidation, workspace divergence, MCP/ACP denials, optimistic two-store races, and legacy lineage migration. Readiness review transitions, restricted-value redaction, and YAML refresh passed in the focused readiness checks.
+- Final raw-terminal review drill: opened the current queue, exact resume r2 with hash/evidence/history, predecessor diff, and approval confirmation; Escape cancelled the first confirmation, the second committed locally, the queue dropped that revision, readiness refreshed to `approved`, the audit overlay showed `artifact.approved (none)`, and uppercase `Q` exited `0`. A post-run CLI check retained application status `interview` with `submissionPerformed: false` and `applicationStatusChanged: false`.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
 

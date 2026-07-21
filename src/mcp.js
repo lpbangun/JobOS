@@ -8,8 +8,7 @@ function result(value) {
 }
 
 async function callTool(s, name, args = {}) {
-  const source = String(process.env.JOBOS_MEDIATION || 'mcp');
-  return result(await callDomainTool(s, name, args, { source }));
+  return result(await callDomainTool(s, name, args, { source: 'mcp' }));
 }
 
 function send(message, framing = 'header') {

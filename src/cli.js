@@ -74,6 +74,10 @@ export const commandRegistry = [
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
+  cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
+  cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
+  cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
+  cmd(['artifacts', 'reject'], 'jobos artifacts reject <artifact-id> --note <reason> [--json]', 'Reject an exact current artifact revision and require a new draft.', { flags: ['--note <reason>'], category: 'workflow' }),
   cmd(['applications', 'plan'], 'jobos applications plan --job <job-id> --profile <profile-id> [--json]', 'Compile review readiness from local score, proofs, materials, answers, and identity evidence.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['applications', 'create'], 'jobos applications create --job <job-id> --status <status> [--json]', 'Create or upsert a local application tracking record.'),
   cmd(['applications', 'update'], 'jobos applications update <application-id> --status <status> [--json]', 'Update a tracked application status.'),
@@ -625,6 +629,39 @@ export async function main(argv = process.argv.slice(2)) {
     const r = await tailor(s, jobId, needProfile(flags), 'cover');
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
+    return;
+  }
+  if (group === 'artifacts' && action === 'queue') {
+    out(await callDomainTool(s, 'review_queue', {
+      profileId: flags.profile ? String(flags.profile) : null,
+      jobId: flags.job ? String(flags.job) : null
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'artifacts' && action === 'diff') {
+    if (!subaction) usage('Missing artifact id');
+    const result = await callDomainTool(s, 'diff_artifact', {
+      artifactId: String(subaction),
+      againstArtifactId: flags.against ? String(flags.against) : null
+    }, { source: 'cli' });
+    if (flags.json) out(result);
+    else text(result.text);
+    return;
+  }
+  if (group === 'artifacts' && action === 'approve') {
+    if (!subaction) usage('Missing artifact id');
+    out(await callDomainTool(s, 'approve_artifact', {
+      artifactId: String(subaction),
+      note: flags.note ? String(flags.note) : ''
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'artifacts' && action === 'reject') {
+    if (!subaction) usage('Missing artifact id');
+    out(await callDomainTool(s, 'reject_artifact', {
+      artifactId: String(subaction),
+      note: String(requireFlag(flags, 'note'))
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'applications' && action === 'plan') {
