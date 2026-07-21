@@ -83,6 +83,14 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   // Global (skip Q — exits)
   for (const token of TUI_HANDLED_KEYS.global) {
     if (token === 'Q') continue;
+    if (token === 'b') {
+      // Clear any overlay left by earlier tokens so the GLOBAL handler is exercised
+      tui.state.overlay = null;
+      fire(token);
+      assert.equal(tui.state.overlay, 'build-network', 'global b opens the build-network overlay');
+      tui.state.overlay = null;
+      continue;
+    }
     if (token === ':') {
       fire(token);
       tui.state.mode = 'normal';
