@@ -30,7 +30,7 @@ const COLORS = {
   bad: `${ESC}38;5;203m`,
   inverse: `${ESC}7m`
 };
-const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
+export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
   pursue: 'pursue_job',
@@ -42,13 +42,14 @@ export const stageOrder = Array.from(validStatuses);
 export const TUI_KEYMAP = Object.freeze({
   global: Object.freeze([
     ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
+    ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
     ['s', 'sources'], ['?', 'system'], [':', 'command'], ['Q', 'quit']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['j/k', 'select'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
 
@@ -58,10 +59,10 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', ':', 'Q']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', ':', 'Q']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
-  discovery: Object.freeze(['j', 'k', 'A', 'X', 'd', 'escape']),
+  discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
 });
 
@@ -690,12 +691,13 @@ function overlayPanel(model, state, width, height, color) {
 function footerLines(width) {
   if (width >= 90) {
     return [
-      ' j/k select · 1 today 2 all 3 high · p pursue z score d daily · a agent i prompt',
+      ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
       ' r review l log · n network o docs q answers · s sources ? system · b build-network : command Q quit'
     ];
   }
   return [
     ' j/k select · 1 today · 2 all · 3 high',
+    ' 4 review · 5 materials-ready · 6 applied · 7 interview',
     ' p pursue · z score · d daily · a agent · i prompt',
     ' r review · l log · n network · o docs · q answers',
     ' s sources · ? system · b build-network · : command · Q quit'
@@ -1549,6 +1551,30 @@ export class JobosTui {
     this.render();
   }
 
+  openDiscoverySelection() {
+    const jobId = this.state.selectedDiscoveryJobId;
+    const row = jobId ? one(this.store, 'SELECT id,status FROM jobs WHERE id=?', [jobId]) : null;
+    if (!row || row.status !== 'new') {
+      this.refresh();
+      this.state.status = 'Discovery selection is stale; queue refreshed without changes.';
+      this.render();
+      return;
+    }
+    try {
+      updateJobStatus(this.store, jobId, 'saved');
+      this.state.error = null;
+      this.state.overlay = null;
+      this.state.filter = 'all';
+      this.state.selectedJobId = jobId;
+      this.refresh({ disk: false });
+      this.state.status = 'Discovery job saved · now selected in the main list.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Discovery open failed: ${error.message}`;
+    }
+    this.render();
+  }
+
   decideDiscovery(status) {
     const jobId = this.state.selectedDiscoveryJobId;
     const row = jobId ? one(this.store, 'SELECT id,status FROM jobs WHERE id=?', [jobId]) : null;
@@ -1790,6 +1816,17 @@ export class JobosTui {
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
+    if (this.state.overlay === 'discovery') {
+      if (key.name === 'return' || key.name === 'enter') return this.openDiscoverySelection();
+      if (value === 'j') return this.moveDiscoverySelection(1);
+      if (value === 'k') return this.moveDiscoverySelection(-1);
+      if (value === 'A') return this.decideDiscovery('saved');
+      if (value === 'X') return this.decideDiscovery('archived');
+      if (value === 'd') {
+        void this.runAction('daily');
+        return true;
+      }
+    }
     if (value === 'r') return this.openOverlay('review');
     if (value === 'l') return this.openOverlay('log');
     if (value === 'n') return this.openOverlay('network');
@@ -2019,6 +2056,10 @@ export class JobosTui {
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
     else if (value === '2') { this.state.filter = 'all'; this.refresh({ disk: false }); }
     else if (value === '3') { this.state.filter = 'high'; this.refresh({ disk: false }); }
+    else if (value === '4') { this.state.filter = 'review'; this.refresh({ disk: false }); }
+    else if (value === '5') { this.state.filter = 'materials-ready'; this.refresh({ disk: false }); }
+    else if (value === '6') { this.state.filter = 'applied'; this.refresh({ disk: false }); }
+    else if (value === '7') { this.state.filter = 'interview'; this.refresh({ disk: false }); }
     else if (value === 'a') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'} · Esc never hides it`;

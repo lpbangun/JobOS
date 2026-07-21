@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { openStore, all } from '../src/db.js';
+import { openStore, all, one, run, save } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
@@ -14,6 +14,7 @@ import { readinessPacketSummary } from '../src/packets.js';
 import {
   TUI_KEYMAP,
   TUI_HANDLED_KEYS,
+  FILTERS,
   expandKeymapBinding,
   keypressForToken,
   JobosTui,
@@ -326,4 +327,43 @@ test('packet create from TUI refuses when readiness is not approved', async t =>
   assert.match(tui.state.status, /packet create failed/);
   assert.equal(readinessPacketSummary(store, { jobId: job.id, profileId: profile.id }).currentPacketId, null,
     'no packet may be frozen before approval');
+});
+
+// Gap #3 — every painted filter is reachable by a number key
+test('number keys select every painted filter in header order', async t => {
+  const { store, profile, job } = await seeded(t, { draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = job.id;
+  tui.refresh({ disk: false });
+
+  FILTERS.forEach((name, index) => {
+    const key = String(index + 1);
+    tui.onKeypress(key, { name: key });
+    assert.equal(tui.state.filter, name, `key ${key} must select painted filter "${name}"`);
+  });
+
+  // Header paints exactly FILTERS; no advertised filter lacks a key
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  for (const name of FILTERS) assert.ok(screen.includes(name), `filter "${name}" painted in header`);
+});
+
+// Gap #4 — discovery Enter opens the highlighted job in the main list
+test('discovery Enter saves the highlighted job and selects it in the main list', async t => {
+  const { store, profile, job } = await seeded(t, { draft: false });
+  run(store, "UPDATE jobs SET status='new' WHERE id=?", [job.id]);
+  save(store);
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.refresh({ disk: false });
+
+  tui.openOverlay('discovery');
+  assert.equal(tui.state.overlay, 'discovery');
+  assert.equal(tui.state.selectedDiscoveryJobId, job.id, 'queue highlights the new job');
+
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.overlay, null, 'overlay closes');
+  assert.equal(one(store, 'SELECT status FROM jobs WHERE id=?', [job.id]).status, 'saved', 'job saved into the main list');
+  assert.equal(tui.model.selected?.job.id, job.id, 'main selection follows the opened job');
+  assert.match(tui.state.status, /saved · now selected in the main list/);
 });

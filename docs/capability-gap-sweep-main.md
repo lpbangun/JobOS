@@ -21,32 +21,12 @@ This file is the **living remaining list only**. Historical full sweep narrative
 - [x] MCP/ACP packet + artifact mutations stay denied  
 - [x] Approved readiness nextAction follows `packet.receiptState` (freeze → attest → confirm → done; ready-for-review → approve materials) — `topLevelNextAction` in `src/readiness.js`, dead-end fallback removed from `src/tui.js`; lifecycle test in `tests/readiness.test.js` (2026-07-21)  
 - [x] TUI apply loop mutations — `:packet create` / `:attest [rfc3339]` / `:receipt <ref>` via `callDomainTool` `source:'tui'`; overlay CTA follows `receiptState`; full approve→freeze→attest→confirm path tested in TUI, MCP/ACP denial still green (2026-07-21)  
+- [x] Filter bar honesty — keys `4`–`7` bound to review / materials-ready / applied / interview (all backed by `filteredJobs`), advertised in KEYMAP; narrow-terminal footer rebalanced so `s/?/:/Q` stay visible (2026-07-21)  
+- [x] Discovery Enter — Enter in the discovery overlay saves the highlighted job and selects it in the main list (overlay closes, filter → all); advertised in discovery KEYMAP; A/X/d unchanged (2026-07-21)  
 
 ---
 
 ## Still open — check one by one
-
-### 3. P0-ish — Filter bar honesty
-
-- [ ] Every filter painted in the job list is reachable by a key **or** unbound filters are not painted  
-- [ ] Current `FILTERS`: today / all / high / review / materials-ready / applied / interview  
-- [ ] Keys today: only `1`–`3` (today/all/high); `4`–`7` either bound or hidden from chrome
-
-**Where:** `FILTERS` + list header in `src/tui.js`; `onKeypress` filter handlers  
-**Verify:** press each advertised filter control; list filter changes
-
----
-
-### 4. P0-ish — Discovery Enter opens job
-
-- [ ] In discovery overlay, Enter selects the highlighted new job into the main list and closes (or focuses) the shell  
-- [ ] KEYMAP/hints mention Enter if it works  
-- [ ] Accept/archive still work; `d` still runs daily
-
-**Where:** discovery branch of `onOverlayKey` in `src/tui.js`  
-**Verify:** `s` → j/k → Enter → main selection is that job
-
----
 
 ### 5. P1 — Contact human gates in TUI
 
@@ -93,9 +73,9 @@ This file is the **living remaining list only**. Historical full sweep narrative
 
 ## Suggested order for the next sessions
 
-1. **#3** filters bind or hide  
-2. **#4** discovery Enter  
-3. Then P1 contacts → answers → P2 strip → P3 tests  
+1. P1 contacts (#5) → answers (#6)  
+2. P2 strip actions (#7)  
+3. P3 contract-hygiene tests (#8)  
 
 ---
 
