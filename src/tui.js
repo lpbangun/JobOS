@@ -671,7 +671,7 @@ function overlayPanel(model, state, width, height, color) {
     const outreach = model.outreachDue || [];
     if (outreach.length) {
       body.push('', `OUTREACH FOLLOW-UPS (${outreach.length}):`);
-      body.push(...outreach.slice(0, 6).map(item => ` ${item.taskDueAt ? String(item.taskDueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
+      body.push(...outreach.slice(0, 6).map(item => ` ${item.dueAt ? String(item.dueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
     } else {
       body.push('', 'No outreach follow-ups due.');
     }
@@ -1306,6 +1306,7 @@ export class JobosTui {
       this.state.mode = 'normal';
       this.state.input = '';
       this.refresh({ disk: false });
+      this.state.busy = null;
       if (decision === 'rejected') {
         const hint = redraftCliHint(
           { ...artifact, jobId: artifact.jobId || this.state.selectedJobId, job_id: this.state.selectedJobId },
