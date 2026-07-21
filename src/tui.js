@@ -46,12 +46,14 @@ export const TUI_KEYMAP = Object.freeze({
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit']
+    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
+    ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
   discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
+  due: Object.freeze([['j/k', 'select'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
 
@@ -61,11 +63,12 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
+  due: Object.freeze(['j', 'k', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
 });
 
@@ -79,6 +82,7 @@ export function expandKeymapBinding(binding) {
     'Ctrl+A': ['ctrl+a'],
     Enter: ['return'],
     Esc: ['escape'],
+    Tab: ['tab'],
     Q: ['Q'],
     ':': [':'],
     '?': ['?'],
@@ -94,6 +98,7 @@ export function keypressForToken(token) {
   if (token === 'ctrl+a') return { value: 'a', key: { name: 'a', ctrl: true } };
   if (token === 'return') return { value: '', key: { name: 'return' } };
   if (token === 'escape') return { value: '', key: { name: 'escape' } };
+  if (token === 'tab') return { value: '', key: { name: 'tab' } };
   if (token === 'up' || token === 'down' || token === 'left' || token === 'right') {
     return { value: '', key: { name: token } };
   }
@@ -254,14 +259,15 @@ function headerLine(model, state, width, color) {
   return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'green', color);
 }
 
-function priorityLines(model, width, color) {
+function priorityLines(model, state, width, color) {
+  const focused = state.stripIndex || 0;
   if (width < 100) {
-    return model.priority.map(item => paint(fit(`[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
+    return model.priority.map((item, index) => paint(fit(`${index === focused ? '▶' : ' '}[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
   }
   const gap = 1;
   const cardWidth = Math.floor((width - gap * 3) / 4);
-  const cards = model.priority.map(item => {
-    const label = item.kind.toUpperCase();
+  const cards = model.priority.map((item, index) => {
+    const label = `${index === focused ? '▶ ' : ''}${item.kind.toUpperCase()}`;
     return [
       paint(`┌${fit(` ${label} `, cardWidth - 2, 'left')}┐`, item.kind === 'failure' ? 'bad' : 'green', color),
       `│${fit(item.text, cardWidth - 2)}│`,
@@ -362,6 +368,7 @@ function overlayItems(model, state) {
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
   if (state.overlay === 'network') return networkOverlayItems(model);
+  if (state.overlay === 'due') return model.dueTasks || [];
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
   return [];
 }
@@ -651,6 +658,24 @@ function overlayPanel(model, state, width, height, color) {
         fit(`${q.status === 'blocked' ? '⚠' : '·'} [${q.category}] ${q.question}${q.status === 'blocked' ? ' · restricted — direct input required' : ' · unmatched'}`, width - 4)));
       body.push('', ':answer add [category] | <exact question> | <your answer>');
     }
+  } else if (state.overlay === 'due') {
+    title = 'DUE · tasks & outreach';
+    const tasks = model.dueTasks || [];
+    if (tasks.length) {
+      body = [`TASKS (${tasks.length}):`];
+      const visible = visibleWindow(tasks, state.overlayIndex, Math.max(3, height - 10));
+      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${task.dueAt ? String(task.dueAt).slice(0, 10) : 'no date'} · ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
+    } else {
+      body = ['No open tasks.'];
+    }
+    const outreach = model.outreachDue || [];
+    if (outreach.length) {
+      body.push('', `OUTREACH FOLLOW-UPS (${outreach.length}):`);
+      body.push(...outreach.slice(0, 6).map(item => ` ${item.taskDueAt ? String(item.taskDueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
+    } else {
+      body.push('', 'No outreach follow-ups due.');
+    }
+    body.push('', keyHints('due'), 'Enter jumps to the selected task’s job');
   } else if (state.overlay === 'discovery') {
     body = [
       'SAVED SEARCHES / RUNS',
@@ -760,7 +785,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const footers = footerLines(safeWidth);
   const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
-  const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, safeWidth, color)];
+  const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(9, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
@@ -836,6 +861,7 @@ export function defaultTuiState() {
     pendingAutoOpenArtifactId: null,
     editorActive: false,
     stageIndex: 0,
+    stripIndex: 0,
     pendingConfirm: null,
     pendingSuppressContactId: null,
     packetDetail: null,
@@ -1429,7 +1455,7 @@ export class JobosTui {
     if (!command) return this.render();
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
-    if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile') return this.openOverlay(command);
+    if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
     if (command === 'build-network') return this.openOverlay('build-network');
     if (command === 'packet' || command === 'packet-show' || command === 'show-packet') {
       const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
@@ -1440,6 +1466,8 @@ export class JobosTui {
     if (command === 'attest') return void this.packetMutate('attest', argText);
     if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
     if (command === 'answer') return void this.answerAdd(argText);
+    if (command === 'prep') return void this.runPrep(argText);
+    if (command === 'weekly') return void this.runWeeklyReview();
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1450,8 +1478,98 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${command}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
     this.render();
+  }
+
+  cycleStripFocus() {
+    const items = this.model.priority || [];
+    if (!items.length) return;
+    this.state.stripIndex = ((this.state.stripIndex || 0) + 1) % items.length;
+    this.state.status = `Strip focus: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
+    this.render();
+  }
+
+  jumpToStripJob() {
+    const item = (this.model.priority || [])[this.state.stripIndex || 0];
+    if (!item?.jobId) {
+      this.state.status = `No linked job on the ${item?.kind || 'strip'} card.`;
+      this.render();
+      return;
+    }
+    this.selectJobInMainList(item.jobId, `Strip ${item.kind} · job now selected in the main list.`);
+  }
+
+  selectJobInMainList(jobId, statusMessage) {
+    const row = one(this.store, 'SELECT id FROM jobs WHERE id=?', [jobId]);
+    if (!row) {
+      this.refresh({ disk: false });
+      this.state.status = 'Linked job no longer exists; state refreshed.';
+      this.render();
+      return;
+    }
+    this.state.overlay = null;
+    this.state.filter = 'all'; // load-bearing: the main list only renders filteredJobs
+    this.state.selectedJobId = jobId;
+    this.refresh({ disk: false });
+    this.state.status = statusMessage;
+    this.render();
+  }
+
+  async runPrep(argText) {
+    const jobId = this.state.selectedJobId;
+    if (!jobId) {
+      this.state.status = 'Select a job before running interview prep.';
+      this.render();
+      return;
+    }
+    const app = one(this.store, 'SELECT id FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1', [jobId]);
+    if (!app) {
+      this.state.status = 'No application record for this job — create one first (pursue or jobos apply create).';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'interview-prep';
+    this.state.status = 'Interview prep running…';
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, 'interview_prep', { applicationId: app.id, stage: argText || 'interview' }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Interview prep draft created (${result.stage || 'interview'}) · review with r`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Interview prep failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async runWeeklyReview() {
+    const profileId = this.model.profileId;
+    if (!profileId) {
+      this.state.status = 'Create a profile before running the weekly review.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'weekly-review';
+    this.state.status = 'Weekly review running…';
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, 'weekly_review', { profileId }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Weekly review written · ${result.path}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Weekly review failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
   }
 
   async answerAdd(argText) {
@@ -2046,6 +2164,14 @@ export class JobosTui {
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
       this.openReviewDocument();
       return true;
+    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'due') {
+      const task = (this.model.dueTasks || [])[this.state.overlayIndex];
+      if (task?.jobId) this.selectJobInMainList(task.jobId, 'Due task · job now selected in the main list.');
+      else {
+        this.state.status = 'This task has no linked job.';
+        this.render();
+      }
+      return true;
     } else if (value === 'd' && this.state.overlay === 'discovery') {
       void this.runAction('daily');
       return true;
@@ -2287,7 +2413,8 @@ export class JobosTui {
       this.client.cancel();
       this.state.status = 'cancelling agent turn';
       this.render();
-    }
+    } else if (key.name === 'tab') this.cycleStripFocus();
+    else if (key.name === 'return' || key.name === 'enter') this.jumpToStripJob();
     return true;
   }
 

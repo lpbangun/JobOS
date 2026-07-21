@@ -6,6 +6,8 @@ import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
+import { due } from './tracking.js';
+import { outreachDue } from './outreach.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
 
@@ -297,6 +299,8 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details,
     review: reviews,
     log: logs,
+    dueTasks: due(s).slice(0, 20).map(row => ({ id: row.id, jobId: row.job_id || null, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority })),
+    outreachDue: outreachDue(s).slice(0, 20),
     answers: {
       ...answerCounts,
       questions: readiness?.answers?.questions

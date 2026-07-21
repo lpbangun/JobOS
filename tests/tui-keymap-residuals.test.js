@@ -161,6 +161,14 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   }
   fire('escape');
 
+  // Due (tasks & outreach list; Enter jumps to the task's job)
+  tui.openOverlay('due');
+  for (const token of TUI_HANDLED_KEYS.due) {
+    if (token === 'escape') continue;
+    fire(token);
+  }
+  fire('escape');
+
   // Review
   tui.openOverlay('review');
   for (const token of TUI_HANDLED_KEYS.review) {
