@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { all, guardedWrite, one, projectAudit, queuePostCommit, recordAudit, run } from './db.js';
+import { all, guardedWrite, one, projectAudit, queuePostCommit, recordAudit, run, save } from './db.js';
 import { id, now, parseJson, slug } from './utils.js';
 import { writeMd } from './workspace.js';
 import { planApplication } from './readiness.js';
@@ -282,7 +282,7 @@ function verifyReviewable(s, artifactId, decision) {
   return row;
 }
 
-function reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
+function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
   if (!HUMAN_REVIEW_SOURCES.has(reviewedBy)) {
     throw new ArtifactError('human_review_required', 'Artifact approval and rejection require the trusted CLI or TUI human review flow.', { artifactId, reviewedBy: reviewedBy || null });
   }
@@ -334,9 +334,64 @@ function reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
 }
 
 export function approveArtifact(s, artifactId, { reviewedBy = 'cli', note = '' } = {}) {
-  return reviewArtifact(s, artifactId, { decision: 'approved', reviewedBy, note });
+  return _reviewArtifact(s, artifactId, { decision: 'approved', reviewedBy, note });
 }
 
 export function rejectArtifact(s, artifactId, { reviewedBy = 'cli', note = '' } = {}) {
-  return reviewArtifact(s, artifactId, { decision: 'rejected', reviewedBy, note });
+  return _reviewArtifact(s, artifactId, { decision: 'rejected', reviewedBy, note });
+}
+
+// TUI artifact-review compatibility wrappers
+export function reviewArtifact(s, { artifactId, approvalStatus, note = '', source }) {
+  if (!source || !['tui', 'api', 'cli'].includes(source)) throw new ArtifactError('invalid_review_source', 'Invalid source: must be tui, api, or cli');
+  if (!REVIEW_STATUSES.has(approvalStatus)) throw new ArtifactError('artifact_review_status_invalid', `Invalid artifact approval status: ${approvalStatus}`);
+  const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
+  const reviewedAt = now();
+  if (approvalStatus === 'draft_needs_human_review') {
+    run(s, 'UPDATE artifacts SET approval_status=?, reviewed_at=NULL, reviewed_by=NULL, review_note=? WHERE id=?', [approvalStatus, note, artifactId]);
+  } else {
+    run(s, 'UPDATE artifacts SET approval_status=?, reviewed_at=?, reviewed_by=?, review_note=? WHERE id=?', [approvalStatus, reviewedAt, source, note, artifactId]);
+  }
+  recordAudit(s, 'artifact.reviewed', 'artifact', artifactId, {
+    jobId: row.job_id || null,
+    profileId: row.profile_id || null,
+    seriesKey: row.series_key,
+    revision: Number(row.revision),
+    contentHash: row.content_hash,
+    approvalStatus,
+    source,
+    reviewedBy: source,
+    note: String(note || ''),
+    reviewNote: String(note || '')
+  }, 'none');
+  save(s);
+  return rowProjection(one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]), row.revision);
+}
+
+export function ingestEditedArtifact(s, { artifactId, content, source = 'tui' }) {
+  if (!['tui', 'api', 'cli'].includes(source)) throw new ArtifactError('invalid_edit_source', 'Invalid source: must be tui, api, or cli');
+  const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
+  const result = createArtifact(s, {
+    jobId: row.job_id,
+    profileId: row.profile_id,
+    type: row.type,
+    path: row.path,
+    title: row.title,
+    content,
+    evidence: parseJson(row.evidence_json, []),
+    warnings: parseJson(row.warnings_json, []),
+    seriesKey: row.series_key,
+    auditAction: null
+  });
+  recordAudit(s, 'artifact.edited', 'artifact', result.id, {
+    jobId: row.job_id || null,
+    profileId: row.profile_id || null,
+    previousArtifactId: artifactId,
+    artifactId: result.id,
+    path: row.path,
+    source
+  }, 'none');
+  return result;
 }

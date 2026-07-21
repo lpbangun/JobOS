@@ -17,6 +17,14 @@ import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { all, one } from './db.js';
 import { parseJson } from './utils.js';
 import { approveArtifact, artifactQueue, diffArtifact, rejectArtifact } from './artifacts.js';
+import {
+  createApplicationPacket,
+  listApplicationPackets,
+  showApplicationPacket,
+  diffApplicationPackets,
+  attestApplicationSubmitted,
+  confirmApplicationReceipt
+} from './packets.js';
 
 export class DomainToolError extends Error {
   constructor(code, message, details = {}) {
@@ -39,7 +47,7 @@ const text = { type: 'string' };
 export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_jobs', description: 'List local JobOS jobs and their current fit and application state.', inputSchema: object({ profileId: text, status: text }) },
   { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one selected job.', inputSchema: required({ jobId: text }, ['jobId']) },
-  { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text }) },
+  { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text, jobId: text }) },
   { name: 'diff_artifact', description: 'Inspect a line diff for an exact artifact revision without changing local state.', inputSchema: required({ artifactId: text, againstArtifactId: text }, ['artifactId']) },
   { name: 'approve_artifact', description: 'Record trusted local human approval of an exact current artifact revision; never submit or apply.', inputSchema: required({ artifactId: text, note: text }, ['artifactId']) },
   { name: 'reject_artifact', description: 'Record trusted local human rejection of an exact current artifact revision; a reason is required.', inputSchema: required({ artifactId: text, note: text }, ['artifactId', 'note']) },
@@ -62,6 +70,13 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_tasks', description: 'List open tasks ordered by due date.', inputSchema: object({}) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
+  { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
+  { name: 'application_packets_list', description: 'List application packets for a job/profile with derived currency and receipt state. At least one of jobId or profileId is required.', inputSchema: { type: 'object', properties: { jobId: text, profileId: text }, anyOf: [{ required: ['jobId'] }, { required: ['profileId'] }] } },
+  { name: 'application_packet_show', description: 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', inputSchema: required({ packetId: text }, ['packetId']) },
+  { name: 'application_packet_diff', description: 'Diff two application packets by their canonical projections, returning deterministic JSON-pointer changes and sameContent flag.', inputSchema: required({ firstPacketId: text, secondPacketId: text }, ['firstPacketId', 'secondPacketId']) },
+  { name: 'create_application_packet', description: 'Freeze current approved materials, answers, and target into one immutable application packet. Requires approved local readiness.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
+  { name: 'attest_application_submitted', description: 'Record trusted local human submission attestation for an exact packet. Binds pre-apply application status to applied.', inputSchema: required({ packetId: text, submittedAt: text }, ['packetId', 'submittedAt']) },
+  { name: 'confirm_application_receipt', description: 'Record an external reference confirming receipt after a user_attestation exists. Does not change application status.', inputSchema: required({ packetId: text, reference: text }, ['packetId', 'reference']) },
   { name: 'list_saved_searches', description: 'List configured local discovery searches.', inputSchema: object({}) },
   { name: 'search_jobs', description: 'Run a saved discovery search and queue results for human review.', inputSchema: required({ search: text }, ['search']) },
   { name: 'import_job_url', description: 'Import a human-provided job URL into local JobOS state.', inputSchema: required({ profileId: text, url: text }, ['profileId', 'url']) },
@@ -70,7 +85,6 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_automation_runs', description: 'List recent automation runs.', inputSchema: object({ limit: { type: 'number' } }) },
   { name: 'daily_discovery', description: 'Run every saved discovery source for one profile and return ranked results plus isolated failures.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'pursue_job', description: 'Run the integrated fit, research, network, answers, artifact, application, and outreach-preparation workflow.', inputSchema: required({ jobId: text, profileId: text, stage: text, dryRun: { type: 'boolean' }, stageTimeoutMs: { type: 'number' } }, ['jobId', 'profileId']) },
-  { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) }
 ]);
 
 const EFFECT_ATTESTATION_STATUSES = new Set(['applied', 'submitted', 'sent']);
@@ -92,6 +106,23 @@ function enforcePolicy(name, args, options) {
       'Artifact approval and rejection require the trusted CLI or TUI human review flow. Agent inspection and diff remain available.',
       { tool: name, source, artifactId: args.artifactId || null, externalSideEffects: 'none' }
     );
+  }
+  const PACKET_SOURCES = new Set(['acp', 'mcp']);
+  if (PACKET_SOURCES.has(source)) {
+    if (name === 'create_application_packet') {
+      throw new DomainToolError(
+        'human_packet_freeze_required',
+        'Packet creation requires the trusted CLI or TUI human workflow. Agent inspection tools (applications_plan, application_packets_list, application_packet_show, application_packet_diff) remain available.',
+        { tool: name, source, externalSideEffects: 'none' }
+      );
+    }
+    if (name === 'attest_application_submitted' || name === 'confirm_application_receipt') {
+      throw new DomainToolError(
+        'human_submission_attestation_required',
+        'Submission attestation and receipt confirmation require the trusted CLI or TUI human workflow. Inspection tools remain available.',
+        { tool: name, source, externalSideEffects: 'none' }
+      );
+    }
   }
   if (!['acp', 'mcp'].includes(source) || allowAgentAttestation(options)) return;
   const status = String(args.status || '').trim().toLowerCase();
@@ -276,5 +307,14 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'daily_discovery') return await runDaily(s, { profileId: args.profileId });
   if (name === 'pursue_job') return await runPursuit(s, { jobId: args.jobId, profileId: args.profileId, stage: args.stage || null, dryRun: Boolean(args.dryRun), stageTimeoutMs: args.stageTimeoutMs || 30000 });
   if (name === 'answers_match') return matchAnswers(s, { profileId: args.profileId, questions: args.questions, employer: args.employer || '' });
+  if (name === 'application_packets_list') return listApplicationPackets(s, { jobId: args.jobId, profileId: args.profileId });
+  if (name === 'application_packet_show') return showApplicationPacket(s, args.packetId);
+  if (name === 'application_packet_diff') return diffApplicationPackets(s, args.firstPacketId, args.secondPacketId);
+  if (name === 'create_application_packet') {
+    const readiness = compileApplicationReadiness(s, { jobId: args.jobId, profileId: args.profileId, includePacket: false });
+    return await createApplicationPacket(s, { jobId: args.jobId, profileId: args.profileId, createdBy: mediationSource(options), readiness });
+  }
+  if (name === 'attest_application_submitted') return await attestApplicationSubmitted(s, { packetId: args.packetId, submittedAt: args.submittedAt, note: args.note || '', source: mediationSource(options) });
+  if (name === 'confirm_application_receipt') return await confirmApplicationReceipt(s, { packetId: args.packetId, reference: args.reference, note: args.note || '', source: mediationSource(options) });
   throw new DomainToolError('unimplemented_domain_tool', `JobOS domain tool is not implemented: ${name}`, { name });
 }

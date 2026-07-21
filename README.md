@@ -54,7 +54,9 @@ npm run jobos -- tui --profile pm-edtech --snapshot --width 140 --height 42
 npm run jobos -- tui --profile pm-edtech --json
 ```
 
-The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job readiness/blockers/proofs/path/current artifact revisions/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` opens the current review queue and `l` opens the audit log; `n`, `o`, `q`, `s`, `?`, and `v` open network, documents, answers, discovery, system, and profile surfaces. In review, Enter opens the exact queued revision with its content hash, evidence, warnings, history, and local-readiness policy; `D` opens a cancellable diff, while `A` starts approval confirmation and `X` starts rejection with a note. Escape cancels either flow. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade outside document review. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting input.
+The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, and `?` open network, documents, answers, discovery, and system surfaces. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `t` opens the selected job's application-stage picker; selecting `applied` records only that the user applied elsewhere. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+
+Review and document surfaces keep artifact decisions human-gated. In review, Enter opens the selected draft; `A`, `R`, and `B` approve, reject with required feedback, or return it to draft. In documents, `E` round-trips through `$VISUAL`/`$EDITOR` and creates a new draft version only when content changes; `V` shows the immediate predecessor diff; `I` shows evidence and warnings; `/`, `n`/`N`, arrows, and PageUp/PageDown search and scroll. Markdown and diffs are sanitized before terminal rendering, and editor paths are confined to the workspace. Agent-created artifacts open automatically when safe; active typing, confirmations, or editor ownership defer the open until the blocker clears.
 
 An empty workspace is valid: the shell gives profile/import commands rather than fabricated sample data. If Hermes is absent or crashes, pipeline navigation and direct JobOS actions remain available with a visible reconnect message.
 
@@ -158,7 +160,33 @@ npm run jobos -- artifacts approve <artifact-id> [--note <text>] --json
 npm run jobos -- artifacts reject <artifact-id> [--note <text>] --json
 ```
 
-Each artifact has a stable `seriesKey`, increasing `revision`, predecessor ID, and SHA-256 `contentHash`. Review is allowed only for the exact current revision when its SQLite content and workspace mirror both match that hash. Approval is idempotent; rejection is terminal for that revision. A redraft creates a successor, makes the prior approval stale for current readiness, and returns the packet to `ready-for-review`. Review audit events are `artifact.approved` or `artifact.rejected` with `externalSideEffect: "none"`.
+Each artifact has a stable `seriesKey`, increasing `revision`, predecessor ID, and SHA-256 `contentHash`. Review is allowed only for the exact current revision when its SQLite content and workspace mirror both match that hash. Approval is idempotent; rejection is terminal for that revision. A redraft creates a successor, makes the prior approval stale for current readiness, and returns readiness to `ready-for-review`. Review audit events are `artifact.approved` or `artifact.rejected` with `externalSideEffect: "none"`.
+
+### Immutable application packets and receipts
+
+After readiness reaches `approved`, freeze the exact approved materials, redacted answer-row versions, and target identity before recording an application attempt:
+
+```bash
+# Trusted local freeze. This creates no external action.
+npm run jobos -- apply packet create --job <job-id> --profile <profile-id> --json
+
+# Inspect immutable history. List requires --job, --profile, or both.
+npm run jobos -- apply packet list --job <job-id> --json
+npm run jobos -- apply packet show <packet-id> --json
+npm run jobos -- apply packet diff <packet-a> <packet-b> --json
+
+# Record what the user did outside JobOS against one exact packet.
+npm run jobos -- apply attest-submitted <packet-id> \
+  --submitted-at <timezone-qualified-rfc3339> [--note <text>] --json
+npm run jobos -- apply confirm-receipt <packet-id> \
+  --reference <external-reference> [--note <text>] --json
+```
+
+Packet creation requires current readiness `approved`; there is no unapproved bypass. The packet SHA-256 covers approved resume/optional-cover IDs and hashes, matched answer IDs with non-secret row-version fingerprints, target identity, proof IDs, score, blockers, and warnings. It never contains answer plaintext. Equal unchanged input is idempotent. A material, answer, or target edit makes the old packet non-attestable; the next explicit create adds a revision, or starts a new attempt after an attestation. Historical rows remain immutable. Redacted mirrors live under `jobos-workspace/jobs/<job-id>/packets/`.
+
+`attest-submitted` records a `user_attestation`; from `saved`, `researching`, or `materials-ready` it also advances local tracking to `applied` with a status-history note bound to the packet ID, packet hash, and receipt ID. `confirm-receipt` requires that attestation and records the external reference without another status transition. These commands record user evidence only: responses, audits, and readiness retain `externalSideEffects: \"none\"` and `submissionPerformed: false`.
+
+Direct `applications create|update --status applied` remains available for manual/backward-compatible tracking, but it creates no receipt and audits `receiptBound: false`. Application status alone is never presented as receipt evidence. Readiness v3 exposes the independent packet `receiptState` (`none`, `attested`, or `confirmed`).
 
 ### Identity and duplicate detection
 
@@ -170,11 +198,11 @@ Sensitive and restricted answer values are always redacted in JSON and YAML outp
 
 ### Mirror
 
-The plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call, during the `application` stage of `pursue`, and after resume/cover creation or review. The mirror carries the same redaction guarantee as the JSON output.
+The readiness v3 plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call, during the `application` stage of `pursue`, and after resume/cover, packet, or receipt changes. The mirror carries the same redaction guarantee as JSON and includes an always-present secret-safe packet summary.
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical plan structure, and agents may inspect `review_queue` and `diff_artifact` to recommend a human action. MCP and the embedded ACP guest cannot call `approve_artifact` or `reject_artifact`, even with spoofed mediation metadata or agent-attestation configuration. The removed local web/API interface provides no review-mutation bypass. Approval and rejection are intentionally limited to the trusted CLI/TUI human flow. The `pursue` workflow includes a `readiness` key in both dry-run and real execution results.
+The MCP tool `applications_plan` returns the identical readiness v3 structure. Agents may inspect `review_queue`, `diff_artifact`, `application_packets_list`, `application_packet_show`, and `application_packet_diff` to recommend a human action. MCP and the embedded ACP guest cannot approve/reject artifacts or create/attest/confirm packets, even with spoofed mediation metadata or agent-attestation configuration. The removed local web/API interface provides no mutation bypass. Approval, packet freeze, and receipt evidence remain limited to trusted CLI/TUI policy sources. The `pursue` workflow includes `readiness` in dry-run and real execution but never creates a packet automatically.
 
 ## Daily automatic discovery
 
@@ -420,7 +448,7 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 - Draft artifacts default to `draft_needs_human_review`. Local approval or rejection is bound to an exact current revision and never triggers an external effect.
 - External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
-- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
+- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
 - `ready-for-review` indicates complete local evidence awaiting human review; `approved` adds only trusted local approval of every current required revision. Neither status means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.

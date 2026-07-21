@@ -89,7 +89,7 @@ test('readiness: plan contains all top-level shape fields', () => {
   const plan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
 
   assert.equal(typeof plan.version, 'number');
-  assert.equal(plan.version, 2);
+  assert.equal(plan.version, 3);
   assert.equal(typeof plan.generatedAt, 'string');
   assert.ok(plan.generatedAt.length > 0);
   assert.equal(plan.jobId, imported.id);
@@ -102,6 +102,16 @@ test('readiness: plan contains all top-level shape fields', () => {
   }
   assert.equal(typeof plan.review.localApprovalComplete, 'boolean');
   assert.equal(typeof plan.localApprovalComplete, 'boolean');
+  assert.deepEqual(plan.packet, {
+    currentPacketId: null,
+    contentHash: null,
+    attemptNumber: null,
+    revision: null,
+    currency: 'none',
+    receiptState: 'none',
+    attestable: false,
+    latestReceiptId: null
+  });
   // Identity section
   assert.ok(plan.identity);
   assert.equal(typeof plan.identity.identityKey, 'string');

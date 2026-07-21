@@ -4,6 +4,7 @@ import { inspectApplicationQuestions } from './answers.js';
 import { id, now, parseJson, slug } from './utils.js';
 import { writeYaml } from './workspace.js';
 import { applicationId } from './tracking.js';
+import { readinessPacketSummary } from './packets.js';
 
 const submittedEvidenceStatuses = new Set([
   'applied',
@@ -91,7 +92,7 @@ function blocker(code, message, nextAction, details = {}) {
   return { code, message, nextAction, ...details };
 }
 
-export function compileApplicationReadiness(s, { jobId, profileId }) {
+export function compileApplicationReadiness(s, { jobId, profileId, includePacket = true }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw readinessError('unknown_job', `Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT id,name FROM profiles WHERE id=?', [profileId]);
@@ -194,8 +195,9 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
   const status = blockers.length ? 'blocked' : approvalsComplete ? 'approved' : 'ready-for-review';
   const readyForReview = status !== 'blocked';
   const mirrorPath = path.join('jobs', jobId, 'application-readiness.yaml');
+  const packetSummary = includePacket ? readinessPacketSummary(s, { jobId, profileId }) : null;
   return {
-    version: 2,
+    version: 3,
     generatedAt: now(),
     jobId,
     profileId,
@@ -231,6 +233,16 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
     nextActions: blockers.map(item => ({ code: item.code, action: item.nextAction })),
     warnings,
     possibleDuplicateApplications: duplicates,
+    packet: includePacket ? (packetSummary || {
+      currentPacketId: null,
+      contentHash: null,
+      attemptNumber: null,
+      revision: null,
+      currency: 'none',
+      receiptState: 'none',
+      attestable: false,
+      latestReceiptId: null
+    }) : null,
     mirrorPath,
     policy: {
       meaning: 'Reviewable completeness and local human approval from local evidence only.',
@@ -242,8 +254,8 @@ export function compileApplicationReadiness(s, { jobId, profileId }) {
   };
 }
 
-export function planApplication(s, { jobId, profileId, writeMirror = true, policyContext = null }) {
-  const plan = compileApplicationReadiness(s, { jobId, profileId });
+export function planApplication(s, { jobId, profileId, writeMirror = true, policyContext = null, includePacket = true }) {
+  const plan = compileApplicationReadiness(s, { jobId, profileId, includePacket });
   if (policyContext) plan.policy = { ...plan.policy, ...policyContext };
   if (writeMirror) writeYaml(path.join(s.p.ws, plan.mirrorPath), plan);
   return plan;
