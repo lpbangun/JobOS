@@ -118,6 +118,11 @@ export async function prepInterview(s, applicationId, stage = 'interview') {
   const proofs = all(s, 'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at', [prof.id]).map(parseProof);
   const company = job.company_id ? one(s, 'SELECT * FROM companies WHERE id=?', [job.company_id]) : null;
   const stakeholders = all(s, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY updated_at DESC', [job.id]).map(st => ({ ...st, links: parseJson(st.links_json, []) }));
+  // Look up the latest people-research run for this job
+  const researchRun = one(s, `SELECT id,status,finished_at FROM research_runs WHERE job_id=? AND profile_id=? AND scope='job' AND status IN ('succeeded','partial') ORDER BY finished_at DESC LIMIT 1`, [job.id, prof.id]);
+  const researchInfo = researchRun
+    ? { runId: researchRun.id, finishedAt: researchRun.finished_at, stale: !researchRun.finished_at || researchRun.finished_at < new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() }
+    : null;
   const at = now();
   let content;
   const cfg = llmConfig();
@@ -125,11 +130,21 @@ export async function prepInterview(s, applicationId, stage = 'interview') {
     try {
       const result = await generateJson({ schemaName: 'jobos_interview_prep', system: 'You are JobOS interview prep. Create useful, role-specific prep while grounding every accomplishment in supplied proof IDs.', user: llmPrompt({ job, prof, app, stage, proofs, company, stakeholders }) });
       if (result.ok) content = renderLlmPacket({ job, prof, app, stage, json: result.json, proofs, company, stakeholders });
+
     } catch (e) {
       if (e?.type === 'agent_error') throw e;
     }
   }
   if (!content) content = fallbackPacket({ job, prof, app, stage, proofs, company, stakeholders });
+  // Prepend research run context
+  if (researchInfo) {
+    const runRel = path.join('research', 'runs', `${researchInfo.runId}.md`);
+    const runLine = `\n> Research run: [${researchInfo.runId}](${runRel}) completed ${researchInfo.finishedAt}.`;
+    const staleWarning = researchInfo.stale ? ' ⚠️ This research is more than 30 days old. Consider running fresh people research before the interview.' : '';
+    content = content + runLine + staleWarning + '\n';
+  } else {
+    content = content + '\n> ⚠️ No people-research run found for this job. Run `jobos research people --scope job --job <job-id> --depth standard` before the interview for network-aware preparation.\n';
+  }
   const safeStage = slug(stage);
   const rel = path.join('jobs', job.id, 'artifacts', `interview-prep-${safeStage}.md`);
   const evidence = proofs.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, metrics: p.metrics }));

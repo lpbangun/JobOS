@@ -80,13 +80,13 @@ function htmlResults(html, options) {
   return normalizeResults(results, options);
 }
 
-async function fetchText(url, { provider, env, headers = {} }) {
+async function fetchText(url, { provider, env, headers = {}, fetchImpl = globalThis.fetch }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs(provider, env));
   timer.unref?.();
   let response;
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       headers: { 'accept': 'application/json,text/html;q=0.9,*/*;q=0.8', 'user-agent': 'JobOS local research (+human-initiated search)', ...headers },
       signal: controller.signal
     });
@@ -98,13 +98,13 @@ async function fetchText(url, { provider, env, headers = {} }) {
   return { text, type: response.headers.get('content-type') || '' };
 }
 
-async function fetchJsonWithTimeout(url, { provider, env, headers = {}, body }) {
+async function fetchJsonWithTimeout(url, { provider, env, headers = {}, body, fetchImpl = globalThis.fetch }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs(provider, env));
   timer.unref?.();
   let response;
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       method: 'POST',
       headers,
       body,
@@ -117,37 +117,37 @@ async function fetchJsonWithTimeout(url, { provider, env, headers = {}, body }) 
   return await response.json();
 }
 
-async function duckduckgoSearch(query, { limit, env }) {
+async function duckduckgoSearch(query, { limit, env, fetchImpl }) {
   const provider = 'duckduckgo';
   const base = env.JOBOS_SEARCH_BASE_URL || 'https://duckduckgo.com/html/';
   const url = searchUrl(base, query);
-  const { text, type } = await fetchText(url, { provider, env });
+  const { text, type } = await fetchText(url, { provider, env, fetchImpl });
   const options = { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://duckduckgo.com' };
   if (type.includes('json') || text.trim().startsWith('{') || text.trim().startsWith('[')) return jsonResults(JSON.parse(text), options);
   return htmlResults(text, options);
 }
 
-async function braveSearch(query, { limit, env }) {
+async function braveSearch(query, { limit, env, fetchImpl }) {
   const provider = 'brave';
   const apiKey = env.JOBOS_BRAVE_API_KEY || env.BRAVE_SEARCH_API_KEY || '';
   if (!apiKey) throw new Error('Missing JOBOS_BRAVE_API_KEY or BRAVE_SEARCH_API_KEY');
   const base = env.JOBOS_BRAVE_SEARCH_URL || 'https://api.search.brave.com/res/v1/web/search';
   const url = searchUrl(base, query, { count: String(limit) });
-  const { text } = await fetchText(url, { provider, env, headers: { 'X-Subscription-Token': apiKey } });
+  const { text } = await fetchText(url, { provider, env, fetchImpl, headers: { 'X-Subscription-Token': apiKey } });
   return jsonResults(JSON.parse(text), { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://search.brave.com' });
 }
 
-async function searxngSearch(query, { limit, env }) {
+async function searxngSearch(query, { limit, env, fetchImpl }) {
   const provider = 'searxng';
   const base = env.JOBOS_SEARXNG_URL || '';
   if (!base) throw new Error('Missing JOBOS_SEARXNG_URL');
   const url = searchUrl(base, query, { format: 'json' });
   if (url.pathname === '/' || url.pathname === '') url.pathname = '/search';
-  const { text } = await fetchText(url, { provider, env });
+  const { text } = await fetchText(url, { provider, env, fetchImpl });
   return jsonResults(JSON.parse(text), { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: url.origin });
 }
 
-async function exaSearch(query, { limit, env }) {
+async function exaSearch(query, { limit, env, fetchImpl }) {
   const provider = 'exa';
   const apiKey = env.EXA_API_KEY || env.JOBOS_EXA_API_KEY || '';
   if (!apiKey) throw new Error('Missing EXA_API_KEY or JOBOS_EXA_API_KEY');
@@ -155,6 +155,7 @@ async function exaSearch(query, { limit, env }) {
   const data = await fetchJsonWithTimeout(base, {
     provider,
     env,
+    fetchImpl,
     headers: {
       'content-type': 'application/json',
       'x-api-key': apiKey
@@ -174,13 +175,14 @@ async function exaSearch(query, { limit, env }) {
   return normalizeResults(items, { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://exa.ai' });
 }
 
-async function tavilySearch(query, { limit, env }) {
+async function tavilySearch(query, { limit, env, fetchImpl }) {
   const provider = 'tavily';
   const apiKey = env.TAVILY_API_KEY || env.JOBOS_TAVILY_API_KEY || '';
   if (!apiKey) throw new Error('Missing TAVILY_API_KEY or JOBOS_TAVILY_API_KEY');
   const base = env.JOBOS_TAVILY_SEARCH_URL || 'https://api.tavily.com/search';
   const data = await fetchJsonWithTimeout(base, {
     provider,
+    fetchImpl,
     env,
     headers: {
       'content-type': 'application/json',
@@ -197,13 +199,14 @@ async function tavilySearch(query, { limit, env }) {
   return normalizeResults(data.results || [], { limit, provider, query, fetchedAt: new Date().toISOString(), baseUrl: 'https://tavily.com' });
 }
 
-async function perplexitySearch(query, { limit, env }) {
+async function perplexitySearch(query, { limit, env, fetchImpl }) {
   const provider = 'perplexity';
   const apiKey = env.PERPLEXITY_API_KEY || env.JOBOS_PERPLEXITY_API_KEY || '';
   if (!apiKey) throw new Error('Missing PERPLEXITY_API_KEY or JOBOS_PERPLEXITY_API_KEY');
   const base = env.JOBOS_PERPLEXITY_SEARCH_URL || 'https://api.perplexity.ai/search';
   const data = await fetchJsonWithTimeout(base, {
     provider,
+    fetchImpl,
     env,
     headers: {
       'content-type': 'application/json',
@@ -252,7 +255,7 @@ export function providerChain(env = process.env) {
   return chain;
 }
 
-export async function searchWebDetailed(query, { limit = 5, env = process.env, providers = null } = {}) {
+export async function searchWebDetailed(query, { limit = 5, env = process.env, providers = null, fetchImpl = globalThis.fetch } = {}) {
   const warnings = [];
   const attempted = [];
   for (const name of providers || providerChain(env)) {
@@ -263,7 +266,7 @@ export async function searchWebDetailed(query, { limit = 5, env = process.env, p
       continue;
     }
     try {
-      const results = await provider.search(query, { limit, env });
+      const results = await provider.search(query, { limit, env, fetchImpl });
       return {
         query,
         provider: name,

@@ -1,7 +1,10 @@
 import { one, all, run, save, audit } from './db.js';
 import { id, now, validStatuses } from './utils.js';
 import { syncJob } from './jobs.js';
+export { validStatuses } from './utils.js';
 export const stageOrder = Array.from(validStatuses);
+
+export function applicationId(jobId, profileId) { return id('app', `${jobId}:${profileId}`); }
 
 function recordStatusChange(s, { applicationId, jobId, profileId, fromStatus, toStatus, note, at }) {
   const sid = id('status', `${applicationId}:${fromStatus || 'new'}:${toStatus}:${at}`);
@@ -12,10 +15,10 @@ export function appCreate(s, jid, status, notes = '', { persist = true } = {}) {
   if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) throw Error(`Unknown job: ${jid}`);
-  const at = now(), aid = id('app', `${jid}:${job.profile_id}`), ex = one(s, 'SELECT * FROM applications WHERE id=?', [aid]);
+  const at = now(), aid = applicationId(jid, job.profile_id), ex = one(s, 'SELECT * FROM applications WHERE id=?', [aid]);
   if (ex) {
     if (ex.status !== status) {
-      recordStatusChange(s, { applicationId: aid, jobId: jid, profileId: job.profile_id, fromStatus: ex.status, toStatus: status, note: notes || '', at });
+      recordStatusChange(s, { applicationId: aid, jobId: jid, profileId: job.profile_id, fromStatus: ex.status, toStatus: status, note: notes || ex.notes, at });
       run(s, 'UPDATE applications SET status=?, notes=?, updated_at=? WHERE id=?', [status, notes || ex.notes, at, aid]);
       const tid = id('task', `${aid}:review-next-action`);
       run(s, 'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [tid, jid, aid, `Review next action for ${job.title}`, 'Human-gated review before external application, outreach, or status-sensitive action.', 'review', at, 'normal', 'open', 'system', at, at]);
@@ -61,10 +64,26 @@ export function appUpdate(s, aid, status, notes = null, { persist = true } = {})
 
 export function due(s) { return all(s, 'SELECT * FROM tasks WHERE status="open" ORDER BY due_at IS NULL,due_at,created_at'); }
 
-export function applicationId(jobId, profileId) { return id('app', `${jobId}:${profileId}`); }
-
 export function _writeApp(s, jobId, profileId, status, notes = '', { receiptBound = false, skipIfExists = false, persist = true } = {}) {
   const appId = applicationId(jobId, profileId);
   if (skipIfExists && one(s, 'SELECT * FROM applications WHERE id=?', [appId])) return one(s, 'SELECT * FROM applications WHERE id=?', [appId]);
   return appCreate(s, jobId, status, notes, { persist });
+}
+
+export function recommendResearch(s, { jobId, profileId, status }) {
+  if (!status) return null;
+  if (['saved', 'researching', 'materials-ready', 'applied'].includes(status)) {
+    return { nextAction: `jobos research people --scope job --job ${jobId} --profile ${profileId} --depth standard`, label: 'Run people research for this job to discover network paths and stakeholders.' };
+  }
+  if (status === 'recruiter-screen') {
+    const recruiter = one(s, `SELECT person_id FROM stakeholders WHERE job_id=? AND person_id IS NOT NULL AND person_id!='' AND lower(role) LIKE '%recruit%' ORDER BY updated_at DESC LIMIT 1`, [jobId]);
+    if (recruiter?.person_id) {
+      return { nextAction: `jobos research people --scope person --person ${recruiter.person_id} --profile ${profileId} --depth standard`, label: 'Refresh source-backed research for the known recruiter.' };
+    }
+    return { nextAction: `jobos research people --scope job --job ${jobId} --profile ${profileId} --depth standard`, label: 'Refresh job people research for the recruiter-screen stage.' };
+  }
+  if (status === 'interview') {
+    return { nextAction: `jobos research people --scope job --job ${jobId} --profile ${profileId} --depth standard`, label: 'Refresh people research before the interview.' };
+  }
+  return null;
 }

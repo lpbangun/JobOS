@@ -183,8 +183,21 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),
     docs: artifactDocs(s, selectedId),
-    readiness: redactSensitive(readiness || selected.readiness || {}),
-    policy: redactSensitive({ ...(selected.policy || {}), ...(readiness?.policy || {}) })
+    latestJobRun: (() => {
+      const row = selectedId ? one(s, "SELECT id,status,usage_json,budget_json,warnings_json,error,started_at,finished_at,created_at FROM research_runs WHERE job_id=? ORDER BY created_at DESC LIMIT 1", [selectedId]) : null;
+      if (!row) return null;
+      return {
+        id: row.id,
+        status: row.status,
+        usage: parseJson(row.usage_json, {}),
+        budget: parseJson(row.budget_json, {}),
+        warnings: parseJson(row.warnings_json, []),
+        error: row.error || null,
+        startedAt: row.started_at,
+        finishedAt: row.finished_at,
+        createdAt: row.created_at
+      };
+    })()
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
   const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
@@ -204,6 +217,54 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     verified: Number(one(s, "SELECT COUNT(*) AS count FROM answers WHERE profile_id=? AND verification_status='verified' AND sensitivity<>'restricted'", [selectedProfile])?.count || 0),
     restricted: Number(one(s, "SELECT COUNT(*) AS count FROM answers WHERE profile_id=? AND sensitivity='restricted'", [selectedProfile])?.count || 0)
   } : { verified: 0, restricted: 0 };
+  // Network setup data
+  const prefsRow = selectedProfile ? one(s, 'SELECT preferences_json FROM profiles WHERE id=?', [selectedProfile]) : null;
+  const networkPrefs = prefsRow ? parseJson(prefsRow.preferences_json, {}) : {};
+  const networkIntent = networkPrefs.networkIntent || {};
+  const networkSetupStatus = !networkIntent.completedAt ? 'not_started'
+    : (() => {
+        const suggestedCount = selectedProfile ? Number(one(s, "SELECT COUNT(*) AS count FROM profile_affiliations WHERE profile_id=? AND status='suggested'", [selectedProfile])?.count || 0) : 0;
+        return suggestedCount > 0 ? 'needs_confirmation' : 'ready';
+      })();
+  const affiliationCounts = selectedProfile ? {
+    confirmed: Number(one(s, "SELECT COUNT(*) AS count FROM profile_affiliations WHERE profile_id=? AND status='confirmed'", [selectedProfile])?.count || 0),
+    suggested: Number(one(s, "SELECT COUNT(*) AS count FROM profile_affiliations WHERE profile_id=? AND status='suggested'", [selectedProfile])?.count || 0)
+  } : { confirmed: 0, suggested: 0 };
+  const affiliationRows = selectedProfile ? all(s, 'SELECT id,type,organization,role_or_program,start_date,end_date,source,confidence,status FROM profile_affiliations WHERE profile_id=? ORDER BY type,created_at', [selectedProfile]).map(row => ({
+    id: row.id,
+    type: row.type,
+    organization: row.organization,
+    roleOrProgram: row.role_or_program || '',
+    startDate: row.start_date || '',
+    endDate: row.end_date || '',
+    source: row.source || 'manual',
+    confidence: row.confidence || 'medium',
+    status: row.status || 'suggested'
+  })) : [];
+  const importedConnectionCount = selectedProfile ? Number(one(s, "SELECT COUNT(*) AS count FROM relationship_edges WHERE from_type='profile' AND from_id=? AND edge_type='direct_connection'", [selectedProfile])?.count || 0) : 0;
+  const latestProfileRun = selectedProfile ? (() => {
+    const row = one(s, "SELECT id,status,usage_json,budget_json,warnings_json,error,started_at,finished_at,created_at FROM research_runs WHERE profile_id=? AND scope='profile' ORDER BY created_at DESC LIMIT 1", [selectedProfile]);
+    if (!row) return null;
+    return {
+      id: row.id,
+      status: row.status,
+      usage: parseJson(row.usage_json, {}),
+      budget: parseJson(row.budget_json, {}),
+      warnings: parseJson(row.warnings_json, []),
+      error: row.error || null,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      createdAt: row.created_at
+    };
+  })() : null;
+  const xaiState = (() => {
+    const envEnabled = process.env.JOBOS_XAI_ENABLED === '1';
+    const hasKey = Boolean(String(process.env.XAI_API_KEY || '').trim());
+    const consented = networkIntent.allowedSources?.xai === true;
+    if (!envEnabled || !consented) return 'off';
+    if (!hasKey) return 'misconfigured';
+    return 'available';
+  })();
 
   return {
     version: 2,
@@ -226,22 +287,22 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     review: reviews,
     log: logs,
     answers: answerCounts,
-    discovery: {
-      ...discoveryHealth(s, { profileId: selectedProfile }),
-      queue: discoveryReviewQueue(s)
-        .filter(row => !selectedProfile || row.profile_id === selectedProfile)
-        .map(row => ({
-          id: row.id,
-          profileId: row.profile_id,
-          title: row.title,
-          company: row.company,
-          location: row.location || '',
-          source: row.source,
-          status: row.status,
-          fitScore: row.fit_score == null ? null : Number(row.fit_score),
-          highFit: Boolean(row.high_fit),
-          createdAt: row.created_at
-        }))
+    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
+    networkSetup: {
+      status: networkSetupStatus,
+      intent: {
+        targetCompanies: networkIntent.targetCompanies || [],
+        targetRoles: networkIntent.targetRoles || [],
+        preferredPersonas: networkIntent.preferredPersonas || [],
+        comfortableRelationshipTypes: networkIntent.comfortableRelationshipTypes || [],
+        exclusions: networkIntent.exclusions || [],
+        allowedSources: networkIntent.allowedSources || { publicWeb: true, linkedinImport: false, xai: false }
+      },
+      affiliations: affiliationCounts,
+      affiliationRows,
+      importedConnectionCount,
+      latestProfileRun,
+      xaiState
     },
     policy: {
       sideEffects: 'off',

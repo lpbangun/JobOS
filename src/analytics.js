@@ -149,7 +149,19 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   const tasks = due(s);
   const top = jobs.slice(0, 5).map(x => `- ${x.title} at ${x.company}: ${x.fit_score ?? 'unscored'}/100 (${x.id})`).join('\n') || '- No jobs imported.';
   const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
-  const content = `# Weekly JobOS review — ${prof.name}\n\nGenerated: ${now()}\n\n## Funnel analytics\n${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}\n\n## Top jobs\n${top}\n\n## Due / open tasks\n${taskLines}\n\n## Recommended experiments\n- Double down on sources or role families that generate interviews, not just imports.\n- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.\n- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.\n\n## Automation policy\nThis review is an internal summary. It did not submit applications or send outreach.\n`;
+  // Research recommendations
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const staleRuns = all(s, `SELECT id,job_id,scope,finished_at FROM research_runs WHERE profile_id=? AND status IN ('succeeded','partial') AND finished_at<? ORDER BY finished_at ASC LIMIT 3`, [pid, cutoff]);
+  const staleRunLines = staleRuns.map(r => `- Run ${r.id} (${r.scope}) finished ${r.finished_at}. Run \`jobos research runs resume ${r.id}\` to refresh.`).join('\n') || '';
+  const highFitNoRun = all(s, `SELECT j.id,j.title,j.company,j.fit_score FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND rr.id IS NULL ORDER BY j.fit_score DESC LIMIT 5`, [pid, pid]);
+  const highFitLines = highFitNoRun.map(j => `- ${j.title} at ${j.company} (${j.fit_score ?? 'unscored'}/100). Run \`jobos research people --scope job --job ${j.id} --profile ${pid} --depth standard\` to start.`).join('\n') || '';
+  const networkIntent = parseJson(prof.preferences_json, {}).networkIntent;
+  const networkSetupStatus = networkIntent?.completedAt ? 'complete' : 'not started or incomplete';
+  const networkSetupLine = networkSetupStatus === 'complete' ? '' : '- Network setup is unfinished. Run \`jobos profile network-intent --profile <id> --file <json>\` to configure intent and import connections.';
+  const followupDue = all(s, `SELECT id,title,due_at FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=? LIMIT 5`, [now()]);
+  const followupLines = followupDue.map(t => `- Task "${t.title}" (${t.id}) is overdue as of ${t.due_at}.`).join('\n') || '';
+  const researchRecs = [staleRunLines, highFitLines, networkSetupLine, followupLines].filter(Boolean).join('\n') || '- None.';
+  const content = `# Weekly JobOS review — ${prof.name}\n\nGenerated: ${now()}\n\n## Funnel analytics\n${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}\n\n## Top jobs\n${top}\n\n## Due / open tasks\n${taskLines}\n\n## Research recommendations (next actions, not auto-launched)\n${researchRecs}\n\n## Recommended experiments\n- Double down on sources or role families that generate interviews, not just imports.\n- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.\n- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.\n\n## Automation policy\nThis review is an internal summary. It did not submit applications, run start research, or send outreach.\n`;
   const rel = path.join('exports', `weekly-review-${pid}-${new Date().toISOString().slice(0, 10)}.md`);
   writeMd(path.join(s.p.ws, rel), content);
   const rid = id('run', `weekly-review:${pid}:${now()}`);

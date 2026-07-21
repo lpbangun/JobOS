@@ -118,7 +118,7 @@ function createSearchServer() {
     const query = url.searchParams.get('q') || '';
     requests.push(query);
     const fixture = fixtureForText(query);
-    const isStakeholder = /stakeholder|hiring manager|recruiter|product leader/i.test(query);
+    const isStakeholder = /\b(stakeholder|team|head|hiring manager|recruiter|talent acquisition|product leader)\b/i.test(query);
     jsonResponse(res, { results: isStakeholder ? fixture.stakeholderResults : fixture.companyResults });
   });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
@@ -341,7 +341,7 @@ function scoreStakeholders({ fixture, rows }) {
   const precisionScore = falseNames.length === 0 ? 10 : falseNames.length === 1 ? 5 : 1;
   const recallRatio = truePositive / validNames.size;
   const recallScore = recallRatio >= 1 ? 10 : recallRatio >= 0.5 ? 5 : 1;
-  const confidenceScore = rows.every(r => /Confidence: (low|medium|high)/.test(r.summary) && parseJson(r.links_json, []).length) ? 10 : 5;
+  const confidenceScore = rows.every(r => ['low', 'medium', 'high'].includes(r.confidence) && parseJson(r.source_observation_ids_json, []).length) ? 10 : 5;
   return {
     company: fixture.company,
     precision: precisionScore,
@@ -420,17 +420,17 @@ async function main() {
     for (const fixture of fixtures) {
       const job = await createJob(env, root, baseProfile.id, fixture);
       const dossierResult = await runCli(env, ['research', 'company', '--job', job.id, '--json']);
-      const stakeholderResult = await runCli(env, ['research', 'stakeholders', '--job', job.id, '--json']);
+      const stakeholderResult = await runCli(env, ['research', 'people', '--scope', 'job', '--profile', baseProfile.id, '--job', job.id, '--depth', 'standard', '--sources', 'public-web', '--json']);
       const store = await openStore({ workspace: root });
       const company = one(store, 'SELECT facts_json FROM companies WHERE id=?', [dossierResult.companyId]);
       const facts = parseJson(company?.facts_json, []);
       const dossier = readFileSync(path.join(root, 'jobos-workspace', dossierResult.path), 'utf8');
       dossierScores.push(scoreDossier({ fixture, result: dossierResult, dossier, facts }));
-      const stakeholderRows = all(store, 'SELECT * FROM stakeholders WHERE job_id=?', [job.id]);
+      const stakeholderRows = all(store, 'SELECT * FROM person_candidates WHERE job_id=? AND research_run_id=?', [job.id, stakeholderResult.runId]);
       stakeholderScores.push(scoreStakeholders({ fixture, rows: stakeholderRows }));
       assertHard(hard, `${fixture.company} dossier has Human gate`, /Human gate/.test(dossier));
-      const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', stakeholderResult.path), 'utf8');
-      assertHard(hard, `${fixture.company} stakeholder doc has Human gate`, /Human gate/.test(stakeholderDoc));
+      const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', stakeholderResult.path.replace(/\.yaml$/, '.md')), 'utf8');
+      assertHard(hard, `${fixture.company} people-research run has Human gate`, /Human gate/.test(stakeholderDoc));
     }
 
     for (const [profileIndex, profile] of profileFixtures.entries()) {
@@ -469,7 +469,7 @@ async function main() {
     }
     assertHard(hard, 'mark-sent records human send only', sent.note.includes('JobOS did not send'));
     assertHard(hard, 'schedule-followup creates due task', due.some(item => item.taskId === scheduled.taskId));
-    for (const action of ['research.company.created', 'research.stakeholders.created', 'research.stakeholder.added', 'outreach.draft.created', 'outreach.mark_sent.recorded', 'outreach.followup_scheduled']) {
+    for (const action of ['research.company.created', 'research.run.completed', 'research.stakeholder.added', 'outreach.draft.created', 'outreach.mark_sent.recorded', 'outreach.followup_scheduled']) {
       assertHard(hard, `audit row exists: ${action}`, Boolean(one(store, 'SELECT id FROM audit_log WHERE action=?', [action])));
     }
 

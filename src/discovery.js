@@ -169,6 +169,18 @@ export function reviewQueue(s) {
   return all(s, "SELECT * FROM jobs WHERE status='new' ORDER BY high_fit DESC, fit_score DESC, created_at DESC").map(j => ({ ...j, score: parseJson(j.score_json, null), sourceHistory: parseJson(j.source_history_json, []) }));
 }
 
+export function recommendResearchForJobs(s, { profileId, limit = 5 }) {
+  const highFitJobs = all(s, `SELECT jobs.*, applications.status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id AND applications.profile_id=? WHERE jobs.profile_id=? AND jobs.high_fit=1 AND (applications.id IS NULL OR applications.status IN ('researching','saved','materials-ready','applied')) ORDER BY jobs.fit_score DESC LIMIT ?`, [profileId, profileId, limit]);
+  return highFitJobs.map(job => ({
+    jobId: job.id,
+    title: job.title,
+    company: job.company,
+    fitScore: job.fit_score,
+    nextAction: `jobos research people --scope job --job ${job.id} --profile ${profileId} --depth standard`,
+    label: `High-fit job "${job.title}" at ${job.company} (${job.fit_score}/100) has no fresh people-research run.`
+  }));
+}
+
 export function configFromFlags(flags = {}) {
   const cfg = flags.config ? parseConfig(flags.config) : {};
   for (const [flag, key] of [

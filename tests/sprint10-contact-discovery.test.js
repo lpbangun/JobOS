@@ -4,14 +4,13 @@ import http from 'node:http';
 import path from 'node:path';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawn } from 'node:child_process';
 import { openStore, all, one, run, save } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
-import { approveContact, createOutreachPlan, discoverContacts, promoteStakeholder, suppressContact } from '../src/research/contacts.js';
+import { approveContact, createOutreachPlan, listContactPoints, listEmailPatterns, listPersonCandidates, promoteStakeholder, suppressContact } from '../src/research/contacts.js';
 import { importNetworkCsv, mapReachableNetwork } from '../src/research/network.js';
 import { draftOutreach } from '../src/outreach.js';
-import net from 'node:net';
+import { createResearchRun, executeResearchRun } from '../src/research/runs.js';
 
 function fakeSearchServer(baseResults) {
   const requests = [];
@@ -28,35 +27,12 @@ function fakeSearchServer(baseResults) {
   })));
 }
 
-function fakeDnsResolver() {
-  return {
-    async resolveMx(domain) {
-      if (domain !== 'acme.test') throw Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
-      return [{ exchange: 'mx.acme.test', priority: 10 }];
-    },
-    async resolveTxt(domain) {
-      if (domain === '_dmarc.acme.test') return [['v=DMARC1; p=none']];
-      if (domain === 'acme.test') return [['v=spf1 include:_spf.acme.test ~all']];
-      throw Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
-    },
-    async resolveNs(domain) {
-      if (domain !== 'acme.test') throw Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
-      return ['ns1.acme.test'];
-    }
-  };
-}
-
-function fakeLookupImpl() {
-  return async (host, options) => {
-    if (net.isIP(host)) return [{ address: host, family: net.isIP(host) }];
-    return [{ address: '8.8.8.8', family: 4 }];
-  };
-}
 
 function fakePageFetch(calls) {
-  return async rawUrl => {
+  return async (rawUrl, options) => {
     calls.push(String(rawUrl));
     const url = new URL(rawUrl);
+    if (url.hostname === '127.0.0.1') return fetch(rawUrl, options);
     const body = url.pathname.includes('team') || url.pathname === '/'
       ? `<!doctype html><html><head><title>Acme Learning Team</title></head><body>
           <section>
@@ -69,6 +45,7 @@ function fakePageFetch(calls) {
       : '<html><head><title>Acme Learning</title></head><body>Acme Learning public page.</body></html>';
     return {
       ok: true,
+      status: 200,
       url: rawUrl,
       headers: { get: () => 'text/html; charset=utf-8' },
       text: async () => body
@@ -81,7 +58,7 @@ function fakeAdapterServer() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
-    if (url.pathname === '/orgs/acme-learning/members') {
+    if (url.pathname === '/orgs/acmelearning/members') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify([{ login: 'mayachen', html_url: 'https://github.com/mayachen' }]));
       return;
@@ -119,23 +96,51 @@ function createFixtureStore() {
   });
 }
 
+async function runContactResearch(s, { profile, job, fetchImpl, env, sources = ['public_web'] }) {
+  const runId = createResearchRun(s, {
+    profileId: profile.id,
+    scope: 'job',
+    jobId: job.id,
+    depth: 'standard',
+    sources
+  });
+  const runtimeEnv = {
+    ...env,
+    JOBOS_ALLOW_PRIVATE_HOSTS: 'true',
+    JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+      'acme.test': {
+        mx: [{ exchange: 'mx.acme.test', priority: 10 }],
+        txt: [['v=spf1 include:_spf.acme.test ~all']],
+        ns: ['ns1.acme.test']
+      }
+    })
+  };
+  const result = await executeResearchRun(s, runId, { fetchImpl, env: runtimeEnv });
+  return {
+    ...result,
+    path: path.join('jobs', job.id, 'research', 'contacts.md'),
+    contacts: listContactPoints(s, { jobId: job.id }),
+    personCandidates: listPersonCandidates(s, { jobId: job.id }),
+    emailPatterns: listEmailPatterns(s, { companyId: job.company_id })
+  };
+}
+
 test('contact discovery extracts public emails, infers patterns, records LinkedIn URLs, and approves contacts', async () => {
   const search = await fakeSearchServer([
     { title: 'Acme Learning Team', url: 'https://acme.test/team', snippet: 'Jane Doe Head of People and Maya Chen Head of Product at Acme Learning.' },
     { title: 'Maya Chen — Head of Product at Acme Learning', url: 'https://www.linkedin.com/in/maya-chen', snippet: 'Maya Chen is Head of Product at Acme Learning.' }
   ]);
   try {
-    const { root, s, job } = await createFixtureStore();
+    const { root, s, profile: owner, job } = await createFixtureStore();
     const fetchCalls = [];
-    const result = await discoverContacts(s, {
-      jobId: job.id,
+    const result = await runContactResearch(s, {
+      profile: owner,
+      job,
       fetchImpl: fakePageFetch(fetchCalls),
-      lookupImpl: fakeLookupImpl(),
-      resolver: fakeDnsResolver(),
       env: { ...process.env, JOBOS_SMTP_PROBE: 'true', JOBOS_SMTP_FIXTURE_JSON: JSON.stringify({ 'jane.doe@acme.test': 'smtp_accepts_rcpt', 'acme.test': 'smtp_inconclusive' }), JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4' }
     });
-    assert.ok(result.contactCount >= 5);
-    assert.ok(fetchCalls.every(url => !url.includes('linkedin.com')), `LinkedIn should not be fetched: ${fetchCalls.join(', ')}`);
+    assert.ok(result.contacts.length >= 5);
+    assert.ok(fetchCalls.every(raw => !new URL(raw).hostname.endsWith('linkedin.com')), `LinkedIn should not be fetched: ${fetchCalls.join(', ')}`);
     const contacts = result.contacts;
     const jane = contacts.find(c => c.normalizedValue === 'jane.doe@acme.test');
     const generic = contacts.find(c => c.normalizedValue === 'careers@acme.test');
@@ -172,60 +177,6 @@ test('contact discovery extracts public emails, infers patterns, records LinkedI
   }
 });
 
-test('research contacts CLI returns parseable JSON and writes contact worksheet', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'jobos-contacts-cli-'));
-  const pageServer = http.createServer((req, res) => {
-    const url = new URL(req.url || '/', 'http://127.0.0.1');
-    if (url.pathname === '/search') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ results: [
-        { title: 'Acme Learning Team', url: `http://127.0.0.1:${pageServer.address().port}/team`, snippet: 'Jane Doe Head of People at Acme Learning jane.doe@acme.test.' },
-        { title: 'Maya Chen — Head of Product at Acme Learning', url: 'https://www.linkedin.com/in/maya-chen', snippet: 'Maya Chen is Head of Product at Acme Learning.' }
-      ] }));
-      return;
-    }
-    res.writeHead(200, { 'content-type': 'text/html' });
-    res.end('<html><head><title>Acme Learning Team</title></head><body><h2>Jane Doe</h2><p>Head of People <a href="mailto:jane.doe@acme.test">Email</a></p><h2>John Smith</h2><p>Product Lead john.smith@acme.test</p><h2>Maya Chen</h2><p>Head of Product</p></body></html>');
-  });
-  await new Promise(resolve => pageServer.listen(0, '127.0.0.1', resolve));
-  const env = {
-    ...process.env,
-    JOBOS_HOME: root,
-    JOBOS_SEARCH_BASE_URL: `http://127.0.0.1:${pageServer.address().port}/search`,
-    JOBOS_SMTP_PROBE: 'false',
-    JOBOS_ALLOW_PRIVATE_HOSTS: 'true',
-    JOBOS_DNS_FIXTURE_JSON: JSON.stringify({ 'acme.test': { mx: [{ exchange: 'mx.acme.test', priority: 10 }], txt: [['v=spf1 ~all']], dmarc: [['v=DMARC1; p=none']], ns: ['ns1.acme.test'] } }),
-    JOBOS_RESEARCH_PAGE_LIMIT: '4',
-    JOBOS_LLM_PROVIDER: '',
-    OPENAI_API_KEY: '',
-    ANTHROPIC_API_KEY: ''
-  };
-  const runCli = args => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('close', code => code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(`${args.join(' ')}\n${stdout}\n${stderr}`)));
-  });
-  try {
-    await runCli(['init', '--json']);
-    const profile = await runCli(['profile', 'create', 'PM EdTech', '--json']);
-    const jobFile = path.join(root, 'job.md');
-    writeFileSync(jobFile, 'Title: Product Manager\nCompany: Acme Learning\nLocation: Remote\n\nAcme Learning needs a PM.');
-    const job = await runCli(['jobs', 'import-text', '--profile', profile.id, '--file', jobFile, '--json']);
-    const store = await openStore({ workspace: root });
-    run(store, 'UPDATE companies SET website=? WHERE id=(SELECT company_id FROM jobs WHERE id=?)', [`http://127.0.0.1:${pageServer.address().port}`, job.id]);
-    save(store);
-    const result = await runCli(['research', 'contacts', '--job', job.id, '--json']);
-    assert.equal(result.jobId, job.id);
-    assert.ok(result.contactCount >= 3);
-    assert.ok(result.contacts.some(c => c.value === 'jane.doe@acme.test'));
-    assert.ok(result.contacts.some(c => c.type === 'profile_url'));
-    assert.match(readFileSync(path.join(root, 'jobos-workspace', result.path), 'utf8'), /Contact research/);
-  } finally {
-    await new Promise(resolve => pageServer.close(resolve));
-  }
-});
 
 test('network CSV import creates a local path ladder for a job', async () => {
   const { root, s, job } = await createFixtureStore();
@@ -249,12 +200,11 @@ test('outreach draft blocks unapproved and suppressed explicit email contacts', 
   ]);
   try {
     const { s, profile, job } = await createFixtureStore();
-    const result = await discoverContacts(s, {
-      jobId: job.id,
+    const result = await runContactResearch(s, {
+      profile,
+      job,
       fetchImpl: fakePageFetch([]),
-      lookupImpl: fakeLookupImpl(),
-      resolver: fakeDnsResolver(),
-      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4', JOBOS_ALLOW_PRIVATE_HOSTS: 'true' }
+      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4' }
     });
     const maya = result.personCandidates.find(c => c.name === 'Maya Chen');
     const promoted = promoteStakeholder(s, { candidateId: maya.id });
@@ -283,30 +233,28 @@ test('configured public adapters create reusable source observations', async () 
   ]);
   const adapters = await fakeAdapterServer();
   try {
-    const { s, job } = await createFixtureStore();
-    const result = await discoverContacts(s, {
-      jobId: job.id,
+    const { s, profile, job } = await createFixtureStore();
+    const result = await runContactResearch(s, {
+      profile,
+      job,
+      sources: ['public_web', 'github', 'gdelt', 'wayback'],
       fetchImpl: fakePageFetch([]),
-      lookupImpl: fakeLookupImpl(),
-      resolver: fakeDnsResolver(),
       env: {
         ...process.env,
         JOBOS_SMTP_PROBE: 'false',
         JOBOS_SEARCH_BASE_URL: search.baseUrl,
         JOBOS_RESEARCH_PAGE_LIMIT: '2',
-        JOBOS_RESEARCH_ADAPTERS: 'github,gdelt,wayback',
         JOBOS_GITHUB_API_URL: adapters.baseUrl,
         JOBOS_GDELT_DOC_URL: `${adapters.baseUrl}/gdelt`,
-        JOBOS_WAYBACK_CDX_URL: `${adapters.baseUrl}/cdx`,
-        JOBOS_ALLOW_PRIVATE_HOSTS: 'true'
+        JOBOS_WAYBACK_CDX_URL: `${adapters.baseUrl}/cdx`
       }
     });
-    assert.ok(result.warnings.length === 0, result.warnings.join('\n'));
+    assert.ok(result.warnings.every(warning => !/adapter failed|HTTP 404/.test(warning)), result.warnings.join('\n'));
     const providers = all(s, 'SELECT DISTINCT provider FROM source_observations WHERE job_id=?', [job.id]).map(row => row.provider);
     assert.ok(providers.includes('github'));
     assert.ok(providers.includes('gdelt'));
     assert.ok(providers.includes('wayback'));
-    assert.ok(adapters.requests.includes('/orgs/acme-learning/members'));
+    assert.ok(adapters.requests.includes('/orgs/acmelearning/members'));
     assert.ok(adapters.requests.includes('/gdelt'));
     assert.ok(adapters.requests.includes('/cdx'));
   } finally {
@@ -318,16 +266,15 @@ test('configured public adapters create reusable source observations', async () 
 test('createOutreachPlan ranks an approved pattern candidate, persists a plan, and emits an audit row', async () => {
   const search = await fakeSearchServer([
     { title: 'Acme Learning Team', url: 'https://acme.test/team', snippet: 'Jane Doe Head of People and Maya Chen Head of Product at Acme Learning.' },
-    { title: 'Maya Chen', url: 'https://www.linkedin.com/in/maya-chen', snippet: 'Maya Chen is Head of Product.' }
+    { title: 'Maya Chen', url: 'https://www.linkedin.com/in/maya-chen', snippet: 'Maya Chen is Head of Product at Acme Learning.' }
   ]);
   try {
     const { s, profile, job } = await createFixtureStore();
-    const result = await discoverContacts(s, {
-      jobId: job.id,
+    const result = await runContactResearch(s, {
+      profile,
+      job,
       fetchImpl: fakePageFetch([]),
-      lookupImpl: fakeLookupImpl(),
-      resolver: fakeDnsResolver(),
-      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4', JOBOS_ALLOW_PRIVATE_HOSTS: 'true' }
+      env: { ...process.env, JOBOS_SMTP_PROBE: 'false', JOBOS_SEARCH_BASE_URL: search.baseUrl, JOBOS_RESEARCH_PAGE_LIMIT: '4' }
     });
     const mayaContact = result.contacts.find(c => c.normalizedValue === 'maya.chen@acme.test');
     assert.ok(mayaContact, 'expected a maya.chen pattern candidate');

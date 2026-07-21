@@ -1,4 +1,4 @@
-import { one, run, save, audit } from './db.js';
+import { one, all, run, save, audit } from './db.js';
 import { parseJson, tokenize, redFlags, now } from './utils.js';
 import { syncJob } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
@@ -87,6 +87,49 @@ function normalizeScore(raw, job, profileId, cfg, fallback) {
   };
 }
 
+export function networkAccessFromEvidence(s, { jobId, profileId }) {
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const runRow = one(s, `SELECT id,finished_at FROM research_runs WHERE job_id=? AND profile_id=? AND scope='job' AND status IN ('succeeded','partial') ORDER BY finished_at DESC LIMIT 1`,
+    [jobId, profileId]);
+  if (!runRow) {
+    return { score: 50, reason: 'No verified network evidence. No people-research run has been completed for this job.' };
+  }
+  const fresh = runRow.finished_at && runRow.finished_at >= cutoff;
+  const freshLabel = fresh ? 'Fresh' : 'Stale';
+  const prefix = fresh ? '' : `Stale evidence (research run ${runRow.id} completed ${runRow.finished_at}). `;
+
+  // Check for direct connections to stakeholders at this job
+  const direct = one(s, `SELECT 1 FROM relationship_edges WHERE edge_type='direct_connection' AND to_id IN (
+    SELECT id FROM stakeholders WHERE job_id=? UNION SELECT person_id FROM stakeholders WHERE job_id=? AND person_id IS NOT NULL
+    UNION SELECT id FROM person_candidates WHERE job_id=? UNION SELECT person_id FROM person_candidates WHERE job_id=? AND person_id IS NOT NULL
+  ) LIMIT 1`, [jobId, jobId, jobId, jobId]);
+  if (direct) {
+    return { score: fresh ? 90 : 80, reason: `${prefix}Direct network connection to a stakeholder at this company. ${freshLabel} evidence supports network access.` };
+  }
+
+  // Check for mutual affiliations (shared employer, school, community, event, open source)
+  const mutual = one(s, `SELECT 1 FROM relationship_edges WHERE edge_type IN ('shared_employer','shared_school','shared_open_source','shared_event') AND to_id IN (
+    SELECT id FROM stakeholders WHERE job_id=? UNION SELECT person_id FROM stakeholders WHERE job_id=? AND person_id IS NOT NULL
+    UNION SELECT id FROM person_candidates WHERE job_id=? UNION SELECT person_id FROM person_candidates WHERE job_id=? AND person_id IS NOT NULL
+  ) LIMIT 1`, [jobId, jobId, jobId, jobId]);
+  if (mutual) {
+    return { score: fresh ? 80 : 70, reason: `${prefix}Mutual affiliation (shared employer, school, or community) found with a stakeholder at this company. ${freshLabel} evidence suggests network access.` };
+  }
+
+  // Check for approved contact points linked to stakeholders
+  const approvedContact = one(s, `SELECT 1 FROM contact_points WHERE human_approved=1 AND do_not_use=0 AND (
+    stakeholder_id IN (SELECT id FROM stakeholders WHERE job_id=?)
+    OR person_id IN (SELECT person_id FROM stakeholders WHERE job_id=? AND person_id IS NOT NULL)
+    OR person_id IN (SELECT person_id FROM person_candidates WHERE job_id=? AND person_id IS NOT NULL)
+  ) LIMIT 1`, [jobId, jobId, jobId]);
+  if (approvedContact) {
+    return { score: fresh ? 70 : 60, reason: `${prefix}Approved contact point exists for a stakeholder at this company. ${freshLabel} evidence supports potential network access.` };
+  }
+
+  // Research run completed but no specific network path found — generic company awareness
+  return { score: fresh ? 60 : 50, reason: `${prefix}People research completed but no direct or mutual connection found. ${freshLabel} evidence provides generic company awareness.` };
+}
+
 function scoringPrompt({ job, prof, proofs }) {
   const prefs = parseJson(prof.preferences_json, {});
   return `Score this job for the candidate. Use the candidate profile, preferences, proof points, and job description. Do not use keyword counting. Return JSON with: overall number 0-100, confidence low|medium|high, dimensions.roleFit/domainFit/seniority/locationWorkModel/compensation/missionInterest/networkAccess/redFlags each {score, reason}, redFlags array, reasoning string. Each dimension reason must be 2-3 sentences.\n\nPROFILE:\n${JSON.stringify({ id: prof.id, name: prof.name, preferences: prefs }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs, null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, location: job.location, description: job.description, requirements: parseJson(job.requirements_json, []) }, null, 2)}`;
@@ -115,6 +158,8 @@ export async function score(s, jid, pid) {
       out = { ...out, llmError: e.message, reasoning: `${out.reasoning} LLM call failed: ${e.message}` };
     }
   }
+  // Override networkAccess with evidence from people-research runs
+  out.dimensions.networkAccess = networkAccessFromEvidence(s, { jobId: jid, profileId: pid });
   run(s, 'UPDATE jobs SET fit_score=?, score_json=?, updated_at=? WHERE id=?', [out.overall, JSON.stringify(out), now(), jid]);
   audit(s, 'job.scored', 'job', jid, { jobId: jid, profileId: pid, overall: out.overall, mode: out.mode });
   syncJob(s, jid);

@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, action_id TEXT NOT NULL, schedule TEXT NOT NULL, profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_run', consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, trigger_name TEXT NOT NULL, inputs_json TEXT NOT NULL DEFAULT '{}', outputs_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, external_side_effects TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL, automation_id TEXT, action_id TEXT, trigger_type TEXT NOT NULL DEFAULT 'manual', started_at TEXT, finished_at TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT, counts_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL, primary_profile_url TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]', identity_confidence TEXT NOT NULL DEFAULT 'low', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS profile_affiliations (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, type TEXT NOT NULL, organization TEXT NOT NULL, normalized_organization TEXT NOT NULL, role_or_program TEXT NOT NULL DEFAULT '', start_date TEXT, end_date TEXT, source TEXT NOT NULL DEFAULT 'manual', source_observation_ids_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'suggested', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id));
+CREATE TABLE IF NOT EXISTS person_affiliations (id TEXT PRIMARY KEY, person_id TEXT NOT NULL, type TEXT NOT NULL, organization TEXT NOT NULL, normalized_organization TEXT NOT NULL, role_or_program TEXT NOT NULL DEFAULT '', start_date TEXT, end_date TEXT, source TEXT NOT NULL DEFAULT 'manual', source_observation_ids_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'suggested', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS research_runs (id TEXT PRIMARY KEY, profile_id TEXT, scope TEXT NOT NULL, job_id TEXT, company_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', person_id TEXT, depth TEXT NOT NULL DEFAULT 'standard', sources_json TEXT NOT NULL DEFAULT '[]', budget_json TEXT NOT NULL DEFAULT '{}', usage_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued', checkpoint_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', error TEXT NOT NULL DEFAULT '', started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS research_run_sources (run_id TEXT NOT NULL, source_observation_id TEXT NOT NULL, PRIMARY KEY (run_id, source_observation_id));
 CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', external_side_effect TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS application_packets (
   id TEXT PRIMARY KEY,
@@ -58,8 +63,7 @@ CREATE TABLE IF NOT EXISTS application_packets (
   created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')),
   supersedes_packet_id TEXT,
   UNIQUE(job_id, profile_id, attempt_number, revision),
-  CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR
-        (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
+  CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
   FOREIGN KEY(job_id) REFERENCES jobs(id),
   FOREIGN KEY(profile_id) REFERENCES profiles(id),
   FOREIGN KEY(application_id) REFERENCES applications(id),
@@ -133,7 +137,21 @@ function migrate(db){
     "CREATE TABLE IF NOT EXISTS application_packets (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, application_id TEXT NOT NULL, attempt_number INTEGER NOT NULL CHECK(attempt_number > 0), revision INTEGER NOT NULL CHECK(revision > 0), content_hash TEXT NOT NULL, readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'), readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3), resume_artifact_id TEXT NOT NULL, resume_content_hash TEXT NOT NULL, cover_artifact_id TEXT, cover_content_hash TEXT, answers_json TEXT NOT NULL DEFAULT '[]', identity_json TEXT NOT NULL DEFAULT '{}', materials_json TEXT NOT NULL DEFAULT '{}', blockers_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')), supersedes_packet_id TEXT, UNIQUE(job_id, profile_id, attempt_number, revision), CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(application_id) REFERENCES applications(id), FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id), FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets(id))",
     "CREATE INDEX IF NOT EXISTS application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)",
     "CREATE TABLE IF NOT EXISTS application_receipts (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, application_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')), submitted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, external_reference TEXT NOT NULL DEFAULT '', evidence_path TEXT NOT NULL DEFAULT '', evidence_hash TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', receipt_hash TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK(source IN ('cli','tui')), external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'), UNIQUE(packet_id, type), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(application_id) REFERENCES applications(id))",
-    "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)"
+    "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)",
+    "ALTER TABLE person_candidates ADD COLUMN person_id TEXT",
+    "ALTER TABLE person_candidates ADD COLUMN research_run_id TEXT",
+    "ALTER TABLE stakeholders ADD COLUMN person_id TEXT",
+    "ALTER TABLE contact_points ADD COLUMN origin_research_run_id TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS idx_people_normalized_name ON people(normalized_name)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_people_primary_profile_url ON people(primary_profile_url) WHERE primary_profile_url != ''",
+    "CREATE INDEX IF NOT EXISTS idx_profile_affiliations_owner ON profile_affiliations(profile_id, type, normalized_organization)",
+    "CREATE INDEX IF NOT EXISTS idx_person_affiliations_owner ON person_affiliations(person_id, type, normalized_organization)",
+    "CREATE INDEX IF NOT EXISTS idx_research_runs_profile ON research_runs(profile_id, status, scope)",
+    "CREATE INDEX IF NOT EXISTS idx_research_runs_job ON research_runs(job_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_person_candidates_run ON person_candidates(research_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_stakeholders_person ON stakeholders(person_id)",
+    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)"
   ]) {
     try { db.run(sql); } catch (e) {
       const message = String(e?.message || e);
@@ -285,6 +303,7 @@ export function acquireWriteLock(s, { timeoutMs = 5000, staleMs = 30000 } = {}) 
       try {
         const stat = fs.statSync(file);
         const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Number(lock.pid) === process.pid) return () => {};
         stale = Date.now() - stat.mtimeMs > staleMs && !processAlive(Number(lock.pid));
       } catch {
         try { stale = Date.now() - fs.statSync(file).mtimeMs > staleMs; } catch {}
@@ -323,6 +342,123 @@ function migratePolicyPreferences(db) {
       db.run('UPDATE profiles SET preferences_json=?,updated_at=? WHERE id=?', [JSON.stringify(prefs), now(), row.id]);
     }
   }
+}
+
+function migratePeopleBackfill(db) {
+  // Idempotent — skip if already done
+  const existing = db.exec("SELECT value FROM meta WHERE key='people_backfill_version'");
+  if (existing.length > 0 && existing[0].values?.[0]?.[0]) return;
+
+  const ts = now();
+
+  // Collect all candidates without person_id
+  const candidates = [];
+  {
+    const st = db.prepare("SELECT * FROM person_candidates WHERE person_id IS NULL AND name != ''");
+    while (st.step()) candidates.push(st.getAsObject());
+    st.free();
+  }
+
+  if (candidates.length === 0) {
+    db.run("INSERT OR REPLACE INTO meta VALUES (?,?)", ['people_backfill_version', '1']);
+    return;
+  }
+
+
+  // Group candidates by job_id
+  const byJob = {};
+  for (const c of candidates) {
+    const jid = c.job_id || '';
+    if (!byJob[jid]) byJob[jid] = [];
+    byJob[jid].push(c);
+  }
+
+  for (const [jobId, jobCandidates] of Object.entries(byJob)) {
+    let profileId = null;
+    let companyName = '';
+    let role = '';
+    if (jobId) {
+      const jobStatement = db.prepare('SELECT profile_id,company,title FROM jobs WHERE id=?', [jobId]);
+      try {
+        if (jobStatement.step()) {
+          const job = jobStatement.getAsObject();
+          profileId = job.profile_id || null;
+          companyName = job.company || '';
+          role = job.title || '';
+        }
+      } finally {
+        jobStatement.free();
+      }
+    }
+    // Create synthetic migration research run
+    const runId = id('research', `migration:${jobId}:people-backfill`);
+    db.run(`INSERT OR IGNORE INTO research_runs (id,profile_id,scope,job_id,company_name,role,person_id,depth,sources_json,budget_json,usage_json,status,checkpoint_json,warnings_json,error,started_at,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      runId, profileId, jobId ? 'job' : 'person', jobId || null, companyName, role, null, 'standard',
+      '[]', '{}', '{}', 'succeeded', '{}', '[]', '',
+      ts, ts, ts, ts
+    ]);
+
+    for (const c of jobCandidates) {
+      // Create canonical person seeded from candidate ID
+      const pid = id('person', c.id);
+      const normalizedName = String(c.name || '').trim().toLowerCase();
+
+      db.run(`INSERT OR IGNORE INTO people (id,name,normalized_name,primary_profile_url,aliases_json,identity_confidence,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, [
+        pid, c.name, normalizedName, '', '[]', 'low', ts, ts
+      ]);
+
+      // Link candidate to person and research run
+      db.run(`UPDATE person_candidates SET person_id=?, updated_at=? WHERE id=?`, [pid, ts, c.id]);
+      db.run(`UPDATE person_candidates SET research_run_id=? WHERE id=? AND (research_run_id IS NULL OR research_run_id='')`, [runId, c.id]);
+    }
+  }
+
+  // Link unambiguous stakeholders — same name+job as a single candidate that has person_id
+  {
+    const st = db.prepare("SELECT s.* FROM stakeholders s WHERE (s.person_id IS NULL OR s.person_id = '') AND s.job_id IS NOT NULL");
+    const rows = [];
+    while (st.step()) rows.push(st.getAsObject());
+    st.free();
+
+    for (const sh of rows) {
+      const cands = [];
+      const cst = db.prepare("SELECT * FROM person_candidates WHERE job_id=? AND name=? AND person_id IS NOT NULL AND person_id != ''", [sh.job_id, sh.name]);
+      while (cst.step()) cands.push(cst.getAsObject());
+      cst.free();
+
+      if (cands.length === 1) {
+        db.run(`UPDATE stakeholders SET person_id=?, updated_at=? WHERE id=?`, [cands[0].person_id, ts, sh.id]);
+      }
+      // 0 or >1 matches — leave unlinked (ambiguous)
+    }
+  }
+
+  // Rewrite contact_points.person_id from candidate IDs to canonical person IDs
+  // Keep contact IDs immutable so outreach-plan references survive
+  db.run(`UPDATE contact_points SET person_id = (
+    SELECT pc.person_id FROM person_candidates pc WHERE pc.id = contact_points.person_id
+  ) WHERE person_id IN (SELECT id FROM person_candidates WHERE person_id IS NOT NULL AND person_id != '')`);
+
+  // Rewrite relationship_edges — candidate endpoints to person endpoints
+  db.run(`UPDATE relationship_edges SET from_type='person', from_id = (
+    SELECT pc.person_id FROM person_candidates pc WHERE pc.id = relationship_edges.from_id
+  ) WHERE from_type='candidate' AND from_id IN (SELECT id FROM person_candidates WHERE person_id IS NOT NULL AND person_id != '')`);
+
+  db.run(`UPDATE relationship_edges SET to_type='person', to_id = (
+    SELECT pc.person_id FROM person_candidates pc WHERE pc.id = relationship_edges.to_id
+  ) WHERE to_type='candidate' AND to_id IN (SELECT id FROM person_candidates WHERE person_id IS NOT NULL AND person_id != '')`);
+
+  // Rewrite relationship_edges — stakeholder endpoints to person endpoints
+  db.run(`UPDATE relationship_edges SET from_type='person', from_id = (
+    SELECT s.person_id FROM stakeholders s WHERE s.id = relationship_edges.from_id
+  ) WHERE from_type='stakeholder' AND from_id IN (SELECT id FROM stakeholders WHERE person_id IS NOT NULL AND person_id != '')`);
+
+  db.run(`UPDATE relationship_edges SET to_type='person', to_id = (
+    SELECT s.person_id FROM stakeholders s WHERE s.id = relationship_edges.to_id
+  ) WHERE to_type='stakeholder' AND to_id IN (SELECT id FROM stakeholders WHERE person_id IS NOT NULL AND person_id != '')`);
+
+  // Mark backfill complete
+  db.run("INSERT OR REPLACE INTO meta VALUES (?,?)", ['people_backfill_version', '1']);
 }
 
 function loadAuthoritativeStore(s) {
@@ -390,6 +526,7 @@ export async function openStore(flags={}) {
   migrate(db);
   migrateArtifacts(db);
   migratePolicyPreferences(db);
+  migratePeopleBackfill(db);
   db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','8']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
@@ -408,6 +545,7 @@ export function queuePostCommit(s, projection) {
 }
 
 export function save(s) {
+  if (s._inGuardedWrite) return;
   const release = acquireWriteLock(s);
   try {
     persistLocked(s);
@@ -426,6 +564,7 @@ export function guardedWrite(s, mutate) {
   try {
     loadAuthoritativeStore(s);
     s.db.run('BEGIN IMMEDIATE');
+    s._inGuardedWrite = true;
     try {
       result = mutate();
       if (result && typeof result.then === 'function') throw new TypeError('guardedWrite mutation must be synchronous');
@@ -434,6 +573,8 @@ export function guardedWrite(s, mutate) {
       try { s.db.run('ROLLBACK'); } catch {}
       s.postCommitProjections = [];
       throw error;
+    } finally {
+      s._inGuardedWrite = false;
     }
     try {
       persistLocked(s);

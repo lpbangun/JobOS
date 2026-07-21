@@ -16,6 +16,7 @@ const genericInboxNames = new Set([
 export function canonicalUrl(raw) {
   try {
     const url = new URL(raw);
+    url.hostname = url.hostname.replace(/^www\./, '').toLowerCase();
     url.hash = '';
     if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) url.port = '';
     return url.href.replace(/\/$/, '');
@@ -110,11 +111,12 @@ export async function resolveHostIsPublic(host, { lookupImpl = dns.lookup, allow
   return { ok: true, addresses: records.map(r => r.address) };
 }
 
-export function sourceAllowedForRecording(raw) {
+export function sourceAllowedForRecording(raw, { sourceType = 'web_search' } = {}) {
   if (!isHttpUrl(raw)) return false;
   if (isLinkedInProfileUrl(raw)) return true;
   const host = hostForUrl(raw);
-  return !blockedProfileHosts.some(domain => host === domain || host.endsWith(`.${domain}`));
+  const blocked = blockedProfileHosts.find(domain => host === domain || host.endsWith(`.${domain}`));
+  return !blocked || (sourceType === 'x_search' && ['x.com', 'twitter.com'].includes(blocked));
 }
 
 export function normalizeEmail(raw) {
@@ -303,7 +305,7 @@ export async function fetchPublicPage(rawUrl, { fetchImpl = fetch, env = process
   const $ = cheerio.load(html);
   const mailtoEmails = $('a[href^="mailto:"]').map((_, el) => normalizeEmail($(el).attr('href'))).get().filter(Boolean);
   $('script,style,noscript,svg').remove();
-  $('br,p,div,section,article,li,h1,h2,h3,h4,h5,header,footer').each((_, el) => { $(el).append('\n'); });
+  $('br,p,div,section,article,li,h1,h2,h3,h4,h5,header,footer').each((_, el) => { $(el).prepend('\n').append('\n'); });
   const title = ($('title').first().text() || $('h1').first().text() || rawUrl).replace(/\s+/g, ' ').trim();
   const bodyText = $('body').text().replace(/\r/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   const emails = [...new Set([...mailtoEmails, ...extractEmails(bodyText)])].sort();
@@ -327,14 +329,17 @@ export async function fetchPublicPage(rawUrl, { fetchImpl = fetch, env = process
   };
 }
 
-export function sourceObservationFromSearch(job, result, { sourceType = null } = {}) {
+export function sourceObservationFromSearch(context, result, { sourceType = null } = {}) {
   const url = String(result.url || '').trim();
   const canonical = canonicalUrl(url);
   const type = sourceType || (isLinkedInProfileUrl(url) ? 'profile_search' : 'web_search');
+  const runId = context.runId || context.id;
+  const jobId = context.jobId ?? context.job_id ?? (context.runId ? null : context.id);
+  const companyId = context.companyId ?? context.company_id ?? null;
   return {
-    id: id('src', `${job.id}:${canonical}:${result.provider || 'search'}:${result.query || ''}:${result.rank || ''}`),
-    companyId: job.company_id || null,
-    jobId: job.id,
+    id: id('src', `${runId}:${canonical}:${result.provider || 'search'}:${result.query || ''}`),
+    companyId,
+    jobId,
     url,
     canonicalUrl: canonical,
     title: String(result.title || url),
@@ -342,19 +347,22 @@ export function sourceObservationFromSearch(job, result, { sourceType = null } =
     sourceType: type,
     provider: result.provider || 'search',
     query: result.query || '',
-    trust: type === 'profile_search' ? 'public_search_profile_url' : 'public_search',
+    trust: type === 'profile_search' ? 'public_search_profile_url' : type === 'x_search' ? 'x_search_citation' : 'public_search',
     fetchedAt: result.fetchedAt || now(),
     contentHash: hash(`${result.title || ''}\n${result.snippet || ''}`),
     metadata: { rank: result.rank || null, profileUrlOnly: isLinkedInProfileUrl(url) }
   };
 }
 
-export function sourceObservationFromPage(job, page, { provider = 'page_fetch', query = '' } = {}) {
+export function sourceObservationFromPage(context, page, { provider = 'page_fetch', query = '' } = {}) {
   const canonical = canonicalUrl(page.url);
+  const runId = context.runId || context.id;
+  const jobId = context.jobId ?? context.job_id ?? (context.runId ? null : context.id);
+  const companyId = context.companyId ?? context.company_id ?? null;
   return {
-    id: id('src', `${job.id}:${canonical}:${page.contentHash || hash(page.rawText || page.snippet || '')}`),
-    companyId: job.company_id || null,
-    jobId: job.id,
+    id: id('src', `${runId}:${canonical}:${provider}:${query}`),
+    companyId,
+    jobId,
     url: page.url,
     canonicalUrl: canonical,
     title: page.title || page.url,

@@ -16,9 +16,9 @@ function extractJson(text) {
   throw new Error('LLM response did not contain JSON');
 }
 
-export function llmConfig(env = process.env) {
+export function llmConfig(env = process.env, route) {
   const agent = String(env.JOBOS_AGENT || '').trim();
-  if (agent) {
+  if (agent && !route) {
     const rawAgentTimeout = Number(env.JOBOS_AGENT_TIMEOUT_MS || 120000);
     const timeoutMs = Number.isFinite(rawAgentTimeout) && rawAgentTimeout >= 1000 ? rawAgentTimeout : 120000;
     return {
@@ -32,13 +32,17 @@ export function llmConfig(env = process.env) {
       warning: null
     };
   }
-  const provider = env.JOBOS_LLM_PROVIDER || '';
-  const model = env.JOBOS_LLM_MODEL || '';
-  const apiKey = env.JOBOS_LLM_API_KEY || (provider === 'anthropic' ? env.ANTHROPIC_API_KEY : provider === 'ollama-cloud' ? env.OLLAMA_API_KEY : env.OPENAI_API_KEY) || '';
-  const baseUrl = env.JOBOS_LLM_BASE_URL || (provider === 'anthropic' ? 'https://api.anthropic.com/v1' : provider === 'ollama-cloud' ? 'https://ollama.com/v1' : 'https://api.openai.com/v1');
-  const rawTimeout = Number(env.JOBOS_LLM_TIMEOUT_MS || 30000);
+  const routePrefix = route ? `JOBOS_RESEARCH_${route.toUpperCase()}` : null;
+  const read = (suffix) => routePrefix ? env[`${routePrefix}_${suffix}`] : undefined;
+  const provider = read('PROVIDER') || env.JOBOS_LLM_PROVIDER || '';
+  const model = read('MODEL') || env.JOBOS_LLM_MODEL || '';
+  const baseApiKey = read('API_KEY') || env.JOBOS_LLM_API_KEY;
+  const apiKey = baseApiKey || (provider === 'anthropic' ? env.ANTHROPIC_API_KEY : provider === 'ollama-cloud' ? env.OLLAMA_API_KEY : env.OPENAI_API_KEY) || '';
+  const baseUrl = read('BASE_URL') || env.JOBOS_LLM_BASE_URL || (provider === 'anthropic' ? 'https://api.anthropic.com/v1' : provider === 'ollama-cloud' ? 'https://ollama.com/v1' : 'https://api.openai.com/v1');
+  const rawTimeout = Number(read('TIMEOUT_MS') || env.JOBOS_LLM_TIMEOUT_MS || 30000);
   const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout >= 1000 ? rawTimeout : 30000;
   const configured = Boolean(provider && model && apiKey);
+  const routeLabel = route ? ` research ${route}` : '';
   return {
     provider,
     model,
@@ -46,7 +50,7 @@ export function llmConfig(env = process.env) {
     timeoutMs,
     configured,
     degradedMode: !configured,
-    warning: configured ? null : 'JOBOS LLM is not configured; using deterministic degraded mode. Set JOBOS_LLM_PROVIDER, JOBOS_LLM_MODEL, and JOBOS_LLM_API_KEY to enable provider-backed scoring and tailoring.'
+    warning: configured ? null : `JOBOS LLM${routeLabel} is not configured; using deterministic degraded mode. Set JOBOS_LLM_PROVIDER, JOBOS_LLM_MODEL, and JOBOS_LLM_API_KEY${routePrefix ? ` or ${routePrefix}_*` : ''} to enable provider-backed scoring and tailoring.`
   };
 }
 
@@ -107,10 +111,11 @@ async function postAnthropic(cfg, messages, temperature, maxTokens) {
   const content = data.content?.map(part => part.text || '').join('\n');
   return extractJson(content);
 }
+ 
 
-export async function generateJson({ system = '', user = '', schemaName = 'jobos_json', schema, stage = schemaName, temperature = 0.2, maxTokens = 2200, env = process.env, workspace } = {}) {
+export async function generateJson({ system = '', user = '', schemaName = 'jobos_json', schema, stage = schemaName, temperature = 0.2, maxTokens = 2200, env = process.env, workspace, route } = {}) {
   const agentName = String(env.JOBOS_AGENT || '').trim();
-  if (agentName) {
+  if (agentName && !route) {
     const cfg = llmConfig(env);
     const result = await runAgent(agentName, {
       protocolVersion: AGENT_PROTOCOL_VERSION,
@@ -135,11 +140,15 @@ export async function generateJson({ system = '', user = '', schemaName = 'jobos
       }
     };
   }
-  const cfg = llmConfig(env);
+  const cfg = llmConfig(env, route);
   if (!cfg.configured) {
     return { ok: false, config: cfg, reason: cfg.warning };
   }
-  const runtimeCfg = { ...cfg, apiKey: env.JOBOS_LLM_API_KEY || (cfg.provider === 'anthropic' ? env.ANTHROPIC_API_KEY : cfg.provider === 'ollama-cloud' ? env.OLLAMA_API_KEY : env.OPENAI_API_KEY) };
+  const routeApiKey = route ? env[`JOBOS_RESEARCH_${route.toUpperCase()}_API_KEY`] : '';
+  const runtimeCfg = {
+    ...cfg,
+    apiKey: routeApiKey || env.JOBOS_LLM_API_KEY || (cfg.provider === 'anthropic' ? env.ANTHROPIC_API_KEY : cfg.provider === 'ollama-cloud' ? env.OLLAMA_API_KEY : env.OPENAI_API_KEY)
+  };
   const messages = [
     { role: 'system', content: `${system}\n\nReturn valid JSON only. Do not include markdown fences or prose outside JSON.`.trim() },
     { role: 'user', content: user }

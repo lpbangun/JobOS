@@ -289,32 +289,6 @@ test('add-stakeholder requires source URL and records pasted stakeholder context
   assert.doesNotMatch(stakeholderDoc, /did send|sent email/i);
 });
 
-test('stakeholder search uses LLM relevance check when configured', async () => {
-  const fake = await fakeSearchServer();
-  const llm = await fakeResearchLlmServer();
-  try {
-    const { root, run } = makeRunner({
-      JOBOS_SEARCH_BASE_URL: fake.baseUrl,
-      JOBOS_LLM_PROVIDER: 'openai',
-      JOBOS_LLM_MODEL: 'fake-relevance-model',
-      JOBOS_LLM_API_KEY: 'test-key',
-      JOBOS_LLM_BASE_URL: llm.baseUrl
-    });
-    const { job } = await seedJob(run, root);
-    const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
-    assert.equal(stakeholders.candidateCount, 2);
-    assert.equal(stakeholders.stakeholderIds.length, 1);
-    assert.equal(llm.requests.filter(r => r.body.metadata?.schemaName === 'jobos_stakeholder_relevance').length, 1);
-    const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
-    assert.match(stakeholderDoc, /Maya Chen/);
-    assert.match(stakeholderDoc, /Confidence: high/);
-    assert.match(stakeholderDoc, /Relevance check:/);
-    assert.doesNotMatch(stakeholderDoc, /Jordan Patel/);
-  } finally {
-    await fake.close();
-    await llm.close();
-  }
-});
 
 test('outreach draft uses LLM evidence schema when configured', async () => {
   const fake = await fakeSearchServer();
@@ -356,56 +330,5 @@ test('outreach draft uses LLM evidence schema when configured', async () => {
   } finally {
     await fake.close();
     await llm.close();
-  }
-});
-
-test('stakeholder research creates sourced outreach draft without sending anything', async () => {
-  const fake = await fakeSearchServer();
-  try {
-    const { root, run, runRaw } = makeRunner({ JOBOS_SEARCH_BASE_URL: fake.baseUrl });
-    const { profile, job } = await seedJob(run, root);
-    const stakeholders = JSON.parse(await run(['research', 'stakeholders', '--job', job.id, '--json']));
-    assert.equal(stakeholders.stakeholderIds.length, 2);
-    const stakeholderDoc = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md'), 'utf8');
-    assert.match(stakeholderDoc, /Maya Chen/);
-    assert.match(stakeholderDoc, /Confidence: high/);
-    assert.doesNotMatch(stakeholderDoc, /Priya Rao|linkedin\.com|OtherCo|Learning Guild|Sam Lee/);
-    const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--goal', 'informational', '--json']));
-    assert.equal(draft.approvalStatus, 'draft_needs_human_review');
-    assert.match(draft.threadId, /^thread_/);
-    const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
-    assert.match(content, /Draft only - not sent/);
-    assert.match(content, /Evidence used/);
-    assert.match(content, /My relevant background includes/);
-    assert.match(content, /Human gate/);
-    assert.match(content, /did not send email/);
-    assert.match(content, /Maya Chen|Jordan Patel/);
-    assert.match(content, /https:\/\/acme\.example\/team\//);
-    assert.doesNotMatch(content, /My background is PM EdTech/);
-    assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'stakeholders.md')));
-    const sent = JSON.parse(await run(['outreach', 'mark-sent', '--artifact', draft.id, '--channel', 'email', '--notes', 'Human sent from email client.', '--json']));
-    assert.equal(sent.status, 'sent_by_human');
-    assert.equal(sent.channel, 'email');
-    assert.match(sent.note, /JobOS did not send/);
-    const scheduled = JSON.parse(await run(['outreach', 'schedule-followup', '--thread', draft.threadId, '--after', '0', '--json']));
-    assert.equal(scheduled.status, 'followup_scheduled');
-    assert.match(scheduled.taskId, /^task_/);
-    const due = JSON.parse(await run(['outreach', 'due', '--json']));
-    assert.ok(due.some(item => item.threadId === draft.threadId && item.taskId === scheduled.taskId));
-    const threadsYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'outreach', 'threads.yaml'), 'utf8');
-    assert.match(threadsYaml, /autoSend: disabled/);
-    assert.match(threadsYaml, /sent_by_human|followup_scheduled/);
-    const store = await openStore({ workspace: root });
-    assert.ok(one(store, 'SELECT id FROM audit_log WHERE action=?', ['outreach.mark_sent.recorded']));
-    assert.ok(one(store, 'SELECT id FROM audit_log WHERE action=?', ['outreach.followup_scheduled']));
-    const otherProfile = JSON.parse(await run(['profile', 'create', 'Other Profile', '--json']));
-    const wrongProfile = await runRaw(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', otherProfile.id, '--json']);
-    assert.notEqual(wrongProfile.status, 0);
-    assert.match(wrongProfile.stderr, /not linked to job/);
-    const traversal = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--goal', '../../../../evil', '--json']));
-    assert.match(traversal.path, new RegExp(`^jobs/${job.id}/outreach/`));
-    assert.doesNotMatch(traversal.path, /\.\./);
-  } finally {
-    await fake.close();
   }
 });

@@ -229,9 +229,42 @@ Discovery sources:
 
 Portfolio runs cap each request at 10 seconds, the run at 60 seconds, and total requests at 90. A cap or child-source failure returns partial jobs plus structured failure metadata instead of discarding completed work. Public-page adapters reject private, loopback, link-local, credential-bearing, and unsafe redirect targets.
 
-## Networking and outreach
+## People research, networking, and outreach
 
-Import user-owned relationship data:
+People research is progressive and human-gated. Confirm the profile's goals, exclusions, source choices, and affiliations before building an open-ended profile network map. In the TUI, press `b` to open **Build My Network Map**; the default action saves the setup without launching research.
+
+```json
+{
+  "version": 1,
+  "targetCompanies": ["Acme Learning"],
+  "targetRoles": ["Product Manager"],
+  "preferredPersonas": ["recruiter", "hiring_manager", "peer", "alumni"],
+  "comfortableRelationshipTypes": ["school", "employer", "community"],
+  "exclusions": ["current employer"],
+  "allowedSources": {
+    "publicWeb": true,
+    "linkedinImport": true,
+    "xai": false
+  }
+}
+```
+
+```bash
+npm run jobos -- profile network-intent \
+  --profile pm-edtech --file intent.json --json
+
+# Generic relationship-edge CSV remains supported.
+npm run jobos -- network import \
+  --profile pm-edtech --file relationships.csv --format generic --json
+
+# A user-exported LinkedIn connections CSV is detected automatically.
+npm run jobos -- network import \
+  --profile pm-edtech --file Connections.csv --format linkedin --json
+```
+
+LinkedIn import accepts the export columns `First Name`, `Last Name`, `URL`, `Email Address`, `Company`, and `Position`. It reads the local file only: JobOS does not sign in to LinkedIn or scrape profile pages. Imported URLs and emails remain local, are tier `U` (`user_imported`), and are never approved automatically. Import audits store counts, the basename, and a short file hash—not raw rows, email addresses, exclusions, or secrets.
+
+Generic relationship CSV uses:
 
 ```csv
 from_type,from_id,to_type,to_id,edge_type,confidence,evidence
@@ -241,14 +274,54 @@ profile,pm-edtech,person,person_123,direct_connection,high,Former colleague
 
 Valid `edge_type` values are `direct_connection`, `shared_employer`, `shared_school`, `shared_investor`, `shared_event`, `shared_open_source`, `shared_customer_domain`, and `manual_note`. Confidence is `low`, `medium`, or `high`.
 
+Run durable research at the narrowest useful scope:
+
 ```bash
-npm run jobos -- network import --file relationships.csv --json
+# Requires confirmed network intent.
+npm run jobos -- research people \
+  --profile pm-edtech --scope profile --depth standard --json
+
+npm run jobos -- research people \
+  --profile pm-edtech --scope target \
+  --company "Acme Learning" --role "Product Manager" --json
+
+npm run jobos -- research people \
+  --profile pm-edtech --scope job --job <job-id> --depth deep --json
+
+npm run jobos -- research people \
+  --profile pm-edtech --scope person --person <person-id> --json
+
+npm run jobos -- research runs get <run-id> --json
+npm run jobos -- research runs resume <run-id> --json
+npm run jobos -- research runs cancel <run-id> --json
+```
+
+Runs persist budgets, usage, warnings, source links, and checkpoints in SQLite. They finish as `succeeded`, `partial`, `paused_retryable`, `failed`, or `cancelled`; retryable runs resume from their saved node. Public observations are cached for seven days and xAI observations for 24 hours unless `--refresh` is used. Standard and deep modes enforce bounded queries, source characters, candidates, model/tool calls, duration, and optional dollar cost.
+
+Default source selection is local-network data, enabled LinkedIn imports, and bounded public web search. Optional GitHub, GDELT, and Wayback adapters can be selected with `--sources public_web,github,gdelt,wayback`. Public LinkedIn profile URLs may be recorded from search results, but JobOS never fetches those profile pages.
+
+xAI X Search is optional, user-keyed, and off by default. It runs only when all three gates pass: profile consent (`allowedSources.xai: true`), `JOBOS_XAI_ENABLED=1`, and `XAI_API_KEY`. Uncited candidates are dropped. If `--max-cost-usd` is supplied, configure `JOBOS_MODEL_PRICING_JSON` for the selected model so the run can enforce the cap before calling xAI.
+
+```bash
+export JOBOS_XAI_ENABLED=1
+export XAI_API_KEY=...
+# Example schema only: replace these values with current provider prices.
+export JOBOS_MODEL_PRICING_JSON='{"grok-4.5":{"inputPerMillionUsd":3,"outputPerMillionUsd":15,"xSearchCallUsd":0.01}}'
+npm run jobos -- research people \
+  --profile pm-edtech --scope target --company "Acme Learning" \
+  --sources public_web,xai --max-cost-usd 0.50 --json
+```
+
+Research and networking share canonical people, affiliations, source observations, staged candidates, contact points, and relationship edges. Identity resolves by canonical profile URL and then exact imported email—never by name alone. Email checks distinguish syntax, domain/MX, optional SMTP confidence, and user-imported data; guessed addresses are never labeled verified.
+
+```bash
 npm run jobos -- network list --json
 npm run jobos -- network paths --job <job-id> --json
+npm run jobos -- network contacts --job <job-id> --json
 npm run jobos -- outreach plan --job <job-id> --profile pm-edtech --json
 ```
 
-Research and networking share one evidence model. Contact discovery records source observations, stages person candidates, extracts public email/contact points, labels confidence, and combines approved contact quality with user-owned relationship edges. Warm introduction paths outrank cold routes when evidence supports them.
+Warm, source-backed paths outrank cold routes. Network access scores describe evidence strength, not the probability of a reply. Contacts remain unapproved until a human explicitly approves them; suppressed contacts cannot be used. Research creates local evidence and review records only—it does not send outreach, create connection requests, apply, or access private accounts.
 
 Outreach drafting remains local by default. Marking a thread sent records what the user did elsewhere; it does not pretend JobOS delivered the message:
 
@@ -396,11 +469,7 @@ export PERPLEXITY_API_KEY=...
 
 Set `JOBOS_SEARCH_PROVIDER=none` for deterministic offline pursuit/research; worksheets then contain explicit open questions instead of network-derived claims.
 
-Optional public contact-research adapters:
-
-```bash
-export JOBOS_RESEARCH_ADAPTERS=github,gdelt,wayback
-```
+Optional people-research sources are selected per run with `--sources`; GitHub, GDELT, Wayback, and xAI use bounded, isolated adapters. Source failures preserve completed observations and return a partial or retryable run instead of fabricating missing facts.
 
 ## CLI contract and local state
 
@@ -417,7 +486,14 @@ export JOBOS_RESEARCH_ADAPTERS=github,gdelt,wayback
   browser/                    # credential material; never mirrored
 jobos-workspace/
   profiles/
+    <profile-id>.yaml
+    <profile-id>/
+      network-map.yaml
+      network-map.md
   proof-points/
+  research/runs/
+    <run-id>.yaml
+    <run-id>.md
   searches/
   discovery/runs/
   jobs/<job-id>/
@@ -448,7 +524,8 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 - Draft artifacts default to `draft_needs_human_review`. Local approval or rejection is bound to an exact current revision and never triggers an external effect.
 - External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
-- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
+- User-exported LinkedIn connection files are local inputs. JobOS records public LinkedIn URLs but does not fetch profile pages, sign in, or bypass platform controls.
+- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
 - `ready-for-review` indicates complete local evidence awaiting human review; `approved` adds only trusted local approval of every current required revision. Neither status means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.

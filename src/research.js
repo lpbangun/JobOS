@@ -437,7 +437,7 @@ function renderStakeholders({ job, stakeholders, query, generatedAt, searchError
 
 function upsertStakeholder(s, job, person, at) {
   const sid = id('stakeholder', `${job.id}:${person.name}:${person.links[0] || ''}`);
-  run(s, 'INSERT OR REPLACE INTO stakeholders VALUES (?,?,?,?,?,?,?,?,?,?)', [sid, job.id, job.company_id, person.name, person.role, JSON.stringify(person.links), person.summary, 'not_contacted', at, at]);
+  run(s, 'INSERT OR REPLACE INTO stakeholders (id,job_id,company_id,name,role,links_json,summary,outreach_status,created_at,updated_at,person_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', [sid, job.id, job.company_id, person.name, person.role, JSON.stringify(person.links), person.summary, 'not_contacted', at, at, null]);
   return { id: sid, ...person };
 }
 
@@ -558,11 +558,10 @@ export async function addStakeholder(s, { jobId, name = '', role = '', sourceUrl
   return { id: stakeholder.id, jobId: job.id, path: rel, name: stakeholder.name, role: stakeholder.role, sourceUrl: url, confidence: structured.person.confidence, warnings: structured.warnings, note: 'Stakeholder recorded from user-provided source text/URL; no outreach was sent.' };
 }
 
-export async function research(s, jid, type) {
+export async function researchCompany(s, jid) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) throw Error(`Unknown job: ${jid}`);
   const at = now();
-  if (type === 'company') {
     const researchResult = await buildCompanyResearch(job);
     const { queries, facts, warnings, mode, openQuestions, outreachAngles, droppedClaims, droppedAngles, matched } = researchResult;
     for (const result of matched) saveSourceObservation(s, sourceObservationFromSearch(job, result));
@@ -592,29 +591,6 @@ export async function research(s, jid, type) {
     audit(s, 'research.company.created', 'job', jid, { jobId: jid, path: rel, structuredPath: structuredRel, queries, sourceCount: facts.length, mode, droppedClaims, droppedAngles, warnings: warnings.length, identityConfidence: identity.sourceConfidence });
     save(s);
     return { jobId: jid, companyId: job.company_id || slug(job.company), path: rel, structuredPath: structuredRel, mode, identity, factCount: facts.length, sourceCount: new Set(facts.map(f => f.url)).size, sources: facts.map(f => f.url), queryCount: queries.length, outreachAngleCount: outreachAngles.length, droppedUnsupportedClaims: droppedClaims, droppedUnsupportedAngles: droppedAngles, warnings, note: 'Company dossier created from public web-search results; no external side effects.' };
-  }
-
-  const queries = stakeholderResearchQueries(job);
-  const gathered = [];
-  const errors = [];
-  for (const query of queries) {
-    const searched = await safeSearch(query, 8);
-    gathered.push(...searched.results);
-    if (searched.error) errors.push(`${query}: ${searched.error}`);
-  }
-  const results = dedupeResults(gathered);
-  const query = queries.filter(q => !q.includes('linkedin.com')).join(' | ');
-  const searchError = errors.join('; ') || null;
-  for (const result of results.filter(result => sourceAllowedForRecording(result.url))) saveSourceObservation(s, sourceObservationFromSearch(job, result));
-  syncSourceObservations(s, jid);
-  const candidates = results.map(result => personFromResult(result, job.company)).filter(Boolean).slice(0, 5);
-  const checked = await filterStakeholdersWithLlm(job, candidates);
-  const people = checked.people;
-  const stakeholders = people.map(p => upsertStakeholder(s, job, p, at));
-  const rel = writeStakeholderDoc(s, job, stakeholders, query, at, checked.warnings, searchError);
-  audit(s, 'research.stakeholders.created', 'job', jid, { jobId: jid, path: rel, query, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, warnings: checked.warnings.length });
-  save(s);
-  return { jobId: jid, path: rel, stakeholderIds: stakeholders.map(x => x.id), candidateCount: candidates.length, sourceCount: new Set(stakeholders.flatMap(x => x.links)).size, searchError, warnings: checked.warnings, note: 'Stakeholder research created from public web-search results; no outreach was sent.' };
 }
 
 export function getStakeholder(s, sid) {

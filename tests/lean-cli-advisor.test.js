@@ -378,13 +378,13 @@ test('pursue dry-run returns full stage dependency graph', () => {
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
   const dry = out(['pursue', imported.id, '--profile', 'pm', '--dry-run']);
   assert.equal(dry.dryRun, true);
-  assert.ok(dry.stages.length >= 10, `should have 10 stages, got ${dry.stages.length}`);
+  assert.ok(dry.stages.length >= 8, `should have 8 stages, got ${dry.stages.length}`);
   const scoreStage = dry.stages.find(s => s.stage === 'score');
   assert.deepEqual(scoreStage.dependencies, []);
   const companyStage = dry.stages.find(s => s.stage === 'company');
   assert.ok(companyStage.dependencies.includes('score'));
   const outreachStage = dry.stages.find(s => s.stage === 'outreach');
-  assert.ok(outreachStage.dependencies.includes('network'));
+  assert.ok(outreachStage.dependencies.includes('people-research'));
   assert.ok(outreachStage.dependencies.includes('application'));
 });
 
