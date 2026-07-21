@@ -182,7 +182,7 @@ test('document approval and rejection confirm locally, refresh review state, and
   assert.equal(rejectedDoc.approvalStatus, 'rejected');
   assert.equal(rejectedDoc.reviewNote, 'Missing evidence');
   assert.equal(tui.model.review.some(item => item.id === rejected.id), false);
-  assert.match(tui.state.status, /queue, readiness, and audit log refreshed/);
+  assert.match(tui.state.status, /rejected · redraft next: jobos tailor cover-letter/);
 });
 
 test('review, log, network, documents, answers, discovery, system, and profile surfaces render real state', async t => {
