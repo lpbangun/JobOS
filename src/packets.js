@@ -390,9 +390,7 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
     let auditEvents = [];
 
     if (!existingApp) {
-      const result = _writeApp(s, jobId, profileId, 'materials-ready', '', { receiptBound: false, skipIfExists: true });
-      application = result.application;
-      auditEvents = auditEvents.concat(result.auditEvents);
+      application = _writeApp(s, jobId, profileId, 'materials-ready', '', { receiptBound: false, skipIfExists: true, persist: false });
     } else {
       application = existingApp;
     }

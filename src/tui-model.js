@@ -1,5 +1,6 @@
 import { all, one } from './db.js';
 import { discoveryHealth, listJobSummaries, reviewQueue, selectedJobContext } from './domain-tools.js';
+import { reviewQueue as discoveryReviewQueue } from './discovery.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
@@ -90,29 +91,66 @@ function priorityStrip(s, jobs, at) {
   ];
 }
 
-function artifactDocs(s, jobId) {
+export function artifactDocs(s, jobId) {
   if (!jobId) return [];
-  return all(s, `SELECT id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,
-    series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note
-    FROM artifacts WHERE job_id=? ORDER BY series_key,revision DESC,created_at DESC`, [jobId])
-    .map(row => ({
+  const rows = all(s, `SELECT id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,content_hash,reviewed_at,reviewed_by,review_note
+    FROM artifacts WHERE job_id=? ORDER BY created_at DESC,id DESC`, [jobId]);
+  const proofIds = [...new Set(rows.flatMap(row => parseJson(row.evidence_json, []))
+    .map(value => typeof value === 'string' ? value : (value?.proofPointId || value?.id))
+    .filter(Boolean))];
+  const proofs = proofIds.length
+    ? all(s, `SELECT id,summary,evidence,skills_json,metrics_json,source FROM proof_points WHERE id IN (${proofIds.map(() => '?').join(',')})`, proofIds)
+    : [];
+  const proofById = new Map(proofs.map(row => [row.id, row]));
+  const resolveEvidence = value => {
+    const proofPointId = typeof value === 'string' ? value : (value?.proofPointId || value?.id);
+    if (!proofPointId) return value;
+    const proof = proofById.get(proofPointId);
+    if (!proof) return { ...(typeof value === 'object' && value ? value : {}), proofPointId, missing: true };
+    return {
+      ...(typeof value === 'object' && value ? value : {}),
+      proofPointId,
+      summary: proof.summary,
+      evidence: proof.evidence,
+      skills: parseJson(proof.skills_json, []),
+      metrics: parseJson(proof.metrics_json, []),
+      source: proof.source
+    };
+  };
+  return rows.map(row => {
+    const previous = rows.find(candidate =>
+      candidate.profile_id === row.profile_id &&
+      candidate.path === row.path &&
+      (candidate.created_at < row.created_at || (candidate.created_at === row.created_at && candidate.id < row.id)));
+    return {
       id: row.id,
+      jobId: row.job_id,
+      profileId: row.profile_id,
       type: row.type,
       path: row.path,
       title: row.title,
       content: row.content,
-      evidence: redactSensitive(parseJson(row.evidence_json, [])),
-      warnings: redactSensitive(parseJson(row.warnings_json, [])),
+      evidence: parseJson(row.evidence_json, []).map(resolveEvidence),
+      warnings: parseJson(row.warnings_json, []).map(String),
       approvalStatus: row.approval_status,
       createdAt: row.created_at,
       seriesKey: row.series_key,
-      revision: Number(row.revision || 0),
-      supersedesArtifactId: row.supersedes_artifact_id || null,
-      contentHash: row.content_hash || '',
+      revision: row.revision,
+      contentHash: row.content_hash,
       reviewedAt: row.reviewed_at || null,
       reviewedBy: row.reviewed_by || null,
-      reviewNote: row.review_note || ''
-    }));
+      reviewNote: row.review_note || '',
+      previousDraft: previous ? {
+        id: previous.id,
+        title: previous.title,
+        path: previous.path,
+        content: previous.content,
+        approvalStatus: previous.approval_status,
+        createdAt: previous.created_at,
+        revision: previous.revision
+      } : null
+    };
+  });
 }
 
 export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = new Date().toISOString() } = {}) {
@@ -188,7 +226,23 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     review: reviews,
     log: logs,
     answers: answerCounts,
-    discovery: discoveryHealth(s, { profileId: selectedProfile }),
+    discovery: {
+      ...discoveryHealth(s, { profileId: selectedProfile }),
+      queue: discoveryReviewQueue(s)
+        .filter(row => !selectedProfile || row.profile_id === selectedProfile)
+        .map(row => ({
+          id: row.id,
+          profileId: row.profile_id,
+          title: row.title,
+          company: row.company,
+          location: row.location || '',
+          source: row.source,
+          status: row.status,
+          fitScore: row.fit_score == null ? null : Number(row.fit_score),
+          highFit: Boolean(row.high_fit),
+          createdAt: row.created_at
+        }))
+    },
     policy: {
       sideEffects: 'off',
       autoApply: 'disabled',
