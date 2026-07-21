@@ -1,10 +1,11 @@
 import { score } from './scoring.js';
 import { tailor } from './tailoring.js';
-import { research } from './research.js';
+import { researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
-import { approveContact, createOutreachPlan, discoverContacts } from './research/contacts.js';
+import { approveContact, createOutreachPlan } from './research/contacts.js';
 import { mapReachableNetwork } from './research/network.js';
-import { appCreate, appUpdate, due } from './tracking.js';
+import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
+import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
 import { importUrl, listJobs } from './jobs.js';
@@ -43,6 +44,32 @@ export class DomainToolError extends Error {
 const object = properties => ({ type: 'object', properties });
 const required = (properties, names) => ({ ...object(properties), required: names });
 const text = { type: 'string' };
+const researchSources = {
+  type: 'array',
+  items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'github', 'gdelt', 'wayback', 'xai'] }
+};
+const researchBudget = object({
+  maxQueries: { type: 'number' },
+  maxCandidates: { type: 'number' },
+  maxSourceChars: { type: 'number' },
+  maxModelCalls: { type: 'number' },
+  maxPaidToolCalls: { type: 'number' },
+  maxDurationMs: { type: 'number' },
+  maxCostUsd: { type: ['number', 'null'] }
+});
+const peopleResearchRequest = {
+  profileId: text,
+  scope: { type: 'string', enum: ['profile', 'target', 'job', 'person'] },
+  jobId: text,
+  company: text,
+  role: text,
+  personId: text,
+  person: required({ name: text, profileUrl: text }, ['name', 'profileUrl']),
+  depth: { type: 'string', enum: ['standard', 'deep'] },
+  sources: researchSources,
+  refresh: { type: 'boolean' },
+  budget: researchBudget
+};
 
 export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_jobs', description: 'List local JobOS jobs and their current fit and application state.', inputSchema: object({ profileId: text, status: text }) },
@@ -56,7 +83,10 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
-  { name: 'discover_contacts', description: 'Discover source-backed contact points and email patterns for a job or stakeholder without sending outreach.', inputSchema: object({ jobId: text, stakeholderId: text }) },
+  { name: 'start_people_research', description: 'Run people research synchronously for a scope (profile/target/job/person) and return the run result.', inputSchema: required(peopleResearchRequest, ['profileId', 'scope']) },
+  { name: 'get_people_research_run', description: 'Get the current state of a people research run.', inputSchema: required({ runId: text }, ['runId']) },
+  { name: 'resume_people_research_run', description: 'Resume a paused_retryable people research run.', inputSchema: required({ runId: text }, ['runId']) },
+  { name: 'cancel_people_research_run', description: 'Request cancellation of a people research run.', inputSchema: required({ runId: text }, ['runId']) },
   { name: 'approve_contact', description: 'Mark a discovered contact point as human-approved for later draft use.', inputSchema: required({ contactId: text }, ['contactId']) },
   { name: 'plan_outreach', description: 'Rank a reviewable outreach path from discovered contacts and user-owned network evidence.', inputSchema: required({ jobId: text, profileId: text, stakeholderId: text, goal: text }, ['jobId', 'profileId']) },
   { name: 'map_reachable_network', description: 'Create a local reachable-network path ladder for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
@@ -97,37 +127,51 @@ function allowAgentAttestation(options) {
   if (options.allowExternalAttestation === true) return true;
   return process.env.JOBOS_ALLOW_AGENT_ATTESTATION === '1';
 }
-
 function enforcePolicy(name, args, options) {
   const source = mediationSource(options);
-  if (['approve_artifact', 'reject_artifact'].includes(name) && ['acp', 'mcp'].includes(source)) {
+  if (!['acp', 'mcp'].includes(source)) return;
+
+  // approve_contact is always denied for agent mediation regardless of attestation override
+  if (name === 'approve_contact') {
     throw new DomainToolError(
-      'human_review_required',
-      'Artifact approval and rejection require the trusted CLI or TUI human review flow. Agent inspection and diff remain available.',
-      { tool: name, source, artifactId: args.artifactId || null, externalSideEffects: 'none' }
+      'agent_human_confirmation_denied',
+      'Agent mediation cannot approve contacts. Complete human confirmation manually.',
+      { tool: name, source, status: null, externalSideEffect: 'none' }
     );
   }
-  const PACKET_SOURCES = new Set(['acp', 'mcp']);
-  if (PACKET_SOURCES.has(source)) {
-    if (name === 'create_application_packet') {
-      throw new DomainToolError(
-        'human_packet_freeze_required',
-        'Packet creation requires the trusted CLI or TUI human workflow. Agent inspection tools (applications_plan, application_packets_list, application_packet_show, application_packet_diff) remain available.',
-        { tool: name, source, externalSideEffects: 'none' }
-      );
-    }
-    if (name === 'attest_application_submitted' || name === 'confirm_application_receipt') {
-      throw new DomainToolError(
-        'human_submission_attestation_required',
-        'Submission attestation and receipt confirmation require the trusted CLI or TUI human workflow. Inspection tools remain available.',
-        { tool: name, source, externalSideEffects: 'none' }
-      );
-    }
+
+  // Artifact approval/rejection is always denied for agent mediation
+  if (name === 'approve_artifact' || name === 'reject_artifact') {
+    throw new DomainToolError(
+      'human_review_required',
+      'Artifact approval and rejection require the trusted CLI or TUI human review flow.',
+      { tool: name, source, status: null, externalSideEffect: 'none' }
+    );
   }
-  if (!['acp', 'mcp'].includes(source) || allowAgentAttestation(options)) return;
+
+  // Packet freeze is always denied for agent mediation
+  if (name === 'create_application_packet') {
+    throw new DomainToolError(
+      'human_packet_freeze_required',
+      'Packet freeze requires trusted CLI or TUI source.',
+      { tool: name, source, status: null, externalSideEffect: 'none' }
+    );
+  }
+
+  // Submission attestation and receipt confirmation are always denied for agent mediation
+  if (name === 'attest_application_submitted' || name === 'confirm_application_receipt') {
+    throw new DomainToolError(
+      'human_submission_attestation_required',
+      'Submission attestation requires trusted CLI or TUI human confirmation.',
+      { tool: name, source, status: null, externalSideEffect: 'none' }
+    );
+  }
+
+  // Attestation override only applies to mark_outreach_sent and application attestation statuses
+  if (allowAgentAttestation(options)) return;
+
   const status = String(args.status || '').trim().toLowerCase();
-  const denied = name === 'approve_contact'
-    || name === 'mark_outreach_sent'
+  const denied = name === 'mark_outreach_sent'
     || ((name === 'create_application' || name === 'update_application_status') && EFFECT_ATTESTATION_STATUSES.has(status));
   if (!denied) return;
   throw new DomainToolError(
@@ -136,6 +180,7 @@ function enforcePolicy(name, args, options) {
     { tool: name, source, status: status || null, externalSideEffect: 'none' }
   );
 }
+
 
 function publicJob(row) {
   return {
@@ -275,8 +320,26 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'score_job') return await score(s, args.jobId, args.profileId);
   if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume');
   if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover');
-  if (name === 'research_company') return await research(s, args.jobId, 'company');
-  if (name === 'discover_contacts') return await discoverContacts(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null });
+  if (name === 'research_company') return await researchCompany(s, args.jobId);
+  if (name === 'start_people_research') {
+    const runId = createResearchRun(s, {
+      profileId: args.profileId,
+      scope: args.scope,
+      jobId: args.jobId || undefined,
+      company: args.company || undefined,
+      role: args.role || undefined,
+      personId: args.personId || undefined,
+      person: args.person || undefined,
+      depth: args.depth || 'standard',
+      sources: args.sources || undefined,
+      budget: args.budget || undefined,
+      refresh: Boolean(args.refresh)
+    });
+    return await executeResearchRun(s, runId);
+  }
+  if (name === 'get_people_research_run') return getResearchRun(s, args.runId);
+  if (name === 'resume_people_research_run') return await resumeResearchRun(s, args.runId);
+  if (name === 'cancel_people_research_run') return requestCancelResearchRun(s, args.runId);
   if (name === 'approve_contact') return approveContact(s, { contactId: args.contactId });
   if (name === 'plan_outreach') return createOutreachPlan(s, { jobId: args.jobId, profileId: args.profileId, stakeholderId: args.stakeholderId || null, goal: args.goal || 'informational' });
   if (name === 'map_reachable_network') return mapReachableNetwork(s, { jobId: args.jobId });
@@ -289,9 +352,15 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'mark_outreach_sent') return markOutreachSent(s, { artifactId: args.artifactId, channel: args.channel, notes: args.notes || '' });
   if (name === 'schedule_outreach_followup') return scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays });
   if (name === 'list_outreach_due') return outreachDue(s);
-  if (name === 'create_application') return appCreate(s, args.jobId, args.status, args.notes || '');
+  if (name === 'create_application') {
+    const application = appCreate(s, args.jobId, args.status, args.notes || '');
+    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+  }
   if (name === 'applications_plan') return planApplication(s, { jobId: args.jobId, profileId: args.profileId });
-  if (name === 'update_application_status') return appUpdate(s, args.applicationId, args.status, args.notes ?? null);
+  if (name === 'update_application_status') {
+    const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null);
+    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+  }
   if (name === 'list_tasks') return due(s);
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');
   if (name === 'weekly_review') {

@@ -6,10 +6,11 @@ import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
+import { setNetworkIntent } from './profiles.js';
+import { createResearchRun, executeResearchRun } from './research/runs.js';
+import { validStatuses, appCreate, appUpdate } from './tracking.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { updateJobStatus } from './jobs.js';
-import { appCreate, appUpdate } from './tracking.js';
-import { validStatuses } from './utils.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -290,7 +291,98 @@ function overlayItems(model, state) {
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
+  if (state.overlay === 'build-network') return buildNetworkItems(model, state);
   return [];
+}
+// Build-network editor: a sequential, keyboard-usable setup editor.
+// The draft (state.networkDraft) holds editable copies seeded from the model on open.
+// Field kinds: 'list' (comma-separated text, Enter to edit), 'toggle' (Enter to flip),
+// 'static' (read-only display), 'action' (Enter/b to trigger).
+const PERSONA_OPTIONS = ['recruiter', 'hiring_manager', 'peer', 'executive', 'alumni'];
+function buildNetworkItems(model, state) {
+  const ns = model.networkSetup || {};
+  const draft = state.networkDraft;
+  if (!model.profileId) return [];
+  if (!draft) return [{ key: '_notice', label: 'Open build-network to edit', value: '', type: 'static' }];
+  const items = [];
+  items.push({ key: 'status', label: 'Setup status', value: ns.status || 'not_started', type: 'static' });
+  items.push({ key: 'schools', label: 'Schools/programs', value: draft.schools || 'none', type: 'list', affType: 'school' });
+  items.push({ key: 'employers', label: 'Former employers/roles', value: draft.employers || 'none', type: 'list', affType: 'employer' });
+  items.push({ key: 'communities', label: 'Communities', value: draft.communities || 'none', type: 'list', affType: 'community' });
+  items.push({ key: 'targetRoles', label: 'Target roles', value: draft.targetRoles || 'none', type: 'list' });
+  items.push({ key: 'targetCompanies', label: 'Target companies', value: draft.targetCompanies || 'none', type: 'list' });
+  items.push({ key: 'personas', label: 'Preferred personas', value: draft.personas || 'none', type: 'list' });
+  items.push({ key: 'relTypes', label: 'Relationship types', value: draft.relTypes || 'none', type: 'list' });
+  items.push({ key: 'exclusions', label: 'Exclusions', value: draft.exclusions || 'none', type: 'list' });
+  items.push({ key: 'sourcePublic', label: 'Public web source', value: draft.sourcePublic ? 'on' : 'off', type: 'toggle' });
+  items.push({ key: 'sourceLinkedin', label: 'LinkedIn import source', value: draft.sourceLinkedin ? 'on' : 'off', type: 'toggle' });
+  items.push({ key: 'sourceXai', label: 'xAI X Search source', value: ns.xaiState || 'off', type: 'static' });
+  items.push({ key: 'connCount', label: 'Imported connections', value: String(ns.importedConnectionCount || 0), type: 'static' });
+  items.push({ key: 'latestRun', label: 'Latest profile research run', value: ns.latestProfileRun ? `${ns.latestProfileRun.status} · ${ns.latestProfileRun.id?.slice(0, 12)}` : 'none', type: 'static' });
+  items.push({ key: '_sep', label: '', value: '', type: 'separator' });
+  items.push({ key: 'saveOnly', label: '[Save only]', value: 'default: save network setup', type: 'action', action: 'saveOnly' });
+  items.push({ key: 'saveBuild', label: '[Save and build]', value: 'save and start network research', type: 'action', action: 'saveBuild' });
+  return items;
+}
+function seedNetworkDraft(model) {
+  const ns = model.networkSetup || {};
+  const intent = ns.intent || {};
+  const rows = ns.affiliationRows || [];
+  const groupFor = type => rows.filter(row => row.type === type && row.status !== 'rejected')
+    .map(row => row.roleOrProgram ? `${row.organization} (${row.roleOrProgram})` : row.organization)
+    .join(', ');
+  return {
+    schools: groupFor('school'),
+    employers: groupFor('employer'),
+    communities: groupFor('community'),
+    targetRoles: (intent.targetRoles || []).join(', '),
+    targetCompanies: (intent.targetCompanies || []).join(', '),
+    personas: (intent.preferredPersonas || []).join(', '),
+    relTypes: (intent.comfortableRelationshipTypes || []).join(', '),
+    exclusions: (intent.exclusions || []).join(', '),
+    sourcePublic: intent.allowedSources?.publicWeb !== false,
+    sourceLinkedin: Boolean(intent.allowedSources?.linkedinImport),
+    sourceXai: Boolean(intent.allowedSources?.xai)
+  };
+}
+function parseList(value) {
+  return [...new Set(String(value || '').split(',').map(part => part.trim()).filter(Boolean))];
+}
+function buildIntentFromDraft(draft) {
+  return {
+    version: 1,
+    targetCompanies: parseList(draft.targetCompanies),
+    targetRoles: parseList(draft.targetRoles),
+    preferredPersonas: parseList(draft.personas).filter(p => PERSONA_OPTIONS.includes(p)),
+    comfortableRelationshipTypes: parseList(draft.relTypes),
+    exclusions: parseList(draft.exclusions),
+    allowedSources: {
+      publicWeb: draft.sourcePublic !== false,
+      linkedinImport: Boolean(draft.sourceLinkedin),
+      xai: Boolean(draft.sourceXai)
+    }
+  };
+}
+function buildAffiliationsFromDraft(draft) {
+  const affiliations = [];
+  const addGroup = (text, type) => {
+    for (const entry of parseList(text)) {
+      // support "Org (role/program)" shorthand
+      const match = entry.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+      affiliations.push({
+        type,
+        organization: match ? match[1].trim() : entry,
+        role_or_program: match ? match[2].trim() : '',
+        status: 'confirmed',
+        source: 'manual',
+        confidence: 'high'
+      });
+    }
+  };
+  addGroup(draft.schools, 'school');
+  addGroup(draft.employers, 'employer');
+  addGroup(draft.communities, 'community');
+  return affiliations;
 }
 function visibleWindow(items, selectedIndex, limit) {
   const size = Math.max(1, Math.min(items.length, limit));
@@ -409,9 +501,26 @@ function overlayPanel(model, state, width, height, color) {
     body.push('', 'j/k scroll · payloads are secret-redacted · Esc closes');
   } else if (state.overlay === 'network') {
     title = `NETWORK · ${selected?.job.company || 'NO JOB'}`;
-    body = selected?.path
-      ? [`strength ${selected.path.strength}`, `channel ${selected.path.channel || '—'}`, JSON.stringify(selected.path.reasoning), ...selected.path.warnings.map(value => `warning ${value}`)]
-      : ['No ranked warm path yet.', 'Press m to run the shared map_reachable_network tool.'];
+    const ns = model.networkSetup || {};
+    const run = selected?.latestJobRun || ns.latestProfileRun;
+    const xaiState = ns.xaiState || 'off';
+    body = [];
+    if (run) {
+      const budget = run.budget || {};
+      const usage = run.usage || {};
+      body.push(`Run: ${run.id?.slice(0, 12)} · ${run.status}`);
+      body.push(`Budget: q=${budget.maxQueries || '—'} c=${budget.maxCandidates || '—'} ms=${budget.maxDurationMs || '—'}`);
+      body.push(`Usage: ${usage.queries || 0}q ${usage.modelCalls || 0}mc ${usage.sourceChars || 0}ch`);
+      if (run.warnings?.length) body.push(...run.warnings.map(w => `warning: ${w}`));
+      if (run.error) body.push(`error: ${run.error}`);
+      body.push(`xAI: ${xaiState}${xaiState === 'available' ? '' : ' · never key'}`);
+    } else {
+      body.push('No research run yet.', 'Open build-network (b) to set up and start research.');
+    }
+    if (selected?.path) {
+      body.push('', `Path: ${selected.path.strength} · ${selected.path.channel || '—'}`);
+      body.push(...wrap(JSON.stringify(selected.path.reasoning), width - 4).slice(0, 2));
+    }
     body.push('', 'm map/refresh · Esc closes');
   } else if (state.overlay === 'docs') {
     return docsPanel(model, state, width, height, color);
@@ -451,19 +560,50 @@ function overlayPanel(model, state, width, height, color) {
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
     } else body = ['No profiles yet.', 'Create one through the CLI.'];
     body.push('', 'j/k select · Enter switches · Esc closes');
+  } else if (state.overlay === 'build-network') {
+    const items = overlayItems(model, state);
+    if (!items.length || (items.length === 1 && items[0].type === 'static')) {
+      body = ['No profile selected.', 'Create a profile first.'];
+    } else {
+      const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 7));
+      body = visible.items.map((item, offset) => {
+        const idx = visible.start + offset;
+        const selected = idx === state.overlayIndex;
+        const prefix = selected ? '▶' : ' ';
+        if (item.type === 'separator') return '';
+        if (item.type === 'toggle') {
+          const mark = item.value === 'on' ? '[x]' : '[ ]';
+          return `${prefix} ${item.label}: ${mark}`;
+        }
+        if (item.type === 'action') return `${prefix} ${item.label} — ${item.value}`;
+        return `${prefix} ${item.label}: ${item.value}`;
+      });
+      const profileId = model.profileId || '—';
+      const scope = state.selectedJobId ? `job:${state.selectedJobId?.slice(0, 8)}` : 'profile';
+      body.push('', `Profile: ${profileId} · Proposed scope: ${scope}`);
+      if (state.mode === 'build-network-field') {
+        body.push(`editing: ${state.networkDraft?._editingKey || ''} > ${state.input}█`);
+        body.push('Enter commits · Esc cancels edit');
+      } else {
+        body.push('j/k move · Enter edit field/toggle · Enter on Save only saves · b Save and build · Esc closes');
+      }
+    }
   }
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
 function footerLines(width) {
-  const format = entries => ` ${entries.map(([key, label]) => `${key} ${label}`).join(' · ')}`;
-  const entries = TUI_KEYMAP.global;
-  if (width >= 116) return [format(entries.slice(0, 9)), format(entries.slice(9))];
+  if (width >= 90) {
+    return [
+      ' j/k select · 1 today 2 all 3 high · p pursue z score d daily · a agent i prompt',
+      ' r review l log · n network o docs q answers · s sources ? system · b build-network : command Q quit'
+    ];
+  }
   return [
-    format(entries.slice(0, 4)),
-    format(entries.slice(4, 9)),
-    format(entries.slice(9, 14)),
-    format(entries.slice(14))
+    ' j/k select · 1 today · 2 all · 3 high',
+    ' p pursue · z score · d daily · a agent · i prompt',
+    ' r review · l log · n network · o docs · q answers',
+    ' s sources · ? system · b build-network · : command · Q quit'
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
@@ -556,7 +696,8 @@ export function defaultTuiState() {
     error: null,
     busy: null,
     messages: [],
-    catalog: []
+    catalog: [],
+    networkDraft: null
   };
 }
 
@@ -781,47 +922,31 @@ export class JobosTui {
     this.state.docsDiff = false;
     this.state.mode = 'normal';
     this.state.input = '';
-    if (name === 'review') {
-      const first = this.model.review[0];
-      this.setSelectedArtifact(first?.id || null, { reset: false });
-    } else if (name === 'discovery') {
-      const queue = this.model.discovery.queue;
-      if (!queue.some(item => item.id === this.state.selectedDiscoveryJobId)) this.state.selectedDiscoveryJobId = queue[0]?.id || null;
-    } else if (name === 'docs') {
-      const docs = this.model.selected?.docs || [];
-      if (!docs.some(doc => doc.id === this.state.selectedArtifactId)) this.setSelectedArtifact(docs[0]?.id || null);
-      this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+    if (name === 'build-network') {
+      this.state.networkDraft = seedNetworkDraft(this.model);
+      this.state.status = 'build-network editor · Enter edits fields · Esc closes';
+    } else {
+      if (name === 'docs') this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
+      this.state.status = `${name} overlay · Esc closes`;
     }
-    this.state.status = `${name} overlay · Esc closes`;
     this.render();
   }
 
   closeTransient() {
-    if (this.state.mode !== 'normal') {
-      if (this.state.mode === 'review-note' && this.state.input) {
-        this.state.pendingConfirm = { kind: 'discard-review-note', next: 'close' };
-        this.render();
-        return true;
-      }
+    if (this.state.mode === 'build-network-field') {
       this.state.mode = 'normal';
       this.state.input = '';
-      this.state.status = 'input cancelled';
-      this.applyPendingAutoOpen();
+      if (this.state.networkDraft) this.state.networkDraft._editingKey = null;
+      this.state.status = 'edit cancelled';
       this.render();
       return true;
     }
     if (this.state.overlay) {
       this.state.overlay = null;
       this.state.overlayIndex = 0;
-      this.state.focusTarget = 'shell';
-      this.state.status = 'overlay closed';
-      this.render();
-      return true;
-    }
-    if (this.state.overlay) {
-      this.state.overlay = null;
-      this.state.overlayIndex = 0;
-      this.state.docsDiff = false;
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.networkDraft = null;
       this.state.status = 'overlay closed';
       this.render();
       return true;
@@ -1017,6 +1142,78 @@ export class JobosTui {
     }
   }
 
+  async buildNetworkSaveOnly() {
+    this.state.busy = 'research';
+    this.state.status = 'saving network setup';
+    this.state.error = null;
+    this.state.overlay = null;
+    this.render();
+    try {
+      const profileId = this.model.profileId;
+      if (!profileId) {
+        this.state.error = 'No profile';
+        this.state.status = 'Create a profile first.';
+        return;
+      }
+      const draft = this.state.networkDraft || seedNetworkDraft(this.model);
+      setNetworkIntent(this.store, {
+        profileId,
+        intent: buildIntentFromDraft(draft),
+        affiliations: buildAffiliationsFromDraft(draft)
+      });
+      this.state.networkDraft = null;
+      this.refresh();
+      this.state.status = 'network setup saved · affiliations confirmed · run jobos network import to add connections';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `save failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async buildNetworkSaveAndBuild() {
+    this.state.busy = 'research';
+    this.state.status = 'building network map · saving and starting research';
+    this.state.error = null;
+    this.state.overlay = null;
+    this.render();
+    try {
+      const profileId = this.model.profileId;
+      if (!profileId) {
+        this.state.error = 'No profile';
+        this.state.status = 'Create a profile first.';
+        return;
+      }
+      const draft = this.state.networkDraft || seedNetworkDraft(this.model);
+      const scope = this.state.selectedJobId ? 'job' : 'profile';
+      const jobId = this.state.selectedJobId || undefined;
+      setNetworkIntent(this.store, {
+        profileId,
+        intent: buildIntentFromDraft(draft),
+        affiliations: buildAffiliationsFromDraft(draft)
+      });
+      this.state.networkDraft = null;
+      this.refresh({ disk: true });
+      const runId = createResearchRun(this.store, {
+        profileId,
+        scope,
+        jobId,
+        depth: 'standard'
+      });
+      const result = await executeResearchRun(this.store, runId);
+      this.refresh();
+      this.state.status = `network research ${result.status} · ${result.runId?.slice(0, 12) || ''}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `research failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   executeCommand(value) {
     const [command] = String(value || '').trim().split(/\s+/);
     this.state.mode = 'normal';
@@ -1025,6 +1222,7 @@ export class JobosTui {
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile') return this.openOverlay(command);
+    if (command === 'build-network') return this.openOverlay('build-network');
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1366,33 +1564,7 @@ export class JobosTui {
 
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
-    if (this.state.overlay === 'review') {
-      if (value === 'j') return this.moveReviewSelection(1);
-      if (value === 'k') return this.moveReviewSelection(-1);
-      if (key.name === 'return' || key.name === 'enter') return this.openReviewDocument();
-      if (value === 'A') return this.reviewCurrentArtifact('approved');
-      if (value === 'R') return this.beginReject();
-      if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
-      if (value === 'E') {
-        this.openReviewDocument();
-        void this.openArtifactEditor();
-        return true;
-      }
-      if (value === 'V' || value === 'I') {
-        this.openReviewDocument();
-        return this.onDocsKey(value, key);
-      }
-    }
-    if (this.state.overlay === 'discovery') {
-      if (value === 'j') return this.moveDiscoverySelection(1);
-      if (value === 'k') return this.moveDiscoverySelection(-1);
-      if (value === 'A') return this.decideDiscovery('saved');
-      if (value === 'X') return this.decideDiscovery('archived');
-      if (value === 'd') {
-        void this.runAction('daily');
-        return true;
-      }
-    }
+    if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
     if (value === 'r') return this.openOverlay('review');
     if (value === 'l') return this.openOverlay('log');
     if (value === 'n') return this.openOverlay('network');
@@ -1400,6 +1572,15 @@ export class JobosTui {
     if (value === 'q') return this.openOverlay('answers');
     if (value === 's') return this.openOverlay('discovery');
     if (value === '?') return this.openOverlay('system');
+    if (this.state.overlay === 'review') {
+      if (value === 'A') return this.reviewCurrentArtifact('approved');
+      if (value === 'R') return this.beginReject();
+      if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
+    }
+    if (this.state.overlay === 'discovery') {
+      if (value === 'A') return this.decideDiscovery('saved');
+      if (value === 'X') return this.decideDiscovery('archived');
+    }
     const items = overlayItems(this.model, this.state);
     if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
     else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
@@ -1409,48 +1590,93 @@ export class JobosTui {
       this.state.overlay = null;
       this.refresh({ disk: false });
       return true;
+    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
+      this.openReviewDocument();
+      return true;
     } else if (value === 'm' && this.state.overlay === 'network') {
       void this.runAction('network');
+      return true;
+    } else if (value === 'd' && this.state.overlay === 'discovery') {
+      void this.runAction('daily');
+      return true;
+    } else if (this.state.overlay === 'build-network') {
+      this.onBuildNetworkKey(value, key, items);
       return true;
     }
     this.render();
     return true;
   }
 
+  onBuildNetworkKey(value, key, items) {
+    const item = items[this.state.overlayIndex];
+    if (!item) return this.render();
+    const isEnter = key.name === 'return' || key.name === 'enter';
+    // b always triggers save-and-build from anywhere in the overlay
+    if (value === 'b') return void this.buildNetworkSaveAndBuild();
+    if (!isEnter) return this.render();
+    if (item.type === 'toggle') {
+      const draft = this.state.networkDraft;
+      if (draft) {
+        const field = item.key === 'sourcePublic' ? 'sourcePublic' : item.key === 'sourceLinkedin' ? 'sourceLinkedin' : 'sourceXai';
+        draft[field] = !draft[field];
+        this.state.status = `${item.label} ${draft[field] ? 'on' : 'off'}`;
+      }
+      this.render();
+      return;
+    }
+    if (item.type === 'list') {
+      // Enter edit mode: seed input with current value
+      const draftKey = item.key;
+      this.state.mode = 'build-network-field';
+      this.state.input = this.state.networkDraft?.[draftKey] || '';
+      if (this.state.networkDraft) this.state.networkDraft._editingKey = draftKey;
+      this.state.status = `editing ${item.label} · Enter commits · Esc cancels`;
+      this.render();
+      return;
+    }
+    if (item.type === 'action' && item.action === 'saveOnly') return void this.buildNetworkSaveOnly();
+    if (item.type === 'action' && item.action === 'saveBuild') return void this.buildNetworkSaveAndBuild();
+    this.render();
+  }
+
   onInputKey(value, key) {
+    if (this.state.mode === 'approve-confirm') {
+      if (value === 'y') { void this.commitArtifactReview('approved'); return true; }
+      this.state.mode = 'normal';
+      this.state.status = 'Approval cancelled.';
+      this.render();
+      return true;
+    }
+    if (this.state.mode === 'reject-confirm') {
+      if (value === 'y') { void this.commitArtifactReview('rejected'); return true; }
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = 'Rejection cancelled.';
+      this.render();
+      return true;
+    }
     if (key.name === 'escape') return this.closeTransient();
-    if (this.state.mode === 'approve-confirm' || this.state.mode === 'reject-confirm') {
-      if (value === 'y') {
-        void this.commitArtifactReview(this.state.mode === 'approve-confirm' ? 'approved' : 'rejected');
-        return true;
-      }
-      if (value === 'n') {
-        this.state.mode = 'normal';
-        this.state.input = '';
-        this.state.status = 'review decision cancelled';
-        this.render();
-        return true;
-      }
-      // Ignore other keys (Enter, backspace, etc.) so they do not silently cancel the confirmation.
+    if (key.name === 'backspace') {
+      this.state.input = this.state.input.slice(0, -1);
       this.render();
       return true;
     }
-    if (this.state.mode === 'reject-note') {
-      if (key.name === 'backspace') this.state.input = this.state.input.slice(0, -1);
-      else if (key.name === 'return' || key.name === 'enter') {
-        this.state.mode = 'reject-confirm';
-        this.render();
-        return true;
-      } else if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) this.state.input += value;
-      this.render();
-      return true;
-    }
-    if (key.name === 'backspace') this.state.input = this.state.input.slice(0, -1);
-    else if (key.name === 'return' || key.name === 'enter') {
+    if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
       if (mode === 'review-note') {
         void this.submitReviewNote();
+        return true;
+      }
+      if (mode === 'reject-note') {
+        if (!text) {
+          this.state.status = 'Rejection feedback is required.';
+          this.render();
+          return true;
+        }
+        this.state.mode = 'reject-confirm';
+        this.state.status = 'Confirm rejection? (y/n)';
+        this.render();
         return true;
       }
       if (mode === 'stage-note') {
@@ -1465,12 +1691,19 @@ export class JobosTui {
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
       else if (mode === 'command') this.executeCommand(text);
-      else this.applyPendingAutoOpen();
+      else if (mode === 'build-network-field' && this.state.networkDraft) {
+        const editKey = this.state.networkDraft._editingKey;
+        if (editKey) this.state.networkDraft[editKey] = text;
+        this.state.networkDraft._editingKey = null;
+        this.state.status = `${editKey || 'field'} updated`;
+      }
+      this.render();
       return true;
-    } else if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) {
-      this.state.input += value;
     }
-    this.render();
+    if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) {
+      this.state.input += value;
+      this.render();
+    }
     return true;
   }
 
@@ -1584,6 +1817,7 @@ export class JobosTui {
     else if (value === 's') this.openOverlay('discovery');
     else if (value === '?') this.openOverlay('system');
     else if (value === 'v') this.openOverlay('profile');
+    else if (value === 'b') this.openOverlay('build-network');
     else if (value === 'p') void this.runAction('pursue');
     else if (value === 'z') void this.runAction('score');
     else if (value === 'd') void this.runAction('daily');

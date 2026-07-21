@@ -15,6 +15,8 @@
     "mcp-demo": "node scripts/mcp-demo.js"
   },
   "dependencies": {
+    "@langchain/core": "1.2.3",
+    "@langchain/langgraph": "1.4.8",
     "cheerio": "^1.2.0",
     "diff": "^9.0.0",
     "marked": "^15.0.12",
@@ -22,9 +24,8 @@
     "openai": "^6.45.0",
     "slice-ansi": "^9.0.0",
     "sql.js": "^1.12.0",
-    "string-width": "^8.2.2",
-    "strip-ansi": "^7.2.0",
-    "yaml": "^2.8.0"
+    "yaml": "^2.8.0",
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "playwright": "^1.61.1"

@@ -2,21 +2,19 @@ import { all, one } from './db.js';
 import { runAllSearches } from './discovery.js';
 import { dedupeJobs } from './jobs.js';
 import { score } from './scoring.js';
-import { research, listJobStakeholders } from './research.js';
-import { discoverContacts, createOutreachPlan } from './research/contacts.js';
-import { mapReachableNetwork } from './research/network.js';
+import { researchCompany, listJobStakeholders } from './research.js';
+import { createOutreachPlan } from './research/contacts.js';
 import { prepareApplicationQuestions } from './answers.js';
 import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { tailor } from './tailoring.js';
 import { appCreate } from './tracking.js';
 import { draftOutreach } from './outreach.js';
+import { createResearchRun, executeResearchRun } from './research/runs.js';
 
 const pursuitStages = [
   'score',
   'company',
-  'stakeholders',
-  'contacts',
-  'network',
+  'people-research',
   'questions',
   'resume',
   'cover-letter',
@@ -27,16 +25,13 @@ const pursuitStages = [
 const stageDependencies = {
   score: [],
   company: ['score'],
-  stakeholders: ['company'],
-  contacts: ['stakeholders'],
-  network: ['contacts'],
+  'people-research': ['company'],
   questions: ['score'],
   resume: ['score'],
   'cover-letter': ['score'],
   application: ['questions', 'resume', 'cover-letter'],
-  outreach: ['network', 'application']
+  outreach: ['people-research', 'application']
 };
-
 function workflowError(code, message) {
   return Object.assign(new Error(message), { code, type: 'workflow' });
 }
@@ -47,7 +42,7 @@ function shouldAdvanceApplication(currentStatus, newStatus) {
   const newRank = forwardOrder.indexOf(newStatus);
   if (currentRank === -1) return false;
   return newRank > currentRank;
-}
+ }
 
 function validateProfileJob(s, jobId, profileId) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
@@ -59,6 +54,8 @@ function validateProfileJob(s, jobId, profileId) {
 
 function selectedStages(stage) {
   if (!stage) return pursuitStages;
+  const renamed = { stakeholders: 'people-research', contacts: 'people-research', network: 'people-research' };
+  if (renamed[stage]) throw workflowError('renamed_stage', `Stage "${stage}" has been replaced by "${renamed[stage]}". Use "${renamed[stage]}" instead.`);
   if (!pursuitStages.includes(stage)) throw workflowError('unknown_stage', `Unknown pursuit stage: ${stage}`);
   const selected = new Set([stage]);
   const visit = name => {
@@ -80,11 +77,16 @@ function compactResult(value) {
 
 async function runStage(name, operation, timeoutMs) {
   const started = Date.now();
+  const controller = new AbortController();
+  let timer;
   try {
     const result = await Promise.race([
-      operation(),
+      operation(controller.signal),
       new Promise((_, reject) => {
-        const timer = setTimeout(() => reject(workflowError('stage_timeout', `Stage "${name}" exceeded ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(() => {
+          controller.abort('stage_timeout');
+          reject(workflowError('stage_timeout', `Stage "${name}" exceeded ${timeoutMs}ms`));
+        }, timeoutMs);
         timer.unref?.();
       })
     ]);
@@ -98,7 +100,7 @@ async function runStage(name, operation, timeoutMs) {
     };
   } catch (error) {
     const elapsedMs = Date.now() - started;
-    const deadlineExceeded = elapsedMs > timeoutMs && error?.code !== 'stage_timeout';
+    const deadlineExceeded = error?.code === 'stage_timeout' || elapsedMs > timeoutMs;
     return {
       stage: name,
       status: 'failed',
@@ -111,6 +113,8 @@ async function runStage(name, operation, timeoutMs) {
       },
       recovery: `Run "jobos pursue --stage ${name} <job-id> --profile <profile-id> --json" after resolving the error.`
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -164,10 +168,18 @@ export async function runPursuit(s, {
   let readiness = null;
   const operations = {
     score: () => score(s, jobId, profileId),
-    company: () => research(s, jobId, 'company'),
-    stakeholders: () => research(s, jobId, 'stakeholders'),
-    contacts: () => discoverContacts(s, { jobId }),
-    network: () => mapReachableNetwork(s, { jobId }),
+    company: () => researchCompany(s, jobId),
+    'people-research': async signal => {
+      const request = {
+        profileId,
+        scope: 'job',
+        jobId,
+        sources: ['local_network', 'linkedin_import', 'public_web'],
+        depth: 'standard'
+      };
+      const runId = createResearchRun(s, request);
+      return await executeResearchRun(s, runId, { signal });
+    },
     questions: () => prepareApplicationQuestions(s, { jobId, profileId }),
     resume: () => tailor(s, jobId, profileId, 'resume'),
     'cover-letter': () => tailor(s, jobId, profileId, 'cover'),
@@ -195,10 +207,15 @@ export async function runPursuit(s, {
     },
     outreach: async () => {
       const plan = createOutreachPlan(s, { jobId, profileId });
-      const stakeholder = listJobStakeholders(s, jobId)[0] || null;
-      if (!stakeholder) return { plan, draft: null, warnings: ['No source-backed stakeholder is available for an outreach draft.'] };
+      if (!plan.recommended || !plan.stakeholderId) {
+        return {
+          plan,
+          draft: null,
+          warnings: ['No approved contact or promoted warm-path stakeholder is available for an outreach draft.']
+        };
+      }
       try {
-        const draft = await draftOutreach(s, { jobId, profileId, stakeholderId: stakeholder.id, goal: 'informational' });
+        const draft = await draftOutreach(s, { profileId, planId: plan.id });
         return { plan, draft };
       } catch (error) {
         return { plan, draft: null, warnings: [`Outreach draft needs attention: ${error.message}`] };
@@ -212,7 +229,8 @@ export async function runPursuit(s, {
     if (failedDependency) {
       result = { stage: name, status: 'skipped', elapsedMs: 0, reason: `upstream stage ${failedDependency} failed`, recovery: `Run "jobos pursue --stage ${failedDependency} ${jobId} --profile ${profileId} --json" first.` };
     } else {
-      result = await runStage(name, operations[name], Number(stageTimeoutMs || 30000));
+      const stageTimeout = name === 'people-research' ? 150000 : Number(stageTimeoutMs || 30000);
+      result = await runStage(name, operations[name], stageTimeout);
     }
     results.push(result);
     byName.set(name, result);

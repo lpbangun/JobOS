@@ -4,30 +4,22 @@ import net from 'node:net';
 import { one, all, run, audit, save } from '../db.js';
 import { id, now, parseJson, slug } from '../utils.js';
 import { writeMd, writeYaml } from '../workspace.js';
-import { searchWebDetailed } from '../search.js';
 import {
   canonicalUrl,
   emailDomain,
   extractEmailContexts,
   extractEmails,
-  fetchPublicPage,
   hostForUrl,
-  isFetchablePublicPage,
   isGenericInbox,
-  isLinkedInProfileUrl,
   nameFromEmailLocal,
-  pageTargetsFromSeeds,
-  saveSourceObservation,
-  sourceAllowedForRecording,
-  sourceObservationFromPage,
-  sourceObservationFromSearch,
-  syncSourceObservations,
-  listSourceObservations
 } from './sources.js';
+import { resolvePerson } from './people.js';
 
 const disposableDomains = new Set([
   '10minutemail.com', 'guerrillamail.com', 'mailinator.com', 'tempmail.com', 'yopmail.com'
 ]);
+export const TIER_RANK = Object.freeze({A: 6, B: 5, U: 4, C: 3, E: 2, D: 1});
+
 
 const smtpProbeLastByDomain = new Map();
 
@@ -71,6 +63,8 @@ function rowToCandidate(row) {
     id: row.id,
     jobId: row.job_id || null,
     companyId: row.company_id || null,
+    personId: row.person_id || null,
+    researchRunId: row.research_run_id || null,
     name: row.name,
     role: row.role || '',
     function: row.function || '',
@@ -102,17 +96,18 @@ function rowToContact(row) {
     humanApproved: Boolean(row.human_approved),
     doNotUse: Boolean(row.do_not_use),
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    originResearchRunId: row.origin_research_run_id || null
   } : null;
 }
 
 function rowToPattern(row) {
   return row ? {
     id: row.id,
-    companyId: row.company_id,
+    companyId: row.company_id || null,
     domain: row.domain,
     pattern: row.pattern,
-    supportCount: Number(row.support_count || 0),
+    supportCount: row.support_count,
     supportSources: parseJson(row.support_sources_json, []),
     confidence: row.confidence,
     createdAt: row.created_at,
@@ -127,14 +122,24 @@ export function listPersonCandidates(s, { jobId = null, companyId = null } = {})
 }
 
 export function listContactPoints(s, { jobId = null, stakeholderId = null, companyId = null } = {}) {
-  if (stakeholderId) return all(s, 'SELECT * FROM contact_points WHERE stakeholder_id=? ORDER BY evidence_tier, confidence DESC, updated_at DESC', [stakeholderId]).map(rowToContact);
-  if (companyId) return all(s, 'SELECT * FROM contact_points WHERE company_id=? ORDER BY evidence_tier, confidence DESC, updated_at DESC', [companyId]).map(rowToContact);
-  if (jobId) {
+  const confidenceOrder = { high: 3, medium: 2, low: 1 };
+  let contacts;
+  if (stakeholderId) {
+    contacts = all(s, 'SELECT * FROM contact_points WHERE stakeholder_id=?', [stakeholderId]).map(rowToContact);
+  } else if (companyId) {
+    contacts = all(s, 'SELECT * FROM contact_points WHERE company_id=?', [companyId]).map(rowToContact);
+  } else if (jobId) {
     const job = one(s, 'SELECT company_id FROM jobs WHERE id=?', [jobId]);
     if (!job?.company_id) return [];
-    return all(s, 'SELECT * FROM contact_points WHERE company_id=? ORDER BY evidence_tier, confidence DESC, updated_at DESC', [job.company_id]).map(rowToContact);
+    contacts = all(s, 'SELECT * FROM contact_points WHERE company_id=?', [job.company_id]).map(rowToContact);
+  } else {
+    return all(s, 'SELECT * FROM contact_points ORDER BY updated_at DESC').map(rowToContact);
   }
-  return all(s, 'SELECT * FROM contact_points ORDER BY updated_at DESC').map(rowToContact);
+  return contacts.sort((a, b) =>
+    (TIER_RANK[b.evidenceTier] || 0) - (TIER_RANK[a.evidenceTier] || 0)
+    || (confidenceOrder[b.confidence] || 0) - (confidenceOrder[a.confidence] || 0)
+    || b.updatedAt.localeCompare(a.updatedAt)
+  );
 }
 
 export function listEmailPatterns(s, { companyId }) {
@@ -149,6 +154,8 @@ function upsertPersonCandidate(s, job, person, sourceIds, at = now()) {
   const existing = one(s, 'SELECT * FROM person_candidates WHERE id=?', [cid]);
   const status = existing?.status || 'candidate';
   const sourceObservationIds = [...new Set([...(parseJson(existing?.source_observation_ids_json, []) || []), ...sourceIds])];
+  const personId = person.personId || null;
+  const researchRunId = person.researchRunId || null;
   const params = [
     cid,
     job.id,
@@ -163,12 +170,14 @@ function upsertPersonCandidate(s, job, person, sourceIds, at = now()) {
     status,
     existing?.suppression_reason || '',
     existing?.created_at || at,
-    at
+    at,
+    personId,
+    researchRunId
   ];
   if (existing) {
-    run(s, `UPDATE person_candidates SET job_id=?,company_id=?,name=?,role=?,function=?,seniority=?,relevance=?,confidence=?,source_observation_ids_json=?,status=?,suppression_reason=?,updated_at=? WHERE id=?`, [...params.slice(1, 12), params[13], cid]);
+    run(s, `UPDATE person_candidates SET job_id=?,company_id=?,name=?,role=?,function=?,seniority=?,relevance=?,confidence=?,source_observation_ids_json=?,status=?,suppression_reason=?,created_at=?,updated_at=?,person_id=?,research_run_id=? WHERE id=?`, [...params.slice(1, 16), cid]);
   } else {
-    run(s, 'INSERT INTO person_candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params);
+    run(s, `INSERT INTO person_candidates (id,job_id,company_id,name,role,function,seniority,relevance,confidence,source_observation_ids_json,status,suppression_reason,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, params);
   }
   return rowToCandidate(one(s, 'SELECT * FROM person_candidates WHERE id=?', [cid]));
 }
@@ -183,7 +192,7 @@ function normalizeContactValue(type, value) {
   return String(value || '').trim();
 }
 
-function upsertContactPoint(s, {
+export function upsertContactPoint(s, {
   companyId,
   personId = null,
   stakeholderId = null,
@@ -195,38 +204,54 @@ function upsertContactPoint(s, {
   sourceObservationIds = [],
   checks = {},
   humanApproved = false,
-  doNotUse = false
+  doNotUse = false,
+  originResearchRunId = null
 }, at = now()) {
   const normalized = normalizeContactValue(type, value);
   if (!normalized) return null;
-  const cid = contactId(companyId, type, normalized, personId || '', stakeholderId || '');
-  const existing = one(s, 'SELECT * FROM contact_points WHERE id=?', [cid]);
+  const seededId = contactId(companyId, type, normalized, personId || '', stakeholderId || '');
+  const existing = personId
+    ? one(s, 'SELECT * FROM contact_points WHERE person_id=? AND type=? AND normalized_value=? ORDER BY created_at LIMIT 1', [personId, type, normalized])
+    : one(s, 'SELECT * FROM contact_points WHERE id=?', [seededId]);
+  const cid = existing?.id || seededId;
   const sourceIds = [...new Set([...(parseJson(existing?.source_observation_ids_json, []) || []), ...sourceObservationIds])];
   const mergedChecks = { ...(parseJson(existing?.checks_json, {}) || {}), ...(checks || {}) };
   const approved = existing?.human_approved ? 1 : (humanApproved ? 1 : 0);
   const blocked = existing?.do_not_use ? 1 : (doNotUse ? 1 : 0);
+  const resolvedTier = (TIER_RANK[existing?.evidence_tier] || 0) > (TIER_RANK[evidenceTier] || 0)
+    ? existing.evidence_tier
+    : evidenceTier;
+  const resolvedVerification = resolvedTier === existing?.evidence_tier
+    ? existing.verification_status
+    : verificationStatus;
+  const confidenceRank = { blocked: 0, low: 1, medium: 2, high: 3 };
+  const resolvedConfidence = (confidenceRank[existing?.confidence] || 0) > (confidenceRank[confidence] || 0)
+    ? existing.confidence
+    : normalizeConfidence(confidence, 'low');
+  const orrId = originResearchRunId || existing?.origin_research_run_id || '';
   const params = [
     cid,
-    personId || null,
-    stakeholderId || null,
-    companyId || null,
+    personId || existing?.person_id || null,
+    stakeholderId || existing?.stakeholder_id || null,
+    companyId || existing?.company_id || null,
     type,
     value,
     normalized,
-    evidenceTier,
-    verificationStatus,
-    normalizeConfidence(confidence, 'low'),
+    resolvedTier,
+    resolvedVerification,
+    resolvedConfidence,
     JSON.stringify(sourceIds),
     JSON.stringify(mergedChecks),
     approved,
     blocked,
     existing?.created_at || at,
-    at
+    at,
+    orrId
   ];
   if (existing) {
-    run(s, `UPDATE contact_points SET person_id=?,stakeholder_id=?,company_id=?,type=?,value=?,normalized_value=?,evidence_tier=?,verification_status=?,confidence=?,source_observation_ids_json=?,checks_json=?,human_approved=?,do_not_use=?,updated_at=? WHERE id=?`, [...params.slice(1, 14), at, cid]);
+    run(s, `UPDATE contact_points SET person_id=?,stakeholder_id=?,company_id=?,type=?,value=?,normalized_value=?,evidence_tier=?,verification_status=?,confidence=?,source_observation_ids_json=?,checks_json=?,human_approved=?,do_not_use=?,created_at=?,updated_at=?,origin_research_run_id=? WHERE id=?`, [...params.slice(1, 17), cid]);
   } else {
-    run(s, 'INSERT INTO contact_points VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params);
+    run(s, `INSERT INTO contact_points (id,person_id,stakeholder_id,company_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at,origin_research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, params);
   }
   return rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [cid]));
 }
@@ -245,24 +270,6 @@ function upsertPattern(s, { companyId, domain, pattern, supportSources, supportC
   return rowToPattern(one(s, 'SELECT * FROM email_patterns WHERE id=?', [pid]));
 }
 
-function namesFromTitle(title) {
-  const name = String(title || '').replace(/\s+/g, ' ').trim().split(/\s+[—|-]\s+/)[0]?.trim() || '';
-  const words = name.split(/\s+/).filter(Boolean);
-  return words.length >= 2 && words.length <= 4 && words.every(w => /^[A-Z][A-Za-z'.-]+$/.test(w)) ? name : '';
-}
-
-function roleFromTitle(title, snippet = '') {
-  const text = `${title} ${snippet}`.replace(/\s+/g, ' ');
-  const exact = text.match(/\b(Head of [A-Z][A-Za-z ]+|Director of [A-Z][A-Za-z ]+|VP [A-Z][A-Za-z ]+|Vice President [A-Z][A-Za-z ]+|Recruiting Lead|Talent Lead|People Operations Manager|Product Manager|Product Leader|Engineering Manager|Design Lead|Hiring Manager|Founder|Recruiter)\b/);
-  if (exact) return exact[1].trim();
-  if (/recruit/i.test(text)) return 'Recruiter';
-  if (/talent/i.test(text)) return 'Talent Lead';
-  if (/people/i.test(text)) return 'People Operations';
-  if (/product/i.test(text)) return 'Product Leader';
-  if (/engineer/i.test(text)) return 'Engineering Leader';
-  if (/founder/i.test(text)) return 'Founder';
-  return 'Relevant stakeholder';
-}
 
 function companyDomains(job, company, observations = []) {
   const domains = new Set();
@@ -293,247 +300,10 @@ function tierForEmailObservation(email, observation, domains) {
 function confidenceForTier(tier, generic = false) {
   if (generic) return 'medium';
   if (tier === 'A') return 'high';
-  if (tier === 'B' || tier === 'C') return 'medium';
+  if (tier === 'B' || tier === 'C' || tier === 'U') return 'medium';
   return 'low';
 }
 
-function contactQueries(job, domains) {
-  const domain = domains[0] || '';
-  const roleFamily = String(job.title || '').replace(/[,()]/g, ' ');
-  const queries = [
-    `"${job.company}" "@${domain || job.company}"`,
-    `"${job.company}" "Head of People" OR recruiter OR "Talent Acquisition"`,
-    `"${job.company}" "${roleFamily}" "hiring manager"`,
-    `site:linkedin.com/in "${job.company}" "Talent Acquisition"`,
-    `site:linkedin.com/in "${job.company}" "${roleFamily.split(/\s+/).slice(0, 3).join(' ')}"`
-  ];
-  if (domain) {
-    queries.unshift(`site:${domain} "@${domain}"`);
-    queries.unshift(`site:${domain} "mailto:"`);
-  }
-  return [...new Set(queries.filter(q => q.replace(/["\s]/g, '').length > 0))].slice(0, 8);
-}
-
-function adapterNames(env) {
-  return String(env.JOBOS_RESEARCH_ADAPTERS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
-}
-
-async function fetchJsonUrl(url, { env = process.env, headers = {} } = {}) {
-  const controller = new AbortController();
-  const timeout = Math.max(1000, Number(env.JOBOS_RESEARCH_FETCH_TIMEOUT_MS || 12000));
-  const timer = setTimeout(() => controller.abort(), timeout);
-  timer.unref?.();
-  let response;
-  try {
-    response = await fetch(url, {
-      headers: { accept: 'application/json,*/*;q=0.8', 'user-agent': 'JobOS local research (+configured public adapter)', ...headers },
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  return await response.json();
-}
-
-function observationFromAdapter(job, { url, title, snippet, sourceType, provider, metadata = {}, trust = 'public_adapter' }) {
-  return {
-    id: id('src', `${job.id}:${provider}:${canonicalUrl(url)}:${title}:${snippet}`),
-    companyId: job.company_id || null,
-    jobId: job.id,
-    url,
-    canonicalUrl: canonicalUrl(url),
-    title: title || url,
-    snippet: snippet || '',
-    sourceType,
-    provider,
-    query: '',
-    trust,
-    fetchedAt: now(),
-    contentHash: id('hash', `${title || ''}:${snippet || ''}`).replace(/^hash_/, ''),
-    metadata
-  };
-}
-
-function githubOrgHandles(observations, company) {
-  const handles = new Set();
-  const companyText = String(company || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  for (const obs of observations) {
-    try {
-      const url = new URL(obs.url);
-      const host = url.hostname.replace(/^www\./, '').toLowerCase();
-      if (host !== 'github.com') continue;
-      const handle = url.pathname.split('/').filter(Boolean)[0];
-      if (!handle || ['features', 'marketplace', 'topics', 'collections', 'login', 'orgs'].includes(handle.toLowerCase())) continue;
-      const text = `${obs.title || ''} ${obs.snippet || ''}`.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
-      if (!companyText || text.includes(companyText.split(' ')[0]) || obs.query?.includes('github')) handles.add(handle);
-    } catch {}
-  }
-  return [...handles].slice(0, 3);
-}
-
-async function collectGithubObservations(s, job, searchObservations, { env = process.env } = {}) {
-  const observations = [];
-  const warnings = [];
-  for (const handle of githubOrgHandles(searchObservations, job.company)) {
-    try {
-      const base = String(env.JOBOS_GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
-      const members = await fetchJsonUrl(`${base}/orgs/${encodeURIComponent(handle)}/members`, { env, headers: env.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {} });
-      for (const member of (Array.isArray(members) ? members : []).slice(0, 20)) {
-        const observation = observationFromAdapter(job, {
-          url: member.html_url || `https://github.com/${member.login}`,
-          title: `${member.login} - public GitHub member of ${handle}`,
-          snippet: `Public GitHub org member for ${handle}.`,
-          sourceType: 'github_public_member',
-          provider: 'github',
-          trust: 'public_api',
-          metadata: { githubOrg: handle, login: member.login, avatarUrl: member.avatar_url || '' }
-        });
-        saveSourceObservation(s, observation);
-        observations.push(observation);
-      }
-    } catch (e) {
-      warnings.push(`GitHub adapter failed for ${handle}: ${e.message}`);
-    }
-  }
-  return { observations, warnings };
-}
-
-async function collectGdeltObservations(s, job, { env = process.env } = {}) {
-  const observations = [];
-  const warnings = [];
-  try {
-    const base = env.JOBOS_GDELT_DOC_URL || 'https://api.gdeltproject.org/api/v2/doc/doc';
-    const url = new URL(base);
-    url.searchParams.set('query', `"${job.company}"`);
-    url.searchParams.set('format', 'json');
-    url.searchParams.set('maxrecords', String(Math.max(1, Number(env.JOBOS_GDELT_LIMIT || 10))));
-    const data = await fetchJsonUrl(url.href, { env });
-    for (const article of (data.articles || []).slice(0, 10)) {
-      const observation = observationFromAdapter(job, {
-        url: article.url,
-        title: article.title || `${job.company} news`,
-        snippet: article.seendate ? `${article.seendate}: ${article.domain || ''}` : (article.domain || ''),
-        sourceType: 'news',
-        provider: 'gdelt',
-        trust: 'public_news_index',
-        metadata: { domain: article.domain || '', language: article.language || '', sourceCountry: article.sourcecountry || '' }
-      });
-      saveSourceObservation(s, observation);
-      observations.push(observation);
-    }
-  } catch (e) {
-    warnings.push(`GDELT adapter failed: ${e.message}`);
-  }
-  return { observations, warnings };
-}
-
-async function collectWaybackObservations(s, job, domains, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
-  const observations = [];
-  const warnings = [];
-  for (const domain of domains.slice(0, 2)) {
-    try {
-      const base = env.JOBOS_WAYBACK_CDX_URL || 'https://web.archive.org/cdx/search/cdx';
-      const url = new URL(base);
-      url.searchParams.set('url', `${domain}/team*`);
-      url.searchParams.set('output', 'json');
-      url.searchParams.set('filter', 'statuscode:200');
-      url.searchParams.set('collapse', 'digest');
-      url.searchParams.set('limit', String(Math.max(1, Number(env.JOBOS_WAYBACK_LIMIT || 3))));
-      const data = await fetchJsonUrl(url.href, { env });
-      const rows = Array.isArray(data) ? data.slice(1) : [];
-      for (const row of rows.slice(0, 3)) {
-        const [urlkey, timestamp, original] = row;
-        if (!timestamp || !original) continue;
-        const archiveUrl = `https://web.archive.org/web/${timestamp}/${original}`;
-        try {
-          const page = await fetchPublicPage(archiveUrl, { fetchImpl, env });
-          if (!page.ok) continue;
-          const observation = sourceObservationFromPage(job, page, { provider: 'wayback', query: `wayback:${domain}/team*` });
-          observation.sourceType = 'archived_page';
-          observation.trust = 'public_archive_potentially_stale';
-          observation.metadata = { ...(observation.metadata || {}), archiveTimestamp: timestamp, originalUrl: original, urlkey };
-          saveSourceObservation(s, observation);
-          observations.push(observation);
-        } catch (e) {
-          warnings.push(`Wayback snapshot fetch failed for ${archiveUrl}: ${e.message}`);
-        }
-      }
-    } catch (e) {
-      warnings.push(`Wayback adapter failed for ${domain}: ${e.message}`);
-    }
-  }
-  return { observations, warnings };
-}
-
-async function collectConfiguredAdapterObservations(s, job, domains, searchObservations, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
-  const names = adapterNames(env);
-  const observations = [];
-  const warnings = [];
-  if (names.includes('github')) {
-    const result = await collectGithubObservations(s, job, searchObservations, { env });
-    observations.push(...result.observations);
-    warnings.push(...result.warnings);
-  }
-  if (names.includes('gdelt')) {
-    const result = await collectGdeltObservations(s, job, { env });
-    observations.push(...result.observations);
-    warnings.push(...result.warnings);
-  }
-  if (names.includes('wayback')) {
-    const result = await collectWaybackObservations(s, job, domains, { fetchImpl, lookupImpl, env });
-    observations.push(...result.observations);
-    warnings.push(...result.warnings);
-  }
-  return { observations, warnings };
-}
-
-async function safeSearch(query, { limit = 6, env = process.env } = {}) {
-  try {
-    const detailed = await searchWebDetailed(query, { limit, env });
-    return { results: detailed.results, warnings: detailed.warnings || [], error: null };
-  } catch (e) {
-    return { results: [], warnings: [{ provider: 'search', message: e.message }], error: e.message };
-  }
-}
-
-async function collectSearchObservations(s, job, company, { env = process.env } = {}) {
-  const domains = companyDomains(job, company);
-  const queries = contactQueries(job, domains);
-  const observations = [];
-  const warnings = [];
-  for (const query of queries) {
-    const searched = await safeSearch(query, { env, limit: 8 });
-    if (searched.error) warnings.push(`${query}: ${searched.error}`);
-    for (const warning of searched.warnings) warnings.push(`${query}: ${warning.provider} ${warning.message}`);
-    for (const result of searched.results) {
-      if (!sourceAllowedForRecording(result.url)) continue;
-      const observation = sourceObservationFromSearch(job, result);
-      saveSourceObservation(s, observation);
-      observations.push(observation);
-    }
-  }
-  return { queries, observations, warnings };
-}
-
-async function fetchPageObservations(s, job, company, searchObservations, { fetchImpl = fetch, lookupImpl = null, env = process.env } = {}) {
-  const seedUrls = searchObservations.map(obs => obs.url).filter(isFetchablePublicPage);
-  const targets = pageTargetsFromSeeds({ company, job, seedUrls, limit: Math.max(1, Number(env.JOBOS_RESEARCH_PAGE_LIMIT || 16)) });
-  const observations = [];
-  const warnings = [];
-  for (const target of targets) {
-    try {
-      const page = await fetchPublicPage(target, { fetchImpl, lookupImpl, env });
-      if (!page.ok) continue;
-      const observation = sourceObservationFromPage(job, page, { query: 'contact-page-crawl' });
-      saveSourceObservation(s, observation);
-      observations.push(observation);
-    } catch (e) {
-      warnings.push(`Could not fetch ${target}: ${e.message}`);
-    }
-  }
-  return { targets, observations, warnings };
-}
 
 function namesForPattern(name) {
   const parts = String(name || '').toLowerCase().replace(/[^a-z\s'-]/g, ' ').split(/\s+/).filter(Boolean);
@@ -697,15 +467,6 @@ async function smtpProbe(email, domainChecks, { env = process.env, timeoutMs = 8
   });
 }
 
-async function dnsForEmails(emails, options) {
-  const out = new Map();
-  for (const email of emails) {
-    const domain = emailDomain(email);
-    if (!domain || out.has(domain)) continue;
-    out.set(domain, await verifyEmailDomain(domain, options));
-  }
-  return out;
-}
 
 function observationEmailContexts(observation) {
   const meta = observation.metadata || {};
@@ -724,29 +485,11 @@ function observationEmailContexts(observation) {
   return [...fromRows, ...extra, ...textContexts].filter((row, index, arr) => arr.findIndex(other => other.email === row.email && other.name === row.name) === index);
 }
 
-function personCandidatesFromObservation(observation) {
-  const meta = observation.metadata || {};
-  const people = Array.isArray(meta.personCandidates) ? meta.personCandidates : [];
-  const fromEmails = observationEmailContexts(observation).filter(row => row.name && !row.generic).map(row => ({
-    name: row.name,
-    role: 'Public contact',
-    confidence: 'medium',
-    summary: row.context,
-    sourceType: 'email_context'
-  }));
-  const fromLinkedIn = isLinkedInProfileUrl(observation.url) ? [{
-    name: namesFromTitle(observation.title),
-    role: roleFromTitle(observation.title, observation.snippet),
-    confidence: 'medium',
-    summary: observation.snippet || observation.title,
-    sourceType: 'public_profile_url'
-  }].filter(p => p.name) : [];
-  return [...people, ...fromEmails, ...fromLinkedIn].filter(p => p.name);
-}
 
 function stakeholderCandidates(s, jobId) {
   return all(s, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY updated_at DESC', [jobId]).map(row => ({
     id: row.id,
+    personId: row.person_id || null,
     name: row.name,
     role: row.role || '',
     sourceObservationIds: [],
@@ -762,9 +505,6 @@ function candidateRowsForGeneration(s, jobId) {
   ];
 }
 
-function samePerson(a, b) {
-  return String(a || '').toLowerCase().replace(/[^a-z]/g, '') === String(b || '').toLowerCase().replace(/[^a-z]/g, '');
-}
 
 function syncContacts(s, jobId) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
@@ -818,6 +558,7 @@ ${candidateRows}
 ## Evidence tiers
 - A: exact public email on a company-controlled page.
 - B: exact public email on a credible third-party or search-indexed public source.
+- U: user-imported contact from network CSV import (unverified).
 - C: source-backed person plus company email pattern with multiple public examples.
 - D: weak pattern/domain hypothesis, usually DNS-only or single-example support.
 - E: profile URL or role relevance without an email.
@@ -829,166 +570,157 @@ ${candidateRows}
 `;
 }
 
-export async function discoverContacts(s, { jobId = null, stakeholderId = null, fetchImpl = fetch, lookupImpl = null, resolver = null, env = process.env } = {}) {
-  let job = jobId ? one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]) : null;
-  let stakeholder = null;
-  if (stakeholderId) {
-    stakeholder = one(s, 'SELECT * FROM stakeholders WHERE id=?', [stakeholderId]);
-    if (!stakeholder) throw Error(`Unknown stakeholder: ${stakeholderId}`);
-    job = one(s, 'SELECT * FROM jobs WHERE id=?', [stakeholder.job_id]);
-  }
-  if (!job) throw Error(`Unknown job: ${jobId || ''}`);
-  const company = job.company_id ? one(s, 'SELECT * FROM companies WHERE id=?', [job.company_id]) : null;
+function observationRowsById(s, observationIds) {
+  const ids = [...new Set((observationIds || []).filter(Boolean))];
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return all(s, `SELECT * FROM source_observations WHERE id IN (${placeholders})`, ids).map(row => ({
+    id: row.id,
+    companyId: row.company_id || null,
+    jobId: row.job_id || null,
+    url: row.url,
+    canonicalUrl: row.canonical_url,
+    title: row.title,
+    snippet: row.snippet,
+    sourceType: row.source_type,
+    provider: row.provider,
+    query: row.query,
+    trust: row.trust,
+    fetchedAt: row.fetched_at,
+    contentHash: row.content_hash,
+    metadata: parseJson(row.metadata_json, {})
+  }));
+}
+
+export async function verifyObservationContacts(s, {
+  runId,
+  jobId = null,
+  companyId = null,
+  observationIds = [],
+  resolver = null,
+  env = process.env
+} = {}) {
+  if (!runId) throw Error('verifyObservationContacts requires runId');
+  const job = jobId ? one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]) : null;
+  if (jobId && !job) throw Error(`Unknown job: ${jobId}`);
+  const resolvedCompanyId = companyId || job?.company_id || null;
+  const company = resolvedCompanyId ? one(s, 'SELECT * FROM companies WHERE id=?', [resolvedCompanyId]) : null;
+  const observations = observationRowsById(s, observationIds);
+  const domainJob = job || { id: runId, company_id: resolvedCompanyId, url: '' };
+  const domains = companyDomains(domainJob, company, observations);
   const at = now();
-  const search = await collectSearchObservations(s, job, company, { env });
-  const initialObservations = [
-    ...listSourceObservations(s, { jobId: job.id }),
-    ...search.observations
-  ].filter((obs, index, arr) => arr.findIndex(other => other.id === obs.id) === index);
-  const initialDomains = companyDomains(job, company, initialObservations);
-  const adapters = await collectConfiguredAdapterObservations(s, job, initialDomains, search.observations, { fetchImpl, lookupImpl, env });
-  const pages = await fetchPageObservations(s, job, company, [...search.observations, ...adapters.observations], { fetchImpl, lookupImpl, env });
-  const observations = [
-    ...initialObservations,
-    ...adapters.observations,
-    ...pages.observations
-  ].filter((obs, index, arr) => arr.findIndex(other => other.id === obs.id) === index);
-  const domains = companyDomains(job, company, observations);
+  const contactIds = [];
   const exactEmails = new Set();
-  const candidateByName = new Map();
-  for (const observation of observations) {
-    const people = personCandidatesFromObservation(observation);
-    for (const person of people) {
-      const candidate = upsertPersonCandidate(s, job, person, [observation.id], at);
-      if (candidate) candidateByName.set(candidate.name.toLowerCase(), candidate);
-    }
-  }
+  const domainChecks = new Map();
+  const stakeholderRows = job ? all(s, 'SELECT id,person_id FROM stakeholders WHERE job_id=?', [job.id]) : [];
+
+  const domainCheckFor = async email => {
+    const domain = emailDomain(email);
+    if (!domainChecks.has(domain)) domainChecks.set(domain, await verifyEmailDomain(domain, { resolver, env }));
+    return domainChecks.get(domain);
+  };
+
   for (const observation of observations) {
     for (const ctx of observationEmailContexts(observation)) {
       if (!ctx.email) continue;
       exactEmails.add(ctx.email);
-      const tier = tierForEmailObservation(ctx.email, observation, domains);
       const generic = ctx.generic || isGenericInbox(ctx.email);
-      let personId = null;
-      let linkedStakeholderId = null;
+      let person = null;
       if (!generic && ctx.name) {
-        const candidate = candidateByName.get(ctx.name.toLowerCase()) || upsertPersonCandidate(s, job, { name: ctx.name, role: 'Public contact', confidence: 'medium' }, [observation.id], at);
-        personId = candidate?.id || null;
-        const stakeholderMatch = all(s, 'SELECT id,name FROM stakeholders WHERE job_id=?', [job.id]).find(row => samePerson(row.name, ctx.name));
-        linkedStakeholderId = stakeholderMatch?.id || null;
+        person = resolvePerson(s, {
+          email: ctx.email,
+          name: ctx.name,
+          sourceRecordId: observation.id
+        })?.person || null;
+        if (job && person) {
+          upsertPersonCandidate(s, job, {
+            id: id('candidate', `${runId}:${person.id}`),
+            personId: person.id,
+            researchRunId: runId,
+            name: person.name || ctx.name,
+            role: 'Public contact',
+            confidence: 'medium'
+          }, [observation.id], at);
+        }
       }
-      const domainCheck = await verifyEmailDomain(emailDomain(ctx.email), { resolver, env });
+      const linkedStakeholder = person
+        ? stakeholderRows.find(row => row.person_id === person.id)
+        : null;
+      const tier = tierForEmailObservation(ctx.email, observation, domains);
+      const domainCheck = await domainCheckFor(ctx.email);
       const smtp = await smtpProbe(ctx.email, domainCheck.checks, { env });
-      const status = tier === 'A' || tier === 'B' ? 'exact_public' : domainCheck.status;
-      upsertContactPoint(s, {
-        companyId: job.company_id,
-        personId,
-        stakeholderId: linkedStakeholderId,
+      const contact = upsertContactPoint(s, {
+        companyId: resolvedCompanyId,
+        personId: person?.id || null,
+        stakeholderId: linkedStakeholder?.id || null,
         type: generic ? 'generic_inbox' : 'email',
         value: ctx.email,
         evidenceTier: tier,
-        verificationStatus: status,
+        verificationStatus: tier === 'A' || tier === 'B' ? 'exact_public' : domainCheck.status,
         confidence: confidenceForTier(tier, generic),
         sourceObservationIds: [observation.id],
-        checks: { exactPublic: true, sourceUrl: observation.url, dns: domainCheck, smtp }
+        checks: { exactPublic: true, sourceUrl: observation.url, dns: domainCheck, smtp },
+        originResearchRunId: runId
       }, at);
+      if (contact?.id) contactIds.push(contact.id);
     }
   }
-  for (const observation of observations.filter(obs => isLinkedInProfileUrl(obs.url))) {
-    const name = namesFromTitle(observation.title);
-    const candidate = name ? upsertPersonCandidate(s, job, { name, role: roleFromTitle(observation.title, observation.snippet), confidence: 'medium', sourceType: 'public_profile_url' }, [observation.id], at) : null;
-    upsertContactPoint(s, {
-      companyId: job.company_id,
-      personId: candidate?.id || null,
-      type: 'profile_url',
-      value: observation.url,
-      evidenceTier: 'E',
-      verificationStatus: 'profile_url_only',
-      confidence: 'medium',
-      sourceObservationIds: [observation.id],
-      checks: { profileUrlOnly: true, fetched: false }
-    }, at);
-  }
-  const patternSupport = new Map();
-  for (const observation of observations) {
-    for (const ctx of observationEmailContexts(observation)) {
-      if (!ctx.name || ctx.generic || isGenericInbox(ctx.email)) continue;
-      const pattern = patternForNameEmail(ctx.name, ctx.email);
-      if (!pattern) continue;
-      const domain = emailDomain(ctx.email);
-      const key = `${domain}:${pattern}`;
-      if (!patternSupport.has(key)) patternSupport.set(key, { domain, pattern, sourceIds: new Set(), examples: new Set() });
-      patternSupport.get(key).sourceIds.add(observation.id);
-      patternSupport.get(key).examples.add(ctx.email);
+
+  if (job && resolvedCompanyId) {
+    const patternSupport = new Map();
+    for (const observation of observations) {
+      for (const ctx of observationEmailContexts(observation)) {
+        if (!ctx.name || ctx.generic || isGenericInbox(ctx.email)) continue;
+        const pattern = patternForNameEmail(ctx.name, ctx.email);
+        if (!pattern) continue;
+        const domain = emailDomain(ctx.email);
+        const key = `${domain}:${pattern}`;
+        if (!patternSupport.has(key)) patternSupport.set(key, { domain, pattern, sourceIds: new Set(), examples: new Set() });
+        patternSupport.get(key).sourceIds.add(observation.id);
+        patternSupport.get(key).examples.add(ctx.email);
+      }
     }
-  }
-  const patterns = [];
-  for (const support of patternSupport.values()) {
-    const count = support.examples.size;
-    patterns.push(upsertPattern(s, {
-      companyId: job.company_id,
-      domain: support.domain,
-      pattern: support.pattern,
-      supportSources: [...support.sourceIds],
-      supportCount: count,
-      confidence: count >= 2 ? 'high' : 'low'
-    }, at));
-  }
-  const existingEmailValues = new Set(listContactPoints(s, { jobId: job.id }).filter(c => ['email', 'generic_inbox'].includes(c.type)).map(c => c.normalizedValue));
-  const domainChecks = await dnsForEmails([...exactEmails, ...patterns.map(p => `pattern@${p.domain}`)], { resolver, env });
-  for (const pattern of patterns) {
-    const dnsCheck = domainChecks.get(pattern.domain) || await verifyEmailDomain(pattern.domain, { resolver, env });
-    for (const candidate of candidateRowsForGeneration(s, job.id)) {
-      const guessed = generateFromPattern(candidate.name, pattern.domain, pattern.pattern);
-      if (!guessed || existingEmailValues.has(guessed)) continue;
-      const tier = pattern.supportCount >= 2 ? 'C' : 'D';
-      const sourceIds = [...new Set([...(candidate.sourceObservationIds || []), ...pattern.supportSources])];
-      upsertContactPoint(s, {
-        companyId: job.company_id,
-        personId: candidate.type === 'stakeholder' ? null : candidate.id,
-        stakeholderId: candidate.stakeholderId || null,
-        type: 'email',
-        value: guessed,
-        evidenceTier: tier,
-        verificationStatus: tier === 'C' ? 'pattern_candidate' : dnsCheck.status,
-        confidence: tier === 'C' && dnsCheck.checks.mxPresent ? 'medium' : 'low',
-        sourceObservationIds: sourceIds,
-        checks: { pattern: pattern.pattern, supportCount: pattern.supportCount, dns: dnsCheck, generated: true }
-      }, at);
-      existingEmailValues.add(guessed);
+    const patterns = [];
+    for (const support of patternSupport.values()) {
+      patterns.push(upsertPattern(s, {
+        companyId: resolvedCompanyId,
+        domain: support.domain,
+        pattern: support.pattern,
+        supportSources: [...support.sourceIds],
+        supportCount: support.examples.size,
+        confidence: support.examples.size >= 2 ? 'high' : 'low'
+      }, at));
     }
+    const existingEmailValues = new Set(listContactPoints(s, { companyId: resolvedCompanyId })
+      .filter(contact => ['email', 'generic_inbox'].includes(contact.type))
+      .map(contact => contact.normalizedValue));
+    for (const pattern of patterns) {
+      const dnsCheck = domainChecks.get(pattern.domain) || await verifyEmailDomain(pattern.domain, { resolver, env });
+      for (const candidate of candidateRowsForGeneration(s, job.id)) {
+        const guessed = generateFromPattern(candidate.name, pattern.domain, pattern.pattern);
+        if (!guessed || existingEmailValues.has(guessed)) continue;
+        const tier = pattern.supportCount >= 2 ? 'C' : 'D';
+        const sourceIds = [...new Set([...(candidate.sourceObservationIds || []), ...pattern.supportSources])];
+        const contact = upsertContactPoint(s, {
+          companyId: resolvedCompanyId,
+          personId: candidate.personId || null,
+          stakeholderId: candidate.stakeholderId || null,
+          type: 'email',
+          value: guessed,
+          evidenceTier: tier,
+          verificationStatus: tier === 'C' ? 'pattern_candidate' : dnsCheck.status,
+          confidence: tier === 'C' && dnsCheck.checks.mxPresent ? 'medium' : 'low',
+          sourceObservationIds: sourceIds,
+          checks: { pattern: pattern.pattern, supportCount: pattern.supportCount, dns: dnsCheck, generated: true },
+          originResearchRunId: runId
+        }, at);
+        if (contact?.id) contactIds.push(contact.id);
+        existingEmailValues.add(guessed);
+      }
+    }
+    syncContacts(s, job.id);
   }
-  const paths = syncContacts(s, job.id);
-  syncSourceObservations(s, job.id);
-  audit(s, 'research.contacts.created', 'job', job.id, {
-    jobId: job.id,
-    stakeholderId: stakeholder?.id || null,
-    path: paths.path,
-    queryCount: search.queries.length,
-    fetchedPageCount: pages.observations.length,
-    contactCount: listContactPoints(s, { jobId: job.id }).length,
-    patternCount: listEmailPatterns(s, { companyId: job.company_id }).length,
-    warnings: search.warnings.length + adapters.warnings.length + pages.warnings.length
-  });
-  save(s);
-  const contacts = listContactPoints(s, stakeholderId ? { stakeholderId } : { jobId: job.id });
-  return {
-    jobId: job.id,
-    stakeholderId: stakeholder?.id || null,
-    path: paths.path,
-    yamlPath: paths.yamlPath,
-    sourceObservationPath: path.join('jobs', job.id, 'research', 'source-observations.yaml'),
-    queryCount: search.queries.length,
-    fetchedPageCount: pages.observations.length,
-    contactCount: contacts.length,
-    candidateCount: listPersonCandidates(s, { jobId: job.id }).length,
-    patternCount: listEmailPatterns(s, { companyId: job.company_id }).length,
-    contacts,
-    personCandidates: listPersonCandidates(s, { jobId: job.id }),
-    emailPatterns: listEmailPatterns(s, { companyId: job.company_id }),
-    warnings: [...search.warnings, ...adapters.warnings, ...pages.warnings],
-    note: 'Contact research created local evidence and review records only; no outreach was sent.'
-  };
+  return { contactIds: [...new Set(contactIds)], exactEmailCount: exactEmails.size };
 }
 
 export function approveContact(s, { contactId }) {
@@ -1026,9 +758,9 @@ export function promoteStakeholder(s, { candidateId: cid }) {
   const sourceIds = parseJson(candidate.source_observation_ids_json, []);
   const links = sourceIds.map(sourceId => one(s, 'SELECT url FROM source_observations WHERE id=?', [sourceId])?.url).filter(Boolean);
   const summary = `Confidence: ${candidate.confidence}. Source type: person_candidate. ${candidate.name} is staged as ${candidate.role || 'a relevant stakeholder'} for ${job.company}.`;
-  run(s, 'INSERT OR REPLACE INTO stakeholders VALUES (?,?,?,?,?,?,?,?,?,?)', [stakeholderId, job.id, job.company_id, candidate.name, candidate.role || 'Relevant stakeholder', JSON.stringify(links), summary, 'not_contacted', at, at]);
+  run(s, `INSERT OR REPLACE INTO stakeholders (id,job_id,company_id,name,role,links_json,summary,outreach_status,created_at,updated_at,person_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [stakeholderId, job.id, job.company_id, candidate.name, candidate.role || 'Relevant stakeholder', JSON.stringify(links), summary, 'not_contacted', at, at, candidate.person_id || null]);
   run(s, 'UPDATE person_candidates SET status=?, updated_at=? WHERE id=?', ['promoted', at, cid]);
-  run(s, 'UPDATE contact_points SET stakeholder_id=?, updated_at=? WHERE person_id=? AND (stakeholder_id IS NULL OR stakeholder_id="")', [stakeholderId, at, cid]);
+  run(s, 'UPDATE contact_points SET stakeholder_id=?, updated_at=? WHERE person_id=? AND (stakeholder_id IS NULL OR stakeholder_id="")', [stakeholderId, at, candidate.person_id || cid]);
   syncContacts(s, job.id);
   audit(s, 'research.stakeholder.promoted', 'stakeholder', stakeholderId, { jobId: job.id, candidateId: cid, sourceObservationIds: sourceIds });
   save(s);
@@ -1060,28 +792,33 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
 
   const contacts = stakeholderId ? listContactPoints(s, { stakeholderId }) : listContactPoints(s, { jobId });
   const sorted = contacts.sort((a, b) => {
-    const tierScore = tier => ({ A: 5, B: 4, C: 3, E: 2, D: 1 }[tier] || 0);
+    const tierScore = tier => TIER_RANK[tier] || 0;
     return Number(b.humanApproved) - Number(a.humanApproved) || tierScore(b.evidenceTier) - tierScore(a.evidenceTier);
   });
-  const selected = sorted[0] || null;
-  const stakeholderRows = all(s, 'SELECT id,name FROM stakeholders WHERE job_id=?', [jobId]);
+  const approved = sorted.filter(c => c.humanApproved && !c.doNotUse);
+  const selected = approved[0] || null;
+  const stakeholderRows = all(s, 'SELECT id,name,person_id FROM stakeholders WHERE job_id=?', [jobId]);
+  const candidates = listPersonCandidates(s, { jobId });
   const targetIds = new Set([
     job.company_id,
     job.company,
-    ...stakeholderRows.map(row => row.id),
-    ...listPersonCandidates(s, { jobId }).map(candidate => candidate.id)
+    ...stakeholderRows.flatMap(row => [row.id, row.person_id]),
+    ...candidates.flatMap(candidate => [candidate.id, candidate.personId])
   ].filter(Boolean).map(value => String(value).toLowerCase()));
   const edgeScore = type => type === 'direct_connection' ? 6
     : ['shared_employer', 'shared_school', 'shared_open_source', 'shared_event'].includes(type) ? 5
       : ['shared_investor', 'shared_customer_domain'].includes(type) ? 4 : 3;
   const warmEdges = all(s, 'SELECT * FROM relationship_edges ORDER BY created_at DESC')
     .filter(edge => targetIds.has(String(edge.to_id || '').toLowerCase()))
-    .filter(edge => !stakeholderId || edge.to_id === stakeholderId || String(edge.to_id || '').toLowerCase() === String(job.company || '').toLowerCase())
+    .filter(edge => !stakeholderId
+      || edge.to_id === stakeholderId
+      || stakeholderRows.some(row => row.id === stakeholderId && row.person_id === edge.to_id)
+      || String(edge.to_id || '').toLowerCase() === String(job.company || '').toLowerCase())
     .sort((a, b) => edgeScore(b.edge_type) - edgeScore(a.edge_type));
   const selectedEdge = warmEdges[0] || null;
   const summary = contactSummaryForPlan(selected);
   const edgeStrength = selectedEdge ? edgeScore(selectedEdge.edge_type) : 0;
-  const contactStrength = selected ? ({ A: 5, B: 4, C: 3, E: 2, D: 1 }[selected.evidenceTier] || 1) : 0;
+  const contactStrength = selected ? (TIER_RANK[selected.evidenceTier] || 1) : 0;
   const preferWarmPath = edgeStrength >= contactStrength && Boolean(selectedEdge);
   const channel = preferWarmPath ? (selectedEdge.edge_type === 'direct_connection' ? 'intro_request' : 'warm_context') : summary.channel;
   const pathStrength = preferWarmPath
@@ -1109,9 +846,13 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
         : 'No source-backed contact or user-owned network path is available.',
     execution: 'local_draft_or_user_configured_action'
   };
-  const resolvedStakeholderId = stakeholderId
-    || selected?.stakeholderId
-    || (stakeholderRows.some(row => row.id === selectedEdge?.to_id) ? selectedEdge.to_id : null);
+  const edgeStakeholder = selectedEdge
+    ? stakeholderRows.find(row => row.id === selectedEdge.to_id || row.person_id === selectedEdge.to_id)
+    : null;
+  const contactStakeholder = selected?.personId
+    ? stakeholderRows.find(row => row.person_id === selected.personId)
+    : null;
+  const resolvedStakeholderId = stakeholderId || selected?.stakeholderId || contactStakeholder?.id || edgeStakeholder?.id || null;
   const warnings = preferWarmPath ? [] : summary.warnings;
   run(s, 'INSERT INTO outreach_plans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [pid, jobId, profileId, resolvedStakeholderId, selected?.id || null, slug(goal || 'informational'), channel, pathStrength, recommended ? 1 : 0, JSON.stringify(reasoning), JSON.stringify(warnings), at]);
   audit(s, 'outreach.plan.created', 'outreach_plan', pid, { jobId, profileId, stakeholderId: resolvedStakeholderId, contactPointId: selected?.id || null, relationshipEdgeId: selectedEdge?.id || null, channel, warnings: warnings.length });
@@ -1131,4 +872,12 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
     warnings,
     note: 'Outreach plan created locally; JobOS did not send a message.'
   };
+}
+
+export async function discoverContacts(s, { jobId = null, stakeholderId = null } = {}) {
+  const { createResearchRun, executeResearchRun } = await import('./runs.js');
+  const job = jobId ? one(s, 'SELECT profile_id FROM jobs WHERE id=?', [jobId]) : null;
+  if (!job) throw Error(`Unknown job: ${jobId || ''}`);
+  const runId = createResearchRun(s, { profileId: job.profile_id, scope: 'job', jobId, depth: 'standard' });
+  return executeResearchRun(s, runId);
 }

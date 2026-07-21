@@ -4,14 +4,15 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { audit, openStore, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
-import { createProfile, addProof } from './profiles.js';
+import { createProfile, addProof, setNetworkIntent } from './profiles.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
-import { appCreate, appUpdate, due } from './tracking.js';
-import { addStakeholder, research } from './research.js';
+import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
+import { addStakeholder, researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
-import { approveContact, createOutreachPlan, discoverContacts, promoteStakeholder, suppressContact } from './research/contacts.js';
-import { importNetworkCsv, mapReachableNetwork } from './research/network.js';
+import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
+import { importNetworkCsv } from './research/network.js';
+import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
 import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
@@ -55,6 +56,7 @@ export const commandRegistry = [
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage <name>] [--dry-run] [--json]', 'Run integrated fit, research, networking, application preparation, and outreach planning.', { flags: ['--stage <name>', '--stage-timeout <ms>', '--dry-run'], category: 'workflow' }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
+  cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
   cmd(['answers', 'add'], 'jobos answers add --profile <profile-id> --category <category> --question <text> --answer <text> [--sensitivity personal] [--json]', 'Store a verified reusable application answer locally.', { flags: ['--category <category>', '--question <text>', '--answer <text>', '--sensitivity <class>', '--reuse <scope>', '--status <status>', '--source <ref>', '--employer <name>'] }),
   cmd(['answers', 'list'], 'jobos answers list --profile <profile-id> [--category <category>] [--json]', 'List local answers with sensitive values redacted.', { flags: ['--category <category>', '--status <status>'] }),
@@ -86,13 +88,14 @@ export const commandRegistry = [
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
-  cmd(['research', 'stakeholders'], 'jobos research stakeholders --job <job-id> [--json]', 'Create a source-backed stakeholder worksheet.'),
-  cmd(['research', 'contacts'], 'jobos research contacts --job <job-id>|--stakeholder <stakeholder-id> [--json]', 'Discover source-backed contact points, email patterns, and public profile paths for review.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>'] }),
+  cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
+  cmd(['research', 'runs', 'get'], 'jobos research runs get <run-id> [--json]', 'Read a durable people-research run.'),
+  cmd(['research', 'runs', 'resume'], 'jobos research runs resume <run-id> [--json]', 'Resume a paused_retryable people-research run.'),
+  cmd(['research', 'runs', 'cancel'], 'jobos research runs cancel <run-id> [--json]', 'Request idempotent cancellation of a people-research run.'),
   cmd(['research', 'approve-contact'], 'jobos research approve-contact --contact <contact-id>|--worksheet-candidate <candidate-id> [--json]', 'Mark a discovered contact point as human-approved for later draft use.', { flags: ['--contact <contact-id>', '--worksheet-candidate <candidate-id>'] }),
   cmd(['research', 'suppress-contact'], 'jobos research suppress-contact --contact <contact-id> --reason <text> [--json]', 'Mark a discovered contact point as do-not-use in local state.', { flags: ['--contact <contact-id>', '--reason <text>'] }),
   cmd(['research', 'promote-stakeholder'], 'jobos research promote-stakeholder --candidate <candidate-id> [--json]', 'Promote a staged person candidate to a local stakeholder record.', { flags: ['--candidate <candidate-id>'] }),
-  cmd(['research', 'network'], 'jobos research network --job <job-id> [--json]', 'Create a local reachable-network path ladder for a job.', { flags: ['--job <job-id>'] }),
-  cmd(['network', 'import'], 'jobos network import --file <csv> [--json]', 'Import local relationship edges from a CSV file.', { flags: ['--file <csv>'] }),
+  cmd(['network', 'import'], 'jobos network import --file <csv> [--profile <profile-id>] [--format auto|generic|linkedin] [--json]', 'Import generic edges or a user-exported LinkedIn connections CSV.', { flags: ['--file <csv>', '--profile <profile-id>', '--format <format>'] }),
   cmd(['network', 'paths'], 'jobos network paths --job <job-id> [--json]', 'Rank reachable introduction and advice paths for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'contacts'], 'jobos network contacts --job <job-id> [--json]', 'List ranked source-backed contacts for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'list'], 'jobos network list [--json]', 'List imported relationship edges.', { category: 'workflow' }),
@@ -528,7 +531,18 @@ export async function main(argv = process.argv.slice(2)) {
     const name = [subaction, ...rest].filter(Boolean).join(' ');
     if (!name) usage('Missing profile name');
     const r = createProfile(s, name, { fromResume: flags['from-resume'], preferences: flags.preferences });
-    out({ id: r.profile.id, name: r.profile.name, created: r.created, preferences: parseJson(r.profile.preferences_json, {}) });
+    out({ id: r.profile.id, name: r.profile.name, created: r.created, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
+    return;
+  }
+  if (group === 'profile' && action === 'network-intent') {
+    const filePath = requireFlag(flags, 'file', '--file <json>');
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(String(filePath), 'utf8'));
+    } catch (e) {
+      usage(`Invalid --file JSON: ${e.message}`);
+    }
+    out(setNetworkIntent(s, { profileId: needProfile(flags), intent: data.intent, affiliations: data.affiliations }));
     return;
   }
   if (group === 'proof' && action === 'add') {
@@ -681,22 +695,14 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'applications' && action === 'create') {
     if (!flags.job || !flags.status) usage('Missing --job or --status');
-    const a = await callDomainTool(s, 'create_application', {
-      jobId: String(flags.job),
-      status: String(flags.status),
-      notes: flags.notes ? String(flags.notes) : ''
-    }, { source: 'cli' });
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
+    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '');
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
     return;
   }
   if (group === 'applications' && action === 'update') {
     if (!subaction || !flags.status) usage('Missing application id or --status');
-    const a = await callDomainTool(s, 'update_application_status', {
-      applicationId: String(subaction),
-      status: String(flags.status),
-      notes: flags.notes ? String(flags.notes) : null
-    }, { source: 'cli' });
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status });
+    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null);
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
     return;
   }
   if (group === 'apply') {
@@ -754,43 +760,58 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');
-    out(await research(s, jobId, 'company'));
+    out(await researchCompany(s, jobId));
     return;
   }
-  if (group === 'research' && action === 'stakeholders') {
-    const jobId = requireFlag(flags, 'job');
-    out(await research(s, jobId, 'stakeholders'));
+  if (group === 'research' && action === 'people') {
+    const profileId = needProfile(flags);
+    const scope = requireFlag(flags, 'scope');
+    if (!['profile', 'target', 'job', 'person'].includes(scope)) usage('--scope must be profile, target, job, or person');
+    const personField = (flags.name && flags['source-url']) ? { name: String(flags.name), profileUrl: String(flags['source-url']) } : undefined;
+    const runId = createResearchRun(s, {
+      profileId,
+      scope,
+      jobId: flags.job ? String(flags.job) : undefined,
+      company: flags.company ? String(flags.company) : undefined,
+      role: flags.role ? String(flags.role) : undefined,
+      personId: flags.person ? String(flags.person) : undefined,
+      person: personField,
+      depth: flags.depth || 'standard',
+      sources: flags.sources ? String(flags.sources).split(',').map(s => s.trim()) : undefined,
+      budget: flags['max-cost-usd'] !== undefined ? { maxCostUsd: Number(flags['max-cost-usd']) } : undefined
+    });
+    const result = await executeResearchRun(s, runId);
+    out(result);
     return;
   }
-  if (group === 'research' && action === 'contacts') {
-    if (!flags.job && !flags.stakeholder) usage('Missing --job <job-id> or --stakeholder <stakeholder-id>');
-    out(await discoverContacts(s, { jobId: flags.job ? String(flags.job) : null, stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null }));
-    return;
-  }
-  if (group === 'research' && action === 'approve-contact') {
-    const contactId = flags.contact || flags['worksheet-candidate'];
-    if (!contactId) usage('Missing --contact <contact-id> or --worksheet-candidate <candidate-id>');
-    out(approveContact(s, { contactId: String(contactId) }));
-    return;
-  }
-  if (group === 'research' && action === 'suppress-contact') {
-    const contactId = requireFlag(flags, 'contact', '--contact <contact-id>');
-    out(suppressContact(s, { contactId: String(contactId), reason: flags.reason ? String(flags.reason) : 'user_suppressed' }));
-    return;
-  }
-  if (group === 'research' && action === 'promote-stakeholder') {
-    const candidateId = requireFlag(flags, 'candidate', '--candidate <candidate-id>');
-    out(promoteStakeholder(s, { candidateId: String(candidateId) }));
-    return;
-  }
-  if (group === 'research' && action === 'network') {
-    const jobId = requireFlag(flags, 'job');
-    out(mapReachableNetwork(s, { jobId: String(jobId) }));
-    return;
+  if (group === 'research' && action === 'runs') {
+    if (subaction === 'get') {
+      const runId = rest[0] || flags.run;
+      if (!runId) usage('Missing run id');
+      out(getResearchRun(s, String(runId)));
+      return;
+    }
+    if (subaction === 'resume') {
+      const runId = rest[0] || flags.run;
+      if (!runId) usage('Missing run id');
+      out(await resumeResearchRun(s, String(runId)));
+      return;
+    }
+    if (subaction === 'cancel') {
+      const runId = rest[0] || flags.run;
+      if (!runId) usage('Missing run id');
+      out(requestCancelResearchRun(s, String(runId)));
+      return;
+    }
+    usage('Missing run subcommand: get, resume, or cancel');
   }
   if (group === 'network' && action === 'import') {
     const filePath = requireFlag(flags, 'file', '--file <csv>');
-    out(importNetworkCsv(s, { filePath: String(filePath) }));
+    out(importNetworkCsv(s, {
+      filePath: String(filePath),
+      profileId: flags.profile ? String(flags.profile) : null,
+      format: String(flags.format || 'auto')
+    }));
     return;
   }
   if (group === 'network' && action === 'paths') {

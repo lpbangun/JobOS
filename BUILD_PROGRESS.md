@@ -8,14 +8,15 @@ JobOS now has a data-bound terminal product as its primary local control surface
 
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
-- `jobos pursue <job-id> --profile <id>` composes fit scoring, company/stakeholder/contact research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and an outreach draft when a sourced stakeholder is available.
-- `jobos applications plan --job <id> --profile <id>` compiles readiness v3 from score, proofs, materials, answers, identity, and packet/receipt state, returning blocked/ready-for-review/approved with actionable blockers and a redacted YAML mirror.
-- `jobos apply packet create|list|show|diff ...`, `apply attest-submitted`, and `apply confirm-receipt` freeze exact approved application inputs and record user-supplied submission/receipt evidence without performing an external action.
+- `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available.
+- `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
+- `jobos research people --scope profile|target|job|person ...` runs budgeted, checkpointed people research; `research runs get|resume|cancel` exposes the durable lifecycle.
+- `jobos profile network-intent ...` and the TUI `b` flow confirm progressive networking goals, exclusions, sources, and affiliations before an open profile network map is built.
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
 
-### Implemented in the ACP host and lean CLI passes
+### Implemented in the ACP host, lean CLI, and people-research passes
 
 - Real ACP v1 client lifecycle for Hermes 0.18.2: initialize, session creation, event streaming, mediated MCP tools, cancellation, timeout/crash typing, redacted stderr, and restart.
 - Cancelled or timed-out ACP sessions quarantine later updates and start a clean process/session before the next prompt; raw TUI and ACP drills verify uncontaminated recovery.
@@ -38,10 +39,15 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
 - MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, and redacted packet list/show/diff inspection. Packet freeze and receipt mutations are not advertised to MCP/ACP and are denied under spoofed overrides.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
-- Application readiness compiler v3: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review/approved statuses, an always-present secret-safe packet summary, actionable blockers, YAML redaction, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution without automatic packet creation.
-
-- Human review closure: immutable artifact series/revisions with SHA-256 content identity, current-revision queue/diff, trusted CLI/TUI approval or rejection, fail-closed workspace verification, local-only review audit events, readiness `approved` semantics, redraft invalidation, explicit MCP/ACP mutation denials, and no restored web/API bypass.
-- Application packet + receipt spine: schema-v8 immutable packet/receipt rows, canonical SHA-256 input and receipt hashes, approved-only exact material pinning, non-secret answer row-version fingerprints, explicit attempt/revision lineage, deterministic packet diff, idempotent replay/conflict rejection, receipt-bound applied status history, confirmation references, guarded post-commit YAML/audit projections, and direct-applied `receiptBound: false` honesty.
+- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+- Canonical `people`, profile/person affiliations, durable `research_runs`, and run-source joins with an idempotent migration that preserves contact, edge, stakeholder, and outreach-plan references.
+- Identity resolution by canonical profile URL and then exact imported email; same-name records never merge automatically.
+- User-exported LinkedIn connection import with tier `U` unapproved contacts, idempotent direct edges, skipped-row warnings, local mirrors, and privacy-safe audit metadata.
+- Fixed LangGraph orchestration for profile, target, job, and person scopes with isolated adapters, standard/deep budgets, checkpoints, retryable resume, terminal cancellation, partial results, source caching, and internal deadline handling.
+- Local-network, LinkedIn-import, public-web, GitHub, GDELT, and Wayback adapters use injectable fetch/DNS boundaries. Public LinkedIn URLs are record-only and never fetched.
+- Optional xAI X Search is off by default and requires environment enablement, profile consent, and a user API key. Only citation-backed X evidence persists; usage and configured cost estimates are recorded.
+- People research is integrated into pursuit, deterministic network-access scoring, application-status launch recommendations, CLI/TUI controls, ACP-session MCP, and external MCP. The obsolete `discover_contacts` tool/export is removed.
+- Human gates remain authoritative: research never sends outreach or applies, imports remain unapproved, MCP cannot approve contacts for an agent, and suppressed contacts are unusable.
 
 ### Intentionally deferred
 
@@ -54,17 +60,15 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- `npm test`: **120/120 passed**, including the critic-authored T1–T13 artifact-review contract suite.
-- `npm run smoke`: passed; clean temp workspace, fixture discovery, scoring, tailoring, application/interview/analytics/scheduler flows, workspace exports, dashboard API/shell, and route hardening.
+- `npm test`: **139/139 passed** on 2026-07-20, including the permanent people-research orchestration suite and all established CLI, TUI, ACP, MCP, discovery, readiness, research, outreach, and workflow checks.
+- `npm run smoke`: passed on 2026-07-20 in a clean temporary workspace through profile/job setup, discovery, scoring, tailoring, application/interview/analytics/scheduler flows, and workspace exports.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 37-tool list (includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
-- Artifact-review PTY exercises: approve/draft/reject feedback, evidence/diff/search/scroll, external-editor version creation, application-stage tracking, input-safe deferred agent artifact open, and clean exit `0`.
-- Wide (140×42) and narrow (90×32) snapshots rendered successfully; targeted ACP/TUI/scheduler plus artifact-review integration suites passed **34/34**.
-- Independent Advisor suite `tests/lean-cli-advisor.test.js`: **43/43 passed**; focused contact/outreach suite: **8/8 passed**.
+- People-research critic suite `tests/people-research-orchestration.test.js`: **14/14 passed**; companion contact/TUI/integration suites: **25/25 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
-- Human-review suite `tests/human-review.test.js`: **6/6 passed**, covering current-only queueing, exact/idempotent/local-only decisions, redraft invalidation, workspace divergence, MCP/ACP denials, optimistic two-store races, and legacy lineage migration. Readiness review transitions, restricted-value redaction, and YAML refresh passed in the focused readiness checks.
-- Final raw-terminal review drill: opened the current queue, exact resume r2 with hash/evidence/history, predecessor diff, and approval confirmation; Escape cancelled the first confirmation, the second committed locally, the queue dropped that revision, readiness refreshed to `approved`, the audit overlay showed `artifact.approved (none)`, and uppercase `Q` exited `0`. A post-run CLI check retained application status `interview` with `submissionPerformed: false` and `applicationStatusChanged: false`.
+- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
+- Independent people-research convergence gate passed on critic pass 3 with no failures or unmet criteria. It covers migration and identity, onboarding/import privacy, all four scopes, adapter isolation, budgets, cache/resume/cancel/deadline behavior, xAI gates/citations, integrated alumni path ranking, deterministic network-access bands, status launch recommendations, MCP/TUI mediation, exact mirrors, and zero external effects.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
 
@@ -110,6 +114,8 @@ The 2026-07-20 artifact-review convergence used a critic-authored T1–T13 red s
 - No real Chromium binary is installed in this headless environment. Headed login needs a display; headless hosts may import a user-owned Playwright storage-state file.
 - Registered browser scripts are trusted, unsandboxed Node.js modules.
 - Public research is best-effort and source-grounded; offline mode produces explicit open questions rather than fabricated facts.
+- Optional xAI research uses the user's key and provider billing. It remains disabled without all consent/configuration gates, and dollar caps require user-supplied current pricing metadata.
+- Public LinkedIn URLs are record-only. JobOS does not fetch profile pages or authenticate to LinkedIn; connection data comes only from a user-exported local CSV.
 - `sql.js` does not merge concurrent writes. A stale writer receives retryable `stale_snapshot` and must reopen/retry.
 - Hermes ACP needs configured provider authentication for live conversation; absent/crashed backends leave the JobOS pipeline usable with typed recovery.
 - Codex app-server is cataloged as a distinct future adapter, not mislabeled as ACP.

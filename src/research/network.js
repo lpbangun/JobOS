@@ -1,9 +1,12 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { all, one, run, audit, save } from '../db.js';
 import { id, now, parseJson } from '../utils.js';
 import { writeMd, writeYaml } from '../workspace.js';
-import { listContactPoints, listPersonCandidates } from './contacts.js';
+import { canonicalUrl, isHttpUrl } from './sources.js';
+import { listContactPoints, listPersonCandidates, TIER_RANK } from './contacts.js';
+import { resolvePerson, upsertPersonAffiliations } from './people.js';
 
 const allowedEdgeTypes = new Set(['direct_connection', 'shared_employer', 'shared_school', 'shared_investor', 'shared_event', 'shared_open_source', 'shared_customer_domain', 'manual_note']);
 
@@ -64,27 +67,176 @@ function edgeFromRow(row, at) {
   };
 }
 
-export function importNetworkCsv(s, { filePath }) {
+export function importNetworkCsv(s, { filePath, profileId = null, format = 'auto' }) {
   const text = fs.readFileSync(filePath, 'utf8');
-  const rows = parseCsv(text);
   const at = now();
-  const imported = [];
-  for (const row of rows) {
-    const edge = edgeFromRow(row, at);
-    run(s, 'INSERT OR REPLACE INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [edge.id, edge.fromType, edge.fromId, edge.toType, edge.toId, edge.edgeType, JSON.stringify(edge.evidence), edge.confidence, edge.createdAt]);
-    imported.push(edge);
+  const fileHash = crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+  const basename = path.basename(filePath);
+
+  // Detect format from raw headers
+  if (format === 'auto') {
+    const rawLines = String(text).split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith('#'));
+    if (rawLines.length) {
+      const headers = parseCsvLine(rawLines[0]).map(h => h.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'));
+      format = (headers.includes('first_name') && headers.includes('last_name') && headers.includes('url')) ? 'linkedin' : 'generic';
+    } else {
+      format = 'generic';
+    }
   }
-  const rel = path.join('network', `relationship-edges-${new Date().toISOString().slice(0, 10)}.yaml`);
-  writeYaml(path.join(s.p.ws, rel), {
+  if (!['linkedin', 'generic'].includes(format)) throw Error(`Invalid network import format: ${format}`);
+
+  if (format !== 'linkedin') {
+    // Generic format — existing edge-based import with privacy-safe audit
+    const rows = parseCsv(text);
+    const imported = [];
+    const edgeWarnings = [];
+    for (const row of rows) {
+      try {
+        const edge = edgeFromRow(row, at);
+        run(s, 'INSERT OR REPLACE INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [edge.id, edge.fromType, edge.fromId, edge.toType, edge.toId, edge.edgeType, JSON.stringify(edge.evidence), edge.confidence, edge.createdAt]);
+        imported.push(edge);
+      } catch (e) {
+        edgeWarnings.push(e.message);
+      }
+    }
+    const rel = path.join('network', `relationship-edges-${new Date().toISOString().slice(0, 10)}.yaml`);
+    writeYaml(path.join(s.p.ws, rel), {
+      version: 1,
+      sourceFile: basename,
+      importedAt: at,
+      policy: { externalSideEffects: 'none', note: 'Relationship edges are user-imported local data.' },
+      edges: imported
+    });
+    audit(s, 'network.imported', 'relationship_edges', id('network-import', `${basename}:${at}`), {
+      format: 'generic',
+      path: rel,
+      count: imported.length,
+      basename,
+      fileHash,
+      skippedCount: edgeWarnings.length || undefined
+    });
+    save(s);
+    return { count: imported.length, path: rel, edges: imported, warnings: edgeWarnings.length ? edgeWarnings : undefined, note: 'Network CSV imported locally; no external accounts were accessed.' };
+  }
+
+  // LinkedIn format — profile→person connections
+  if (!profileId) throw Error('profileId is required for LinkedIn import format');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const rows = parseCsv(text);
+  const staged = [];
+  const warnings = [];
+
+  // Stage: validate every row before any write
+  for (const row of rows) {
+    const firstName = String(row.first_name || '').trim();
+    const lastName = String(row.last_name || '').trim();
+    const url = String(row.url || '').trim();
+    const email = String(row.email_address || '').trim().toLowerCase();
+    const company = String(row.company || '').trim();
+    const position = String(row.position || '').trim();
+    const name = [firstName, lastName].filter(Boolean).join(' ');
+    if (url && !isHttpUrl(url)) {
+      warnings.push(`Skipping row for "${name || '(no name)'}": URL must be http(s)`);
+      continue;
+    }
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      warnings.push(`Skipping row for "${name || '(no name)'}": invalid email`);
+      continue;
+    }
+
+    if (!name && !url && !email) {
+      warnings.push('Skipping row: empty row');
+      continue;
+    }
+    if (!name || (!url && !email)) {
+      warnings.push(`Skipping row for "${name || '(no name)'}": requires at least a name plus URL or email`);
+      continue;
+    }
+    staged.push({ firstName, lastName, name, url, email, company, position });
+  }
+
+  // Process staged rows
+  const imported = [];
+  for (const entry of staged) {
+    // Resolve canonical person via people.js (URL→email→create)
+    const resolved = resolvePerson(s, {
+      profileUrl: entry.url || undefined,
+      email: entry.email || undefined,
+      name: entry.name || undefined,
+      sourceRecordId: `${entry.url || entry.email || entry.name}:linkedin_import`
+    });
+    const personId = resolved?.person?.id || id('person', `${entry.url || entry.email || entry.name}:linkedin_import`);
+
+    // Direct connection edge profile→person (idempotent via deterministic ID)
+    const edgeEvidence = [{ label: `User-imported direct connection to ${entry.name}`, source: basename }];
+    const edgeId = id('edge', `profile:${profileId}:person:${personId}:direct_connection`);
+    run(s, 'INSERT OR REPLACE INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+      edgeId, 'profile', profileId, 'person', personId, 'direct_connection', JSON.stringify(edgeEvidence), 'high', at
+    ]);
+
+    if (entry.company) {
+      upsertPersonAffiliations(s, personId, [{
+        type: 'employer',
+        organization: entry.company,
+        roleOrProgram: entry.position,
+        source: 'linkedin_import',
+        confidence: 'medium',
+        status: 'suggested'
+      }], at);
+      const employerEvidence = [{ label: `User-imported employer: ${entry.company}`, source: basename }];
+      const employerEdgeId = id('edge', `person:${personId}:company:${entry.company}:shared_employer`);
+      run(s, 'INSERT OR REPLACE INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+        employerEdgeId, 'person', personId, 'company', entry.company, 'shared_employer', JSON.stringify(employerEvidence), 'medium', at
+      ]);
+    }
+
+    // Profile URL contact at tier U, unapproved
+    if (entry.url) {
+      const normalizedUrl = canonicalUrl(entry.url);
+      const cidUrl = id('contact', `:${personId}::profile_url:${normalizedUrl}`);
+      run(s, 'INSERT OR IGNORE INTO contact_points (id,person_id,stakeholder_id,company_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at,origin_research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+        cidUrl, personId, null, null, 'profile_url', entry.url, normalizedUrl,
+        'U', 'user_imported', 'medium', '[]', JSON.stringify({ importedFrom: 'linkedin_csv', basename }), 0, 0, at, at, ''
+      ]);
+    }
+
+    // Email contact at tier U, unapproved
+    if (entry.email) {
+      const cidEmail = id('contact', `:${personId}::email:${entry.email}`);
+      run(s, 'INSERT OR IGNORE INTO contact_points (id,person_id,stakeholder_id,company_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at,origin_research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+        cidEmail, personId, null, null, 'email', entry.email, entry.email,
+        'U', 'user_imported', 'medium', '[]', JSON.stringify({ importedFrom: 'linkedin_csv', basename }), 0, 0, at, at, ''
+      ]);
+    }
+
+    imported.push({ personId, name: entry.name, url: entry.url || null, email: entry.email || null, company: entry.company || null });
+  }
+
+  // Workspace mirror — persons list only, no raw CSV, emails, exclusions, or API keys
+  const relDir = path.join('network', 'imports');
+  const relYaml = path.join(relDir, `linkedin-import-${new Date().toISOString().slice(0, 10)}.yaml`);
+  writeYaml(path.join(s.p.ws, relYaml), {
     version: 1,
-    sourceFile: filePath,
     importedAt: at,
-    policy: { externalSideEffects: 'none', note: 'Relationship edges are user-imported local data.' },
-    edges: imported
+    profileId,
+    format: 'linkedin',
+    policy: { externalSideEffects: 'none', note: 'Imported LinkedIn connections are local data only.' },
+    count: imported.length,
+    warnings: warnings.length > 0 ? warnings : undefined,
+    persons: imported
   });
-  audit(s, 'network.imported', 'relationship_edges', id('network-import', `${filePath}:${at}`), { path: rel, count: imported.length, sourceFile: filePath });
+
+  // Privacy-safe audit: format, counts, basename, file hash only
+  audit(s, 'network.imported', 'relationship_edges', id('network-import', `${basename}:${at}`), {
+    format: 'linkedin',
+    count: imported.length,
+    skippedCount: warnings.length,
+    basename,
+    fileHash
+  });
+
   save(s);
-  return { count: imported.length, path: rel, edges: imported, note: 'Network CSV imported locally; no external accounts were accessed.' };
+  return { count: imported.length, path: relYaml, warnings, format: 'linkedin', note: 'LinkedIn connections imported locally.' };
 }
 
 function rowToEdge(row) {
@@ -110,8 +262,8 @@ function strengthForEdge(edge) {
 
 function strengthForContact(contact) {
   if (contact.doNotUse) return 0;
-  if (contact.type === 'email' && contact.evidenceTier === 'A' && contact.humanApproved) return 4;
-  if (contact.type === 'email' && ['A', 'B'].includes(contact.evidenceTier)) return 3;
+  if (contact.type === 'email' && TIER_RANK[contact.evidenceTier] >= TIER_RANK.A && contact.humanApproved) return 4;
+  if (contact.type === 'email' && TIER_RANK[contact.evidenceTier] >= TIER_RANK.U) return 3;
   if (contact.type === 'generic_inbox') return 2;
   if (contact.type === 'profile_url') return 1;
   return 0;
@@ -153,7 +305,7 @@ export function mapReachableNetwork(s, { jobId }) {
   const candidates = listPersonCandidates(s, { jobId });
   const contacts = listContactPoints(s, { jobId });
   const stakeholderIds = new Set(all(s, 'SELECT id FROM stakeholders WHERE job_id=?', [jobId]).map(row => row.id));
-  const candidateIds = new Set(candidates.map(c => c.id));
+  const candidateIds = new Set(candidates.flatMap(candidate => [candidate.id, candidate.personId]).filter(Boolean));
   const relevantEdges = edges.filter(edge =>
     edge.toId === job.company_id
     || edge.toId === job.company

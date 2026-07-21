@@ -109,12 +109,11 @@ async function main() {
     const jobs = await run('review queue through jobs list', ['jobs', 'list', '--json'], value => Array.isArray(value) && value.some(job => job.id === discovery.jobs[0].id));
     const jobId = jobs.find(job => job.id === discovery.jobs[0].id).id;
     await run('score job', ['score', jobId, '--profile', profile.id, '--json'], value => Number(value.overall) > 0);
-    const stakeholders = await run('research stakeholders', ['research', 'stakeholders', '--job', jobId, '--json'], value => Array.isArray(value.stakeholderIds) && value.stakeholderIds.length >= 1);
-    await run('draft outreach', ['outreach', 'draft', '--job', jobId, '--stakeholder', stakeholders.stakeholderIds[0], '--profile', profile.id, '--json'], value => value.approvalStatus === 'draft_needs_human_review');
+    await run('research people', ['research', 'people', '--scope', 'job', '--job', jobId, '--profile', profile.id, '--depth', 'standard', '--json'], value => ['succeeded', 'partial'].includes(value.status));
     await run('track application', ['applications', 'create', '--job', jobId, '--status', 'materials-ready', '--json'], value => value.status === 'materials-ready');
     await run('bounded scheduler loop', ['loop', 'scheduler', '--max-iterations', '1', '--json'], (_value, result) => result.stdout.trim().split('\n').every(line => JSON.parse(line).type === 'loop.iteration'));
     await run('check automation runs', ['runs', 'list', '--json'], value => Array.isArray(value));
-    await run('agent guide was sufficient', [], () => guide.commands.some(command => command.name === 'outreach draft'));
+    await run('agent guide was sufficient', [], () => guide.commands.some(command => command.name === 'research people'));
 
     const passed = steps.filter(step => step.pass).length;
     const score = Math.round((passed / steps.length) * 100);

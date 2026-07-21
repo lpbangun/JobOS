@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { openStore } from '../src/db.js';
+import { openStore, all } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
@@ -192,7 +192,7 @@ test('review, log, network, documents, answers, discovery, system, and profile s
   const expectations = {
     review: /draft_needs_human_review/,
     log: /job\.scored|artifact/,
-    network: /No ranked warm path|strength/,
+    network: /No research run yet/,
     docs: /resume|Tailored/,
     answers: /verified reusable answers/,
     discovery: /No discovery searches configured|last/,
@@ -252,8 +252,82 @@ test('narrow terminals keep safety state, controls, and all three product panes 
   assert.match(screen, /JOBS · today/);
   assert.match(screen, /SELECTED JOB/);
   assert.match(screen, /AGENT/);
-  assert.match(screen, /s sources · \? system · : command · Q quit/);
+  assert.match(screen, /s sources · \? system · b build-network · : command · Q quit/);
   assert.equal(screen.split('\n').length, 24);
+});
+
+test('model exposes network setup state, affiliation counts, and safe xAI display', async t => {
+  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const model = buildTuiModel(store, { profileId: profile.id });
+  assert.ok(model.networkSetup, 'model.networkSetup is present');
+  assert.equal(model.networkSetup.status, 'not_started', 'status is not_started without completed intent');
+  assert.ok('affiliations' in model.networkSetup, 'affiliation counts present');
+  assert.ok('importedConnectionCount' in model.networkSetup, 'imported connection count present');
+  assert.equal(model.networkSetup.latestProfileRun, null, 'no profile run yet');
+  assert.match(model.networkSetup.xaiState, /^(off|available|misconfigured)$/, 'xai state is a known value');
+  assert.doesNotMatch(JSON.stringify(model.networkSetup), /XAI_API_KEY|xai_key/i, 'xai state never leaks the key');
+});
+test('b key opens build-network overlay without auto-run, default is save-only, scope is profile when no job selected', async t => {
+  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = null;
+  assert.equal(tui.state.overlay, null, 'no overlay initially');
+  tui.onKeypress('b', { name: 'b' });
+  assert.equal(tui.state.overlay, 'build-network', 'b opens build-network overlay');
+  assert.equal(tui.state.busy, null, 'no auto-run triggered');
+  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(rendered, /Proposed scope: profile/, 'proposes profile scope without selected job');
+  assert.match(rendered, /Save only/, 'save only is visible');
+  assert.match(rendered, /Save and build/, 'save and build is visible');
+  assert.doesNotMatch(rendered, /XAI_API_KEY|xai_key/i, 'no api key leak');
+  assert.match(rendered, /xAI/, 'xAI state is shown');
+});
+
+test('build-network overlay proposes job scope with selected job', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = jobs[0].id;
+  tui.model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
+  tui.onKeypress('b', { name: 'b' });
+  assert.equal(tui.state.overlay, 'build-network');
+  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(rendered, /Proposed scope: job/, 'proposes job scope with selected job');
+});
+
+test('existing navigation and overlays remain functional after build-network addition', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t);
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = jobs[0].id;
+  assert.equal(tui.state.agentOn, true, 'agent on by default');
+  tui.openOverlay('review');
+  assert.equal(tui.state.overlay, 'review');
+  tui.closeTransient();
+  assert.equal(tui.state.overlay, null);
+  tui.onKeypress('n', { name: 'n' });
+  assert.equal(tui.state.overlay, 'network', 'n still opens network');
+  tui.closeTransient();
+  tui.onKeypress('l', { name: 'l' });
+  assert.equal(tui.state.overlay, 'log', 'l still opens log');
+  tui.closeTransient();
+  tui.onKeypress('r', { name: 'r' });
+  assert.equal(tui.state.overlay, 'review', 'r still opens review');
+  tui.closeTransient();
+  tui.onKeypress('s', { name: 's' });
+  assert.equal(tui.state.overlay, 'discovery', 's still opens discovery');
+  tui.closeTransient();
+  tui.onKeypress('v', { name: 'v' });
+  assert.equal(tui.state.overlay, 'profile', 'v still opens profile');
+  tui.closeTransient();
+  const orderedJobs = tui.filtered();
+  tui.state.selectedJobId = orderedJobs[0].id;
+  tui.moveSelection(1);
+  assert.equal(tui.state.selectedJobId, orderedJobs[1].id, 'navigation j/k still works');
+  tui.state.busy = 'agent';
+  tui.moveSelection(0);
+  assert.equal(tui.state.busy, 'agent', 'busy state preserved during navigation');
 });
 
 test('external MCP demo initializes, calls shared tools, persists state, and exits cleanly', async t => {
@@ -294,4 +368,166 @@ test('documented Q quit restores and pauses terminal input', async t => {
   assert.equal(tui.stopped, true);
   assert.equal(paused, true);
   assert.deepEqual(rawModes, [true, false]);
+});
+
+
+function readIntent(store, profileId) {
+  const row = all(store, 'SELECT preferences_json FROM profiles WHERE id=?', [profileId])[0];
+  return JSON.parse(row.preferences_json || '{}').networkIntent || {};
+}
+
+function affiliationRows(store, profileId) {
+  return all(store, 'SELECT type,organization,role_or_program,status,source FROM profile_affiliations WHERE profile_id=? ORDER BY type,organization', [profileId]);
+}
+
+function runCount(store, profileId) {
+  return Number(all(store, 'SELECT COUNT(*) AS count FROM research_runs WHERE profile_id=?', [profileId])[0].count || 0);
+}
+
+test('build-network editor: editing a list field and toggling a source persists with completedAt', async t => {
+  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = null;
+  tui.onKeypress('b', { name: 'b' });
+  assert.equal(tui.state.overlay, 'build-network');
+  assert.ok(tui.state.networkDraft, 'draft seeded on open');
+
+  // Move to target companies field and enter edit mode
+  const items = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
+  assert.match(items, /Target companies/);
+  // Find the targetCompanies item index
+  const findIdx = (key) => {
+    const list = tui.model.networkSetup;
+    // buildNetworkItems order: status, schools, employers, communities, targetRoles, targetCompanies, ...
+    const order = ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'];
+    return order.indexOf(key);
+  };
+  tui.state.overlayIndex = findIdx('targetCompanies');
+  // Enter edit mode
+  tui.onOverlayKey('\r', { name: 'return' });
+  assert.equal(tui.state.mode, 'build-network-field', 'entered field edit mode');
+  // Type a value
+  for (const ch of 'Acme Learning, EduCo') tui.onInputKey(ch, { name: ch });
+  // Commit with Enter
+  tui.onInputKey('\r', { name: 'return' });
+  assert.equal(tui.state.mode, 'normal', 'edit mode exited after commit');
+  assert.equal(tui.state.networkDraft.targetCompanies, 'Acme Learning, EduCo', 'draft updated with typed value');
+
+  // Toggle LinkedIn source
+  tui.state.overlayIndex = findIdx('sourceLinkedin');
+  tui.onOverlayKey('\r', { name: 'return' });
+  assert.equal(tui.state.networkDraft.sourceLinkedin, true, 'linkedin toggle flipped on');
+
+  // Move to Save only and save
+  tui.state.overlayIndex = findIdx('saveOnly');
+  await tui.buildNetworkSaveOnly();
+  assert.equal(tui.state.overlay, null, 'overlay closed after save');
+  const intent = readIntent(store, profile.id);
+  assert.equal(intent.version, 1, 'persisted intent has version 1');
+  assert.ok(intent.completedAt, 'persisted intent has completedAt');
+  assert.deepEqual(intent.targetCompanies, ['Acme Learning', 'EduCo'], 'target companies persisted and deduped');
+  assert.equal(intent.allowedSources.linkedinImport, true, 'linkedin toggle persisted');
+  assert.equal(runCount(store, profile.id), 0, 'Save only does not create a research run');
+});
+
+test('build-network editor: affiliation fields are confirmed and replace existing affiliations on save', async t => {
+  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
+  // Seed a suggested affiliation so we can confirm replacement
+  const { setNetworkIntent } = await import('../src/profiles.js');
+  setNetworkIntent(store, { profileId: profile.id, intent: { version: 1, allowedSources: { publicWeb: true } }, affiliations: [{ type: 'school', organization: 'Old University', status: 'suggested' }] });
+  assert.equal(affiliationRows(store, profile.id).length, 1, 'suggested affiliation seeded');
+
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.onKeypress('b', { name: 'b' });
+  const findIdx = (key) => ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'].indexOf(key);
+  // Edit schools field
+  tui.state.overlayIndex = findIdx('schools');
+  tui.onOverlayKey('\r', { name: 'return' });
+  // Clear the seeded value (edit mode pre-fills with current), then type new schools
+  const seeded = tui.state.input;
+  for (let i = 0; i < seeded.length; i++) tui.onInputKey('\b', { name: 'backspace' });
+  for (const ch of 'Stanford (MBA), MIT') tui.onInputKey(ch, { name: ch });
+  tui.onInputKey('\r', { name: 'return' });
+
+  // Save
+  tui.state.overlayIndex = findIdx('saveOnly');
+  await tui.buildNetworkSaveOnly();
+  const rows = affiliationRows(store, profile.id);
+  assert.equal(rows.length, 2, 'old suggested affiliation replaced by two confirmed schools');
+  assert.ok(rows.every(r => r.status === 'confirmed'), 'all affiliations confirmed');
+  assert.ok(rows.some(r => r.organization === 'Stanford' && r.role_or_program === 'MBA'), 'role/program shorthand parsed');
+  assert.ok(rows.some(r => r.organization === 'MIT'), 'plain organization parsed');
+});
+
+test('build-network editor: Enter on Save only does not create a run; explicit Save and build creates the proposed-scope run', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const io = streams();
+  // No selected job → profile scope
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = null;
+  tui.onKeypress('b', { name: 'b' });
+  const findIdx = (key) => ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'].indexOf(key);
+  // Set target companies so profile scope is valid (requires target companies for public_web)
+  tui.state.overlayIndex = findIdx('targetCompanies');
+  tui.onOverlayKey('\r', { name: 'return' });
+  for (const ch of 'Acme Learning') tui.onInputKey(ch, { name: ch });
+  tui.onInputKey('\r', { name: 'return' });
+  // Ensure only local_network source (no public_web) so the offline run succeeds without network
+  tui.state.overlayIndex = findIdx('sourcePublic');
+  tui.onOverlayKey('\r', { name: 'return' }); // turn public web off
+  assert.equal(tui.state.networkDraft.sourcePublic, false);
+
+  // Enter on Save only
+  tui.state.overlayIndex = findIdx('saveOnly');
+  tui.onOverlayKey('\r', { name: 'return' });
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(runCount(store, profile.id), 0, 'Save only created no run');
+
+  // Reopen and Save and build with profile scope (no selected job)
+  // Save only refreshed the model which reset selectedJobId to the first job; force null again.
+  tui.state.selectedJobId = null;
+  tui.onKeypress('b', { name: 'b' });
+  // re-seed target companies and source state since draft was cleared
+  tui.state.overlayIndex = findIdx('targetCompanies');
+  tui.onOverlayKey('\r', { name: 'return' });
+  for (const ch of 'Acme Learning') tui.onInputKey(ch, { name: ch });
+  tui.onInputKey('\r', { name: 'return' });
+  tui.state.overlayIndex = findIdx('sourcePublic');
+  tui.onOverlayKey('\r', { name: 'return' }); // off
+  // b triggers Save and build
+  tui.onOverlayKey('b', { name: 'b' });
+  // Poll until the async run completes (busy clears)
+  for (let i = 0; i < 100 && tui.state.busy; i++) await new Promise(r => setTimeout(r, 50));
+  assert.equal(tui.state.busy, null, 'save and build completed');
+  assert.equal(runCount(store, profile.id), 1, 'Save and build created one run');
+  const run = all(store, 'SELECT scope,status FROM research_runs WHERE profile_id=? ORDER BY created_at DESC LIMIT 1', [profile.id])[0];
+  assert.equal(run.scope, 'profile', 'run scope is profile with no selected job');
+  assert.ok(['succeeded', 'partial', 'failed', 'cancelled'].includes(run.status), `run reached a terminal state (${run.status})`);
+
+  // Now with a selected job → job scope
+  tui.state.selectedJobId = jobs[0].id;
+  tui.refresh({ disk: false });
+  tui.onKeypress('b', { name: 'b' });
+  tui.state.overlayIndex = findIdx('sourcePublic');
+  tui.onOverlayKey('\r', { name: 'return' }); // off
+  tui.onOverlayKey('b', { name: 'b' });
+  for (let i = 0; i < 100 && tui.state.busy; i++) await new Promise(r => setTimeout(r, 50));
+  assert.equal(tui.state.busy, null, 'job-scope save and build completed');
+  const runs = all(store, 'SELECT scope FROM research_runs WHERE profile_id=? ORDER BY created_at DESC LIMIT 1', [profile.id]);
+  assert.equal(runs[0].scope, 'job', 'run scope is job with selected job');
+});
+
+test('build-network editor: no key appears in rendered output', async t => {
+  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
+  process.env.XAI_API_KEY = 'test-fake-key-not-real';
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.onKeypress('b', { name: 'b' });
+  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
+  assert.doesNotMatch(rendered, /test-fake-key-not-real/, 'api key never rendered');
+  assert.doesNotMatch(rendered, /XAI_API_KEY/i, 'env var name never rendered');
+  assert.match(rendered, /xAI/, 'xAI state shown without key');
+  delete process.env.XAI_API_KEY;
 });

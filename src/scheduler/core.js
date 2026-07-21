@@ -20,13 +20,7 @@ export function acquireSchedulerLock(s) {
     fs.closeSync(fd);
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
-    let pid;
-    try {
-      pid = Number(fs.readFileSync(file, 'utf8').trim());
-    } catch (readErr) {
-      if (readErr.code !== 'ENOENT') throw readErr;
-      return acquireSchedulerLock(s);
-    }
+    const pid = Number(fs.readFileSync(file, 'utf8').trim());
     if (pidAlive(pid)) throw Error(`Scheduler already running with PID ${pid}`);
     fs.rmSync(file, { force: true });
     return acquireSchedulerLock(s);
@@ -50,11 +44,7 @@ export function dueAutomations(s, { nowDate = new Date() } = {}) {
       recordedInvalid = true;
     }
   }
-  if (recordedInvalid) {
-    try { save(s); } catch (e) {
-      if (e?.code !== 'stale_snapshot') throw e;
-    }
-  }
+  if (recordedInvalid) save(s);
   return due;
 }
 
@@ -185,11 +175,9 @@ export async function schedulerStatus(s) {
 export async function startScheduler(s, { intervalSeconds = 60, onTick = null } = {}) {
   const release = acquireSchedulerLock(s);
   let stopped = false;
-  let wake = null, timer = null;
+  let wake = null;
   const stop = () => {
     stopped = true;
-    clearTimeout(timer);
-    timer = null;
     wake?.();
   };
   process.once('SIGINT', stop);
@@ -201,10 +189,9 @@ export async function startScheduler(s, { intervalSeconds = 60, onTick = null } 
       if (stopped) break;
       await new Promise(resolve => {
         wake = resolve;
-        timer = setTimeout(resolve, Math.max(1, Number(intervalSeconds) || 60) * 1000);
+        setTimeout(resolve, Math.max(1, Number(intervalSeconds) || 60) * 1000);
       });
       wake = null;
-      timer = null;
     }
   } finally {
     release();

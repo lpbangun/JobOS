@@ -1,0 +1,5 @@
+First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Bob,Direct,https://www.linkedin.com/in/bob-direct,bob.direct@example.com,Northstar Media,Technical Recruiter,12 Jan 2024
+Alice,Alumni,https://www.linkedin.com/in/alice-alumni,alice.alumni@example.com,Northstar Media,PR Director,18 Feb 2024
+No,Identity,,,,Intern,
+Skip,Incomplete,not-a-url,,,
