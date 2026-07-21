@@ -6,7 +6,7 @@ during a full sweep against `main`.
 
 ## 1. Cron day-of-month + day-of-week matching changed from AND to OR
 
-**Status:** Needs explanation / decision before merge.  
+**Status:** Decided (2026-07-21): OR semantics (standard Vixie cron) is **kept**. Documented in a comment above `matchesCron()` in `src/scheduler/cron.js`, in `BUILD_PROGRESS.md`, and in `README.md`; locked by explicit OR/wildcard cases in `tests/sprint7-scheduler.test.js`.  
 **Location:** `src/scheduler/cron.js`, `matchesCron()` (lines 58–64).  
 **What changed:** When a cron expression specifies both a concrete day-of-month
 and a concrete day-of-week (neither is `*`), the old `matchesCron` logic treated
@@ -37,12 +37,16 @@ that relied on the AND semantics.
 
 ## 2. BUILD_PROGRESS.md MCP tool count (fixed in this branch)
 
-**Status:** Fixed in `BUILD_PROGRESS.md` as part of the review follow-up.  
+**Status:** Fixed in `BUILD_PROGRESS.md` as part of the review follow-up;
+reconciled again on 2026-07-21 (gap #8) when the catalog grew.  
 **Location:** `BUILD_PROGRESS.md` line under "Real external MCP drill".  
 **What was wrong:** The verification log recorded a "31-tool list" for the
-external MCP drill, but the current MCP catalog is `DOMAIN_TOOLS` (40 entries)
-minus the three packet-mutation tools filtered by `MUTATION_DENY` in
-`src/mcp.js`, i.e., **37 tools**.
+external MCP drill, but the current MCP catalog is `DOMAIN_TOOLS` (44 entries
+after `answers_add`) minus the three packet-mutation tools filtered by
+`MUTATION_DENY` in `src/mcp.js`, i.e., **41 tools**. The advertised count is
+now pinned by tests (AP08 relational check in `tests/apppacket-receipt.test.js`
+and the over-the-wire count in `tests/sprint4-interview-analytics-mcp.test.js`)
+so the verification log cannot drift again.
 
 **What was changed:** Updated the line to read "37-tool list (includes
 `applications_plan` and packet list/show/diff inspection)".

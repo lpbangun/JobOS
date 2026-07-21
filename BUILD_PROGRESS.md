@@ -27,7 +27,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Concise root help grouped into Setup, Workflows, and Extend; the complete low-level registry remains behind `help --all` and `agent-guide --json`.
 - Ashby, public career-page, and bounded VC/startup portfolio discovery in addition to Greenhouse and Lever.
 - Hard portfolio caps: 30 companies, 90 requests, 10 seconds per request, and 60 seconds total; partial results retain structured source failures.
-- Cron-friendly `daily` and dependency-aware `pursue` workflow orchestration with dry-run, stage selection, elapsed times, result paths/IDs, skip reasons, and recovery guidance.
+- Cron-friendly `daily` and dependency-aware `pursue` workflow orchestration with dry-run, stage selection, elapsed times, result paths/IDs, skip reasons, and recovery guidance. Schedules follow standard Unix-cron semantics: when both day-of-month and day-of-week are restricted, either matching fires (OR).
 - Profile/job ownership validation in scoring, tailoring, and pursue.
 - Reusable answer bank with normalized matching, employer scoping, status/reuse policy, redacted mirrors, restricted-question blockers, and proof-grounded agent/LLM draft suggestions.
 - Warm relationship edges integrated into outreach-plan selection; source-backed warm paths can outrank cold contact routes.
@@ -63,7 +63,7 @@ Not required for the smallest coherent CLI product:
 - `npm test`: **139/139 passed** on 2026-07-20, including the permanent people-research orchestration suite and all established CLI, TUI, ACP, MCP, discovery, readiness, research, outreach, and workflow checks.
 - `npm run smoke`: passed on 2026-07-20 in a clean temporary workspace through profile/job setup, discovery, scoring, tailoring, application/interview/analytics/scheduler flows, and workspace exports.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
-- Real external MCP drill: initialize, 37-tool list (includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`.
+- Real external MCP drill: initialize, 41-tool list (DOMAIN_TOOLS minus the three MUTATION_DENY packet tools; includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`. The advertised count is pinned by `tests/apppacket-receipt.test.js` (AP08) and `tests/sprint4-interview-analytics-mcp.test.js`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - People-research critic suite `tests/people-research-orchestration.test.js`: **14/14 passed**; companion contact/TUI/integration suites: **25/25 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.

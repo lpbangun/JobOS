@@ -208,6 +208,8 @@ The MCP tool `applications_plan` returns the identical readiness v3 structure. A
 
 `daily` is the cron-friendly one-shot command. Existing scheduler support can run it every day:
 
+Schedules follow standard Unix-cron semantics: when an expression restricts both day-of-month and day-of-week (neither is `*`), the job fires when **either** field matches (OR), as in Vixie cron.
+
 ```bash
 npm run jobos -- automation enable daily_discovery --json
 npm run jobos -- scheduler start --interval 60
