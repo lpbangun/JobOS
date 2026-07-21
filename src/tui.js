@@ -329,7 +329,7 @@ function detailPanel(model, width, height, color) {
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
     '',
-    ...wrap('p pursue · z score · n network · o docs · q answers · i agent', width - 4).map(line => paint(line, 'green', color))
+    ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -459,6 +459,20 @@ function visibleWindow(items, selectedIndex, limit) {
 
 function keyHints(scope) {
   return (TUI_KEYMAP[scope] || TUI_KEYMAP.global).map(([key, label]) => `${key} ${label}`).join(' · ');
+}
+
+/**
+ * Curated action hint for the SELECTED JOB panel. Labels are derived from
+ * TUI_KEYMAP.global at render time so the hint cannot drift from the bindings
+ * (the old hardcoded line mislabeled `i` as "agent").
+ */
+export const DETAIL_HINT_KEYS = Object.freeze(['p', 'z', 'n', 'o', 'q', 'a', 'i']);
+function detailHints() {
+  return DETAIL_HINT_KEYS.map(key => {
+    const entry = TUI_KEYMAP.global.find(([binding]) => binding === key);
+    if (!entry) throw new Error(`DETAIL_HINT_KEYS advertises "${key}" but TUI_KEYMAP.global lacks it`);
+    return `${key} ${entry[1]}`;
+  }).join(' · ');
 }
 
 function selectedDoc(model, state) {

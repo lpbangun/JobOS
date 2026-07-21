@@ -65,7 +65,8 @@ test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agen
   assert.match(screen, new RegExp(proof.id));
   assert.match(screen, /resume · draft_needs_human_review/);
   assert.match(screen, /side-effects:off/);
-  assert.match(screen, /p pursue · z score · n network · o docs · q answers · i agent/);
+  assert.match(screen, /p pursue · z score · n network · o docs · q answers · a agent/);
+  assert.match(screen, /i prompt/);
 });
 
 test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {

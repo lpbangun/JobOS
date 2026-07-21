@@ -15,6 +15,7 @@ import {
   TUI_KEYMAP,
   TUI_HANDLED_KEYS,
   FILTERS,
+  DETAIL_HINT_KEYS,
   expandKeymapBinding,
   keypressForToken,
   JobosTui,
@@ -64,6 +65,14 @@ test('TUI_KEYMAP bindings expand into TUI_HANDLED_KEYS for every scope', () => {
         );
       }
     }
+  }
+});
+
+// Reconciliation — the SELECTED JOB hint derives from TUI_KEYMAP; pin the subset
+test('SELECTED JOB hint keys are advertised by TUI_KEYMAP.global', () => {
+  const bindings = new Set(TUI_KEYMAP.global.map(([key]) => key));
+  for (const key of DETAIL_HINT_KEYS) {
+    assert.ok(bindings.has(key), `detail hint advertises "${key}" but TUI_KEYMAP.global lacks it`);
   }
 });
 
