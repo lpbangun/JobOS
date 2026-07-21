@@ -65,7 +65,8 @@ test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agen
   assert.match(screen, new RegExp(proof.id));
   assert.match(screen, /resume · draft_needs_human_review/);
   assert.match(screen, /side-effects:off/);
-  assert.match(screen, /p pursue · z score · n network · o docs · q answers · i agent/);
+  assert.match(screen, /p pursue · z score · n network · o docs · q answers · a agent/);
+  assert.match(screen, /i prompt/);
 });
 
 test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {
@@ -182,7 +183,7 @@ test('document approval and rejection confirm locally, refresh review state, and
   assert.equal(rejectedDoc.approvalStatus, 'rejected');
   assert.equal(rejectedDoc.reviewNote, 'Missing evidence');
   assert.equal(tui.model.review.some(item => item.id === rejected.id), false);
-  assert.match(tui.state.status, /queue, readiness, and audit log refreshed/);
+  assert.match(tui.state.status, /rejected · redraft next: jobos tailor cover-letter/);
 });
 
 test('review, log, network, documents, answers, discovery, system, and profile surfaces render real state', async t => {

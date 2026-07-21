@@ -8,8 +8,10 @@ import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
 import { setNetworkIntent } from './profiles.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
+import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
+import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
 import {
   openArtifactEditor as runArtifactEditor,
@@ -29,7 +31,7 @@ const COLORS = {
   bad: `${ESC}38;5;203m`,
   inverse: `${ESC}7m`
 };
-const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
+export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
   pursue: 'pursue_job',
@@ -41,15 +43,79 @@ export const stageOrder = Array.from(validStatuses);
 export const TUI_KEYMAP = Object.freeze({
   global: Object.freeze([
     ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
+    ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['?', 'system'], [':', 'command'], ['Q', 'quit']
+    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
+    ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['j/k', 'select'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
+  due: Object.freeze([['j/k', 'select'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
+
+/**
+ * Atomic keys each KEYMAP binding expands to. Used by invariant tests so
+ * advertised keys stay a subset of live handlers (no silent KEYMAP lies).
+ * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
+ */
+export const TUI_HANDLED_KEYS = Object.freeze({
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
+  review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
+  docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
+  discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
+  network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
+  due: Object.freeze(['j', 'k', 'return', 'escape']),
+  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
+});
+
+/** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
+export function expandKeymapBinding(binding) {
+  const table = {
+    'j/k': ['j', 'k'],
+    'n/N': ['n', 'N'],
+    '↑/↓': ['up', 'down'],
+    '←/→': ['left', 'right', 'h', 'l'],
+    'Ctrl+A': ['ctrl+a'],
+    Enter: ['return'],
+    Esc: ['escape'],
+    Tab: ['tab'],
+    Q: ['Q'],
+    ':': [':'],
+    '?': ['?'],
+    '/': ['/']
+  };
+  if (table[binding]) return table[binding];
+  if (binding.length === 1) return [binding];
+  return [binding];
+}
+
+/** Keypress args for one handler token (for automated KEYMAP drills). */
+export function keypressForToken(token) {
+  if (token === 'ctrl+a') return { value: 'a', key: { name: 'a', ctrl: true } };
+  if (token === 'return') return { value: '', key: { name: 'return' } };
+  if (token === 'escape') return { value: '', key: { name: 'escape' } };
+  if (token === 'tab') return { value: '', key: { name: 'tab' } };
+  if (token === 'up' || token === 'down' || token === 'left' || token === 'right') {
+    return { value: '', key: { name: token } };
+  }
+  if (token === 'N') return { value: 'N', key: { name: 'n', shift: true } };
+  if (token === 'Q') return { value: 'Q', key: { name: 'q', shift: true } };
+  if (token.length === 1 && token >= 'A' && token <= 'Z') {
+    return { value: token, key: { name: token.toLowerCase(), shift: true } };
+  }
+  return { value: token, key: { name: token.length === 1 ? token.toLowerCase() : token } };
+}
+
+function redraftCliHint(artifact, profileId) {
+  const jobId = artifact?.jobId || artifact?.job_id || '<job-id>';
+  const profile = profileId || '<profile-id>';
+  const type = artifact?.type === 'cover_letter' ? 'cover-letter' : 'resume';
+  return `jobos tailor ${type} --job ${jobId} --profile ${profile} --json`;
+}
 
 function stripAnsi(value) {
   return stripAnsiText(String(value ?? ''));
@@ -123,9 +189,18 @@ function filteredJobs(model, filter) {
   return model.jobs.filter(job => job.stage === filter);
 }
 
+function packetCtaLine(row) {
+  const currency = row?.currency || 'none';
+  const receiptState = row?.receiptState || 'none';
+  if (currency !== 'current') return 'next :packet create — freeze a packet from the approved materials';
+  if (receiptState === 'none') return 'next submit externally, then :attest <rfc3339> (or :attest for now)';
+  if (receiptState === 'attested') return 'next :receipt <external-reference> once the site confirms receipt';
+  return 'receipt confirmed · follow-ups only (outreach, interview prep)';
+}
+
 function readinessLines(readiness, width, color) {
   const status = readiness?.status || 'blocked';
-  const next = readiness?.nextAction || readiness?.next || readiness?.nextActions?.[0]?.action || 'Complete readiness checks';
+  const next = readiness?.nextAction || readiness?.next || readiness?.nextActions?.[0]?.action || 'Review the readiness details above.';
   const blockers = Array.isArray(readiness?.blockers) ? readiness.blockers : [];
   const warnings = Array.isArray(readiness?.warnings) ? readiness.warnings : [];
   const localApprovalComplete = readiness?.localApprovalComplete || readiness?.review?.localApprovalComplete;
@@ -184,14 +259,15 @@ function headerLine(model, state, width, color) {
   return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'green', color);
 }
 
-function priorityLines(model, width, color) {
+function priorityLines(model, state, width, color) {
+  const focused = state.stripIndex || 0;
   if (width < 100) {
-    return model.priority.map(item => paint(fit(`[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
+    return model.priority.map((item, index) => paint(fit(`${index === focused ? '▶' : ' '}[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
   }
   const gap = 1;
   const cardWidth = Math.floor((width - gap * 3) / 4);
-  const cards = model.priority.map(item => {
-    const label = item.kind.toUpperCase();
+  const cards = model.priority.map((item, index) => {
+    const label = `${index === focused ? '▶ ' : ''}${item.kind.toUpperCase()}`;
     return [
       paint(`┌${fit(` ${label} `, cardWidth - 2, 'left')}┐`, item.kind === 'failure' ? 'bad' : 'green', color),
       `│${fit(item.text, cardWidth - 2)}│`,
@@ -262,7 +338,7 @@ function detailPanel(model, width, height, color) {
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
     '',
-    ...wrap('p pursue · z score · n network · o docs · q answers · i agent', width - 4).map(line => paint(line, 'green', color))
+    ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -291,8 +367,28 @@ function overlayItems(model, state) {
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
+  if (state.overlay === 'network') return networkOverlayItems(model);
+  if (state.overlay === 'due') return model.dueTasks || [];
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
   return [];
+}
+// Network overlay rows: discovered contact points first (human-gated via A/X),
+// then person candidates (promotable via P). Suppressed values are already
+// nulled by the model (listNetworkContacts redacts do_not_use rows).
+function networkOverlayItems(model) {
+  const selected = model.selected;
+  if (!selected) return [];
+  const contacts = (selected.contacts || []).map(contact => ({
+    kind: 'contact',
+    id: contact.id,
+    label: `[contact] ${contact.name || 'unnamed'} · ${contact.role || 'role —'} · ${contact.type}${contact.value ? ` ${contact.value}` : ''} · tier ${contact.evidenceTier || '—'}${contact.approved ? ' · approved' : ''}${contact.suppressed ? ' · suppressed' : ''}`
+  }));
+  const candidates = (selected.candidates || []).map(candidate => ({
+    kind: 'candidate',
+    id: candidate.id,
+    label: `[candidate] ${candidate.name || 'unnamed'} · ${candidate.role || 'role —'} · ${candidate.status}${candidate.relevance ? ` · ${candidate.relevance}` : ''}`
+  }));
+  return [...contacts, ...candidates];
 }
 // Build-network editor: a sequential, keyboard-usable setup editor.
 // The draft (state.networkDraft) holds editable copies seeded from the model on open.
@@ -392,6 +488,20 @@ function visibleWindow(items, selectedIndex, limit) {
 
 function keyHints(scope) {
   return (TUI_KEYMAP[scope] || TUI_KEYMAP.global).map(([key, label]) => `${key} ${label}`).join(' · ');
+}
+
+/**
+ * Curated action hint for the SELECTED JOB panel. Labels are derived from
+ * TUI_KEYMAP.global at render time so the hint cannot drift from the bindings
+ * (the old hardcoded line mislabeled `i` as "agent").
+ */
+export const DETAIL_HINT_KEYS = Object.freeze(['p', 'z', 'n', 'o', 'q', 'a', 'i']);
+function detailHints() {
+  return DETAIL_HINT_KEYS.map(key => {
+    const entry = TUI_KEYMAP.global.find(([binding]) => binding === key);
+    if (!entry) throw new Error(`DETAIL_HINT_KEYS advertises "${key}" but TUI_KEYMAP.global lacks it`);
+    return `${key} ${entry[1]}`;
+  }).join(' · ');
 }
 
 function selectedDoc(model, state) {
@@ -521,7 +631,15 @@ function overlayPanel(model, state, width, height, color) {
       body.push('', `Path: ${selected.path.strength} · ${selected.path.channel || '—'}`);
       body.push(...wrap(JSON.stringify(selected.path.reasoning), width - 4).slice(0, 2));
     }
-    body.push('', 'm map/refresh · Esc closes');
+    const contactItems = networkOverlayItems(model);
+    if (contactItems.length) {
+      body.push('', `Contacts & candidates · human gates (${contactItems.length}):`);
+      const visible = visibleWindow(contactItems, state.overlayIndex, Math.max(3, height - body.length - 4));
+      body.push(...visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${fit(item.label, width - 4)}`));
+    } else {
+      body.push('', 'No discovered contacts yet — b build-network, then m map/refresh.');
+    }
+    body.push('', keyHints('network'));
   } else if (state.overlay === 'docs') {
     return docsPanel(model, state, width, height, color);
   } else if (state.overlay === 'answers') {
@@ -533,6 +651,31 @@ function overlayPanel(model, state, width, height, color) {
       'Agent and TUI use answers_match only with explicit application questions.',
       'Restricted values are never displayed or auto-filled.'
     ];
+    const openQuestions = model.answers.questions || [];
+    if (openQuestions.length) {
+      body.push('', `Open questions for the selected job (${openQuestions.length}):`);
+      body.push(...openQuestions.slice(0, Math.max(1, height - body.length - 4)).map(q =>
+        fit(`${q.status === 'blocked' ? '⚠' : '·'} [${q.category}] ${q.question}${q.status === 'blocked' ? ' · restricted — direct input required' : ' · unmatched'}`, width - 4)));
+      body.push('', ':answer add [category] | <exact question> | <your answer>');
+    }
+  } else if (state.overlay === 'due') {
+    title = 'DUE · tasks & outreach';
+    const tasks = model.dueTasks || [];
+    if (tasks.length) {
+      body = [`TASKS (${tasks.length}):`];
+      const visible = visibleWindow(tasks, state.overlayIndex, Math.max(3, height - 10));
+      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${task.dueAt ? String(task.dueAt).slice(0, 10) : 'no date'} · ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
+    } else {
+      body = ['No open tasks.'];
+    }
+    const outreach = model.outreachDue || [];
+    if (outreach.length) {
+      body.push('', `OUTREACH FOLLOW-UPS (${outreach.length}):`);
+      body.push(...outreach.slice(0, 6).map(item => ` ${item.dueAt ? String(item.dueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
+    } else {
+      body.push('', 'No outreach follow-ups due.');
+    }
+    body.push('', keyHints('due'), 'Enter jumps to the selected task’s job');
   } else if (state.overlay === 'discovery') {
     body = [
       'SAVED SEARCHES / RUNS',
@@ -588,6 +731,35 @@ function overlayPanel(model, state, width, height, color) {
         body.push('j/k move · Enter edit field/toggle · Enter on Save only saves · b Save and build · Esc closes');
       }
     }
+  } else if (state.overlay === 'packet') {
+    title = `PACKET · ${selected?.job.id || 'NO JOB'}`;
+    const detail = state.packetDetail;
+    const meta = selected?.readiness?.packet;
+    if (detail?.empty || (!detail && !meta?.currentPacketId)) {
+      body = [
+        'No application packet is frozen for this job.',
+        'Freeze one once readiness is approved:',
+        ':packet create',
+        `CLI parity: jobos apply packet create --job ${selected?.job.id || '<job-id>'} --profile ${model.profileId || '<profile-id>'} --json`,
+        '',
+        'Then submit externally, :attest <rfc3339>, and :receipt <reference> once confirmed.'
+      ];
+    } else {
+      const row = detail && !detail.empty ? detail : meta;
+      body = [
+        `id ${row.id || row.currentPacketId || '—'}`,
+        `currency ${row.currency || '—'} · receipt ${row.receiptState || '—'}`,
+        `attempt ${row.attemptNumber ?? '—'} · revision ${row.revision ?? '—'}`,
+        `contentHash ${String(row.contentHash || '').slice(0, 16) || '—'}…`,
+        `attestable ${row.attestable == null ? '—' : row.attestable}`,
+        row.resumeArtifactId ? `resume ${row.resumeArtifactId}` : (meta ? `packet summary from readiness` : ''),
+        row.applicationId ? `application ${row.applicationId}` : '',
+        '',
+        packetCtaLine(row),
+        'Esc closes · :packet refreshes · :packet create / :attest / :receipt run the trusted human mutations'
+      ].filter(Boolean);
+    }
+    body.push('', 'Esc closes');
   }
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -595,12 +767,13 @@ function overlayPanel(model, state, width, height, color) {
 function footerLines(width) {
   if (width >= 90) {
     return [
-      ' j/k select · 1 today 2 all 3 high · p pursue z score d daily · a agent i prompt',
+      ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
       ' r review l log · n network o docs q answers · s sources ? system · b build-network : command Q quit'
     ];
   }
   return [
     ' j/k select · 1 today · 2 all · 3 high',
+    ' 4 review · 5 materials-ready · 6 applied · 7 interview',
     ' p pursue · z score · d daily · a agent · i prompt',
     ' r review · l log · n network · o docs · q answers',
     ' s sources · ? system · b build-network · : command · Q quit'
@@ -610,9 +783,9 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search']);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
-  const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, safeWidth, color)];
+  const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(9, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
@@ -659,7 +832,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search' };
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -672,7 +845,6 @@ export function defaultTuiState() {
     selectedJobId: null,
     selectedArtifactId: null,
     profileId: null,
-    selectedArtifactId: null,
     selectedDiscoveryJobId: null,
     agentOn: true,
     agentState: 'connecting',
@@ -689,7 +861,10 @@ export function defaultTuiState() {
     pendingAutoOpenArtifactId: null,
     editorActive: false,
     stageIndex: 0,
+    stripIndex: 0,
     pendingConfirm: null,
+    pendingSuppressContactId: null,
+    packetDetail: null,
     mode: 'normal',
     input: '',
     status: 'starting JobOS host',
@@ -1130,8 +1305,25 @@ export class JobosTui {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
       this.state.mode = 'normal';
       this.state.input = '';
-      this.state.status = `${decision} locally · queue, readiness, and audit log refreshed`;
       this.refresh({ disk: false });
+      this.state.busy = null;
+      if (decision === 'rejected') {
+        const hint = redraftCliHint(
+          { ...artifact, jobId: artifact.jobId || this.state.selectedJobId, job_id: this.state.selectedJobId },
+          this.model.profileId
+        );
+        if (this.client?.state === 'ready' && !this.state.busy) {
+          this.state.status = `rejected · agent redraft requested · or CLI: ${hint}`;
+          this.render();
+          await this.promptAgent(
+            `Revise artifact ${artifact.id} (${artifact.path || artifact.type}) for job ${this.state.selectedJobId} using only stored proof points. Human rejection feedback: ${args.note || ''}`
+          );
+        } else {
+          this.state.status = `rejected · redraft next: ${hint}`;
+        }
+      } else {
+        this.state.status = `${decision} locally · queue, readiness, and audit log refreshed`;
+      }
     } catch (error) {
       this.state.error = error.message;
       this.state.status = `${decision} failed: ${error.message}`;
@@ -1214,15 +1406,69 @@ export class JobosTui {
     }
   }
 
+  async showPacketSummary() {
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    const meta = this.model.selected?.readiness?.packet;
+    if (!jobId) {
+      this.state.error = 'No job selected';
+      this.state.status = 'Select a job before inspecting its application packet.';
+      this.render();
+      return;
+    }
+    if (!meta?.currentPacketId) {
+      this.state.packetDetail = { empty: true, jobId, profileId };
+      this.state.overlay = 'packet';
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = `No packet · freeze with :packet create (or CLI: jobos apply packet create --job ${jobId} --profile ${profileId || '<profile>'} --json)`;
+      this.render();
+      return;
+    }
+    this.state.busy = 'packet_show';
+    this.state.error = null;
+    this.state.status = `Loading packet ${meta.currentPacketId}`;
+    this.render();
+    try {
+      const detail = await callDomainTool(this.store, 'application_packet_show', { packetId: meta.currentPacketId }, { source: 'tui' });
+      this.state.packetDetail = detail;
+      this.state.overlay = 'packet';
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.status = `Packet ${detail.id} · ${detail.currency}/${detail.receiptState} · ${packetCtaLine(detail).replace(/^next /, 'next: ')}`;
+    } catch (error) {
+      this.state.packetDetail = { ...meta, id: meta.currentPacketId, fallback: true };
+      this.state.overlay = 'packet';
+      this.state.error = error.message;
+      this.state.status = `Packet summary from readiness (${error.message})`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   executeCommand(value) {
-    const [command] = String(value || '').trim().split(/\s+/);
+    const trimmed = String(value || '').trim();
+    const [command] = trimmed.split(/\s+/);
+    const argText = trimmed.slice((command || '').length).trim();
     this.state.mode = 'normal';
     this.state.input = '';
     if (!command) return this.render();
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
-    if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile') return this.openOverlay(command);
+    if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
     if (command === 'build-network') return this.openOverlay('build-network');
+    if (command === 'packet' || command === 'packet-show' || command === 'show-packet') {
+      const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
+      if (command === 'packet' && (sub === 'create' || sub === 'freeze')) return void this.packetMutate('create');
+      return void this.showPacketSummary();
+    }
+    if (command === 'freeze') return void this.packetMutate('create');
+    if (command === 'attest') return void this.packetMutate('attest', argText);
+    if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
+    if (command === 'answer') return void this.answerAdd(argText);
+    if (command === 'prep') return void this.runPrep(argText);
+    if (command === 'weekly') return void this.runWeeklyReview();
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1233,8 +1479,196 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${command}`;
-    this.state.status = 'Commands: pursue score daily network review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
     this.render();
+  }
+
+  cycleStripFocus() {
+    const items = this.model.priority || [];
+    if (!items.length) return;
+    this.state.stripIndex = ((this.state.stripIndex || 0) + 1) % items.length;
+    this.state.status = `Strip focus: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
+    this.render();
+  }
+
+  jumpToStripJob() {
+    const item = (this.model.priority || [])[this.state.stripIndex || 0];
+    if (!item?.jobId) {
+      this.state.status = `No linked job on the ${item?.kind || 'strip'} card.`;
+      this.render();
+      return;
+    }
+    this.selectJobInMainList(item.jobId, `Strip ${item.kind} · job now selected in the main list.`);
+  }
+
+  selectJobInMainList(jobId, statusMessage) {
+    const row = one(this.store, 'SELECT id FROM jobs WHERE id=?', [jobId]);
+    if (!row) {
+      this.refresh({ disk: false });
+      this.state.status = 'Linked job no longer exists; state refreshed.';
+      this.render();
+      return;
+    }
+    this.state.overlay = null;
+    this.state.filter = 'all'; // load-bearing: the main list only renders filteredJobs
+    this.state.selectedJobId = jobId;
+    this.refresh({ disk: false });
+    this.state.status = statusMessage;
+    this.render();
+  }
+
+  async runPrep(argText) {
+    const jobId = this.state.selectedJobId;
+    if (!jobId) {
+      this.state.status = 'Select a job before running interview prep.';
+      this.render();
+      return;
+    }
+    const app = one(this.store, 'SELECT id FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1', [jobId]);
+    if (!app) {
+      this.state.status = 'No application record for this job — create one first (pursue or jobos apply create).';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'interview-prep';
+    this.state.status = 'Interview prep running…';
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, 'interview_prep', { applicationId: app.id, stage: argText || 'interview' }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Interview prep draft created (${result.stage || 'interview'}) · review with r`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Interview prep failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async runWeeklyReview() {
+    const profileId = this.model.profileId;
+    if (!profileId) {
+      this.state.status = 'Create a profile before running the weekly review.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'weekly-review';
+    this.state.status = 'Weekly review running…';
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, 'weekly_review', { profileId }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Weekly review written · ${result.path}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Weekly review failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async answerAdd(argText) {
+    const usage = 'Usage: :answer add [category] | <exact question> | <your answer> · restricted categories auto-redact';
+    const parts = String(argText || '').split('|').map(part => part.trim());
+    const head = (parts[0] || '').split(/\s+/).filter(Boolean);
+    if (head[0] !== 'add' || parts.length !== 3 || !parts[1] || !parts[2]) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const category = head[1] || 'other';
+    const profileId = this.model.profileId;
+    if (!profileId) {
+      this.state.status = 'Create a profile before adding answers.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'answer-add';
+    this.state.status = 'Saving answer…';
+    this.render();
+    try {
+      await callDomainTool(this.store, 'answers_add', {
+        profileId,
+        category,
+        question: parts[1],
+        answer: parts[2],
+        sourceRef: this.state.selectedJobId ? `job:${this.state.selectedJobId}` : 'user_input'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      // Never echo the answer value back: restricted values stay redacted everywhere.
+      this.state.status = `Answer saved (${category}) · restricted values stay redacted and never auto-fill`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Answer add failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async packetMutate(kind, argText = '') {
+    if (this.state.busy) return;
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    if (!jobId) {
+      this.state.error = 'No job selected';
+      this.state.status = 'Select a job before packet actions.';
+      return this.render();
+    }
+    if (kind === 'receipt' && !argText) {
+      this.state.error = 'Missing reference';
+      this.state.status = 'Usage: :receipt <external-reference> — a confirmation id or URL from the job site.';
+      return this.render();
+    }
+    this.state.busy = `packet_${kind}`;
+    this.state.error = null;
+    this.state.status = kind === 'create' ? `Freezing packet for ${jobId}`
+      : kind === 'attest' ? `Attesting submission for ${jobId}`
+        : `Confirming receipt for ${jobId}`;
+    this.render();
+    try {
+      let done;
+      if (kind === 'create') {
+        await callDomainTool(this.store, 'create_application_packet', { jobId, profileId }, { source: 'tui' });
+        done = 'packet frozen';
+      } else {
+        const summary = readinessPacketSummary(this.store, { jobId, profileId });
+        if (!summary?.currentPacketId) throw new Error('no frozen packet for this job yet — run :packet create first');
+        const packetId = summary.currentPacketId;
+        if (kind === 'attest') {
+          const submittedAt = argText || new Date().toISOString();
+          await callDomainTool(this.store, 'attest_application_submitted', { packetId, submittedAt, note: '' }, { source: 'tui' });
+          done = `submission attested at ${submittedAt}`;
+        } else {
+          await callDomainTool(this.store, 'confirm_application_receipt', { packetId, reference: argText, note: '' }, { source: 'tui' });
+          done = `receipt confirmed (${argText})`;
+        }
+      }
+      this.refresh({ disk: false });
+      if (this.state.overlay === 'packet') await this.showPacketSummary();
+      this.state.status = kind === 'create' ? `${done} · next: submit externally, then :attest <rfc3339>`
+        : kind === 'attest' ? `${done} · next: :receipt <external-reference> once the site confirms`
+          : `${done} · application loop complete locally`;
+    } catch (error) {
+      if (error?.code === 'stale_snapshot') {
+        reload(this.store);
+        this.state.status = `packet ${kind} stopped: workspace changed; refreshed safely, retry when ready`;
+      } else {
+        this.state.status = `packet ${kind} failed: ${error.message}`;
+      }
+      this.state.error = error.message;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
   }
 
   currentReviewItem() {
@@ -1292,15 +1726,21 @@ export class JobosTui {
       return;
     }
     const artifactId = this.state.selectedArtifactId;
-    const row = one(this.store, 'SELECT id,job_id,path FROM artifacts WHERE id=?', [artifactId]);
+    const row = one(this.store, 'SELECT id,job_id,path,type FROM artifacts WHERE id=?', [artifactId]);
     this.state.mode = 'normal';
     this.state.input = '';
     const reviewed = this.reviewCurrentArtifact('rejected', note);
     if (!reviewed || !row) return;
+    const hint = redraftCliHint(
+      { type: row.type, jobId: row.job_id, job_id: row.job_id, path: row.path },
+      this.model.profileId
+    );
     if (this.client?.state === 'ready' && !this.state.busy) {
+      this.state.status = `rejected · agent redraft requested · or CLI: ${hint}`;
+      this.render();
       await this.promptAgent(`Revise artifact ${row.id} (${row.path}) for job ${row.job_id} using only stored proof points. Human rejection feedback: ${note}`);
     } else {
-      this.state.status = 'Rejection saved; redraft skipped because the agent is not ready.';
+      this.state.status = `Rejection saved · redraft next: ${hint}`;
       this.applyPendingAutoOpen();
       this.render();
     }
@@ -1321,6 +1761,109 @@ export class JobosTui {
     this.state.overlayIndex = Math.max(0, (this.model.selected?.docs || []).findIndex(doc => doc.id === item.id));
     this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
     this.state.status = `Documents · ${item.title}`;
+    this.render();
+  }
+
+  networkGateItem() {
+    return networkOverlayItems(this.model)[this.state.overlayIndex] || null;
+  }
+
+  async approveContactSelection() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return; }
+    if (item.kind !== 'contact') { this.state.status = 'A approves a contact row · P promotes a candidate row.'; this.render(); return; }
+    if (this.state.busy) return;
+    this.state.busy = 'contact-gate';
+    this.state.status = `Approving ${item.id}…`;
+    this.render();
+    try {
+      await callDomainTool(this.store, 'approve_contact', { contactId: item.id }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = 'Contact approved for human-reviewed use · JobOS sends nothing.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Approve failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  beginSuppressContact() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return true; }
+    if (item.kind !== 'contact') { this.state.status = 'X suppresses a contact row · P promotes a candidate row.'; this.render(); return true; }
+    this.state.pendingSuppressContactId = item.id;
+    this.state.mode = 'suppress-reason';
+    this.state.input = '';
+    this.state.status = 'Suppress reason (optional) · Enter marks do-not-use locally · Esc cancels';
+    this.render();
+    return true;
+  }
+
+  commitSuppressContact() {
+    const contactId = this.state.pendingSuppressContactId;
+    const reason = this.state.input.trim();
+    this.state.mode = 'normal';
+    this.state.input = '';
+    this.state.pendingSuppressContactId = null;
+    if (!contactId) { this.render(); return; }
+    try {
+      suppressContact(this.store, { contactId, reason });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = 'Contact suppressed locally · value now hidden · nothing was sent.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Suppress failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  async promoteCandidateSelection() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return; }
+    if (item.kind !== 'candidate') { this.state.status = 'P promotes a candidate row · A/X gate contact rows.'; this.render(); return; }
+    if (this.state.busy) return;
+    this.state.busy = 'contact-gate';
+    this.state.status = `Promoting ${item.id}…`;
+    this.render();
+    try {
+      const result = promoteStakeholder(this.store, { candidateId: item.id });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Candidate promoted → stakeholder ${result.id} · outreach not_contacted · nothing was sent.`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Promote failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  openDiscoverySelection() {
+    const jobId = this.state.selectedDiscoveryJobId;
+    const row = jobId ? one(this.store, 'SELECT id,status FROM jobs WHERE id=?', [jobId]) : null;
+    if (!row || row.status !== 'new') {
+      this.refresh();
+      this.state.status = 'Discovery selection is stale; queue refreshed without changes.';
+      this.render();
+      return;
+    }
+    try {
+      updateJobStatus(this.store, jobId, 'saved');
+      this.state.error = null;
+      this.state.overlay = null;
+      this.state.filter = 'all';
+      this.state.selectedJobId = jobId;
+      this.refresh({ disk: false });
+      this.state.status = 'Discovery job saved · now selected in the main list.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Discovery open failed: ${error.message}`;
+    }
     this.render();
   }
 
@@ -1565,6 +2108,17 @@ export class JobosTui {
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
+    if (this.state.overlay === 'discovery') {
+      if (key.name === 'return' || key.name === 'enter') return this.openDiscoverySelection();
+      if (value === 'j') return this.moveDiscoverySelection(1);
+      if (value === 'k') return this.moveDiscoverySelection(-1);
+      if (value === 'A') return this.decideDiscovery('saved');
+      if (value === 'X') return this.decideDiscovery('archived');
+      if (value === 'd') {
+        void this.runAction('daily');
+        return true;
+      }
+    }
     if (value === 'r') return this.openOverlay('review');
     if (value === 'l') return this.openOverlay('log');
     if (value === 'n') return this.openOverlay('network');
@@ -1576,6 +2130,24 @@ export class JobosTui {
       if (value === 'A') return this.reviewCurrentArtifact('approved');
       if (value === 'R') return this.beginReject();
       if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
+      if (value === 'E') {
+        this.openReviewDocument();
+        void this.openArtifactEditor();
+        return true;
+      }
+      if (value === 'V' || value === 'I') {
+        this.openReviewDocument();
+        return this.onDocsKey(value, key);
+      }
+    }
+    if (this.state.overlay === 'network') {
+      if (value === 'm') {
+        void this.runAction('network');
+        return true;
+      }
+      if (value === 'A') return void this.approveContactSelection();
+      if (value === 'X') return this.beginSuppressContact();
+      if (value === 'P') return void this.promoteCandidateSelection();
     }
     if (this.state.overlay === 'discovery') {
       if (value === 'A') return this.decideDiscovery('saved');
@@ -1593,8 +2165,13 @@ export class JobosTui {
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
       this.openReviewDocument();
       return true;
-    } else if (value === 'm' && this.state.overlay === 'network') {
-      void this.runAction('network');
+    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'due') {
+      const task = (this.model.dueTasks || [])[this.state.overlayIndex];
+      if (task?.jobId) this.selectJobInMainList(task.jobId, 'Due task · job now selected in the main list.');
+      else {
+        this.state.status = 'This task has no linked job.';
+        this.render();
+      }
       return true;
     } else if (value === 'd' && this.state.overlay === 'discovery') {
       void this.runAction('daily');
@@ -1687,6 +2264,10 @@ export class JobosTui {
         this.commitDocsSearch();
         return true;
       }
+      if (mode === 'suppress-reason') {
+        this.commitSuppressContact();
+        return true;
+      }
       this.state.mode = 'normal';
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
@@ -1775,7 +2356,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);
@@ -1794,6 +2375,10 @@ export class JobosTui {
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
     else if (value === '2') { this.state.filter = 'all'; this.refresh({ disk: false }); }
     else if (value === '3') { this.state.filter = 'high'; this.refresh({ disk: false }); }
+    else if (value === '4') { this.state.filter = 'review'; this.refresh({ disk: false }); }
+    else if (value === '5') { this.state.filter = 'materials-ready'; this.refresh({ disk: false }); }
+    else if (value === '6') { this.state.filter = 'applied'; this.refresh({ disk: false }); }
+    else if (value === '7') { this.state.filter = 'interview'; this.refresh({ disk: false }); }
     else if (value === 'a') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'} · Esc never hides it`;
@@ -1829,7 +2414,8 @@ export class JobosTui {
       this.client.cancel();
       this.state.status = 'cancelling agent turn';
       this.render();
-    }
+    } else if (key.name === 'tab') this.cycleStripFocus();
+    else if (key.name === 'return' || key.name === 'enter') this.jumpToStripJob();
     return true;
   }
 

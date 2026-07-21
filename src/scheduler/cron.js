@@ -50,6 +50,14 @@ export function floorMinute(date) {
   return d;
 }
 
+/**
+ * Match a parsed cron expression against a UTC minute.
+ * Day-of-month + day-of-week: when BOTH fields are restricted (neither is
+ * `*`), JobOS follows standard Vixie-cron OR semantics — the day matches if
+ * EITHER field matches. This is intentional (Unix-cron alignment); the older
+ * AND behavior was retired with the AppPacket-ReceiptSpine main sweep and the
+ * decision is locked by tests/sprint7-scheduler.test.js.
+ */
 export function matchesCron(expr, date = new Date()) {
   const c = typeof expr === 'string' ? parseCron(expr) : expr;
   const d = floorMinute(date);
@@ -61,7 +69,7 @@ export function matchesCron(expr, date = new Date()) {
       ? dowMatches
       : c.dayOfWeekAny
         ? domMatches
-        : domMatches || dowMatches;
+        : domMatches || dowMatches; // both DOM and DOW restricted: standard-cron OR
   return c.minute.has(d.getUTCMinutes())
     && c.hour.has(d.getUTCHours())
     && dayMatches

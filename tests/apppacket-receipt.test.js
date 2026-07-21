@@ -307,9 +307,11 @@ test('AP03 packet freezes exact approved materials answers target and initialize
   const existing = await baseFixture(t, { prefix: 'jobos-packet-existing-', applicationStatus: 'researching' });
   const before = one(existing.store, 'SELECT status,notes,confirmation_url,updated_at FROM applications WHERE id=?', [existing.application.id]);
   const beforeChanges = count(existing.store, 'status_changes', 'application_id=?', [existing.application.id]);
-  createApplicationPacket(existing.store, { jobId: existing.job.id, profileId: existing.profile.id, createdBy: 'cli' });
+  const existingPacket = createApplicationPacket(existing.store, { jobId: existing.job.id, profileId: existing.profile.id, createdBy: 'cli' });
   assert.deepEqual(one(existing.store, 'SELECT status,notes,confirmation_url,updated_at FROM applications WHERE id=?', [existing.application.id]), before);
   assert.equal(count(existing.store, 'status_changes', 'application_id=?', [existing.application.id]), beforeChanges);
+  assert.equal(existingPacket.applicationId, existing.application.id, 'packet links the pre-existing application');
+  assert.equal(count(existing.store, 'applications'), 1, 'no second application row is created');
 });
 
 test('AP04 canonical packet hash is stable and identical create is idempotent', async t => {
@@ -442,6 +444,7 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
   for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']) assert.equal(advertised.includes(name), false);
   assert.ok(DOMAIN_TOOLS.some(tool => tool.name === 'create_application_packet'));
+  assert.equal(advertised.length, DOMAIN_TOOLS.length - 3, 'MCP advertises DOMAIN_TOOLS minus exactly the three MUTATION_DENY packet tools');
 
   const oldMediation = process.env.JOBOS_MEDIATION;
   const oldOverride = process.env.JOBOS_ALLOW_AGENT_ATTESTATION;
@@ -468,6 +471,10 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
     }
     await assertRejectCode(
       () => Promise.resolve().then(() => api.attestApplicationSubmitted(fixture.store, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source })),
+      'human_submission_attestation_required'
+    );
+    await assertRejectCode(
+      () => Promise.resolve().then(() => api.confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'REF', source })),
       'human_submission_attestation_required'
     );
   }
@@ -620,6 +627,39 @@ test('AP13 concurrent packet writers converge and stale persistence leaves no ha
   assert.equal(allTextUnder(path.dirname(packetMirror(fixture.root, fixture.job.id, a.id))).includes('receiptState: attested'), false);
 });
 
+test('AP13b conflicting receipt confirmation leaves every surface consistent with SQLite', async t => {
+  const { createApplicationPacket, attestApplicationSubmitted, confirmApplicationReceipt } = await packetApi();
+  const fixture = await baseFixture(t);
+  const packet = createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
+  attestApplicationSubmitted(fixture.store, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source: 'cli' });
+  confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'REF-FIRST', source: 'cli' });
+
+  const statusBefore = one(fixture.store, 'SELECT status FROM applications WHERE id=?', [packet.applicationId]).status;
+  const changesBefore = count(fixture.store, 'status_changes');
+  const auditsBefore = count(fixture.store, 'audit_log');
+  const readinessYaml = path.join(fixture.store.p.jobs, fixture.job.id, 'application-readiness.yaml');
+  const readinessBefore = readFileSync(readinessYaml, 'utf8');
+  const packetYaml = packetMirror(fixture.root, fixture.job.id, packet.id);
+  const packetYamlBefore = readFileSync(packetYaml, 'utf8');
+  // attest and confirm each record their own receipt row, so a fully-confirmed
+  // packet has two rows (see AP12's count(..., 2) assert); the contract here is
+  // that the rejected conflict adds no further row.
+  const receiptsBefore = count(fixture.store, 'application_receipts');
+  assert.ok(receiptsBefore >= 1, 'confirmed packet has at least one receipt row');
+
+  await assertRejectCode(
+    () => Promise.resolve().then(() => confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'REF-CONFLICT', source: 'cli' })),
+    'receipt_conflict'
+  );
+
+  assert.equal(one(fixture.store, 'SELECT status FROM applications WHERE id=?', [packet.applicationId]).status, statusBefore, 'application status unchanged');
+  assert.equal(count(fixture.store, 'status_changes'), changesBefore, 'no status history appended');
+  assert.equal(count(fixture.store, 'application_receipts'), receiptsBefore, 'conflicting confirm adds no receipt row');
+  assert.equal(count(fixture.store, 'audit_log'), auditsBefore, 'no audit entry for the failed confirmation');
+  assert.equal(readFileSync(readinessYaml, 'utf8'), readinessBefore, 'readiness mirror unchanged');
+  assert.equal(readFileSync(packetYaml, 'utf8'), packetYamlBefore, 'packet mirror unchanged');
+});
+
 test('AP14 readiness v3 reports packet receipt state without claiming adapter submission', async t => {
   const { createApplicationPacket, attestApplicationSubmitted, confirmApplicationReceipt } = await packetApi();
   const fixture = await baseFixture(t);
@@ -681,6 +721,36 @@ test('AP15 packet CLI list show and diff are filterable parseable historical and
   assert.deepEqual(byBoth.map(item => item.id), byJob.map(item => item.id));
   assert.ok(byJob.some(item => item.id === first.id));
   assert.ok(byJob.some(item => item.id === second.id));
+
+  // Cross-profile isolation: fabricate another profile's application+packet for the
+  // SAME job; none of the first profile's filter combinations may list it.
+  const otherProfile = createProfile(fixture.store, `Second ${crypto.randomUUID()}`).profile;
+  const leakAt = new Date().toISOString();
+  const otherApplicationId = `app_${crypto.randomUUID()}`;
+  const otherPacketId = `packet_${crypto.randomUUID()}`;
+  run(fixture.store, `INSERT INTO applications (id, job_id, profile_id, status, notes, confirmation_url, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+    [otherApplicationId, fixture.job.id, otherProfile.id, 'applied', '', '', leakAt, leakAt]);
+  run(fixture.store, `INSERT INTO application_packets (id, job_id, profile_id, application_id, attempt_number, revision, content_hash, readiness_status_at_create, readiness_version, resume_artifact_id, resume_content_hash, created_at, created_by_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [otherPacketId, fixture.job.id, otherProfile.id, otherApplicationId, 1, 1, 'other-content-hash', 'approved', 3, fixture.resume.id, 'other-resume-hash', leakAt, 'cli']);
+  save(fixture.store);
+  // The fabricated row must be genuinely queryable, or the non-leak asserts below
+  // would pass vacuously.
+  const otherByProfile = cliOk(fixture.root, ['apply', 'packet', 'list', '--profile', otherProfile.id, '--json']);
+  assert.ok(otherByProfile.some(item => item.id === otherPacketId), 'other-profile packet is queryable under its own profile');
+  // Profile-scoped listings must never surface another profile's packet.
+  for (const listing of [
+    cliOk(fixture.root, ['apply', 'packet', 'list', '--profile', fixture.profile.id, '--json']),
+    cliOk(fixture.root, ['apply', 'packet', 'list', '--job', fixture.job.id, '--profile', fixture.profile.id, '--json'])
+  ]) {
+    assert.equal(listing.some(item => item.id === otherPacketId), false, 'cross-profile packet must not leak through profile-scoped filters');
+    assert.ok(listing.some(item => item.id === first.id), 'first-profile packet still listed');
+  }
+  // `--job` alone is a job-scoped, not profile-scoped, query: listApplicationPackets
+  // filters job_id and profile_id independently, so a job shared by two profiles
+  // lists both profiles' packets. JobOS is single-user local-first — profiles are
+  // organizational units, not a security boundary — so this is intended behavior.
+  const byJobAfter = cliOk(fixture.root, ['apply', 'packet', 'list', '--job', fixture.job.id, '--json']);
+  assert.ok(byJobAfter.some(item => item.id === otherPacketId), 'job-scoped listing includes every profile for that job');
   assert.equal(cliOk(fixture.root, ['apply', 'packet', 'show', first.id, '--json']).id, first.id);
   const diff = cliOk(fixture.root, ['apply', 'packet', 'diff', first.id, second.id, '--json']);
   assert.equal(diff.sameContent, false);

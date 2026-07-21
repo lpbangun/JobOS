@@ -73,6 +73,7 @@ test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const json = result.stdout.slice(result.stdout.indexOf('\r\n\r\n') + 4);
   const response = JSON.parse(json);
   assert.ok(response.result.tools.some(t => t.name === 'interview_prep'));
+  assert.equal(response.result.tools.length, 41, 'advertised MCP tool count: DOMAIN_TOOLS (44) minus the 3 MUTATION_DENY packet tools');
   const first = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { note: 'café' } });
   const second = JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const framed = `Content-Length: ${Buffer.byteLength(first)}\r\n\r\n${first}Content-Length: ${Buffer.byteLength(second)}\r\n\r\n${second}`;

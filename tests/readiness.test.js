@@ -159,6 +159,16 @@ test('readiness: plan contains all top-level shape fields', () => {
   assert.ok(Array.isArray(plan.nextActions));
   assert.equal(plan.nextActions.length, plan.blockers.length);
 
+  // Top-level nextAction guidance is always present and never the dead-end fallback
+  assert.equal(typeof plan.nextAction, 'string');
+  assert.ok(plan.nextAction.length >= 10, 'top-level nextAction should be actionable');
+  assert.ok(!plan.nextAction.includes('Complete readiness checks'),
+    'nextAction must never be the legacy "Complete readiness checks" dead end');
+  if (plan.status === 'blocked' && plan.blockers.length) {
+    assert.equal(plan.nextAction, plan.blockers[0].nextAction,
+      'blocked plan nextAction points at the first blocker');
+  }
+
   // Warnings
   assert.ok(Array.isArray(plan.warnings));
 
@@ -426,6 +436,93 @@ test('readiness: current human-approved resume transitions ready-for-review to a
   assert.equal(rejectedPlan.localApprovalComplete, false);
   assert.ok(rejectedPlan.blockers.some(item => item.code === 'resume_rejected'));
   assert.ok(rejectedPlan.warnings.some(item => item.code === 'cover_letter_rejected'));
+});
+
+// ── nextAction follows the packet receipt lifecycle ──────────────────
+
+test('readiness: nextAction walks approve → freeze → attest → confirm-receipt instead of the readiness dead end', async () => {
+  const { out, root } = makeRunner();
+  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
+  const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
+  out(['proof', 'add', '--profile', 'pm', '--summary', 'Led EdTech product discovery', '--evidence', 'Reduced manual review by 30%']);
+  out(['score', imported.id, '--profile', 'pm']);
+  out(['tailor', 'resume', '--job', imported.id, '--profile', 'pm']);
+
+  const { openStore, one, run, save } = await import('../src/db.js');
+  const store = await openStore({ workspace: root });
+  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', ['[]', imported.id]);
+  save(store);
+
+  out(['answers', 'add', '--profile', 'pm', '--category', 'motivation',
+    '--question', 'Why are you interested in Acme Learning Co?', '--answer', 'The mission fits my experience.',
+    '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe the experience that best prepares you for the Senior Product Manager, Learning Platform role.',
+    '--answer', 'I have relevant product experience.', '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
+    '--question', 'Are you legally authorized to work in the role location?', '--answer', 'yes',
+    '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
+    '--question', 'Will you now or later require employment sponsorship?', '--answer', 'no',
+    '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
+
+  const planFor = () => out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
+  const neverDeadEnd = plan => {
+    assert.ok(!plan.nextAction.includes('Complete readiness checks'),
+      `nextAction must never be the legacy dead end, got: ${plan.nextAction}`);
+  };
+
+  // ready-for-review → nextAction points at approving the pending draft
+  const draftPlan = planFor();
+  assert.equal(draftPlan.status, 'ready-for-review');
+  const original = one(await openStore({ workspace: root }), `SELECT * FROM artifacts
+    WHERE job_id=? AND profile_id=? AND type='resume'`, [imported.id, 'pm']);
+  assert.ok(draftPlan.nextAction.includes('jobos artifacts approve'),
+    `ready-for-review nextAction should point at approve, got: ${draftPlan.nextAction}`);
+  assert.ok(draftPlan.nextAction.includes(original.id),
+    'ready-for-review nextAction should name the pending artifact');
+  neverDeadEnd(draftPlan);
+
+  out(['artifacts', 'approve', original.id, '--note', 'Verified against stored proof.']);
+
+  // approved, no packet → nextAction is freeze packet
+  const approvedPlan = planFor();
+  assert.equal(approvedPlan.status, 'approved');
+  assert.equal(approvedPlan.packet.currency, 'none');
+  assert.ok(approvedPlan.nextAction.includes(`jobos apply packet create --job ${imported.id} --profile pm --json`),
+    `approved/no-packet nextAction should be packet create, got: ${approvedPlan.nextAction}`);
+  neverDeadEnd(approvedPlan);
+
+  // freeze → next step is human submission attestation for the frozen packet
+  out(['apply', 'packet', 'create', '--job', imported.id, '--profile', 'pm']);
+  const frozenPlan = planFor();
+  const packetId = frozenPlan.packet.currentPacketId;
+  assert.ok(packetId, 'packet should exist after freeze');
+  assert.equal(frozenPlan.packet.currency, 'current');
+  assert.equal(frozenPlan.packet.receiptState, 'none');
+  assert.ok(frozenPlan.nextAction.includes(`jobos apply attest-submitted ${packetId} --submitted-at`),
+    `frozen nextAction should be attest-submitted, got: ${frozenPlan.nextAction}`);
+  neverDeadEnd(frozenPlan);
+
+  // attest → next step is confirm-receipt
+  out(['apply', 'attest-submitted', packetId, '--submitted-at', '2026-07-21T10:00:00Z']);
+  const attestedPlan = planFor();
+  assert.equal(attestedPlan.packet.receiptState, 'attested');
+  assert.ok(attestedPlan.nextAction.includes(`jobos apply confirm-receipt ${packetId} --reference`),
+    `attested nextAction should be confirm-receipt, got: ${attestedPlan.nextAction}`);
+  neverDeadEnd(attestedPlan);
+
+  // confirm → loop complete; no more packet/attest guidance
+  out(['apply', 'confirm-receipt', packetId, '--reference', 'EXT-REF-1']);
+  const confirmedPlan = planFor();
+  assert.equal(confirmedPlan.packet.receiptState, 'confirmed');
+  assert.match(confirmedPlan.nextAction, /complete/i,
+    `confirmed nextAction should report completion, got: ${confirmedPlan.nextAction}`);
+  assert.ok(!confirmedPlan.nextAction.includes('packet create'), 'confirmed plan must not ask to freeze again');
+  assert.ok(!confirmedPlan.nextAction.includes('attest-submitted'), 'confirmed plan must not ask to attest again');
+  neverDeadEnd(confirmedPlan);
 });
 
 // ── Redaction in JSON output ──────────────────────────────────────────

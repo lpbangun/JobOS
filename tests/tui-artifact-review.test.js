@@ -115,12 +115,12 @@ test('T1 — Artifact review actions and audit', async t => {
   const rPayload = JSON.parse(rejectAudits[rejectAudits.length - 1].payload_json);
   assert.equal(rPayload.note, 'needs more metrics');
 
-  // PromptAgent called if client ready; otherwise status reflects
+  // PromptAgent called if client ready; otherwise status always includes CLI redraft nextAction
   if (tui.client?.state === 'ready' && !tui.state.busy) {
     // promptAgent with revise text — can't assert directly without mock
   } else {
-    assert.match(tui.state.status, /Rejection saved; redraft skipped/,
-      'T1-R: rejection status reflects agent readiness');
+    assert.match(tui.state.status, /redraft next: jobos tailor/,
+      'T1-R: rejection status surfaces CLI redraft nextAction when agent offline');
   }
 
   // ── Intended flow 3: B restores draft ──

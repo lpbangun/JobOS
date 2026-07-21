@@ -28,6 +28,11 @@ test('cron parser supports lists, ranges, steps, and UTC due evaluation', () => 
   assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-06T09:00:00.000Z')), true);
   assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-15T09:00:00.000Z')), true);
   assert.equal(matchesCron('0 9 1,15 * 1', new Date('2026-07-08T09:00:00.000Z')), false);
+  // DOM+DOW contract: both restricted → standard Vixie-cron OR (either field fires).
+  assert.equal(matchesCron('0 9 6 * 1', new Date('2026-07-06T09:00:00.000Z')), true, 'DOM and DOW both match');
+  assert.equal(matchesCron('0 9 15 * *', new Date('2026-07-15T09:00:00.000Z')), true, 'restricted DOM with DOW wildcard matches');
+  assert.equal(matchesCron('0 9 15 * *', new Date('2026-07-06T09:00:00.000Z')), false, 'restricted DOM with DOW wildcard rejects other days');
+  assert.equal(matchesCron('0 9 * * 1', new Date('2026-07-15T09:00:00.000Z')), false, 'DOM wildcard with restricted DOW rejects other weekdays');
   assert.equal(nextRunAfter('0 7 * * 1-5', new Date('2026-07-03T07:00:00.000Z')).toISOString(), '2026-07-06T07:00:00.000Z');
   assert.equal(isDue('* * * * *', '2026-07-04T10:00:00.000Z', new Date('2026-07-04T10:01:00.000Z')), true);
   assert.equal(isDue('* * * * *', '2026-07-04T10:01:00.000Z', new Date('2026-07-04T10:01:30.000Z')), false);

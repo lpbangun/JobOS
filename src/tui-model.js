@@ -4,6 +4,10 @@ import { reviewQueue as discoveryReviewQueue } from './discovery.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
+import { listNetworkContacts } from './workflows.js';
+import { listPersonCandidates } from './research/contacts.js';
+import { due } from './tracking.js';
+import { outreachDue } from './outreach.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
 
@@ -197,7 +201,16 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
         finishedAt: row.finished_at,
         createdAt: row.created_at
       };
-    })()
+    })(),
+    contacts: selectedId ? listNetworkContacts(s, { jobId: selectedId }) : [],
+    candidates: selectedId ? listPersonCandidates(s, { jobId: selectedId }).map(candidate => ({
+      id: candidate.id,
+      name: candidate.name,
+      role: candidate.role,
+      status: candidate.status,
+      relevance: candidate.relevance,
+      confidence: candidate.confidence
+    })) : []
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
   const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
@@ -286,7 +299,16 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details,
     review: reviews,
     log: logs,
-    answers: answerCounts,
+    dueTasks: due(s).slice(0, 20).map(row => ({ id: row.id, jobId: row.job_id || null, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority })),
+    outreachDue: outreachDue(s).slice(0, 20),
+    answers: {
+      ...answerCounts,
+      questions: readiness?.answers?.questions
+        ? readiness.answers.questions
+            .filter(question => question.status === 'unmatched' || question.status === 'blocked')
+            .map(question => ({ category: question.category, question: question.question, status: question.status }))
+        : []
+    },
     discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
     networkSetup: {
       status: networkSetupStatus,
