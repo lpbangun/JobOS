@@ -1852,6 +1852,15 @@ export class JobosTui {
       if (value === 'A') return this.reviewCurrentArtifact('approved');
       if (value === 'R') return this.beginReject();
       if (value === 'B') return this.reviewCurrentArtifact('draft_needs_human_review');
+      if (value === 'E') {
+        this.openReviewDocument();
+        void this.openArtifactEditor();
+        return true;
+      }
+      if (value === 'V' || value === 'I') {
+        this.openReviewDocument();
+        return this.onDocsKey(value, key);
+      }
     }
     if (this.state.overlay === 'discovery') {
       if (value === 'A') return this.decideDiscovery('saved');

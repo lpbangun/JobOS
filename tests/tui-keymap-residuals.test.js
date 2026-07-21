@@ -150,11 +150,37 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   // Review
   tui.openOverlay('review');
   for (const token of TUI_HANDLED_KEYS.review) {
-    if (token === 'escape' || token === 'E') continue;
+    if (token === 'escape') continue;
     if (token === 'A' || token === 'R') {
       fire(token);
       tui.state.mode = 'normal';
       tui.state.input = '';
+      continue;
+    }
+    if (token === 'E') {
+      // E opens the highlighted artifact, then spawns the external editor —
+      // stub the spawn and assert both steps instead of skipping the key.
+      tui.openOverlay('review');
+      let editorCalled = false;
+      tui.openArtifactEditor = async () => { editorCalled = true; return {}; };
+      fire(token);
+      assert.equal(tui.state.overlay, 'docs', 'review E opens the artifact in the docs viewer');
+      assert.ok(editorCalled, 'review E spawns the artifact editor');
+      continue;
+    }
+    if (token === 'V') {
+      tui.openOverlay('review');
+      fire(token);
+      assert.equal(tui.state.overlay, 'docs', 'review V opens the artifact first');
+      assert.equal(tui.state.docsView, 'diff', 'review V toggles the diff view');
+      continue;
+    }
+    if (token === 'I') {
+      tui.openOverlay('review');
+      tui.state.docsEvidenceExpanded = false; // known state — the docs drill may have toggled it
+      fire(token);
+      assert.equal(tui.state.overlay, 'docs', 'review I opens the artifact first');
+      assert.equal(tui.state.docsEvidenceExpanded, true, 'review I expands evidence');
       continue;
     }
     fire(token);
