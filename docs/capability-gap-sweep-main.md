@@ -1,6 +1,6 @@
 # Remaining gaps checklist — check one by one
 
-**Tip:** `origin/main` @ `a091001` (*Merge tui-focus into main*) + reconciliation + gaps #5–#6 on `baseline-fix`  
+**Tip:** `origin/main` @ `a091001` (*Merge tui-focus into main*) + reconciliation + gaps #5–#8 on `baseline-fix`  
 **Updated:** 2026-07-21  
 
 This file is the **living remaining list only**. Historical full sweep narrative is retired; use git history if you need the original inventory.
@@ -28,35 +28,20 @@ This file is the **living remaining list only**. Historical full sweep narrative
 - [x] Rebase reconciliation 3 — review overlay `E`/`V`/`I` restored (open the artifact, then editor / diff toggle / evidence toggle via `onDocsKey`); drill reopens the review overlay per key and asserts the real effects — commit `952bf06` (2026-07-21)  
 - [x] Contact human gates in TUI (#5) — `n` network overlay lists discovered contacts + candidates with `A` approve (`callDomainTool` `source:'tui'`), `X` suppress (reason input mode), `P` promote; new advertised `network` KEYMAP scope; the three dead `jobos research` CLI contact commands wired; suppress/promote stay library+CLI-only (agents don't need them; `approve_contact` agent denial unchanged); `tests/tui-contact-gates.test.js` — commit `eb5cbec` (2026-07-21)  
 - [x] Answers entry in TUI (#6) — answers overlay lists the selected job's open questions (never values) with `:answer add [category] | <question> | <answer>`; new `answers_add` domain tool denied to mcp/acp (`human_answer_input_required`); restricted categories auto-redact + scope to `job:<id>`; value never echoed; `tests/tui-answers-entry.test.js` — commit `a22d66e` (2026-07-21)  
+- [x] Strip actions (#7) — `Tab` cycles strip focus (advertised `strip` KEYMAP scope, `▶` marker), `Enter` jumps to the focused card's job (failure card honestly reports no linked job); `:due` overlay lists tasks + outreach follow-ups with jump-to-job; `:prep` drafts interview prep for the selected job's latest application (refuses when none); `:weekly` writes the weekly review; `tests/tui-strip-actions.test.js` — commit `e140473` (2026-07-21)  
+- [x] Contract hygiene (#8) — cron DOM+DOW **OR** semantics decided/kept (standard Vixie cron), documented in `src/scheduler/cron.js` + `BUILD_PROGRESS.md` + `README.md` and locked by OR/wildcard cases in `tests/sprint7-scheduler.test.js`; AP03 link asserts, AP08 direct `confirmApplicationReceipt` mcp/acp denial + relational MCP-count pin, new AP13b post-conflict consistency (snapshot-based — attest and confirm each record a receipt row), AP15 cross-profile non-leak for profile-scoped filters (with `--job`-alone documented as job-scoped by design); advertised MCP tool count pinned at 41 over the wire; `docs/main-sweep-gaps.md` reconciled — commit `52ffa99` (2026-07-21)  
 
 ---
 
 ## Still open — check one by one
 
-### 7. P2 — Post-apply / strip actions
-
-- [ ] Priority strip item can jump selection to its `jobId`  
-- [ ] Interview prep from selected application (command-bar OK)  
-- [ ] Weekly review / analytics funnel reachable without hunting CLI only  
-- [ ] Tasks due / outreach due actionable from shell
-
----
-
-### 8. P3 — Contract hygiene (`docs/main-sweep-gaps.md`)
-
-- [ ] Cron DOM+DOW OR vs AND decision documented (or restored)  
-- [ ] AP03 packet links on existing-application branch asserted  
-- [ ] AP08 direct service denial for `confirmApplicationReceipt` with mcp/acp  
-- [ ] AP13 post-conflict receipt consistency  
-- [ ] AP15 list filters do not leak cross-profile packets  
-- [ ] Optional: MCP advertised tool count assertion (37)
+All sweep items are closed. Re-open an entry only on regression.
 
 ---
 
 ## Suggested order for the next sessions
 
-1. P2 strip actions (#7)  
-2. P3 contract-hygiene tests (#8) — note: `answers_add` (gap #6) raised `DOMAIN_TOOLS` to 44 / advertised MCP tools to 41; reconcile the stale "37" text in `BUILD_PROGRESS.md` when pinning the count
+Checklist complete — next work is new scope (e.g. the live-but-unregistered global keys `t`/`v`/`g`/`c`/`x`, or whatever the next design-doc milestone is).
 
 ---
 
