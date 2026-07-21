@@ -8,6 +8,7 @@ import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
 import { setNetworkIntent } from './profiles.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
+import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { readinessPacketSummary } from './packets.js';
@@ -50,6 +51,7 @@ export const TUI_KEYMAP = Object.freeze({
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
   discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
 
@@ -63,6 +65,7 @@ export const TUI_HANDLED_KEYS = Object.freeze({
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
+  network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
 });
 
@@ -358,8 +361,27 @@ function overlayItems(model, state) {
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
+  if (state.overlay === 'network') return networkOverlayItems(model);
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
   return [];
+}
+// Network overlay rows: discovered contact points first (human-gated via A/X),
+// then person candidates (promotable via P). Suppressed values are already
+// nulled by the model (listNetworkContacts redacts do_not_use rows).
+function networkOverlayItems(model) {
+  const selected = model.selected;
+  if (!selected) return [];
+  const contacts = (selected.contacts || []).map(contact => ({
+    kind: 'contact',
+    id: contact.id,
+    label: `[contact] ${contact.name || 'unnamed'} · ${contact.role || 'role —'} · ${contact.type}${contact.value ? ` ${contact.value}` : ''} · tier ${contact.evidenceTier || '—'}${contact.approved ? ' · approved' : ''}${contact.suppressed ? ' · suppressed' : ''}`
+  }));
+  const candidates = (selected.candidates || []).map(candidate => ({
+    kind: 'candidate',
+    id: candidate.id,
+    label: `[candidate] ${candidate.name || 'unnamed'} · ${candidate.role || 'role —'} · ${candidate.status}${candidate.relevance ? ` · ${candidate.relevance}` : ''}`
+  }));
+  return [...contacts, ...candidates];
 }
 // Build-network editor: a sequential, keyboard-usable setup editor.
 // The draft (state.networkDraft) holds editable copies seeded from the model on open.
@@ -602,7 +624,15 @@ function overlayPanel(model, state, width, height, color) {
       body.push('', `Path: ${selected.path.strength} · ${selected.path.channel || '—'}`);
       body.push(...wrap(JSON.stringify(selected.path.reasoning), width - 4).slice(0, 2));
     }
-    body.push('', 'm map/refresh · Esc closes');
+    const contactItems = networkOverlayItems(model);
+    if (contactItems.length) {
+      body.push('', `Contacts & candidates · human gates (${contactItems.length}):`);
+      const visible = visibleWindow(contactItems, state.overlayIndex, Math.max(3, height - body.length - 4));
+      body.push(...visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${fit(item.label, width - 4)}`));
+    } else {
+      body.push('', 'No discovered contacts yet — b build-network, then m map/refresh.');
+    }
+    body.push('', keyHints('network'));
   } else if (state.overlay === 'docs') {
     return docsPanel(model, state, width, height, color);
   } else if (state.overlay === 'answers') {
@@ -721,7 +751,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search']);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
@@ -770,7 +800,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search' };
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -800,6 +830,7 @@ export function defaultTuiState() {
     editorActive: false,
     stageIndex: 0,
     pendingConfirm: null,
+    pendingSuppressContactId: null,
     packetDetail: null,
     mode: 'normal',
     input: '',
@@ -1565,6 +1596,85 @@ export class JobosTui {
     this.render();
   }
 
+  networkGateItem() {
+    return networkOverlayItems(this.model)[this.state.overlayIndex] || null;
+  }
+
+  async approveContactSelection() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return; }
+    if (item.kind !== 'contact') { this.state.status = 'A approves a contact row · P promotes a candidate row.'; this.render(); return; }
+    if (this.state.busy) return;
+    this.state.busy = 'contact-gate';
+    this.state.status = `Approving ${item.id}…`;
+    this.render();
+    try {
+      await callDomainTool(this.store, 'approve_contact', { contactId: item.id }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = 'Contact approved for human-reviewed use · JobOS sends nothing.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Approve failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  beginSuppressContact() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return true; }
+    if (item.kind !== 'contact') { this.state.status = 'X suppresses a contact row · P promotes a candidate row.'; this.render(); return true; }
+    this.state.pendingSuppressContactId = item.id;
+    this.state.mode = 'suppress-reason';
+    this.state.input = '';
+    this.state.status = 'Suppress reason (optional) · Enter marks do-not-use locally · Esc cancels';
+    this.render();
+    return true;
+  }
+
+  commitSuppressContact() {
+    const contactId = this.state.pendingSuppressContactId;
+    const reason = this.state.input.trim();
+    this.state.mode = 'normal';
+    this.state.input = '';
+    this.state.pendingSuppressContactId = null;
+    if (!contactId) { this.render(); return; }
+    try {
+      suppressContact(this.store, { contactId, reason });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = 'Contact suppressed locally · value now hidden · nothing was sent.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Suppress failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  async promoteCandidateSelection() {
+    const item = this.networkGateItem();
+    if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return; }
+    if (item.kind !== 'candidate') { this.state.status = 'P promotes a candidate row · A/X gate contact rows.'; this.render(); return; }
+    if (this.state.busy) return;
+    this.state.busy = 'contact-gate';
+    this.state.status = `Promoting ${item.id}…`;
+    this.render();
+    try {
+      const result = promoteStakeholder(this.store, { candidateId: item.id });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Candidate promoted → stakeholder ${result.id} · outreach not_contacted · nothing was sent.`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Promote failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   openDiscoverySelection() {
     const jobId = this.state.selectedDiscoveryJobId;
     const row = jobId ? one(this.store, 'SELECT id,status FROM jobs WHERE id=?', [jobId]) : null;
@@ -1862,6 +1972,15 @@ export class JobosTui {
         return this.onDocsKey(value, key);
       }
     }
+    if (this.state.overlay === 'network') {
+      if (value === 'm') {
+        void this.runAction('network');
+        return true;
+      }
+      if (value === 'A') return void this.approveContactSelection();
+      if (value === 'X') return this.beginSuppressContact();
+      if (value === 'P') return void this.promoteCandidateSelection();
+    }
     if (this.state.overlay === 'discovery') {
       if (value === 'A') return this.decideDiscovery('saved');
       if (value === 'X') return this.decideDiscovery('archived');
@@ -1877,9 +1996,6 @@ export class JobosTui {
       return true;
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
       this.openReviewDocument();
-      return true;
-    } else if (value === 'm' && this.state.overlay === 'network') {
-      void this.runAction('network');
       return true;
     } else if (value === 'd' && this.state.overlay === 'discovery') {
       void this.runAction('daily');
@@ -1972,6 +2088,10 @@ export class JobosTui {
         this.commitDocsSearch();
         return true;
       }
+      if (mode === 'suppress-reason') {
+        this.commitSuppressContact();
+        return true;
+      }
       this.state.mode = 'normal';
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
@@ -2060,7 +2180,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);

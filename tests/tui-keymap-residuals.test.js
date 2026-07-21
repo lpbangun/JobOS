@@ -147,6 +147,20 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   }
   fire('escape');
 
+  // Network (contact human gates)
+  tui.openOverlay('network');
+  for (const token of TUI_HANDLED_KEYS.network) {
+    if (token === 'escape') continue;
+    if (token === 'X') {
+      fire(token);
+      tui.state.mode = 'normal'; // suppress-reason (only entered when a contact row is highlighted)
+      tui.state.input = '';
+      continue;
+    }
+    fire(token);
+  }
+  fire('escape');
+
   // Review
   tui.openOverlay('review');
   for (const token of TUI_HANDLED_KEYS.review) {

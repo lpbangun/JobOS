@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { audit, openStore, save } from './db.js';
+import { all, audit, one, openStore, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof, setNetworkIntent } from './profiles.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
@@ -832,6 +832,30 @@ export async function main(argv = process.argv.slice(2)) {
     const textInput = flags.file ? fs.readFileSync(String(flags.file), 'utf8') : (flags.text ? String(flags.text) : '');
     if (!textInput && !flags.name) usage('Missing --text, --file, or --name for stakeholder source context');
     out(await addStakeholder(s, { jobId, sourceUrl: String(sourceUrl), name: flags.name ? String(flags.name) : '', role: flags.role ? String(flags.role) : '', text: textInput }));
+    return;
+  }
+  if (group === 'research' && action === 'approve-contact') {
+    const contactId = flags.contact ? String(flags.contact) : null;
+    const candidateId = flags['worksheet-candidate'] ? String(flags['worksheet-candidate']) : null;
+    if (!contactId && !candidateId) usage('Provide --contact <contact-id> or --worksheet-candidate <candidate-id>');
+    if (contactId) {
+      out(approveContact(s, { contactId }));
+      return;
+    }
+    const candidate = one(s, 'SELECT id,person_id FROM person_candidates WHERE id=?', [candidateId]);
+    if (!candidate) usage(`Unknown candidate: ${candidateId}`);
+    const keys = [candidate.id, candidate.person_id].filter(Boolean);
+    const contactIds = all(s, `SELECT id FROM contact_points WHERE person_id IN (${keys.map(() => '?').join(',')})`, keys).map(row => row.id);
+    if (!contactIds.length) usage(`Candidate ${candidateId} has no contact points to approve`);
+    out({ candidateId, approvedContacts: contactIds.map(id => approveContact(s, { contactId: id }).id), note: 'Contacts approved for human-reviewed use; JobOS did not send outreach.' });
+    return;
+  }
+  if (group === 'research' && action === 'suppress-contact') {
+    out(suppressContact(s, { contactId: String(requireFlag(flags, 'contact')), reason: String(requireFlag(flags, 'reason')) }));
+    return;
+  }
+  if (group === 'research' && action === 'promote-stakeholder') {
+    out(promoteStakeholder(s, { candidateId: String(requireFlag(flags, 'candidate')) }));
     return;
   }
   if (group === 'outreach' && action === 'draft') {

@@ -4,6 +4,8 @@ import { reviewQueue as discoveryReviewQueue } from './discovery.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
+import { listNetworkContacts } from './workflows.js';
+import { listPersonCandidates } from './research/contacts.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
 
@@ -197,7 +199,16 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
         finishedAt: row.finished_at,
         createdAt: row.created_at
       };
-    })()
+    })(),
+    contacts: selectedId ? listNetworkContacts(s, { jobId: selectedId }) : [],
+    candidates: selectedId ? listPersonCandidates(s, { jobId: selectedId }).map(candidate => ({
+      id: candidate.id,
+      name: candidate.name,
+      role: candidate.role,
+      status: candidate.status,
+      relevance: candidate.relevance,
+      confidence: candidate.confidence
+    })) : []
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
   const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
