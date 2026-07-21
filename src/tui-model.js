@@ -297,7 +297,14 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details,
     review: reviews,
     log: logs,
-    answers: answerCounts,
+    answers: {
+      ...answerCounts,
+      questions: readiness?.answers?.questions
+        ? readiness.answers.questions
+            .filter(question => question.status === 'unmatched' || question.status === 'blocked')
+            .map(question => ({ category: question.category, question: question.question, status: question.status }))
+        : []
+    },
     discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
     networkSetup: {
       status: networkSetupStatus,

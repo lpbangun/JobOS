@@ -644,6 +644,13 @@ function overlayPanel(model, state, width, height, color) {
       'Agent and TUI use answers_match only with explicit application questions.',
       'Restricted values are never displayed or auto-filled.'
     ];
+    const openQuestions = model.answers.questions || [];
+    if (openQuestions.length) {
+      body.push('', `Open questions for the selected job (${openQuestions.length}):`);
+      body.push(...openQuestions.slice(0, Math.max(1, height - body.length - 4)).map(q =>
+        fit(`${q.status === 'blocked' ? '⚠' : '·'} [${q.category}] ${q.question}${q.status === 'blocked' ? ' · restricted — direct input required' : ' · unmatched'}`, width - 4)));
+      body.push('', ':answer add [category] | <exact question> | <your answer>');
+    }
   } else if (state.overlay === 'discovery') {
     body = [
       'SAVED SEARCHES / RUNS',
@@ -1432,6 +1439,7 @@ export class JobosTui {
     if (command === 'freeze') return void this.packetMutate('create');
     if (command === 'attest') return void this.packetMutate('attest', argText);
     if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
+    if (command === 'answer') return void this.answerAdd(argText);
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1442,8 +1450,49 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${command}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add review log docs answers system profile agent refresh reconnect quit';
     this.render();
+  }
+
+  async answerAdd(argText) {
+    const usage = 'Usage: :answer add [category] | <exact question> | <your answer> · restricted categories auto-redact';
+    const parts = String(argText || '').split('|').map(part => part.trim());
+    const head = (parts[0] || '').split(/\s+/).filter(Boolean);
+    if (head[0] !== 'add' || parts.length !== 3 || !parts[1] || !parts[2]) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const category = head[1] || 'other';
+    const profileId = this.model.profileId;
+    if (!profileId) {
+      this.state.status = 'Create a profile before adding answers.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'answer-add';
+    this.state.status = 'Saving answer…';
+    this.render();
+    try {
+      await callDomainTool(this.store, 'answers_add', {
+        profileId,
+        category,
+        question: parts[1],
+        answer: parts[2],
+        sourceRef: this.state.selectedJobId ? `job:${this.state.selectedJobId}` : 'user_input'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      // Never echo the answer value back: restricted values stay redacted everywhere.
+      this.state.status = `Answer saved (${category}) · restricted values stay redacted and never auto-fill`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Answer add failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
   }
 
   async packetMutate(kind, argText = '') {

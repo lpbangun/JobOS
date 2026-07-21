@@ -12,7 +12,7 @@ import { importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
-import { matchAnswers } from './answers.js';
+import { addAnswer, matchAnswers } from './answers.js';
 import { runDaily, runPursuit } from './workflows.js';
 import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { all, one } from './db.js';
@@ -101,6 +101,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
+  { name: 'answers_add', description: 'Save a human-provided answer for an application question. Restricted categories are stored redacted and never auto-filled. Agent mediation is denied.', inputSchema: required({ profileId: text, category: text, question: text, answer: text, sensitivity: text, reuseScope: text, verificationStatus: text, sourceRef: text, employer: text }, ['profileId', 'question', 'answer']) },
   { name: 'application_packets_list', description: 'List application packets for a job/profile with derived currency and receipt state. At least one of jobId or profileId is required.', inputSchema: { type: 'object', properties: { jobId: text, profileId: text }, anyOf: [{ required: ['jobId'] }, { required: ['profileId'] }] } },
   { name: 'application_packet_show', description: 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', inputSchema: required({ packetId: text }, ['packetId']) },
   { name: 'application_packet_diff', description: 'Diff two application packets by their canonical projections, returning deterministic JSON-pointer changes and sameContent flag.', inputSchema: required({ firstPacketId: text, secondPacketId: text }, ['firstPacketId', 'secondPacketId']) },
@@ -141,6 +142,14 @@ function enforcePolicy(name, args, options) {
   }
 
   // Artifact approval/rejection is always denied for agent mediation
+  if (name === 'answers_add') {
+    throw new DomainToolError(
+      'human_answer_input_required',
+      'Answers require direct human input; agent mediation cannot write answers (restricted values must never be agent-mediated).',
+      { tool: name, source, status: null, externalSideEffect: 'none' }
+    );
+  }
+
   if (name === 'approve_artifact' || name === 'reject_artifact') {
     throw new DomainToolError(
       'human_review_required',
@@ -376,6 +385,17 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'daily_discovery') return await runDaily(s, { profileId: args.profileId });
   if (name === 'pursue_job') return await runPursuit(s, { jobId: args.jobId, profileId: args.profileId, stage: args.stage || null, dryRun: Boolean(args.dryRun), stageTimeoutMs: args.stageTimeoutMs || 30000 });
   if (name === 'answers_match') return matchAnswers(s, { profileId: args.profileId, questions: args.questions, employer: args.employer || '' });
+  if (name === 'answers_add') return addAnswer(s, {
+    profileId: args.profileId,
+    category: args.category || 'other',
+    question: args.question,
+    answer: args.answer,
+    sensitivity: args.sensitivity || 'personal',
+    reuseScope: args.reuseScope || 'global',
+    verificationStatus: args.verificationStatus || 'verified',
+    sourceRef: args.sourceRef || 'user_input',
+    employer: args.employer || ''
+  });
   if (name === 'application_packets_list') return listApplicationPackets(s, { jobId: args.jobId, profileId: args.profileId });
   if (name === 'application_packet_show') return showApplicationPacket(s, args.packetId);
   if (name === 'application_packet_diff') return diffApplicationPackets(s, args.firstPacketId, args.secondPacketId);
