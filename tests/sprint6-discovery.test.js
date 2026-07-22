@@ -50,11 +50,6 @@ test('saved search discovery run imports, scores, dedupes, flags high fit, write
   const search = JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', fixture, '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   assert.equal(search.adapter, 'greenhouse');
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'searches', `${search.id}.yaml`)));
-  const watch = JSON.parse(run(['watchlist', 'add', '--company', 'Acme Learning', '--adapter', 'greenhouse', '--board-token', 'acme', '--notes', 'Target company', '--json']));
-  assert.equal(watch.handle, 'acme');
-  assert.ok(JSON.parse(run(['watchlist', 'list', '--json'])).some(x => x.id === watch.id));
-  assert.ok(existsSync(path.join(root, 'jobos-workspace', 'watchlist', `${watch.id}.yaml`)));
-
   const first = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   assert.equal(first.status, 'succeeded');
   assert.equal(first.counts.fetched, 1);
@@ -70,6 +65,12 @@ test('saved search discovery run imports, scores, dedupes, flags high fit, write
   const allRuns = JSON.parse(run(['discover', 'run-all', '--json']));
   assert.equal(allRuns.count, 1);
   assert.equal(allRuns.runs[0].counts.deduped, 1);
+
+  const watch = JSON.parse(run(['watchlist', 'add', '--profile', profile.id, '--company', 'Acme Learning', '--adapter', 'greenhouse', '--board-token', 'acme', '--notes', 'Target company', '--json']));
+  assert.equal(watch.handle, 'acme');
+  assert.equal(watch.config.preset, 'company-watch');
+  assert.ok(JSON.parse(run(['watchlist', 'list', '--json'])).some(x => x.id === watch.id && x.legacy === false));
+  assert.ok(existsSync(path.join(root, 'jobos-workspace', 'searches', `${watch.id}.yaml`)));
 
   const jobs = JSON.parse(run(['jobs', 'list', '--json']));
   assert.equal(jobs.length, 1);

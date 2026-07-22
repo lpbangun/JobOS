@@ -12,6 +12,81 @@ function parseConfig(value) {
   return JSON.parse(String(value));
 }
 
+const COMPANY_WATCH_PRESET = 'company-watch';
+
+function normalizedAdapter(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function compactText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function sortValue(value) {
+  if (Array.isArray(value)) return value.map(sortValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, sortValue(value[key])]));
+}
+
+/**
+ * Convert the historical ways of spelling an ATS company target into the
+ * config shape written by the canonical company-watch preset.
+ */
+function normalizeCompanySearchConfig(adapter, value = {}) {
+  const kind = normalizedAdapter(adapter);
+  const input = { ...parseConfig(value) };
+  const explicitHandle = input.handle ?? input.boardToken ?? input.board_token;
+  const company = compactText(input.company);
+  const companyLabel = compactText(input.companyLabel || (explicitHandle ? company : '') || company);
+  const handle = compactText(explicitHandle || company);
+  const notes = String(input.notes ?? '');
+
+  for (const key of ['preset', 'handle', 'boardToken', 'board_token', 'company', 'companyLabel', 'notes']) delete input[key];
+  const config = { ...input, preset: COMPANY_WATCH_PRESET };
+  if (kind === 'greenhouse') config.boardToken = handle;
+  else if (kind === 'career-page' || kind === 'portfolio') config.url = compactText(input.url || handle);
+  else config.handle = handle;
+  if (companyLabel) config.companyLabel = companyLabel;
+  config.notes = notes;
+  return sortValue(config);
+}
+
+function companySearchIdentity(adapter, config) {
+  const kind = normalizedAdapter(adapter);
+  const normalized = normalizeCompanySearchConfig(kind, config);
+  // ATS board handles and display labels are case-insensitive identifiers for
+  // dedupe purposes. Other config (for example fixture paths) remains exact.
+  for (const key of ['boardToken', 'handle', 'companyLabel']) {
+    if (typeof normalized[key] === 'string') normalized[key] = normalized[key].toLowerCase();
+  }
+  normalized.notes = compactText(normalized.notes);
+  return `${kind}:${JSON.stringify(sortValue(normalized))}`;
+}
+
+function equivalentCompanySearch(s, { profileId, adapter, config }) {
+  const wanted = companySearchIdentity(adapter, config);
+  return all(s, 'SELECT * FROM saved_searches WHERE profile_id=?', [profileId]).find(row => {
+    try {
+      return companySearchIdentity(row.adapter, parseJson(row.config_json, {})) === wanted;
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+function availableCompanySearchName(s, preferred, adapter) {
+  const names = new Set(all(s, 'SELECT name FROM saved_searches').map(row => compactText(row.name).toLowerCase()));
+  const base = compactText(preferred) || 'Company jobs';
+  if (!names.has(base.toLowerCase())) return base;
+  const kind = normalizedAdapter(adapter);
+  const withAdapter = `${base} (${kind})`;
+  if (!names.has(withAdapter.toLowerCase())) return withAdapter;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base} (${kind} ${suffix})`;
+    if (!names.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 function serializeSearch(row) {
   return row ? { id: row.id, name: row.name, profileId: row.profile_id, adapter: row.adapter, config: parseJson(row.config_json, {}), minFit: row.min_fit, lastRunAt: row.last_run_at, createdAt: row.created_at, updatedAt: row.updated_at } : null;
 }
@@ -84,6 +159,67 @@ export function listSearches(s) {
 
 export function getSearch(s, search) {
   return one(s, 'SELECT * FROM saved_searches WHERE id=? OR name=?', [search, search]);
+}
+
+/**
+ * Create the saved-search representation of a watched company. Unlike the
+ * legacy watchlist API, this preset is executable by discovery run-all.
+ */
+export function createCompanySearch(s, { company, profileId, adapter, handle, notes = '', minFit = 70, name = '' }) {
+  const label = compactText(company);
+  if (!label) throw Error('Missing company');
+  if (!profileId) throw Error('Missing profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const kind = normalizedAdapter(adapter);
+  getAdapter(kind);
+  const boardHandle = compactText(handle);
+  if (!boardHandle) throw Error('Missing board token/handle');
+  const config = normalizeCompanySearchConfig(kind, { companyLabel: label, handle: boardHandle, notes });
+  const existing = equivalentCompanySearch(s, { profileId, adapter: kind, config });
+  if (existing) return { ...serializeSearch(existing), created: false, deduped: true };
+
+  const preferredName = compactText(name) || `${label} jobs`;
+  const safeName = availableCompanySearchName(s, preferredName, kind);
+  const search = createSearch(s, {
+    name: safeName,
+    profileId,
+    adapter: kind,
+    config,
+    minFit: Number.isFinite(Number(minFit)) ? Number(minFit) : 70
+  });
+  return { ...search, created: true, deduped: false };
+}
+
+/**
+ * Explicitly migrate legacy, profile-less watchlist rows into executable
+ * saved searches for one chosen profile. Legacy rows remain readable so old
+ * workspaces and exports retain their history.
+ */
+export function migrateLegacyWatchlist(s, { profileId, minFit = 70 } = {}) {
+  if (!profileId) throw Error('Missing profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const legacyRows = all(s, 'SELECT * FROM company_watchlist ORDER BY company,adapter,handle');
+  const items = [];
+  let created = 0, deduped = 0, failed = 0;
+  for (const row of legacyRows) {
+    try {
+      const search = createCompanySearch(s, {
+        company: row.company,
+        profileId,
+        adapter: row.adapter,
+        handle: row.handle,
+        notes: row.notes,
+        minFit
+      });
+      if (search.created) created += 1;
+      else deduped += 1;
+      items.push({ watchlistId: row.id, status: search.created ? 'created' : 'deduped', search });
+    } catch (error) {
+      failed += 1;
+      items.push({ watchlistId: row.id, status: 'failed', error: error?.message || String(error) });
+    }
+  }
+  return { profileId, total: legacyRows.length, created, deduped, failed, items };
 }
 
 export function addWatchlist(s, { company, adapter, handle, notes = '' }) {

@@ -130,6 +130,8 @@ npm run jobos -- pursue <job-id> --profile pm-edtech \
   --stage questions --json
 ```
 
+The valid stages are `score`, `company`, `people-research`, `questions`, `resume`, `cover-letter`, `application`, and `outreach`. A selected stage also runs its declared dependencies. The standalone `score`, `research`, `tailor`, application, and outreach commands are advanced operations for intentionally running only that operation; unlike `pursue --stage`, they do not run the pursuit dependency graph. Re-running draft, research, or outreach work may create a new artifact revision, research run, or outreach plan.
+
 ## Application readiness
 
 Check whether your local materials are complete for human review:
@@ -230,6 +232,10 @@ Discovery sources:
 - `portfolio`: bounded VC/startup routing across up to 30 companies and recognized ATS targets.
 
 Portfolio runs cap each request at 10 seconds, the run at 60 seconds, and total requests at 90. A cap or child-source failure returns partial jobs plus structured failure metadata instead of discarding completed work. Public-page adapters reject private, loopback, link-local, credential-bearing, and unsafe redirect targets.
+
+Company board targets are canonical saved searches. The legacy `watchlist add` command remains as a deprecated compatibility alias and now creates an executable company-search preset. Existing profile-less watchlist rows can be migrated explicitly with `jobos searches migrate-watchlist --profile <profile-id> --json`; multi-profile workspaces must choose the destination profile.
+
+Task commands distinguish the open inbox from elapsed deadlines: `jobos tasks list` includes future and undated open items, while `jobos tasks due` includes only tasks with `due_at` at or before the current time. Both accept `--type` and `--created-by` filters. The TUI due overlay shows task type/source once and filters with `1 all`, `2 followup`, and `3 review`.
 
 ## People research, networking, and outreach
 
@@ -515,7 +521,7 @@ npm run jobos -- help --all
 npm run jobos -- agent-guide --json
 ```
 
-The full low-level CLI—manual imports, scoring, tailoring, contact review, task/analytics commands, loops, scheduler controls, and MCP—remains available for composition.
+The full low-level CLI—manual imports, standalone scoring and tailoring, contact review, task/analytics commands, agent streaming loops, scheduler controls, and MCP—remains available for composition. Human background automation should use `scheduler start` or `scheduler run-once`; `loop ...` commands are bounded JSONL streaming primitives for agents and test harnesses.
 
 `jobos tui --json` exposes the same presentation model for machine inspection; `jobos tui --snapshot` renders the terminal shell without starting an agent process.
 

@@ -32,6 +32,7 @@ const COLORS = {
   inverse: `${ESC}7m`
 };
 export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
+const TASK_FILTERS = ['all', 'followup', 'review'];
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
   pursue: 'pursue_job',
@@ -53,7 +54,7 @@ export const TUI_KEYMAP = Object.freeze({
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
   discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
-  due: Object.freeze([['j/k', 'select'], ['Enter', 'jump'], ['Esc', 'close']]),
+  due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
 });
 
@@ -68,7 +69,7 @@ export const TUI_HANDLED_KEYS = Object.freeze({
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
-  due: Object.freeze(['j', 'k', 'return', 'escape']),
+  due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
 });
 
@@ -295,7 +296,7 @@ function listPanel(model, state, width, height, color) {
       const fitScore = job.fitScore == null ? '—' : String(job.fitScore);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · ${job.stage}`, width - 4));
+      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
     }
@@ -315,7 +316,7 @@ function detailPanel(model, width, height, color) {
   const lines = [
     paint(`${item.job.title}`, 'green', color),
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    '',
+    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
     paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
     ...wrap(item.narrative, width - 4).slice(0, 3),
     '',
@@ -368,9 +369,16 @@ function overlayItems(model, state) {
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
   if (state.overlay === 'network') return networkOverlayItems(model);
-  if (state.overlay === 'due') return model.dueTasks || [];
+  if (state.overlay === 'due') return dueOverlayTasks(model, state);
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
   return [];
+}
+
+function dueOverlayTasks(model, state) {
+  const tasks = model.dueTasks || [];
+  return state.taskFilter && state.taskFilter !== 'all'
+    ? tasks.filter(task => task.type === state.taskFilter)
+    : tasks;
 }
 // Network overlay rows: discovered contact points first (human-gated via A/X),
 // then person candidates (promotable via P). Suppressed values are already
@@ -659,21 +667,15 @@ function overlayPanel(model, state, width, height, color) {
       body.push('', ':answer add [category] | <exact question> | <your answer>');
     }
   } else if (state.overlay === 'due') {
-    title = 'DUE · tasks & outreach';
-    const tasks = model.dueTasks || [];
+    title = 'DUE · tasks';
+    const tasks = dueOverlayTasks(model, state);
+    body = [`Filter: ${TASK_FILTERS.map((filter, index) => `${index + 1} ${filter === state.taskFilter ? `[${filter}]` : filter}`).join(' · ')}`];
     if (tasks.length) {
-      body = [`TASKS (${tasks.length}):`];
+      body.push(`TASKS (${tasks.length}):`);
       const visible = visibleWindow(tasks, state.overlayIndex, Math.max(3, height - 10));
-      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${task.dueAt ? String(task.dueAt).slice(0, 10) : 'no date'} · ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
+      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${String(task.dueAt).slice(0, 10)} · [${task.type || 'task'}/${task.source || 'system'}] ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
     } else {
-      body = ['No open tasks.'];
-    }
-    const outreach = model.outreachDue || [];
-    if (outreach.length) {
-      body.push('', `OUTREACH FOLLOW-UPS (${outreach.length}):`);
-      body.push(...outreach.slice(0, 6).map(item => ` ${item.dueAt ? String(item.dueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
-    } else {
-      body.push('', 'No outreach follow-ups due.');
+      body.push('No tasks due for this filter.');
     }
     body.push('', keyHints('due'), 'Enter jumps to the selected task’s job');
   } else if (state.overlay === 'discovery') {
@@ -851,6 +853,7 @@ export function defaultTuiState() {
     sessionId: null,
     overlay: null,
     overlayIndex: 0,
+    taskFilter: 'all',
     docsScroll: 0,
     docsDiffScroll: 0,
     docsQuery: '',
@@ -2126,6 +2129,13 @@ export class JobosTui {
     if (value === 'q') return this.openOverlay('answers');
     if (value === 's') return this.openOverlay('discovery');
     if (value === '?') return this.openOverlay('system');
+    if (this.state.overlay === 'due' && ['1', '2', '3'].includes(value)) {
+      this.state.taskFilter = TASK_FILTERS[Number(value) - 1];
+      this.state.overlayIndex = 0;
+      this.state.status = `Due task filter: ${this.state.taskFilter}`;
+      this.render();
+      return true;
+    }
     if (this.state.overlay === 'review') {
       if (value === 'A') return this.reviewCurrentArtifact('approved');
       if (value === 'R') return this.beginReject();
@@ -2166,7 +2176,7 @@ export class JobosTui {
       this.openReviewDocument();
       return true;
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'due') {
-      const task = (this.model.dueTasks || [])[this.state.overlayIndex];
+      const task = items[this.state.overlayIndex];
       if (task?.jobId) this.selectJobInMainList(task.jobId, 'Due task · job now selected in the main list.');
       else {
         this.state.status = 'This task has no linked job.';

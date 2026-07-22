@@ -5,7 +5,7 @@ import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from '
 import { approveContact, createOutreachPlan } from './research/contacts.js';
 import { mapReachableNetwork } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
-import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
+import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
 import { importUrl, listJobs } from './jobs.js';
@@ -72,7 +72,7 @@ const peopleResearchRequest = {
 };
 
 export const DOMAIN_TOOLS = Object.freeze([
-  { name: 'list_jobs', description: 'List local JobOS jobs and their current fit and application state.', inputSchema: object({ profileId: text, status: text }) },
+  { name: 'list_jobs', description: 'List local JobOS jobs and their current fit, discovery, and application state.', inputSchema: object({ profileId: text, status: text, discoveryStatus: text, applicationStatus: text }) },
   { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one selected job.', inputSchema: required({ jobId: text }, ['jobId']) },
   { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text, jobId: text }) },
   { name: 'diff_artifact', description: 'Inspect a line diff for an exact artifact revision without changing local state.', inputSchema: required({ artifactId: text, againstArtifactId: text }, ['artifactId']) },
@@ -97,7 +97,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'create_application', description: 'Create a local application tracking record; agent mediation cannot attest submission by default.', inputSchema: required({ jobId: text, status: text, notes: text }, ['jobId', 'status']) },
   { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
-  { name: 'list_tasks', description: 'List open tasks ordered by due date.', inputSchema: object({}) },
+  { name: 'list_tasks', description: 'List open inbox tasks ordered by due date, including future and undated tasks.', inputSchema: object({ type: text, createdBy: text }) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
@@ -199,6 +199,8 @@ function publicJob(row) {
     company: row.company,
     location: row.location || '',
     source: row.source,
+    discoveryStatus: row.status,
+    // Compatibility alias for callers that previously consumed the job triage status.
     status: row.status,
     fitScore: row.fit_score == null ? null : Number(row.fit_score),
     score: row.fit_score == null ? null : Number(row.fit_score),
@@ -210,9 +212,18 @@ function publicJob(row) {
   };
 }
 
-export function listJobSummaries(s, { profileId = null, status = null } = {}) {
+export function listJobSummaries(s, {
+  profileId = null,
+  discoveryStatus = null,
+  applicationStatus = null,
+  status = null
+} = {}) {
   return listJobs(s)
     .filter(row => !profileId || row.profile_id === profileId)
+    .filter(row => !discoveryStatus || row.status === discoveryStatus)
+    .filter(row => !applicationStatus || row.application_status === applicationStatus)
+    // Preserve the legacy cross-namespace filter while explicit filters give new
+    // callers an unambiguous way to select one state machine.
     .filter(row => !status || row.application_status === status || row.status === status)
     .map(publicJob);
 }
@@ -280,6 +291,8 @@ export function selectedJobContext(s, jobId) {
       company: job.company,
       location: job.location || '',
       source: job.source,
+      discoveryStatus: job.status,
+      // Compatibility alias for the discovery status.
       status: job.status,
       applicationId: job.application_id || null,
       applicationStatus: job.application_status || null
@@ -370,7 +383,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null);
     return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
   }
-  if (name === 'list_tasks') return due(s);
+  if (name === 'list_tasks') return openTasks(s, { type: args.type || null, createdBy: args.createdBy || null });
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');
   if (name === 'weekly_review') {
     const result = weekly(s, args.profileId);

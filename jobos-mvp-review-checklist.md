@@ -12,6 +12,8 @@
   - `jobos jobs import-url <url>` creates a Job record and local workspace folder.
   - `jobos jobs import-text --file <path>` parses into canonical Job fields.
   - `jobos jobs list --json` returns parseable JSON.
+- [ ] **Primary pursuit smoke:** `jobos pursue <job-id> --profile <profile> --json` completes the integrated workflow, reports all eight stages, and creates only honest proof/source-grounded outputs.
+- [ ] **Focused pursuit smoke:** `jobos pursue <job-id> --profile <profile> --stage <stage> --json` runs the selected stage and its declared dependencies.
 - [ ] **Fit scoring smoke:** `jobos score <job-id> --profile <profile> --json` returns numeric subscores, overall score, reasoning, confidence, and red flags; deterministic without API keys.
 - [ ] **Tailoring smokes:**
   - `jobos tailor resume --job <job-id> --profile <profile> --output markdown` writes file.
@@ -23,7 +25,8 @@
   - Status transitions are validated.
 - [ ] **Task smoke:** `jobos tasks due --json` returns due tasks; tasks created by imports/automation link to parent entities.
 - [ ] **Weekly review smoke:** `jobos review weekly --profile <profile> --output markdown` produces a non-empty report.
-- [ ] **Import/round-trip smoke:** Create profile → import job → score → tailor → create application → list application → run weekly review; end-to-end works with only local data.
+- [ ] **Standalone-operation smokes:** Run score, tailoring, research, application tracking, and outreach commands independently to verify their advanced composition contracts without assuming that they execute `pursue` dependencies.
+- [ ] **Import/round-trip smoke:** Create profile → import job → pursue → inspect application/readiness → run weekly review; end-to-end works with only local data.
 
 ---
 

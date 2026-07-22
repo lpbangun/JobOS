@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-20
+## Current status — 2026-07-22
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -8,7 +8,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
-- `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, network mapping, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available.
+- `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
 - `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
 - `jobos research people --scope profile|target|job|person ...` runs budgeted, checkpointed people research; `research runs get|resume|cancel` exposes the durable lifecycle.
@@ -25,6 +25,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Artifact review lifecycle: sanitized Markdown/diffs, selected-artifact evidence, predecessor-aware versions, workspace-confined `$VISUAL`/`$EDITOR` round-trips, auditable approve/reject/draft decisions, and input-safe agent-created artifact auto-open.
 - Scripted real-client evidence: multi-turn ACP cancel/recover/restart/policy/timeout/missing-binary drill and external MCP initialize/list/call/exit drill.
 - Concise root help grouped into Setup, Workflows, and Extend; the complete low-level registry remains behind `help --all` and `agent-guide --json`.
+- Overlap cleanup: discovery and application statuses are explicitly namespaced while retaining compatibility aliases; task inbox and true-due semantics are separate and filterable in CLI/TUI; company watch targets are canonical executable saved searches with explicit legacy migration; and bounded loop commands are classified as agent-stream primitives.
 - Ashby, public career-page, and bounded VC/startup portfolio discovery in addition to Greenhouse and Lever.
 - Hard portfolio caps: 30 companies, 90 requests, 10 seconds per request, and 60 seconds total; partial results retain structured source failures.
 - Cron-friendly `daily` and dependency-aware `pursue` workflow orchestration with dry-run, stage selection, elapsed times, result paths/IDs, skip reasons, and recovery guidance. Schedules follow standard Unix-cron semantics: when both day-of-month and day-of-week are restricted, either matching fires (OR).
@@ -60,8 +61,8 @@ Not required for the smallest coherent CLI product:
 
 ## Verification
 
-- `npm test`: **139/139 passed** on 2026-07-20, including the permanent people-research orchestration suite and all established CLI, TUI, ACP, MCP, discovery, readiness, research, outreach, and workflow checks.
-- `npm run smoke`: passed on 2026-07-20 in a clean temporary workspace through profile/job setup, discovery, scoring, tailoring, application/interview/analytics/scheduler flows, and workspace exports.
+- `npm test`: **216/216 passed** on 2026-07-22, including the status-namespace, task-semantics, watchlist-consolidation, CLI compatibility, and all established CLI, TUI, ACP, MCP, discovery, readiness, research, outreach, and workflow checks. Subsequent TUI status-label and task-filter refinements passed their focused TUI/keymap suites.
+- `npm run smoke`: passed on 2026-07-22 in a clean temporary workspace through profile/job setup, discovery, scoring, tailoring, application readiness, packet/receipt confirmation, interview, analytics, scheduler, and workspace-export flows.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 41-tool list (DOMAIN_TOOLS minus the three MUTATION_DENY packet tools; includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`. The advertised count is pinned by `tests/apppacket-receipt.test.js` (AP08) and `tests/sprint4-interview-analytics-mcp.test.js`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
