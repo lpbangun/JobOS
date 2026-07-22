@@ -204,11 +204,13 @@ The readiness v3 plan is written to `jobos-workspace/jobs/<job-id>/application-r
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical readiness v3 structure. Agents may inspect `review_queue`, `diff_artifact`, `application_packets_list`, `application_packet_show`, and `application_packet_diff` to recommend a human action. MCP and the embedded ACP guest cannot approve/reject artifacts or create/attest/confirm packets, even with spoofed mediation metadata or agent-attestation configuration. The removed local web/API interface provides no mutation bypass. Approval, packet freeze, and receipt evidence remain limited to trusted CLI/TUI policy sources. The `pursue` workflow includes `readiness` in dry-run and real execution but never creates a packet automatically.
+The MCP tool `applications_plan` returns the identical readiness v3 structure. Agents may inspect `review_queue`, `diff_artifact`, `application_packets_list`, `application_packet_show`, and `application_packet_diff` to recommend a human action. MCP and the embedded ACP guest are not offered artifact decisions, contact approval, human answer entry, or packet freeze/attestation/confirmation tools; service-level policy also rejects direct calls. The removed local web/API interface provides no mutation bypass. Approval, packet freeze, and receipt evidence remain limited to trusted CLI/TUI policy sources. The `pursue` workflow includes `readiness` in dry-run and real execution but never creates a packet automatically.
 
 ## Daily automatic discovery
 
 `daily` is the cron-friendly one-shot command. Existing scheduler support can run it every day:
+
+Use `discover run-all` only when an advanced caller needs the raw per-search runs without `daily`'s cross-run dedupe and combined ranked report.
 
 Schedules follow standard Unix-cron semantics: when an expression restricts both day-of-month and day-of-week (neither is `*`), the job fires when **either** field matches (OR), as in Vixie cron.
 
@@ -235,7 +237,7 @@ Portfolio runs cap each request at 10 seconds, the run at 60 seconds, and total 
 
 Company board targets are canonical saved searches. The legacy `watchlist add` command remains as a deprecated compatibility alias and now creates an executable company-search preset. Existing profile-less watchlist rows can be migrated explicitly with `jobos searches migrate-watchlist --profile <profile-id> --json`; multi-profile workspaces must choose the destination profile.
 
-Task commands distinguish the open inbox from elapsed deadlines: `jobos tasks list` includes future and undated open items, while `jobos tasks due` includes only tasks with `due_at` at or before the current time. Both accept `--type` and `--created-by` filters. The TUI due overlay shows task type/source once and filters with `1 all`, `2 followup`, and `3 review`.
+Task commands distinguish the open inbox from elapsed deadlines: `jobos tasks list` includes future and undated open items, while `jobos tasks due` is the canonical filtered deadline query and includes only open tasks with a non-null `due_at` at or before the current time. Both accept `--type` and `--created-by` filters; use `jobos tasks due --type followup --created-by outreach` for due outreach follow-ups. `jobos outreach due` is an enriched outreach-thread view of that same result set, not a separate definition of “due.” The TUI due overlay shows task type/source once and filters with `1 all`, `2 followup`, and `3 review`.
 
 ## People research, networking, and outreach
 

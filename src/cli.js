@@ -76,7 +76,7 @@ export const commandRegistry = [
   cmd(['watchlist', 'add'], 'jobos watchlist add --profile <profile> --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Deprecated alias: create an executable company saved-search preset.', { deprecated: 'Use searches create with a company/ATS target.', relatedWorkflow: 'daily' }),
   cmd(['watchlist', 'list'], 'jobos watchlist list [--json]', 'Compatibility view of legacy watchlist rows and canonical company-search presets.', { deprecated: 'Use searches list.' }),
   cmd(['discover', 'run'], 'jobos discover run --search <name-or-id> [--json]', 'Run one saved discovery search and queue results for review.'),
-  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Run all saved discovery searches, optionally scoped to a profile.'),
+  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone resume operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
@@ -110,11 +110,11 @@ export const commandRegistry = [
   cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a reviewable outreach path from discovered contacts, network edges, and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
   cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
   cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
-  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
+  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'Show the outreach-thread context for due follow-up tasks; use tasks due --type followup --created-by outreach as the canonical filtered query.'),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
   cmd(['tasks', 'list'], 'jobos tasks list [--type <type>] [--created-by <source>] [--json]', 'List the open task inbox, including future and undated tasks.', { flags: ['--type <type>', '--created-by <source>'] }),
-  cmd(['tasks', 'due'], 'jobos tasks due [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'List only open tasks whose due time has passed, optionally watching on an interval.', { output: 'array-or-jsonl', flags: ['--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
+  cmd(['tasks', 'due'], 'jobos tasks due [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical filtered query for open tasks with a non-null due time that has passed, optionally watching on an interval.', { output: 'array-or-jsonl', flags: ['--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
   cmd(['review', 'weekly'], 'jobos review weekly --profile <profile> [--output markdown] [--json]', 'Generate a weekly review export.', { output: 'object-or-markdown' }),
   cmd(['automation', 'create'], 'jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled] [--json]', 'Create or update a scheduler automation.'),
   cmd(['automation', 'list'], 'jobos automation list [--json]', 'List configured automations.'),
@@ -192,6 +192,8 @@ function renderRootHelp({ allCommands = false } = {}) {
 
 Usage:
   jobos <command> [flags]
+
+Use \`tui\` for interactive work; use \`daily\` and \`pursue\` for scripted workflows.
 
 ${section('Setup', setup)}
 

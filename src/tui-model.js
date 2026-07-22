@@ -83,7 +83,7 @@ function priorityStrip(s, jobs, at) {
   const due = one(s, "SELECT tasks.title,tasks.due_at,jobs.id AS job_id,jobs.company FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id WHERE tasks.status='open' AND tasks.due_at IS NOT NULL AND tasks.due_at<=? ORDER BY tasks.due_at LIMIT 1", [at]);
   const interview = one(s, "SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at FROM applications JOIN jobs ON jobs.id=applications.job_id LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.status='open' WHERE applications.status='interview' ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1");
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
-  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.status) && String(job.updatedAt || '') >= recentThreshold);
+  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
   return [
     {
@@ -331,7 +331,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
+    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
     networkSetup: {
       status: networkSetupStatus,
       intent: {

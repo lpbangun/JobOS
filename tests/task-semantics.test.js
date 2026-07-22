@@ -6,6 +6,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { openStore, run } from '../src/db.js';
 import { due, openTasks } from '../src/tracking.js';
+import { outreachDue } from '../src/outreach.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { JobosTui, renderTui } from '../src/tui.js';
 
@@ -32,6 +33,26 @@ test('task inbox and due queries have distinct semantics and category filters', 
   assert.deepEqual(due(store, { at: '2026-07-21T12:00:00.000Z' }).map(task => task.id), ['due-review', 'due-followup']);
   assert.deepEqual(openTasks(store, { type: 'followup' }).map(task => task.id), ['due-followup']);
   assert.deepEqual(due(store, { at: '2026-07-21T12:00:00.000Z', createdBy: 'outreach' }).map(task => task.id), ['due-followup']);
+});
+
+test('outreach due is an enriched view of due tasks and excludes undated follow-ups', async t => {
+  const { store, insert } = await fixture(t);
+  insert({ id: 'outreach-due', type: 'followup', dueAt: '2026-07-20T10:00:00.000Z', createdBy: 'outreach' });
+  insert({ id: 'outreach-undated', type: 'followup', createdBy: 'outreach' });
+  const at = '2026-07-20T08:00:00.000Z';
+  for (const [id, taskId] of [['thread-due', 'outreach-due'], ['thread-undated', 'outreach-undated']]) {
+    run(store, `INSERT INTO outreach_threads
+      (id,artifact_id,job_id,profile_id,stakeholder_id,goal,channel,status,sent_at,next_followup_at,followup_task_id,notes,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, `artifact-${id}`, null, null, null, 'informational', '', 'followup_scheduled', null, null, taskId, '', at, at]);
+  }
+
+  const dueTaskIds = due(store, { at: '2026-07-21T12:00:00.000Z', type: 'followup', createdBy: 'outreach' }).map(task => task.id);
+  const dueThreads = outreachDue(store, { nowDate: new Date('2026-07-21T12:00:00.000Z') });
+
+  assert.deepEqual(dueTaskIds, ['outreach-due']);
+  assert.deepEqual(dueThreads.map(thread => thread.taskId), dueTaskIds);
+  assert.equal(dueThreads[0].threadId, 'thread-due');
 });
 
 test('TUI due overlay uses true due tasks and renders outreach reminders once with category and source', async t => {

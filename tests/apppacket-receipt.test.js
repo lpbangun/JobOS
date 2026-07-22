@@ -444,7 +444,7 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
   for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']) assert.equal(advertised.includes(name), false);
   assert.ok(DOMAIN_TOOLS.some(tool => tool.name === 'create_application_packet'));
-  assert.equal(advertised.length, DOMAIN_TOOLS.length - 3, 'MCP advertises DOMAIN_TOOLS minus exactly the three MUTATION_DENY packet tools');
+  assert.equal(advertised.length, DOMAIN_TOOLS.length - 7, 'MCP excludes all seven always-denied human-gated mutations');
 
   const oldMediation = process.env.JOBOS_MEDIATION;
   const oldOverride = process.env.JOBOS_ALLOW_AGENT_ATTESTATION;

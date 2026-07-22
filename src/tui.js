@@ -52,7 +52,7 @@ export const TUI_KEYMAP = Object.freeze({
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
@@ -1461,14 +1461,13 @@ export class JobosTui {
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
     if (command === 'build-network') return this.openOverlay('build-network');
-    if (command === 'packet' || command === 'packet-show' || command === 'show-packet') {
+    if (command === 'packet') {
       const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
-      if (command === 'packet' && (sub === 'create' || sub === 'freeze')) return void this.packetMutate('create');
-      return void this.showPacketSummary();
+      if (!sub) return void this.showPacketSummary();
+      if (sub === 'create') return void this.packetMutate('create');
     }
-    if (command === 'freeze') return void this.packetMutate('create');
     if (command === 'attest') return void this.packetMutate('attest', argText);
-    if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
+    if (command === 'receipt') return void this.packetMutate('receipt', argText);
     if (command === 'answer') return void this.answerAdd(argText);
     if (command === 'prep') return void this.runPrep(argText);
     if (command === 'weekly') return void this.runWeeklyReview();
@@ -1481,7 +1480,7 @@ export class JobosTui {
     if (command === 'refresh') return this.refresh();
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
-    this.state.error = `Unknown command: ${command}`;
+    this.state.error = `Unknown command: ${trimmed}`;
     this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
     this.render();
   }

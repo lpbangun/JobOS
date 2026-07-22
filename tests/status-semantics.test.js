@@ -35,7 +35,7 @@ test('job summaries expose both status namespaces and support explicit filters',
   const summaries = listJobSummaries(store, { profileId: profile.id });
   const discoverySummary = summaries.find(item => item.id === discoverySaved.id);
   assert.equal(discoverySummary.discoveryStatus, 'saved');
-  assert.equal(discoverySummary.status, 'saved', 'legacy status remains the discovery-status alias');
+  assert.equal('status' in discoverySummary, false, 'generic status is not exposed');
   assert.equal(discoverySummary.applicationStatus, null);
 
   assert.deepEqual(
@@ -45,11 +45,6 @@ test('job summaries expose both status namespaces and support explicit filters',
   assert.deepEqual(
     listJobSummaries(store, { applicationStatus: 'saved' }).map(item => item.id),
     [applicationSaved.id]
-  );
-  assert.deepEqual(
-    new Set(listJobSummaries(store, { status: 'saved' }).map(item => item.id)),
-    new Set([discoverySaved.id, applicationSaved.id]),
-    'legacy status filter remains cross-namespace compatible'
   );
   assert.deepEqual(
     listJobSummaries(store, { discoveryStatus: 'imported', applicationStatus: 'researching' }).map(item => item.id),
@@ -65,7 +60,7 @@ test('selected context and TUI stage expose status provenance without creating a
 
   const context = selectedJobContext(store, triageOnly.id);
   assert.equal(context.job.discoveryStatus, 'saved');
-  assert.equal(context.job.status, 'saved');
+  assert.equal('status' in context.job, false);
   assert.equal(context.job.applicationStatus, null);
 
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: triageOnly.id });

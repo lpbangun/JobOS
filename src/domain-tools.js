@@ -72,7 +72,7 @@ const peopleResearchRequest = {
 };
 
 export const DOMAIN_TOOLS = Object.freeze([
-  { name: 'list_jobs', description: 'List local JobOS jobs and their current fit, discovery, and application state.', inputSchema: object({ profileId: text, status: text, discoveryStatus: text, applicationStatus: text }) },
+  { name: 'list_jobs', description: 'List local JobOS jobs and their current fit, discovery, and application state. Filter status with discoveryStatus or applicationStatus.', inputSchema: object({ profileId: text, discoveryStatus: text, applicationStatus: text }) },
   { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one selected job.', inputSchema: required({ jobId: text }, ['jobId']) },
   { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text, jobId: text }) },
   { name: 'diff_artifact', description: 'Inspect a line diff for an exact artifact revision without changing local state.', inputSchema: required({ artifactId: text, againstArtifactId: text }, ['artifactId']) },
@@ -93,11 +93,11 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder; never send it.', inputSchema: { type: 'object', properties: { jobId: text, stakeholderId: text, profileId: text, goal: text, planId: text, contactId: text }, required: ['profileId'], anyOf: [{ required: ['jobId', 'stakeholderId'] }, { required: ['planId'] }] } },
   { name: 'mark_outreach_sent', description: 'Record a user-confirmed outreach send; agent mediation is denied unless explicitly enabled.', inputSchema: required({ artifactId: text, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: text }, ['artifactId', 'channel']) },
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: required({ threadId: text, afterDays: { type: 'number' } }, ['threadId', 'afterDays']) },
-  { name: 'list_outreach_due', description: 'List due outreach follow-up tasks without sending anything.', inputSchema: object({}) },
+  { name: 'list_outreach_due', description: 'Show outreach-thread context for the canonical due outreach-followup task set (open, non-null due time passed); never sends anything.', inputSchema: object({}) },
   { name: 'create_application', description: 'Create a local application tracking record; agent mediation cannot attest submission by default.', inputSchema: required({ jobId: text, status: text, notes: text }, ['jobId', 'status']) },
   { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
-  { name: 'list_tasks', description: 'List open inbox tasks ordered by due date, including future and undated tasks.', inputSchema: object({ type: text, createdBy: text }) },
+  { name: 'list_tasks', description: 'List open inbox tasks ordered by due date, including future and undated tasks. Use the tasks due CLI command with type and created-by filters for the canonical elapsed-deadline query.', inputSchema: object({ type: text, createdBy: text }) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
@@ -200,8 +200,6 @@ function publicJob(row) {
     location: row.location || '',
     source: row.source,
     discoveryStatus: row.status,
-    // Compatibility alias for callers that previously consumed the job triage status.
-    status: row.status,
     fitScore: row.fit_score == null ? null : Number(row.fit_score),
     score: row.fit_score == null ? null : Number(row.fit_score),
     highFit: Boolean(row.high_fit),
@@ -215,16 +213,12 @@ function publicJob(row) {
 export function listJobSummaries(s, {
   profileId = null,
   discoveryStatus = null,
-  applicationStatus = null,
-  status = null
+  applicationStatus = null
 } = {}) {
   return listJobs(s)
     .filter(row => !profileId || row.profile_id === profileId)
     .filter(row => !discoveryStatus || row.status === discoveryStatus)
     .filter(row => !applicationStatus || row.application_status === applicationStatus)
-    // Preserve the legacy cross-namespace filter while explicit filters give new
-    // callers an unambiguous way to select one state machine.
-    .filter(row => !status || row.application_status === status || row.status === status)
     .map(publicJob);
 }
 
@@ -292,8 +286,6 @@ export function selectedJobContext(s, jobId) {
       location: job.location || '',
       source: job.source,
       discoveryStatus: job.status,
-      // Compatibility alias for the discovery status.
-      status: job.status,
       applicationId: job.application_id || null,
       applicationStatus: job.application_status || null
     },

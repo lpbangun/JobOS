@@ -146,6 +146,7 @@ test('root help is concise and shows Setup / Workflows / Extend structure', () =
   assert.ok(help.includes('daily'), 'help should mention daily');
   assert.ok(help.includes('pursue'), 'help should mention pursue');
   assert.ok(help.includes('network'), 'help should mention network');
+  assert.match(help, /Use `tui` for interactive work; use `daily` and `pursue` for scripted workflows\./);
   const lines = help.split('\n').length;
   assert.ok(lines < 45, `help should be concise (got ${lines} lines)`);
 });
@@ -170,6 +171,9 @@ test('agent-guide --json returns complete registry with new commands', () => {
   assert.ok(names.includes('agents list'), 'registry should include agents list');
   assert.ok(names.includes('browser status'), 'registry should include browser status');
   assert.ok(names.includes('network paths'), 'registry should include network paths');
+  const rawDiscovery = registry.commands.find(command => command.name === 'discover run-all');
+  assert.equal(rawDiscovery.relatedWorkflow, 'daily');
+  assert.match(rawDiscovery.summary, /Advanced raw execution/);
 });
 
 test('clean init returns user_configured policy', () => {

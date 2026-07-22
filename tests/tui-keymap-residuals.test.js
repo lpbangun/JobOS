@@ -76,6 +76,10 @@ test('SELECTED JOB hint keys are advertised by TUI_KEYMAP.global', () => {
   }
 });
 
+test('discovery overlay labels d as the full daily workflow', () => {
+  assert.deepEqual(TUI_KEYMAP.discovery.find(([key]) => key === 'd'), ['d', 'daily']);
+});
+
 // Residual 4 — automated KEYMAP drill (PTY-equivalent, non-interactive)
 test('advertised KEYMAP keys do not throw when pressed in their scope', async t => {
   const { store, profile, job } = await seeded(t);
@@ -259,6 +263,20 @@ test('command packet opens packet summary overlay advertising :packet create', a
   assert.match(screen, /PACKET/);
   assert.match(screen, /No application packet|:packet create|apply packet create/i);
   assert.match(tui.state.status, /No packet|packet create/i);
+});
+
+test('undocumented packet and receipt command aliases are rejected', async t => {
+  const { store, profile, job } = await seeded(t, { draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = job.id;
+  tui.refresh({ disk: false });
+
+  for (const alias of ['packet-show', 'show-packet', 'packet freeze', 'freeze', 'confirm reference']) {
+    tui.state.error = null;
+    tui.executeCommand(alias);
+    assert.equal(tui.state.error, `Unknown command: ${alias}`);
+  }
 });
 
 test('packet overlay renders readiness packet fields when present', async t => {
