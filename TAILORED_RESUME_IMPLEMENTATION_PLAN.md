@@ -1,7 +1,7 @@
 # Tailored Resume Implementation Plan
 
-**Version:** v1.0 — 2026-07-22  
-**Inputs:** `docs/open_source_benchmark_checkup.md`; `CAREER_OPS_IMPLEMENTATION_AUDIT.md`; current JobOS tailoring, profile, artifact, readiness, and packet implementations.  
+**Version:** v1.0 — 2026-07-22
+**Inputs:** `docs/open_source_benchmark_checkup.md`; `CAREER_OPS_IMPLEMENTATION_AUDIT.md`; current JobOS tailoring, profile, artifact, readiness, and packet implementations.
 **Purpose:** Replace JobOS's outline-style tailored resume with a complete, proof-grounded, visually polished, ATS-preflighted application document.
 
 ## Product decision
