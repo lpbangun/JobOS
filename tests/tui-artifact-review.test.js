@@ -71,13 +71,13 @@ test('T1 — Artifact review actions and audit', async t => {
     'T1-A: approval targets the highlighted review row, not stale selectedArtifactId'
   );
 
-  const auditsA = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=?", [artifacts.resumeV2.id]);
-  assert.equal(auditsA.length, 1, 'T1-A: exactly one artifact.reviewed audit');
+  const auditsA = all(store, "SELECT * FROM audit_log WHERE action='artifact.approved' AND entity_id=?", [artifacts.resumeV2.id]);
+  assert.equal(auditsA.length, 1, 'T1-A: exactly one artifact.approved audit');
   const aPayload = JSON.parse(auditsA[0].payload_json);
   assert.equal(aPayload.jobId, jobA.id);
   assert.equal(aPayload.approvalStatus, 'approved');
-  assert.equal(typeof aPayload.note, 'string');
-  assert.equal(aPayload.source, 'tui');
+  assert.equal(typeof aPayload.reviewNote, 'string');
+  assert.equal(aPayload.reviewedBy, 'tui');
   assert.equal(auditsA[0].external_side_effect, 'none');
 
   // Approved item leaves review queue
@@ -100,7 +100,7 @@ test('T1 — Artifact review actions and audit', async t => {
   // Empty feedback refused
   tui.state.input = '';
   tui.onKeypress(null, { name: 'enter' });
-  const auditsEmptyReject = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=? AND payload_json LIKE '%rejected%'", [nextArtifactId]);
+  const auditsEmptyReject = all(store, "SELECT * FROM audit_log WHERE action='artifact.rejected' AND entity_id=?", [nextArtifactId]);
   assert.equal(auditsEmptyReject.length, 0, 'T1-R: empty rejection writes zero audits');
 
   // Feedback entered then Enter rejects
@@ -110,10 +110,10 @@ test('T1 — Artifact review actions and audit', async t => {
   const afterReject = one(store, 'SELECT approval_status FROM artifacts WHERE id=?', [nextArtifactId]);
   assert.equal(afterReject.approval_status, 'rejected', 'T1-R: artifact rejected after feedback');
 
-  const rejectAudits = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=?", [nextArtifactId]);
-  assert.ok(rejectAudits.length >= 1, 'T1-R: artifact.reviewed audit written');
+  const rejectAudits = all(store, "SELECT * FROM audit_log WHERE action='artifact.rejected' AND entity_id=?", [nextArtifactId]);
+  assert.ok(rejectAudits.length >= 1, 'T1-R: artifact.rejected audit written');
   const rPayload = JSON.parse(rejectAudits[rejectAudits.length - 1].payload_json);
-  assert.equal(rPayload.note, 'needs more metrics');
+  assert.equal(rPayload.reviewNote, 'needs more metrics');
 
   // PromptAgent called if client ready; otherwise status always includes CLI redraft nextAction
   if (tui.client?.state === 'ready' && !tui.state.busy) {
@@ -1290,8 +1290,7 @@ test('T12 — Human-gate mediation and shared mutation', async t => {
   assert.deepEqual(mcpNames, toolNames.filter(name => !deniedMcp.has(name)));
   assert.ok(toolNames.length > 0);
 
-  // ── Intended: TUI and API artifact actions use same service ──
-  // API PATCH creates artifact.reviewed with source='api'
+  // ── Intended: API cannot impersonate trusted CLI/TUI human review ──
   const req = new PassThrough();
   req.method = 'PATCH';
   req.headers = {};
@@ -1303,15 +1302,10 @@ test('T12 — Human-gate mediation and shared mutation', async t => {
   res.end = function () {};
   const u = new URL(`http://localhost/api/artifacts/${encodeURIComponent(artifacts.resumeV1.id)}`);
   await handleApi(store, req, res, u);
-
-  const apiAudits = all(store,
-    "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=? ORDER BY created_at DESC",
-    [artifacts.resumeV1.id]);
-  assert.equal(apiAudits.length, 1, 'T12: API creates artifact.reviewed audit');
-  const apiPayload = JSON.parse(apiAudits[0].payload_json);
-  assert.equal(apiPayload.source, 'api', 'T12: API audit has source=api');
-  assert.equal(apiPayload.note, 'via api', 'T12: API audit has note');
-  assert.equal(apiPayload.jobId, jobA.id);
+  assert.equal(res.statusCode, 400, 'T12: API approval is denied by the human-review gate');
+  assert.equal(one(store, 'SELECT approval_status FROM artifacts WHERE id=?', [artifacts.resumeV1.id]).approval_status, 'draft_needs_human_review');
+  const apiAudits = all(store, "SELECT * FROM audit_log WHERE entity_id=? AND action IN ('artifact.approved','artifact.reviewed')", [artifacts.resumeV1.id]);
+  assert.equal(apiAudits.length, 0, 'T12: denied API approval writes no review audit');
 
   const missingReq = new PassThrough();
   missingReq.method = 'PATCH';
@@ -1327,7 +1321,6 @@ test('T12 — Human-gate mediation and shared mutation', async t => {
     /Invalid source/,
     'T12: edited-artifact mutation rejects untrusted audit sources'
   );
-  assert.equal(apiPayload.approvalStatus, 'approved');
 
   // TUI would call same service with source='tui' (verified in T1)
 

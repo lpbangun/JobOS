@@ -25,13 +25,13 @@ function resumeInput({ profile, proof, job, content, suffix = '' }) {
   return {
     jobId: job.id,
     profileId: profile.id,
-    type: 'resume',
+    type: 'other',
     path: path.join('jobs', job.id, 'artifacts', 'tailored-resume.md'),
     title: `Tailored resume${suffix}`,
     content,
     evidence: [{ proofPointId: proof.id }],
     warnings: [],
-    series: { kind: 'resume' }
+    series: { kind: 'other' }
   };
 }
 

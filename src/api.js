@@ -4,7 +4,7 @@ import { createProfile, addProof } from './profiles.js';
 import { appCreate, appUpdate } from './tracking.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 
-import { importText, syncJob, ensureCompany, requirements } from './jobs.js';
+import { importText, syncJob, ensureCompany, requirementInventory } from './jobs.js';
 import { configFromFlags, createSearch, discoveryRuns, listSearches, reviewQueue, runSavedSearch } from './discovery.js';
 import { id, now } from './utils.js';
 import fs from 'node:fs';
@@ -134,7 +134,7 @@ export async function handleApi(s,req,res,u){
       const description=data.description??row.description;
       const nextUrl=(data.url==='' && String(row.url||'').startsWith('jobos:text:')) ? row.url : (data.url??row.url);
       if(data.status && !['imported','new','saved','archived'].includes(String(data.status))) throw Error(`Invalid job status: ${data.status}`);
-      run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, compensation=?, work_model=?, status=?, updated_at=? WHERE id=?',[company.id,data.title??row.title,companyName,data.location??row.location,nextUrl,data.source??row.source,description,JSON.stringify(requirements(description)),data.compensation??row.compensation,data.workModel??data.work_model??row.work_model,data.status??row.status,at,rid]);
+      run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, compensation=?, work_model=?, status=?, updated_at=? WHERE id=?',[company.id,data.title??row.title,companyName,data.location??row.location,nextUrl,data.source??row.source,description,JSON.stringify(requirementInventory(description)),data.compensation??row.compensation,data.workModel??data.work_model??row.work_model,data.status??row.status,at,rid]);
       audit(s,'job.updated','job',rid,{jobId:rid}); syncJob(s,rid); save(s); return send(res,200,one(s,'SELECT * FROM jobs WHERE id=?',[rid]));
     }
     if(req.method==='POST' && resource==='applications'){ const a=appCreate(s,data.jobId||data.job_id,data.status||'saved',data.notes||''); return send(res,201,a); }

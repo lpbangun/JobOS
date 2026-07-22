@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-20
+## Current status — 2026-07-22
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -15,6 +15,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos profile network-intent ...` and the TUI `b` flow confirm progressive networking goals, exclusions, sources, and affiliations before an open profile network map is built.
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
+- `jobos resume import|show|validate|replace|coverage|preflight` and `jobos tailor resume` provide a versioned canonical resume, structured requirement coverage, complete proof-grounded tailoring, and optional locally preflighted PDF rendering.
 
 ### Implemented in the ACP host, lean CLI, and people-research passes
 
@@ -49,25 +50,38 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - People research is integrated into pursuit, deterministic network-access scoring, application-status launch recommendations, CLI/TUI controls, ACP-session MCP, and external MCP. The obsolete `discover_contacts` tool/export is removed.
 - Human gates remain authoritative: research never sends outreach or applies, imports remain unapproved, MCP cannot approve contacts for an agent, and suppressed contacts are unusable.
 
+### Complete tailored-resume compiler
+
+- Canonical JSON/YAML resume revisions preserve complete semantic sections, original source text/hash, uncertain fields, unknown sections, and immutable correction history.
+- Resume-imported proofs begin unverified. Only active, explicitly verified proofs can support requirement coverage or emitted accomplishment claims; retirement and supersession retain lineage.
+- Structured requirement inventories retain exact job text and expose deterministic supported, partially supported, omitted-supported, and unsupported coverage without claiming a proprietary ATS score.
+- Deterministic and optional typed LLM transformations preserve identity, employer, title, chronology, education, and credentials while reordering or rewriting only proof-grounded content.
+- Three bounded LaTeX layouts (`professional`, `technical`, and `leadership`) support Letter/A4 and explicit page budgets. Arbitrary model LaTeX cannot enter the template.
+- Optional PDF rendering compiles in a temporary directory, extracts text, checks semantic order, fonts, links, geometry, page count, and page images, and promotes the PDF only after every machine preflight passes. Missing local tools yield a typed blocker and no fake PDF.
+- Resume review is restricted to trusted CLI/TUI human mediation and requires the exact current artifact hash, valid semantic snapshot, current canonical source revision, and—when requested—a passed render manifest and matching PDF hash.
+- Readiness and immutable application packets pin the exact artifact revision, semantic source revision, content hash, and passed PDF hash. A canonical resume correction makes prior approval/packet currency stale.
+- Outcome feedback aggregates recurring coverage gaps and sample-gated outcome bands without causal or generated-claim assertions.
+- Final independent tailored-resume critic pass 2 converged with no material blockers.
+
 ### Intentionally deferred
 
 Not required for the smallest coherent CLI product:
 
 - Universal auto-apply, Workday/iCIMS/Taleo automation, or LinkedIn/Indeed DOM-specific bots.
 - SMTP auto-send, mailbox reconciliation, and hardcoded platform automation.
-- PDF/DOCX production rendering, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
+- DOCX production rendering, voice interview coaching, offer/negotiation workspaces, and frontend redesign. Local PDF rendering is implemented but requires optional LaTeX and Poppler binaries.
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
 
-- `npm test`: **139/139 passed** on 2026-07-20, including the permanent people-research orchestration suite and all established CLI, TUI, ACP, MCP, discovery, readiness, research, outreach, and workflow checks.
-- `npm run smoke`: passed on 2026-07-20 in a clean temporary workspace through profile/job setup, discovery, scoring, tailoring, application/interview/analytics/scheduler flows, and workspace exports.
+- `npm test`: **218/218 passed** on 2026-07-22 across the full CLI, TUI, ACP, MCP, discovery, readiness, packet, research, tailored-resume, rendering, analytics, and workflow suites.
+- `npm run smoke`: passed on 2026-07-22 in a clean temporary workspace through complete canonical resume import, explicit proof verification, structured tailoring, exact human approval, immutable packet/receipt flow, stale-source detection, discovery, scheduler, interview, analytics, and workspace exports.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
 - Real external MCP drill: initialize, 41-tool list (DOMAIN_TOOLS minus the three MUTATION_DENY packet tools; includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`. The advertised count is pinned by `tests/apppacket-receipt.test.js` (AP08) and `tests/sprint4-interview-analytics-mcp.test.js`.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - People-research critic suite `tests/people-research-orchestration.test.js`: **14/14 passed**; companion contact/TUI/integration suites: **25/25 passed**.
 - Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
-- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
+- Application readiness scenarios passed in the full suite and targeted approval/redaction lifecycle runs, covering plan shape, semantic/render blockers, exact approval and stale-source transitions, packet next actions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, local status disclosure, and no submission claims.
 - Independent people-research convergence gate passed on critic pass 3 with no failures or unmet criteria. It covers migration and identity, onboarding/import privacy, all four scopes, adapter isolation, budgets, cache/resume/cancel/deadline behavior, xAI gates/citations, integrated alumni path ranking, deterministic network-access bands, status launch recommendations, MCP/TUI mediation, exact mirrors, and zero external effects.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)

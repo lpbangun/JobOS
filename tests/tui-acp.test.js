@@ -14,6 +14,7 @@ import { callDomainTool } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runMcpDemo } from '../scripts/mcp-demo.js';
 import { createArtifact } from '../src/artifacts.js';
+import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 function workspace() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-tui-test-'));
@@ -25,10 +26,11 @@ async function seededWorkspace(t, { jobs = 2, draft = true } = {}) {
   const store = await openStore({ workspace: root });
   const profile = createProfile(store, 'PM EdTech').profile;
   const proof = addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio case study', ['product', 'educator'], ['30%']);
+  createCompleteResumeFixture(store, profile, proof);
   const imported = [];
   for (let index = 0; index < jobs; index++) {
     const file = path.join(root, `job-${index}.md`);
-    writeFileSync(file, `Title: Product Manager ${index + 1}\nCompany: Learning Co ${index + 1}\nLocation: Remote\n\nLead educator discovery and launch a learning platform. Own product activation and cross-functional delivery.`);
+    writeFileSync(file, `Title: Product Manager ${index + 1}\nCompany: Learning Co ${index + 1}\nLocation: Remote\n\n## Requirements\n- Must lead educator discovery and launch a learning platform that improves activation.`);
     imported.push(importText(store, { profileId: profile.id, filePath: file }).job);
   }
   await callDomainTool(store, 'score_job', { jobId: imported[0].id, profileId: profile.id }, { source: 'tui' });

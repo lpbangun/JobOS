@@ -124,11 +124,22 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
   if (!profile) throw readinessError('unknown_profile', `Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw readinessError('profile_job_mismatch', `Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`);
 
-  const proofs = all(s, 'SELECT id FROM proof_points WHERE profile_id=? ORDER BY created_at,id', [profileId]);
+  const proofs = all(s, "SELECT id FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified' ORDER BY created_at,id", [profileId]);
   const proofIds = new Set(proofs.map(proof => proof.id));
   const artifacts = latestArtifacts(s, jobId, profileId);
   const resume = artifactState(artifacts.get('resume'), proofIds, { required: true });
   const coverLetter = artifactState(artifacts.get('cover_letter'), proofIds, { required: false });
+  const resumeRecord = resume.artifactId ? one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [resume.artifactId]) : null;
+  const resumeValidation = resumeRecord ? parseJson(resumeRecord.validation_json, null) : null;
+  const resumeCoverage = resumeRecord ? parseJson(resumeRecord.coverage_json, null) : null;
+  const resumeRenderManifest = resumeRecord ? parseJson(resumeRecord.render_manifest_json, null) : null;
+  const currentResumeSource = one(s, 'SELECT id,revision FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [profileId]);
+  if (resume.artifactId) Object.assign(resume, {
+    sourceResumeRevisionId: resumeRecord?.source_resume_revision_id || null,
+    semanticValidation: resumeValidation,
+    coverage: resumeCoverage?.summary || null,
+    renderManifest: resumeRenderManifest
+  });
   const score = parseJson(job.score_json, null);
   const scoreAvailable = job.fit_score != null && Number.isFinite(Number(job.fit_score)) && score && typeof score === 'object';
   const answers = inspectApplicationQuestions(s, { jobId, profileId });
@@ -165,6 +176,36 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     'resume_missing_proof_grounding',
     'The latest resume draft contains no evidence references to current stored proof points.',
     `Add relevant proof points, then rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --json".`
+  ));
+  if (resume.artifactId && !resumeRecord) blockers.push(blocker(
+    'resume_document_incomplete',
+    'The current resume artifact has no persisted semantic document snapshot.',
+    `Regenerate it with "jobos tailor resume --job ${jobId} --profile ${profileId} --json".`
+  ));
+  if (resumeRecord && resumeRecord.source_resume_revision_id !== currentResumeSource?.id) blockers.push(blocker(
+    'resume_stale_source_revision',
+    'The tailored resume was built from an older canonical resume revision.',
+    `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --json" against canonical revision ${currentResumeSource?.revision || 'current'}.`,
+    { sourceResumeRevisionId: resumeRecord.source_resume_revision_id, currentResumeRevisionId: currentResumeSource?.id || null }
+  ));
+  if (resumeRecord && (!resumeValidation || resumeValidation.valid !== true)) {
+    const semanticBlockers = Array.isArray(resumeValidation?.blockers) && resumeValidation.blockers.length
+      ? resumeValidation.blockers
+      : [{ code: 'resume_document_incomplete', message: 'Semantic resume validation did not pass.' }];
+    for (const item of semanticBlockers) blockers.push(blocker(
+      item.code || 'resume_document_incomplete',
+      item.message || 'Semantic resume validation did not pass.',
+      item.code?.startsWith('resume_render')
+        ? `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --format pdf --json" after correcting the render blocker.`
+        : `Correct the canonical resume or proofs, then rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --json".`,
+      { artifactId: resume.artifactId, ...item }
+    ));
+  }
+  if (resumeRenderManifest?.format === 'pdf' && resumeRenderManifest.status !== 'passed' && !(resumeValidation?.blockers || []).some(item => item.code === 'resume_render_failed' || item.code === 'resume_render_text_invalid' || item.code === 'resume_page_budget_exceeded')) blockers.push(blocker(
+    'resume_render_failed',
+    'Requested PDF render validation did not pass.',
+    `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --format pdf --json" after installing or correcting the local renderer.`,
+    { renderStatus: resumeRenderManifest.status }
   ));
   if (answers.unmatched) blockers.push(blocker(
     'unmatched_questions',

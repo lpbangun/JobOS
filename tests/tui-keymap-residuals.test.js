@@ -25,6 +25,7 @@ import {
 import { callDomainTool } from '../src/domain-tools.js';
 import { createArtifact } from '../src/artifacts.js';
 import { buildTuiModel } from '../src/tui-model.js';
+import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 function streams() {
   const stdout = new PassThrough();
@@ -41,9 +42,10 @@ async function seeded(t, { draft = true } = {}) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = await openStore({ workspace: root });
   const profile = createProfile(store, 'PM EdTech').profile;
-  addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio', ['product'], ['30%']);
+  const proof = addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio', ['product'], ['30%']);
+  createCompleteResumeFixture(store, profile, proof);
   const file = path.join(root, 'job.md');
-  writeFileSync(file, 'Title: Product Manager\nCompany: Learning Co\nLocation: Remote\n\nLead educator discovery and launch a learning platform.');
+  writeFileSync(file, 'Title: Product Manager\nCompany: Learning Co\nLocation: Remote\n\n## Requirements\n- Must lead educator discovery and launch a learning platform that improves activation.');
   const job = importText(store, { profileId: profile.id, filePath: file }).job;
   await callDomainTool(store, 'score_job', { jobId: job.id, profileId: profile.id }, { source: 'tui' });
   if (draft) await tailor(store, job.id, profile.id, 'resume');

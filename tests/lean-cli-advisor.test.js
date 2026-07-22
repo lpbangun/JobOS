@@ -46,6 +46,39 @@ function makeRunner({ extraEnv = {} } = {}) {
   return { root, env, jobos, out, raw };
 }
 
+function completePursuitResume() {
+  const verified = { verificationStatus: 'verified' };
+  return {
+    schemaVersion: 1,
+    identity: { name: 'PM Candidate', email: 'pm@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], ...verified },
+    summary: { id: 'summary_main', text: 'Product leader focused on educator research, product strategy, and measurable workflow improvements.', proofPointIds: [], ...verified },
+    experience: [{
+      id: 'experience_acme', employer: 'Acme Learning', title: 'Product Manager', location: 'Remote',
+      dateSource: { startText: '2021-01', endText: 'Present' }, startDate: '2021-01', endDate: null, ...verified,
+      bullets: [
+        { id: 'bullet_research', text: 'Led discovery with educators and operations teams to prioritize product strategy.', proofPointIds: [], ...verified },
+        { id: 'bullet_launch', text: 'Shipped a cross-functional product launch with engineering and design partners.', proofPointIds: [], ...verified },
+        { id: 'bullet_metric', text: 'Improved a learning workflow that reduced manual review time by 30%.', proofPointIds: [], ...verified }
+      ]
+    }],
+    projects: [],
+    education: [{ id: 'education_state', institution: 'State University', degree: 'BS', field: 'Information Systems', location: '', dateSource: { endText: '2020' }, startDate: null, endDate: '2020', ...verified }],
+    credentials: [{ id: 'credential_cspo', name: 'CSPO', issuer: 'Scrum Alliance', date: '2022', ...verified }],
+    skills: [{ id: 'skill_strategy', name: 'Product Strategy', category: 'Product', ...verified }, { id: 'skill_research', name: 'User Research', category: 'Product', ...verified }],
+    additionalSections: []
+  };
+}
+
+function createPursuitProfile(jobos, root) {
+  const resume = fixtureFile(root, 'resume.json', JSON.stringify(completePursuitResume(), null, 2));
+  const profile = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  const profileMirror = readFileSync(path.join(root, 'jobos-workspace', 'profiles', `${profile.id}.yaml`), 'utf8');
+  const proofIds = [...profileMirror.matchAll(/id:\s*(proof_[a-f0-9]+)/g)].map(match => match[1]);
+  assert.ok(proofIds.length >= 3);
+  for (const proofId of proofIds) jobos(['proof', 'verify', proofId]);
+  return profile;
+}
+
 function fixtureFile(root, name, content) {
   const p = path.join(root, name);
   writeFileSync(p, content, 'utf8');
@@ -390,8 +423,7 @@ test('pursue dry-run returns full stage dependency graph', () => {
 
 test('pursue --stage application runs with declared dependencies', () => {
   const { root, jobos } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', '- Built a thing.\n');
-  const initP = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  const initP = createPursuitProfile(jobos, root);
   const job = fixtureFile(root, 'job.md', '# Senior PM at Acme Corp\nRemote.');
   const impP = JSON.parse(jobos(['jobs', 'import-text', '--profile', initP.id, '--file', job]).stdout);
   const result = JSON.parse(jobos(['pursue', impP.id, '--stage', 'application', '--profile', initP.id], { timeoutMs: 120_000 }).stdout);
@@ -405,8 +437,7 @@ test('pursue --stage application runs with declared dependencies', () => {
 
 test('pursue full E2E: all stages ok, artifacts written', () => {
   const { root, jobos } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch improving activation.\n');
-  const initP = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  const initP = createPursuitProfile(jobos, root);
   const job = fixtureFile(root, 'job.md', '# Senior Product Manager at Acme Corp\nRemote. Lead product strategy for EdTech platform.');
   const impP = JSON.parse(jobos(['jobs', 'import-text', '--profile', initP.id, '--file', job]).stdout);
   const result = JSON.parse(jobos(['pursue', impP.id, '--profile', initP.id], { timeoutMs: 180_000 }).stdout);

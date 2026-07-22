@@ -276,10 +276,65 @@ function verifyReviewable(s, artifactId, decision) {
   if (mirrorHash !== row.content_hash) {
     throw new ArtifactError('artifact_mirror_diverged', `Artifact mirror diverged for ${artifactId}; restore or regenerate it before review.`, { artifactId, path: row.path, expectedHash: row.content_hash, actualHash: mirrorHash });
   }
+  if (decision === 'approved' && row.type === 'resume') {
+    const resumeDocument = one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [artifactId]);
+    if (!resumeDocument) throw new ArtifactError('resume_document_incomplete', `Resume ${artifactId} has no semantic document snapshot.`, { artifactId });
+    const validation = parseJson(resumeDocument.validation_json, null);
+    if (!validation?.valid) {
+      const first = validation?.blockers?.[0];
+      throw new ArtifactError(first?.code || 'resume_document_incomplete', first?.message || `Resume ${artifactId} did not pass semantic validation.`, { artifactId, blockers: validation?.blockers || [] });
+    }
+    const currentSource = one(s, 'SELECT id FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [row.profile_id]);
+    if (!currentSource || currentSource.id !== resumeDocument.source_resume_revision_id) {
+      throw new ArtifactError('resume_stale_source_revision', `Resume ${artifactId} was built from a stale canonical source revision.`, { artifactId, sourceResumeRevisionId: resumeDocument.source_resume_revision_id, currentResumeRevisionId: currentSource?.id || null });
+    }
+    const renderManifest = parseJson(resumeDocument.render_manifest_json, null);
+    if (renderManifest?.format === 'pdf') {
+      if (renderManifest.status !== 'passed') throw new ArtifactError('resume_render_failed', `Resume ${artifactId} did not pass requested PDF rendering.`, { artifactId, renderStatus: renderManifest.status });
+      const pdfPath = path.join(s.p.ws, renderManifest.pdfPath || '');
+      if (!renderManifest.pdfPath || !fs.existsSync(pdfPath)) throw new ArtifactError('resume_render_failed', `Rendered PDF is missing for ${artifactId}.`, { artifactId, pdfPath: renderManifest.pdfPath || null });
+      const pdfHash = crypto.createHash('sha256').update(fs.readFileSync(pdfPath)).digest('hex');
+      if (pdfHash !== renderManifest.pdfHash) throw new ArtifactError('resume_render_failed', `Rendered PDF hash diverged for ${artifactId}.`, { artifactId, expectedHash: renderManifest.pdfHash, actualHash: pdfHash });
+    }
+  }
   if (decision === 'approved' && row.approval_status === 'rejected') {
     throw new ArtifactError('artifact_rejected_requires_redraft', `Rejected artifact ${artifactId} requires a new draft before approval.`, { artifactId });
   }
   return row;
+}
+
+export function preflightResumeArtifact(s, artifactId) {
+  const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`, { artifactId });
+  if (row.type !== 'resume') throw new ArtifactError('artifact_type_invalid', `Artifact ${artifactId} is not a resume.`, { artifactId, type: row.type });
+  const resumeDocument = one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [artifactId]);
+  if (!resumeDocument) throw new ArtifactError('resume_document_incomplete', `Resume ${artifactId} has no semantic document snapshot.`, { artifactId });
+  const validation = parseJson(resumeDocument.validation_json, { valid: false, blockers: [{ code: 'resume_document_incomplete', message: 'Semantic validation is missing.' }], warnings: [] });
+  const renderManifest = parseJson(resumeDocument.render_manifest_json, { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] });
+  const blockers = [...(validation.blockers || []), ...(renderManifest.blockers || [])];
+  let approvalEligible = false;
+  try {
+    verifyReviewable(s, artifactId, 'approved');
+    approvalEligible = true;
+  } catch (error) {
+    if (!(error instanceof ArtifactError)) throw error;
+    if (!blockers.some(item => item.code === error.code)) blockers.push({ code: error.code, message: error.message, ...error.details });
+  }
+  return {
+    artifactId,
+    revision: Number(row.revision),
+    contentHash: row.content_hash,
+    sourceResumeRevisionId: resumeDocument.source_resume_revision_id,
+    approvalStatus: row.approval_status,
+    approvalEligible,
+    valid: validation.valid === true && approvalEligible,
+    validation,
+    renderManifest,
+    blockers,
+    warnings: [...(validation.warnings || []), ...(renderManifest.warnings || [])],
+    externalSideEffects: 'none',
+    submissionPerformed: false
+  };
 }
 
 function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
@@ -345,14 +400,11 @@ export function rejectArtifact(s, artifactId, { reviewedBy = 'cli', note = '' } 
 export function reviewArtifact(s, { artifactId, approvalStatus, note = '', source }) {
   if (!source || !['tui', 'api', 'cli'].includes(source)) throw new ArtifactError('invalid_review_source', 'Invalid source: must be tui, api, or cli');
   if (!REVIEW_STATUSES.has(approvalStatus)) throw new ArtifactError('artifact_review_status_invalid', `Invalid artifact approval status: ${approvalStatus}`);
+  if (approvalStatus === 'approved') return approveArtifact(s, artifactId, { reviewedBy: source, note });
+  if (approvalStatus === 'rejected') return rejectArtifact(s, artifactId, { reviewedBy: source, note });
   const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
   if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
-  const reviewedAt = now();
-  if (approvalStatus === 'draft_needs_human_review') {
-    run(s, 'UPDATE artifacts SET approval_status=?, reviewed_at=NULL, reviewed_by=NULL, review_note=? WHERE id=?', [approvalStatus, note, artifactId]);
-  } else {
-    run(s, 'UPDATE artifacts SET approval_status=?, reviewed_at=?, reviewed_by=?, review_note=? WHERE id=?', [approvalStatus, reviewedAt, source, note, artifactId]);
-  }
+  run(s, 'UPDATE artifacts SET approval_status=?, reviewed_at=NULL, reviewed_by=NULL, review_note=? WHERE id=?', [approvalStatus, note, artifactId]);
   recordAudit(s, 'artifact.reviewed', 'artifact', artifactId, {
     jobId: row.job_id || null,
     profileId: row.profile_id || null,

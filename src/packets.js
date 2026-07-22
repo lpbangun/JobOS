@@ -69,11 +69,13 @@ function buildPacketProjection(s, { jobId, profileId }) {
   const readiness = compileApplicationReadiness(s, { jobId, profileId, includePacket: false });
 
   // Current resume and cover artifacts
-  const currentResume = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='resume' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
-  const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId]);
+  const currentResume = one(s, `SELECT * FROM artifacts WHERE job_id=? AND profile_id=? AND type='resume' ORDER BY revision DESC LIMIT 1`, [jobId, profileId]);
+  const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND profile_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId, profileId]);
+  const resumeDocument = currentResume ? one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [currentResume.id]) : null;
+  const resumeRenderManifest = parseJson(resumeDocument?.render_manifest_json, null);
 
-  if (!currentResume) {
-    throw packetError('artifact_unapproved', 'No approved resume artifact found');
+  if (!currentResume || currentResume.approval_status !== 'approved') {
+    throw packetError('artifact_unapproved', 'The current resume revision is not approved');
   }
 
   const pinnedAnswerIds = new Set((readiness.answers?.questions || [])
@@ -107,7 +109,9 @@ function buildPacketProjection(s, { jobId, profileId }) {
       artifactId: currentResume.id,
       seriesKey: currentResume.series_key,
       revision: Number(currentResume.revision),
-      contentHash: currentResume.content_hash
+      contentHash: currentResume.content_hash,
+      sourceResumeRevisionId: resumeDocument?.source_resume_revision_id || null,
+      pdfHash: resumeRenderManifest?.status === 'passed' ? resumeRenderManifest.pdfHash || null : null
     },
     coverLetter: coverEntry,
     proofPointIds: (readiness.materials.proofs.proofPointIds || []).slice().sort(),

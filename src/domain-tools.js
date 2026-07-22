@@ -80,7 +80,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'reject_artifact', description: 'Record trusted local human rejection of an exact current artifact revision; a reason is required.', inputSchema: required({ artifactId: text, note: text }, ['artifactId', 'note']) },
   { name: 'discovery_health', description: 'Inspect saved discovery sources and recent isolated run failures.', inputSchema: object({ profileId: text }) },
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
-  { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
+  { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft with optional local PDF rendering and layout preflight.', inputSchema: required({ jobId: text, profileId: text, layoutProfileId: { type: 'string', enum: ['professional', 'technical', 'leadership'] }, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, density: { type: 'string', enum: ['compact', 'standard', 'spacious'] }, format: { type: 'string', enum: ['markdown', 'pdf'] }, sectionOrder: { type: 'array', items: { type: 'string' } } }, ['jobId', 'profileId']) },
   { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
   { name: 'start_people_research', description: 'Run people research synchronously for a scope (profile/target/job/person) and return the run result.', inputSchema: required(peopleResearchRequest, ['profileId', 'scope']) },
@@ -327,7 +327,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'reject_artifact') return rejectArtifact(s, args.artifactId, { reviewedBy: mediationSource(options), note: args.note || '' });
   if (name === 'discovery_health') return discoveryHealth(s, args);
   if (name === 'score_job') return await score(s, args.jobId, args.profileId);
-  if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume');
+  if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume', { layoutProfileId: args.layoutProfileId, pageSize: args.pageSize, pageLimit: args.pageLimit, density: args.density, format: args.format, sectionOrder: args.sectionOrder });
   if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover');
   if (name === 'research_company') return await researchCompany(s, args.jobId);
   if (name === 'start_people_research') {

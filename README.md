@@ -130,6 +130,38 @@ npm run jobos -- pursue <job-id> --profile pm-edtech \
   --stage questions --json
 ```
 
+## Canonical and tailored resumes
+
+JobOS treats the source resume as a versioned semantic record rather than a Markdown outline. JSON and YAML imports preserve identity, summary, experience, projects, education, credentials, skills, unknown sections, source text, and field-level verification state. A correction creates a new canonical revision; it never rewrites historical tailored artifacts.
+
+```bash
+# Import, inspect, validate, and correct the canonical source.
+npm run jobos -- resume import --profile <profile-id> --file resume.json --json
+npm run jobos -- resume show --profile <profile-id> [--revision <n>] --json
+npm run jobos -- resume validate --profile <profile-id> --json
+npm run jobos -- resume replace --profile <profile-id> --file corrected-resume.yaml --json
+
+# Resume-imported proof points are not eligible for generated claims until
+# explicitly verified. Retire or replace them without deleting history.
+npm run jobos -- proof verify <proof-id> --json
+npm run jobos -- proof retire <proof-id> --reason <text> --json
+npm run jobos -- proof replace <proof-id> --summary <text> --json
+
+# Inspect source-traceable job coverage, then compile a complete draft.
+npm run jobos -- resume coverage --job <job-id> --profile <profile-id> --json
+npm run jobos -- tailor resume --job <job-id> --profile <profile-id> \
+  --layout professional --page-size letter --page-limit 2 --format markdown --json
+
+# Recheck semantic, source-revision, and requested-render eligibility without
+# mutating approval state.
+npm run jobos -- resume preflight --artifact <artifact-id> --json
+```
+
+The tailored document preserves fixed identity, employer, title, date, education, and credential facts. Every emitted accomplishment must cite active verified proof; uncovered requirements remain explicit gaps. Coverage classes are transparent (`supported`, `partially_supported`, `omitted_supported`, and `unsupported`) and are not represented as a proprietary ATS score.
+
+`--format pdf` uses an optional local LaTeX engine (`tectonic` or `pdflatex`) plus Poppler tools (`pdftotext`, `pdfinfo`, and `pdftoppm`). JobOS compiles in a temporary directory, extracts and checks semantic order, fonts, links, geometry, page count, and page images, and publishes the PDF only after those checks pass. Missing tools return a typed `resume_render_failed` blocker and never create a fake PDF. Markdown and semantic sidecars remain usable without TeX.
+
+
 ## Application readiness
 
 Check whether your local materials are complete for human review:
@@ -527,7 +559,7 @@ The full low-level CLI—manual imports, scoring, tailoring, contact review, tas
 - External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
 - User-exported LinkedIn connection files are local inputs. JobOS records public LinkedIn URLs but does not fetch profile pages, sign in, or bypass platform controls.
-- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
+- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred. Local PDF rendering is optional and requires a configured LaTeX engine plus Poppler.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
 - `ready-for-review` indicates complete local evidence awaiting human review; `approved` adds only trusted local approval of every current required revision. Neither status means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.

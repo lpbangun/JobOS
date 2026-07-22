@@ -4,7 +4,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
-import { createProfile, addProof, setNetworkIntent } from './profiles.js';
+import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
+import { getResume, importResume, replaceResume, validateResumeDocument } from './resumes.js';
+import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
 import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
@@ -13,7 +15,7 @@ import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from '
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
-import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
+import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
 import { addWatchlist, configFromFlags, createSearch, listSearches, listWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
@@ -24,6 +26,7 @@ import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
 import { callDomainTool } from './domain-tools.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
+import { preflightResumeArtifact } from './artifacts.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -57,7 +60,16 @@ export const commandRegistry = [
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage <name>] [--dry-run] [--json]', 'Run integrated fit, research, networking, application preparation, and outreach planning.', { flags: ['--stage <name>', '--stage-timeout <ms>', '--dry-run'], category: 'workflow' }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
   cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
+  cmd(['resume', 'import'], 'jobos resume import --profile <profile-id> --file <path> [--json]', 'Import a complete resume into a versioned canonical source record.', { flags: ['--profile <profile-id>', '--file <path>'] }),
+  cmd(['resume', 'show'], 'jobos resume show --profile <profile-id> [--revision <n>] [--json]', 'Inspect the current or historical canonical resume revision.', { flags: ['--profile <profile-id>', '--revision <n>'] }),
+  cmd(['resume', 'validate'], 'jobos resume validate --profile <profile-id> [--json]', 'Validate the current canonical resume and expose correctable fields.', { flags: ['--profile <profile-id>'] }),
+  cmd(['resume', 'coverage'], 'jobos resume coverage --job <job-id> --profile <profile-id> [--json]', 'Show transparent requirement coverage from active verified evidence.', { flags: ['--job <job-id>', '--profile <profile-id>'] }),
+  cmd(['resume', 'preflight'], 'jobos resume preflight --artifact <artifact-id> [--json]', 'Recheck semantic, exact-revision, and requested render eligibility without mutating review state.', { flags: ['--artifact <artifact-id>'] }),
+  cmd(['resume', 'replace'], 'jobos resume replace --profile <profile-id> --file <json-or-yaml> [--json]', 'Create a corrected canonical resume revision without rewriting history.', { flags: ['--profile <profile-id>', '--file <path>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
+  cmd(['proof', 'verify'], 'jobos proof verify <proof-id> [--json]', 'Verify a stored proof point for generated factual claims.'),
+  cmd(['proof', 'retire'], 'jobos proof retire <proof-id> --reason <text> [--json]', 'Retire a proof point while preserving its lineage.', { flags: ['--reason <text>'] }),
+  cmd(['proof', 'replace'], 'jobos proof replace <proof-id> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Supersede a proof point with a corrected active revision.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
   cmd(['answers', 'add'], 'jobos answers add --profile <profile-id> --category <category> --question <text> --answer <text> [--sensitivity personal] [--json]', 'Store a verified reusable application answer locally.', { flags: ['--category <category>', '--question <text>', '--answer <text>', '--sensitivity <class>', '--reuse <scope>', '--status <status>', '--source <ref>', '--employer <name>'] }),
   cmd(['answers', 'list'], 'jobos answers list --profile <profile-id> [--category <category>] [--json]', 'List local answers with sensitive values redacted.', { flags: ['--category <category>', '--status <status>'] }),
   cmd(['answers', 'match'], 'jobos answers match --profile <profile-id> --questions <json-file> [--employer <name>] [--json]', 'Match verified non-sensitive answers to application questions.', { flags: ['--questions <json-file>', '--employer <name>'] }),
@@ -72,7 +84,7 @@ export const commandRegistry = [
   cmd(['discover', 'run'], 'jobos discover run --search <name-or-id> [--json]', 'Run one saved discovery search and queue results for review.'),
   cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Run all saved discovery searches, optionally scoped to a profile.'),
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
-  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
+  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf] [--output markdown] [--json]', 'Create a complete proof-grounded tailored resume draft with optional local PDF rendering.', { flags: ['--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown' }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
@@ -107,6 +119,7 @@ export const commandRegistry = [
   cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
+  cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
   cmd(['tasks', 'due'], 'jobos tasks due [--watch] [--interval N] [--max-iterations N] [--json]', 'List due tasks, optionally watching on an interval.', { output: 'array-or-jsonl' }),
   cmd(['review', 'weekly'], 'jobos review weekly --profile <profile> [--output markdown] [--json]', 'Generate a weekly review export.', { output: 'object-or-markdown' }),
   cmd(['automation', 'create'], 'jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled] [--json]', 'Create or update a scheduler automation.'),
@@ -545,10 +558,68 @@ export async function main(argv = process.argv.slice(2)) {
     out(setNetworkIntent(s, { profileId: needProfile(flags), intent: data.intent, affiliations: data.affiliations }));
     return;
   }
+  if (group === 'resume' && action === 'import') {
+    const row = importResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'show') {
+    const revision = flags.revision == null ? null : numberFlag(flags, 'revision', null, { min: 1 });
+    const row = getResume(s, needProfile(flags), revision);
+    if (!row) throw Error(`Resume revision not found${revision == null ? '' : `: ${revision}`}`);
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, sourceTextHash: row.source_text_hash, verificationStatus: row.verification_status, supersedesResumeId: row.supersedes_resume_id || null, isCurrent: Boolean(row.is_current), document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'validate') {
+    const row = getResume(s, needProfile(flags));
+    if (!row) out({ valid: false, schemaVersion: 1, blockers: [{ code: 'resume_source_missing', message: 'No canonical resume revision exists.' }], warnings: [] });
+    else out({ resumeId: row.id, revision: row.revision, ...validateResumeDocument(row.document) });
+    return;
+  }
+  if (group === 'resume' && action === 'preflight') {
+    out(preflightResumeArtifact(s, String(requireFlag(flags, 'artifact', '--artifact <artifact-id>'))));
+    return;
+  }
+  if (group === 'resume' && action === 'replace') {
+    const row = replaceResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <json-or-yaml>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, supersedesResumeId: row.supersedes_resume_id, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'coverage') {
+    const profileId = needProfile(flags);
+    const jobId = String(requireFlag(flags, 'job'));
+    const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
+    if (!job) throw Error(`Unknown job: ${jobId}`);
+    if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+    const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified'", [profileId]);
+    out({ jobId, profileId, requirements: inventoryForJob(job), coverage: buildRequirementCoverage(inventoryForJob(job), proofs) });
+    return;
+  }
   if (group === 'proof' && action === 'add') {
     const summary = requireFlag(flags, 'summary');
     const p = addProof(s, needProfile(flags), String(summary), flags.evidence ? String(flags.evidence) : '', flags.skills ? splitCsv(flags.skills) : []);
     out({ id: p.id, profileId: p.profile_id, summary: p.summary });
+    return;
+  }
+  if (group === 'proof' && action === 'verify') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = verifyProof(s, String(proofId));
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, verificationStatus: proof.verification_status });
+    return;
+  }
+  if (group === 'proof' && action === 'retire') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = retireProof(s, String(proofId), String(requireFlag(flags, 'reason')));
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, retiredAt: proof.retired_at, retirementReason: proof.retirement_reason });
+    return;
+  }
+  if (group === 'proof' && action === 'replace') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = supersedeProof(s, String(proofId), { summary: String(requireFlag(flags, 'summary')), evidence: flags.evidence ? String(flags.evidence) : '', skills: flags.skills ? splitCsv(flags.skills) : [] });
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, verificationStatus: proof.verification_status, supersedesProofPointId: proof.supersedes_proof_point_id });
     return;
   }
   if (group === 'answers' && action === 'add') {
@@ -641,7 +712,13 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'tailor' && action === 'resume') {
     const jobId = requireFlag(flags, 'job');
-    const r = await tailor(s, jobId, needProfile(flags), 'resume');
+    const layout = flags.layout ? String(flags.layout) : null;
+    const pageSize = flags['page-size'] ? String(flags['page-size']).toLowerCase() : 'letter';
+    const format = flags.format ? String(flags.format).toLowerCase() : 'markdown';
+    if (layout && !['professional', 'technical', 'leadership'].includes(layout)) usage('Invalid --layout; expected professional, technical, or leadership');
+    if (!['letter', 'a4'].includes(pageSize)) usage('Invalid --page-size; expected letter or a4');
+    if (!['markdown', 'pdf'].includes(format)) usage('Invalid --format; expected markdown or pdf');
+    const r = await tailor(s, jobId, needProfile(flags), 'resume', { layoutProfileId: layout, pageSize, pageLimit: numberFlag(flags, 'page-limit', 2, { min: 1 }), format });
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
     return;
@@ -897,6 +974,10 @@ export async function main(argv = process.argv.slice(2)) {
     const r = funnel(s, needProfile(flags), flags.since ? Number(flags.since) : 30);
     if (flags.output === 'markdown' && !flags.json) text(renderFunnelMarkdown(r));
     else out(r);
+    return;
+  }
+  if (group === 'analytics' && action === 'resume-feedback') {
+    out(resumeFeedback(s, needProfile(flags)));
     return;
   }
   if (group === 'tasks' && action === 'due') {
