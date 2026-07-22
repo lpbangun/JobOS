@@ -1,0 +1,11 @@
+{
+  "name": "dns-blocked",
+  "description": "W03-HTTP-05: DNS resolution returns a mix of public and loopback addresses. Mixed answers must be rejected; fetch must never be called.",
+  "url": "https://blocked.example.com/jobs",
+  "lookup": {
+    "blocked.example.com": ["8.8.8.8", "127.0.0.1"]
+  },
+  "responses": [
+    { "status": 200, "headers": {}, "body": "should not be fetched", "ok": true }
+  ]
+}

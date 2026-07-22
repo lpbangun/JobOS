@@ -81,7 +81,8 @@ npm run jobos -- profile create "PM EdTech" \
 # 2. Configure one or more public discovery sources.
 npm run jobos -- searches create "Acme Greenhouse" \
   --profile pm-edtech --adapter greenhouse --board-token acme \
-  --keywords product,learning --location remote --json
+  --keywords product,learning --location remote --posted-within-days 30 \
+  --remote-only --employment-types full_time,contract --json
 
 # Hidden-source examples:
 npm run jobos -- searches create "Startup portfolio" \
@@ -233,7 +234,11 @@ Discovery sources:
 - `career-page`: public Schema.org `JobPosting` and direct job-link extraction.
 - `portfolio`: bounded VC/startup routing across up to 30 companies and recognized ATS targets.
 
-Portfolio runs cap each request at 10 seconds, the run at 60 seconds, and total requests at 90. A cap or child-source failure returns partial jobs plus structured failure metadata instead of discarding completed work. Public-page adapters reject private, loopback, link-local, credential-bearing, and unsafe redirect targets.
+Every saved-search run shares one bounded transport budget across listing requests, retries, redirects, portfolio children, and in-run liveness checks: 10 seconds per request, 60 seconds elapsed, and 90 requests by default. Public `429` and `503` responses retry at most twice, honor safe `Retry-After` values, and retain DNS, credential, SSRF, redirect, timeout, and request-budget checks on every attempt. A cap, truncation, uncertain result, expired result, or child-source failure yields honest `partial`/`failed` status and structured evidence without discarding later or already completed work.
+
+Greenhouse, Lever, Ashby, and Schema.org results preserve source-native compensation, work model, employment type, and department alongside canonical fields. `--posted-within-days`, `--remote-only`, and `--employment-types` filter normalized results before import. SQLite and `job.yaml` retain those fields through refreshes; omitted refresh values do not erase earlier meaningful source data.
+
+Posting liveness is separate from candidate fit. Current ATS listings and explicit apply controls are `active`; definitive closure/status evidence is `expired`; anti-bot pages, rate limits, timeouts, conflicting evidence, ambiguous pages, and manual text imports remain `uncertain`. Results are fresh for 24 hours. Scoring and pursuit reuse fresh evidence, refresh stale public evidence, block known-expired jobs without archiving them, and allow uncertain local work with a visible warning. The `jobos.posting-liveness.v1` handoff is exposed in CLI/domain/TUI/workspace output without adding a fit-score dimension, penalty, or boost.
 
 Company board targets are canonical saved searches. The legacy `watchlist add` command remains as a deprecated compatibility alias and now creates an executable company-search preset. Existing profile-less watchlist rows can be migrated explicitly with `jobos searches migrate-watchlist --profile <profile-id> --json`; multi-profile workspaces must choose the destination profile.
 

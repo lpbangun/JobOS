@@ -8,7 +8,7 @@ import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRu
 import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
-import { importUrl, listJobs } from './jobs.js';
+import { getJobLiveness, getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
@@ -206,6 +206,12 @@ function publicJob(row) {
     scoringMode: parseJson(row.score_json, {})?.mode || null,
     applicationStatus: row.application_status || null,
     url: String(row.url || '').startsWith('jobos:text:') ? '' : (row.url || ''),
+    compensation: parseJson(row.compensation_json, {}),
+    workModel: row.work_model || 'unknown',
+    employmentTypes: parseJson(row.employment_types_json, []),
+    department: row.department || '',
+    sourceNativeFields: parseJson(row.source_native_json, {}),
+    liveness: getJobLiveness(row),
     updatedAt: row.updated_at
   };
 }
@@ -287,8 +293,15 @@ export function selectedJobContext(s, jobId) {
       source: job.source,
       discoveryStatus: job.status,
       applicationId: job.application_id || null,
-      applicationStatus: job.application_status || null
+      applicationStatus: job.application_status || null,
+      compensation: parseJson(job.compensation_json, {}),
+      workModel: job.work_model || 'unknown',
+      employmentTypes: parseJson(job.employment_types_json, []),
+      department: job.department || '',
+      sourceNativeFields: parseJson(job.source_native_json, {}),
+      postingLiveness: getPostingLiveness(job),
     },
+    liveness: getPostingLiveness(job),
     fit: job.fit_score == null ? null : {
       overall: Number(job.fit_score),
       highFit: Boolean(job.high_fit),

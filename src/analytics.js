@@ -3,6 +3,7 @@ import { one, all, run, save, audit } from './db.js';
 import { now, id, parseJson } from './utils.js';
 import { writeMd } from './workspace.js';
 import { openTasks } from './tracking.js';
+import { deserializeLiveness } from './discovery/liveness.js';
 import { listSearches, listWatchlist, discoveryRuns, reviewQueue } from './discovery.js';
 import { listOutreachThreads, outreachDue } from './outreach.js';
 import { listContactPoints } from './research/contacts.js';
@@ -11,7 +12,7 @@ import { listAutomations, listRuns } from './scheduler/store.js';
 export function state(s) {
   return {
     profiles: all(s, 'SELECT id,name,preferences_json,created_at,updated_at FROM profiles ORDER BY created_at'),
-    jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: parseJson(x.score_json, null), requirements: parseJson(x.requirements_json, []) })),
+    jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: parseJson(x.score_json, null), requirements: parseJson(x.requirements_json, []), liveness: deserializeLiveness(x) })),
     applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
     statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
     artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
@@ -153,7 +154,7 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const staleRuns = all(s, `SELECT id,job_id,scope,finished_at FROM research_runs WHERE profile_id=? AND status IN ('succeeded','partial') AND finished_at<? ORDER BY finished_at ASC LIMIT 3`, [pid, cutoff]);
   const staleRunLines = staleRuns.map(r => `- Run ${r.id} (${r.scope}) finished ${r.finished_at}. Run \`jobos research runs resume ${r.id}\` to refresh.`).join('\n') || '';
-  const highFitNoRun = all(s, `SELECT j.id,j.title,j.company,j.fit_score FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND rr.id IS NULL ORDER BY j.fit_score DESC LIMIT 5`, [pid, pid]);
+  const highFitNoRun = all(s, `SELECT j.id,j.title,j.company,j.fit_score FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND COALESCE(j.liveness_status,'uncertain')<>'expired' AND rr.id IS NULL ORDER BY j.fit_score DESC LIMIT 5`, [pid, pid]);
   const highFitLines = highFitNoRun.map(j => `- ${j.title} at ${j.company} (${j.fit_score ?? 'unscored'}/100). Run \`jobos research people --scope job --job ${j.id} --profile ${pid} --depth standard\` to start.`).join('\n') || '';
   const networkIntent = parseJson(prof.preferences_json, {}).networkIntent;
   const networkSetupStatus = networkIntent?.completedAt ? 'complete' : 'not started or incomplete';

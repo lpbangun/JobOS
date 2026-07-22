@@ -1,6 +1,6 @@
 import { one, all, run, save, audit } from './db.js';
 import { parseJson, tokenize, redFlags, now } from './utils.js';
-import { syncJob } from './jobs.js';
+import { assertJobLivenessGate, resolveJobLiveness, syncJob } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 import { listProofs } from './profiles.js';
 import { requirementTextsForJob } from './requirements.js';
@@ -136,12 +136,15 @@ function scoringPrompt({ job, prof, proofs }) {
   return `Score this job for the candidate. Use the candidate profile, preferences, proof points, and job description. Do not use keyword counting. Return JSON with: overall number 0-100, confidence low|medium|high, dimensions.roleFit/domainFit/seniority/locationWorkModel/compensation/missionInterest/networkAccess/redFlags each {score, reason}, redFlags array, reasoning string. Each dimension reason must be 2-3 sentences.\n\nPROFILE:\n${JSON.stringify({ id: prof.id, name: prof.name, preferences: prefs }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs, null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, location: job.location, description: job.description, requirements: parseJson(job.requirements_json, []) }, null, 2)}`;
 }
 
-export async function score(s, jid, pid) {
-  const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+export async function score(s, jid, pid, opts = {}) {
+  let job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) throw Error(`Unknown job: ${jid}`);
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   if (job.profile_id !== pid) throw Object.assign(new Error(`Job ${jid} belongs to profile ${job.profile_id}, not ${pid}`), { code: 'profile_job_mismatch', type: 'validation' });
+  const liveness = await resolveJobLiveness(s, jid, opts);
+  assertJobLivenessGate(liveness, 'be scored');
+  job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   const proofs = listProofs(s, pid);
   const fallback = deterministicScore(job, prof, proofs);
   const cfg = llmConfig();
@@ -159,10 +162,12 @@ export async function score(s, jid, pid) {
       out = { ...out, llmError: e.message, reasoning: `${out.reasoning} LLM call failed: ${e.message}` };
     }
   }
+  out.postingLiveness = liveness.handoff;
+  if (liveness.warning) out.warnings = [...(out.warnings || []), liveness.warning];
   // Override networkAccess with evidence from people-research runs
   out.dimensions.networkAccess = networkAccessFromEvidence(s, { jobId: jid, profileId: pid });
   run(s, 'UPDATE jobs SET fit_score=?, score_json=?, updated_at=? WHERE id=?', [out.overall, JSON.stringify(out), now(), jid]);
-  audit(s, 'job.scored', 'job', jid, { jobId: jid, profileId: pid, overall: out.overall, mode: out.mode });
+  audit(s, 'job.scored', 'job', jid, { jobId: jid, profileId: pid, overall: out.overall, mode: out.mode, postingLiveness: liveness.handoff });
   syncJob(s, jid);
   save(s);
   return out;

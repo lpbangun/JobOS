@@ -1,0 +1,9 @@
+{
+  "name": "retry-429-then-200",
+  "description": "W03-HTTP-01: 429 then 200. Retry-After delta 0 (within 10s cap) so sleep(0) is recorded and the second fetch is made immediately.",
+  "url": "https://api.example.com/v1/boards/acme/jobs?content=true",
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[{\"id\":1,\"title\":\"Engineer\",\"absolute_url\":\"https://example.com/jobs/1\"}]}", "ok": true }
+  ]
+}

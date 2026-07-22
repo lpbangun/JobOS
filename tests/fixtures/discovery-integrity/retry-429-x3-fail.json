@@ -1,0 +1,10 @@
+{
+  "name": "retry-429-x3-fail",
+  "description": "W03-HTTP-01: 429, 429, 429. Three attempts then terminal failure. No 4th attempt.",
+  "url": "https://api.example.com/v1/boards/acme/jobs?content=true",
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false }
+  ]
+}

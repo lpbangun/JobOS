@@ -1,0 +1,22 @@
+{
+  "name": "retry-after-invalid",
+  "description": "W03-HTTP-03: malformed or non-IMF Retry-After values fall back to 250ms then 500ms. Test iterates the invalidHeaders list, substituting each into the first response's retry-after header.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "invalidHeaders": [
+    "",
+    "abc",
+    "-1",
+    "2.5",
+    "Fri, 01 Jan 1990 00:00:00 GMT",
+    "Thursday, 01-Jan-90 00:00:00 GMT",
+    "Wed Oct 21 07:28:00 2015"
+  ],
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "<invalid>" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ],
+  "expectedFallback": {
+    "firstRetryMs": 250,
+    "secondRetryMs": 500
+  }
+}

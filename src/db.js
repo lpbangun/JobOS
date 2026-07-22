@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, preferences_json TEXT NOT NULL, resume_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS proof_points (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', metrics_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'manual', metadata_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','retired','needs_verification')), verification_status TEXT NOT NULL DEFAULT 'verified' CHECK(verification_status IN ('verified','unverified','rejected')), source_resume_entry_id TEXT, supersedes_proof_point_id TEXT, updated_at TEXT NOT NULL, retired_at TEXT, retirement_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_proof_point_id) REFERENCES proof_points(id));
 CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL, website TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '[]', domain TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]', source_confidence TEXT NOT NULL DEFAULT 'low', identity_sources_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, company_id TEXT, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', description TEXT NOT NULL, requirements_json TEXT NOT NULL DEFAULT '[]', compensation TEXT NOT NULL DEFAULT '', work_model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'imported', fit_score INTEGER, score_json TEXT, high_fit INTEGER NOT NULL DEFAULT 0, posted_date TEXT NOT NULL DEFAULT '', dedupe_key TEXT NOT NULL DEFAULT '', source_history_json TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT, last_seen_at TEXT, reposted INTEGER NOT NULL DEFAULT 0, discovery_run_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,url), FOREIGN KEY(profile_id) REFERENCES profiles(id));
+CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, company_id TEXT, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', description TEXT NOT NULL, requirements_json TEXT NOT NULL DEFAULT '[]', compensation TEXT NOT NULL DEFAULT '', compensation_json TEXT NOT NULL DEFAULT '{}', work_model TEXT NOT NULL DEFAULT '', employment_types_json TEXT NOT NULL DEFAULT '[]', department TEXT NOT NULL DEFAULT '', source_native_json TEXT NOT NULL DEFAULT '{}', liveness_status TEXT NOT NULL DEFAULT 'uncertain', liveness_checked_at TEXT, liveness_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'imported', fit_score INTEGER, score_json TEXT, high_fit INTEGER NOT NULL DEFAULT 0, posted_date TEXT NOT NULL DEFAULT '', dedupe_key TEXT NOT NULL DEFAULT '', source_history_json TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT, last_seen_at TEXT, reposted INTEGER NOT NULL DEFAULT 0, discovery_run_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,url), FOREIGN KEY(profile_id) REFERENCES profiles(id));
 CREATE TABLE IF NOT EXISTS saved_searches (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, profile_id TEXT NOT NULL, adapter TEXT NOT NULL, config_json TEXT NOT NULL DEFAULT '{}', min_fit INTEGER NOT NULL DEFAULT 70, last_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id));
 CREATE TABLE IF NOT EXISTS company_watchlist (id TEXT PRIMARY KEY, company TEXT NOT NULL, adapter TEXT NOT NULL, handle TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(company,adapter,handle));
 CREATE TABLE IF NOT EXISTS stakeholders (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', links_json TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', outreach_status TEXT NOT NULL DEFAULT 'not_contacted', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -114,6 +114,13 @@ function migrate(db){
     "ALTER TABLE jobs ADD COLUMN last_seen_at TEXT",
     "ALTER TABLE jobs ADD COLUMN reposted INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN discovery_run_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN compensation_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE jobs ADD COLUMN employment_types_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE jobs ADD COLUMN department TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN source_native_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE jobs ADD COLUMN liveness_status TEXT NOT NULL DEFAULT 'uncertain'",
+    "ALTER TABLE jobs ADD COLUMN liveness_checked_at TEXT",
+    "ALTER TABLE jobs ADD COLUMN liveness_json TEXT NOT NULL DEFAULT '{}'",
     "ALTER TABLE automation_runs ADD COLUMN automation_id TEXT",
     "ALTER TABLE automation_runs ADD COLUMN action_id TEXT",
     "ALTER TABLE automation_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'",
@@ -549,10 +556,10 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','8']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','9']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '8') save(store);
+  if (!existed || previousSchemaVersion !== '9') save(store);
   return store;
 }
 

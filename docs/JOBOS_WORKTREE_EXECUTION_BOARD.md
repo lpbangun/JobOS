@@ -25,7 +25,7 @@ A branch-local passing test does not mean `DONE`. A partial slice does not compl
 |---|---|---:|---|---|---|---|
 | W01 | Candidate truth and complete document pipeline | P0 | **IN_PROGRESS** | Existing user-managed tailored-resume worktree | Preserve artifact/proof/packet contracts | Confirm whether active branch covers only tailoring or the full W01 schema, validation, and renderer scope |
 | W02 | Live form, answer readiness, and packet bridge | P0 | PLANNED | Unassigned | W01 artifact/document interface frozen | Choose stable form-snapshot, field-map, and packet-binding contract |
-| W03 | Discovery integrity, liveness, and normalized intake | P0 | PLANNED | Unassigned | None | Freeze normalized job and liveness result shapes before W04 integration |
+| W03 | Discovery integrity, liveness, and normalized intake | P0 | `READY_FOR_MERGE` | `fix/discovery-integrity` | None; implemented on the integrated W01 base while preserving its schema/workflow contracts | Integration owner review, merge, and merged-runtime verification; W04 may consume `jobos.posting-liveness.v1` without treating it as fit |
 | W04 | Fit consistency, legitimacy boundary, and calibration | P0 | PLANNED | Unassigned | W03 legitimacy contract; W06 aggregate interface for calibration | Separate immediate score-math fix from later outcome calibration without splitting ownership |
 | W05 | Contact confidence, outreach relevance, and outcomes | P1 | PLANNED | Unassigned | Existing research/outreach contracts | Freeze inspectable confidence components and lightweight outcome vocabulary |
 | W06 | Lifecycle next actions, follow-up, velocity, and analytics | P1 | PLANNED | Unassigned | Stable status/attestation events | Freeze one-current-next-action and observation/aggregate interfaces for W04/W07/W08 |
@@ -97,14 +97,17 @@ These briefs are intentionally meta-level. A new worktree should inspect current
 
 **Must not own:** proxy/TLS evasion, authenticated-board arms races, candidate-fit math (W04), application form filling (W02), or automatic preference mutation (W08).
 
-**Acceptance evidence to record:**
+**Implementation note (2026-07-22):** All approved Phases 0–6 are complete on `fix/discovery-integrity`. The worktree was rebased onto the integrated W01 base before touching shared files, preserves W01 resume/proof/artifact/packet behavior, and is ready for integration-owner review.
 
-- `429`/`503` with bounded `Retry-After` recovery;
-- one bad result while later results import successfully;
-- child failure produces `partial` rather than `succeeded`;
-- native compensation/work model/type round-trip;
-- active/expired/uncertain examples including anti-bot uncertainty;
-- recency/remote/type filtering.
+**Acceptance evidence:**
+
+- `W03-HTTP-01`–`W03-HTTP-05`: one shared run-level request/time budget, bounded `429`/`503` recovery, safe `Retry-After`, redirect, timeout, credential, DNS, and SSRF behavior pass;
+- `W03-FILTER-01`–`W03-FILTER-02`: deterministic recency, remote-only, employment-type, keyword, and location precedence pass through adapter, saved-search, CLI, and workspace round trips;
+- `W03-LIVE-01`–`W03-LIVE-03`: `active | expired | uncertain` classification and separate versioned evidence pass for ATS listings, closure evidence, anti-bot/transport ambiguity, and conflicts;
+- `W03-ISO-01`–`W03-ISO-02`, `W03-RUN-01`–`W03-RUN-03`: per-result import/score/liveness failures are isolated; `succeeded | partial | failed` reduces consistently through run-all, daily, scheduler persistence, audit vocabulary, and workspace mirrors;
+- `W03-FIELD-01`–`W03-FIELD-02`, `W03-COMPAT-01`: structured compensation, work model, employment type, department, source-native fields, and liveness survive persistence, refresh, dedupe, CLI/domain/TUI projection, and legacy migration;
+- `W03-GATE-01`–`W03-GATE-03`, `W03-HANDOFF-01`: fresh known-expired jobs cannot score or pursue; uncertain jobs remain usable with warnings; 24-hour freshness refreshes only at the boundary; `jobos.posting-liveness.v1` remains separate from candidate-fit math;
+- `W03-SAFETY-01`: provenance, dedupe/repost history, review queues, profile ownership, and zero external side effects remain intact.
 
 ### W04 — Fit consistency, legitimacy boundary, and calibration
 
@@ -308,6 +311,7 @@ During integration:
 
 | Date | Bundle | Integrated change | Runtime proof | Contract tests | Known remaining scope |
 |---|---|---|---|---|---|
+| 2026-07-22 | W03 | Ready-for-merge worktree: discovery retries/isolation, normalized intake, honest run states, persisted liveness, and score/pursuit gates; not yet integrated | `npm run smoke` passed in a clean temporary workspace with active/expired/uncertain fixture-backed discovery, expired score/pursuit rejection, scheduler output, and no external effects | `npm test` 265/265; W03 combined suite 25/25; compatibility suites 62/62; critic iteration 2 `CONVERGED` | Integration-owner merge and merged-runtime verification; W04 consumes the separate liveness handoff |
 | — | — | No parity bundle is yet recorded as integrated | — | — | W01 tailored-resume work is reported in progress |
 
 ## 9. Decision ledger
