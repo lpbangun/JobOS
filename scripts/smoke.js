@@ -15,10 +15,21 @@ function run(args, raw = false) {
 try {
   const guide = JSON.parse(run(['agent-guide', '--json']));
   if (!guide.commands?.length || !existsSync(path.join(root, '.jobos', 'jobos.sqlite')) || !existsSync(path.join(root, 'jobos-workspace'))) throw new Error('First command did not auto-create the JobOS workspace');
-  const resume = path.join(root, 'resume.md');
-  writeFileSync(resume, '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.\n');
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--json']));
-  JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led evidence-backed EdTech product discovery and launch execution', '--evidence', 'Resume source: reduced manual review time by 30%', '--skills', 'product discovery,stakeholder management,launch execution', '--json']));
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
+  const proof = JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', '--evidence', 'Verified portfolio case study', '--skills', 'product discovery,user research,stakeholder management,launch execution', '--json']));
+  const resume = path.join(root, 'resume.json');
+  writeFileSync(resume, JSON.stringify({
+    schemaVersion: 1,
+    identity: { name: 'Morgan Candidate', email: 'morgan@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_main', text: 'Product leader building evidence-grounded learning workflows.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_learning', employer: 'Learning Studio', title: 'Senior Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_discovery', text: 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_state', institution: 'State University', degree: 'BS', field: 'Information Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_discovery', name: 'Product discovery', category: 'Product', verificationStatus: 'verified' }, { id: 'skill_research', name: 'User research', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  }, null, 2));
+  JSON.parse(run(['resume', 'import', '--profile', profile.id, '--file', resume, '--json']));
   JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json'), '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   const discovery = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   if (discovery.status !== 'succeeded' || discovery.counts.imported !== 1 || discovery.counts.highFit < 1) throw new Error('Fixture-backed discovery run did not import and flag a high-fit job');
@@ -26,7 +37,7 @@ try {
   const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
   if (!(score.overall > 0)) throw new Error('Score did not compute');
   const resumeDraft = run(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
-  if (!resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft missing evidence section');
+  if (!resumeDraft.includes('## Experience') || !resumeDraft.includes('## Education') || resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft was not a complete semantic resume');
   run(['tailor', 'cover-letter', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
   const app = JSON.parse(run(['applications', 'create', '--job', job.id, '--status', 'materials-ready', '--json']));
   const unansweredPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
@@ -123,6 +134,15 @@ try {
   if (!briefPath || !readFileSync(path.join(root, 'jobos-workspace', briefPath), 'utf8').includes('Morning priority brief')) throw new Error('Scheduler did not write priority brief export');
   const runDay = schedulerRun.runs[0].createdAt.slice(0, 10);
   if (!readFileSync(path.join(root, 'jobos-workspace', 'automations', `runs-${runDay}.jsonl`), 'utf8').includes('smoke_brief')) throw new Error('Scheduler did not append automation run JSONL');
+  const revisedResume = JSON.parse(readFileSync(resume, 'utf8'));
+  revisedResume.summary.text = 'Product leader building verified, evidence-grounded learning workflows.';
+  const revisedResumePath = path.join(root, 'resume-revised.json');
+  writeFileSync(revisedResumePath, JSON.stringify(revisedResume, null, 2));
+  JSON.parse(run(['resume', 'replace', '--profile', profile.id, '--file', revisedResumePath, '--json']));
+  const stalePlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (!stalePlan.blockers.some(item => item.code === 'resume_stale_source_revision')) throw new Error('Canonical resume revision did not stale the tailored artifact');
+  const stalePacket = JSON.parse(run(['apply', 'packet', 'show', applicationPacket.id, '--json']));
+  if (stalePacket.currency !== 'stale') throw new Error('Canonical resume revision did not stale the frozen packet');
   console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, humanReview: { readyForReview: reviewPlan.status, approved: approvedPlan.status, reviewedArtifactIds: reviewQueue.map(item => item.id), applicationStatusChanged: false, externalSideEffects: 'none' }, receiptSpine: { packetId: applicationPacket.id, contentHash: applicationPacket.contentHash, receiptState: confirmedPlan.packet.receiptState, receiptCount: receiptRows.length, appliedStatusBound: true, submissionPerformed: false, externalSideEffects: 'none' }, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
 } finally {
   if (!process.env.KEEP_JOBOS_SMOKE) rmSync(root, { recursive: true, force: true });

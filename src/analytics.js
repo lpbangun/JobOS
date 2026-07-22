@@ -174,3 +174,69 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   save(s);
   return { runId: rid, path: rel, content, metrics };
 }
+
+export function resumeFeedback(s, profileId, { minimumSampleSize = 10, minimumBandSize = 3 } = {}) {
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const rows = all(s, `SELECT a.id AS artifact_id,a.job_id,ard.coverage_json,app.status AS application_status
+    FROM artifacts a
+    JOIN artifact_resume_documents ard ON ard.artifact_id=a.id
+    LEFT JOIN applications app ON app.job_id=a.job_id AND app.profile_id=a.profile_id
+    WHERE a.profile_id=? AND a.type='resume'
+      AND a.revision=(SELECT MAX(a2.revision) FROM artifacts a2 WHERE a2.series_key=a.series_key)
+    ORDER BY a.job_id,a.id`, [profileId]);
+  const unsupported = new Map();
+  const observedStatuses = new Set(['recruiter-screen', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn']);
+  const positiveStatuses = new Set(['recruiter-screen', 'interview', 'offer']);
+  const bands = new Map([['low', []], ['medium', []], ['high', []]]);
+  for (const row of rows) {
+    const coverage = parseJson(row.coverage_json, {});
+    for (const item of coverage.unsupported || []) {
+      const requirement = item.requirement || {};
+      const key = String(requirement.sourceText || item.requirementId || '').trim().toLowerCase();
+      if (!key) continue;
+      if (!unsupported.has(key)) unsupported.set(key, { sourceText: requirement.sourceText, category: requirement.category || 'unknown', priority: requirement.priority || 'must_have', occurrences: [] });
+      unsupported.get(key).occurrences.push({ jobId: row.job_id, artifactId: row.artifact_id, requirementId: item.requirementId, proofPointIds: [], sourceEntryIds: [] });
+    }
+    const ratio = Number(coverage.summary?.coverageRatio || 0);
+    const band = ratio < 0.34 ? 'low' : ratio < 0.67 ? 'medium' : 'high';
+    if (observedStatuses.has(row.application_status)) bands.get(band).push({ jobId: row.job_id, artifactId: row.artifact_id, applicationStatus: row.application_status, positiveOutcome: positiveStatuses.has(row.application_status), coverageRatio: ratio });
+  }
+  const recurringUnsupported = [...unsupported.values()]
+    .map(item => ({ ...item, count: item.occurrences.length }))
+    .sort((left, right) => right.count - left.count || left.sourceText.localeCompare(right.sourceText));
+  const bandSummaries = [...bands.entries()].map(([band, samples]) => ({ band, sampleSize: samples.length, positiveOutcomes: samples.filter(sample => sample.positiveOutcome).length, positiveOutcomeRate: samples.length ? samples.filter(sample => sample.positiveOutcome).length / samples.length : null, samples }));
+  const observedSampleSize = bandSummaries.reduce((total, band) => total + band.sampleSize, 0);
+  const comparableBands = bandSummaries.filter(band => band.sampleSize >= minimumBandSize);
+  const comparisonAvailable = observedSampleSize >= minimumSampleSize && comparableBands.length >= 2;
+  const recommendations = recurringUnsupported.slice(0, 10).map(item => ({
+    type: 'proof_or_targeting_improvement',
+    requirement: item.sourceText,
+    count: item.count,
+    action: `If this experience is true, add or verify a proof point for "${item.sourceText}". Otherwise, preserve it as a gap and reconsider roles where it is required.`,
+    sources: item.occurrences
+  }));
+  return {
+    schemaVersion: 1,
+    profileId,
+    artifactSampleSize: rows.length,
+    observedOutcomeSampleSize: observedSampleSize,
+    recurringUnsupported,
+    outcomeComparison: {
+      available: comparisonAvailable,
+      minimumSampleSize,
+      minimumBandSize,
+      bands: bandSummaries,
+      uncertainty: comparisonAvailable
+        ? 'Observed association only; coverage does not establish causation.'
+        : `Insufficient data: need at least ${minimumSampleSize} observed outcomes and two coverage bands with at least ${minimumBandSize} samples each.`,
+      causalClaim: false
+    },
+    recommendations,
+    generatedClaims: [],
+    policy: {
+      createsResumeClaims: false,
+      modifiesProofs: false,
+      externalSideEffects: 'none'
+    }
+  };
+}

@@ -5,8 +5,10 @@ import { id, now, slug, parseJson } from './utils.js';
 import { one, all, run, save, audit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
 import { scoreMd } from './scoring.js';
+import { extractRequirementInventory } from './requirements.js';
 
-export function requirements(text){ return String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean).filter(l=>/require|qualification|experience|skill|must|responsibil|you will|we need|looking for|preferred|ability/i.test(l)).slice(0,20); }
+export function requirementInventory(text){ return extractRequirementInventory(text); }
+export function requirements(text){ return requirementInventory(text).requirements.map(requirement => requirement.sourceText); }
 export function parseJob(text, fb={}){ const lines=String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean); const find=k=>lines.find(l=>new RegExp('^'+k+'\\s*:','i').test(l))?.replace(new RegExp('^'+k+'\\s*:\\s*','i'),''); const heading=lines.find(l=>/^#\s+/.test(l)); return {title:fb.title||find('title')||(heading?heading.replace(/^#\s+/,''):'Imported role'),company:fb.company||find('company')||'Unknown company',location:fb.location||find('location')||'',description:text}; }
 export function ensureCompany(s,name){ const cid=slug(name||'unknown-company'), at=now(); run(s,'INSERT OR IGNORE INTO companies (id,name,created_at,updated_at) VALUES (?,?,?,?)',[cid,name||'Unknown company',at,at]); return one(s,'SELECT * FROM companies WHERE id=?',[cid]); }
 function publicUrl(u){ return String(u || '').startsWith('jobos:text:') ? '' : (u || ''); }
@@ -43,14 +45,14 @@ export function importNormalized(s,{profileId,job,source='discovery',status='new
     const history=appendSourceHistory(ex,entry), reposted=isRepost(ex,entry,at)?1:Number(ex.reposted||0);
     const nextUrl=(!publicUrl(ex.url)&&publicUrl(dbUrl)&&!one(s,'SELECT id FROM jobs WHERE profile_id=? AND url=? AND id<>?',[profileId,dbUrl,ex.id])) ? dbUrl : ex.url;
     const nextDescription=normalized.description||ex.description;
-    run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, posted_date=?, dedupe_key=?, last_seen_at=?, source_history_json=?, reposted=?, discovery_run_id=?, updated_at=? WHERE id=?',[company.id,normalized.title,normalized.company,normalized.location,nextUrl,normalized.source,nextDescription,JSON.stringify(requirements(nextDescription)),normalized.postedDate||ex.posted_date||'',key,at,JSON.stringify(history),reposted,runId||ex.discovery_run_id||'',at,ex.id]);
+    run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, posted_date=?, dedupe_key=?, last_seen_at=?, source_history_json=?, reposted=?, discovery_run_id=?, updated_at=? WHERE id=?',[company.id,normalized.title,normalized.company,normalized.location,nextUrl,normalized.source,nextDescription,JSON.stringify(requirementInventory(nextDescription)),normalized.postedDate||ex.posted_date||'',key,at,JSON.stringify(history),reposted,runId||ex.discovery_run_id||'',at,ex.id]);
     audit(s,'job.seen_again','job',ex.id,{jobId:ex.id,profileId,source:normalized.source,url:publicUrl(dbUrl),created:false,reposted:Boolean(reposted)});
     syncJob(s,ex.id); save(s); return {job:one(s,'SELECT * FROM jobs WHERE id=?',[ex.id]),created:false,deduped:true};
   }
   const jid=id('job',`${profileId}:${dbUrl}:${key}:${normalized.description.slice(0,200)}`);
   const history=[entry];
   const reposted=possibleDuplicates.some(existing=>isRepost(existing,entry,at))?1:0;
-  run(s,'INSERT INTO jobs (id,profile_id,company_id,title,company,location,url,source,description,requirements_json,status,posted_date,dedupe_key,source_history_json,first_seen_at,last_seen_at,reposted,discovery_run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',[jid,profileId,company.id,normalized.title,normalized.company,normalized.location,dbUrl,normalized.source,normalized.description,JSON.stringify(requirements(normalized.description)),status,normalized.postedDate,key,JSON.stringify(history),at,at,reposted,runId,at,at]);
+  run(s,'INSERT INTO jobs (id,profile_id,company_id,title,company,location,url,source,description,requirements_json,status,posted_date,dedupe_key,source_history_json,first_seen_at,last_seen_at,reposted,discovery_run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',[jid,profileId,company.id,normalized.title,normalized.company,normalized.location,dbUrl,normalized.source,normalized.description,JSON.stringify(requirementInventory(normalized.description)),status,normalized.postedDate,key,JSON.stringify(history),at,at,reposted,runId,at,at]);
   const inserted=one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
   createPossibleDuplicateTask(s,inserted,possibleDuplicates,at);
   audit(s,'job.imported','job',jid,{jobId:jid,profileId,source:normalized.source,url:publicUrl(dbUrl),status,reposted:Boolean(reposted)});

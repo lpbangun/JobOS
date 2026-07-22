@@ -9,7 +9,7 @@
   "scripts": {
     "jobos": "node src/cli.js",
     "tui": "node src/cli.js tui",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
     "smoke": "node scripts/smoke.js",
     "acp-demo": "node scripts/acp-demo.js",
     "mcp-demo": "node scripts/mcp-demo.js"

@@ -69,19 +69,33 @@ const SAMPLE_JOB = [
   'Benefits include remote work and health coverage.',
 ].join('\n');
 
-const SAMPLE_RESUME_FULL = [
-  '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.',
-  '- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.',
-  '- Built dashboards and weekly operating reviews that connected adoption data to roadmap decisions.',
-].join('\n');
+function sampleResume(bullets) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    identity: { name: 'PM Candidate', email: 'pm@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_readiness', text: 'Product manager focused on learning platforms.', proofPointIds: [], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_readiness', employer: 'Learning Studio', title: 'Product Manager', location: 'Remote', startDate: '2020-01', endDate: null, dateSource: { startText: '2020-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: bullets.map((text, index) => ({ id: `bullet_readiness_${index}`, text, proofPointIds: [], verificationStatus: 'verified' })) }],
+    education: [{ id: 'education_readiness', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_readiness', name: 'Product discovery', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  }, null, 2);
+}
 
-const SAMPLE_RESUME_SHORT = '- Built a thing.\n';
+const SAMPLE_RESUME_FULL = sampleResume([
+  'Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.',
+  'Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.',
+  'Built dashboards and weekly operating reviews that connected adoption data to roadmap decisions.'
+]);
+
+const SAMPLE_RESUME_SHORT = sampleResume(['Built a product workflow.']);
 
 // ── Shape contract — plan structure ──────────────────────────────────
 
 test('readiness: plan contains all top-level shape fields', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -193,7 +207,7 @@ test('readiness: plan contains all top-level shape fields', () => {
 
 test('readiness: blocked plan when score, proofs, and resume are missing', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -226,7 +240,7 @@ test('readiness: blocked plan when score, proofs, and resume are missing', () =>
 
 test('readiness: blocked plan shows unmatched and restricted-answer blockers', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -269,7 +283,7 @@ test('readiness: blocked plan shows unmatched and restricted-answer blockers', (
 
 test('readiness: ready-for-review with score, proofs, resume, matched ordinary, and direct-input restricted answers', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -296,6 +310,18 @@ test('readiness: ready-for-review with score, proofs, resume, matched ordinary, 
   out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
     '--question', 'Describe your experience with: - 4+ years product management experience in EdTech.',
     '--answer', 'I have over 5 years of product management experience in EdTech.',
+    '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe your experience with: - Strong written communication and stakeholder management.',
+    '--answer', 'I have led written stakeholder communication for cross-functional product teams.',
+    '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe your experience with: - Evidence of launching products with measurable outcomes.',
+    '--answer', 'I launched products and tracked measurable workflow outcomes.',
+    '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe your experience with: - Comfort with remote collaboration across US time zones.',
+    '--answer', 'I have collaborated remotely with distributed teams across US time zones.',
     '--sensitivity', 'public', '--status', 'verified']);
   // Add direct restricted answers scoped to this job (required for direct_input_recording)
   out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
@@ -344,19 +370,20 @@ test('readiness: ready-for-review with score, proofs, resume, matched ordinary, 
 
 test('readiness: current human-approved resume transitions ready-for-review to approved, then a redraft returns it to ready-for-review', async () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
+  const { openStore, one, run, save } = await import('../src/db.js');
+  const store = await openStore({ workspace: root });
+  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', [JSON.stringify({ schemaVersion: 1, requirements: [{ id: 'requirement_supported', sourceText: 'Led discovery with educators and operations teams', sourceLine: 1, category: 'responsibility', priority: 'must_have', normalizedTerms: ['discovery', 'educators', 'operations', 'teams'], years: null, credential: null }] }), imported.id]);
+  run(store, "UPDATE proof_points SET verification_status='verified' WHERE profile_id=?", ['pm']);
+  save(store);
   out(['proof', 'add', '--profile', 'pm', '--summary', 'Led EdTech product discovery', '--evidence', 'Reduced manual review by 30%']);
   out(['score', imported.id, '--profile', 'pm']);
   out(['tailor', 'resume', '--job', imported.id, '--profile', 'pm']);
   out(['applications', 'create', '--job', imported.id, '--status', 'researching']);
 
-  const { openStore, one, run, save } = await import('../src/db.js');
-  const store = await openStore({ workspace: root });
-  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', ['[]', imported.id]);
-  save(store);
 
   out(['answers', 'add', '--profile', 'pm', '--category', 'motivation',
     '--question', 'Why are you interested in Acme Learning Co?', '--answer', 'The mission fits my experience.',
@@ -364,6 +391,9 @@ test('readiness: current human-approved resume transitions ready-for-review to a
   out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
     '--question', 'Describe the experience that best prepares you for the Senior Product Manager, Learning Platform role.',
     '--answer', 'I have relevant product experience.', '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe your experience with: Led discovery with educators and operations teams',
+    '--answer', 'I led discovery with educators and operations teams.', '--sensitivity', 'public', '--status', 'verified']);
   out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
     '--question', 'Are you legally authorized to work in the role location?', '--answer', 'yes',
     '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
@@ -374,7 +404,7 @@ test('readiness: current human-approved resume transitions ready-for-review to a
   const draftPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
   const original = one(await openStore({ workspace: root }), `SELECT * FROM artifacts
     WHERE job_id=? AND profile_id=? AND type='resume'`, [imported.id, 'pm']);
-  assert.equal(draftPlan.status, 'ready-for-review');
+  assert.equal(draftPlan.status, 'ready-for-review', JSON.stringify(draftPlan.blockers));
   assert.equal(draftPlan.readyForReview, true);
   assert.equal(draftPlan.review.localApprovalComplete, false);
   assert.equal(draftPlan.localApprovalComplete, false);
@@ -442,18 +472,19 @@ test('readiness: current human-approved resume transitions ready-for-review to a
 
 test('readiness: nextAction walks approve → freeze → attest → confirm-receipt instead of the readiness dead end', async () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
+  const { openStore, one, run, save } = await import('../src/db.js');
+  const store = await openStore({ workspace: root });
+  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', [JSON.stringify({ schemaVersion: 1, requirements: [{ id: 'requirement_supported', sourceText: 'Led discovery with educators and operations teams', sourceLine: 1, category: 'responsibility', priority: 'must_have', normalizedTerms: ['discovery', 'educators', 'operations', 'teams'], years: null, credential: null }] }), imported.id]);
+  run(store, "UPDATE proof_points SET verification_status='verified' WHERE profile_id=?", ['pm']);
+  save(store);
   out(['proof', 'add', '--profile', 'pm', '--summary', 'Led EdTech product discovery', '--evidence', 'Reduced manual review by 30%']);
   out(['score', imported.id, '--profile', 'pm']);
   out(['tailor', 'resume', '--job', imported.id, '--profile', 'pm']);
 
-  const { openStore, one, run, save } = await import('../src/db.js');
-  const store = await openStore({ workspace: root });
-  run(store, 'UPDATE jobs SET requirements_json=? WHERE id=?', ['[]', imported.id]);
-  save(store);
 
   out(['answers', 'add', '--profile', 'pm', '--category', 'motivation',
     '--question', 'Why are you interested in Acme Learning Co?', '--answer', 'The mission fits my experience.',
@@ -461,6 +492,9 @@ test('readiness: nextAction walks approve → freeze → attest → confirm-rece
   out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
     '--question', 'Describe the experience that best prepares you for the Senior Product Manager, Learning Platform role.',
     '--answer', 'I have relevant product experience.', '--sensitivity', 'public', '--status', 'verified']);
+  out(['answers', 'add', '--profile', 'pm', '--category', 'experience_story',
+    '--question', 'Describe your experience with: Led discovery with educators and operations teams',
+    '--answer', 'I led discovery with educators and operations teams.', '--sensitivity', 'public', '--status', 'verified']);
   out(['answers', 'add', '--profile', 'pm', '--category', 'work_authorization',
     '--question', 'Are you legally authorized to work in the role location?', '--answer', 'yes',
     '--sensitivity', 'restricted', '--reuse', 'never_auto_fill', '--source', `job:${imported.id}`, '--status', 'verified']);
@@ -529,7 +563,7 @@ test('readiness: nextAction walks approve → freeze → attest → confirm-rece
 
 test('readiness: sensitive and restricted answer values are redacted in JSON plan', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -575,7 +609,7 @@ test('readiness: sensitive and restricted answer values are redacted in JSON pla
 
 test('readiness: YAML mirror is written and does not leak sensitive/restricted values', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -620,7 +654,7 @@ test('readiness: YAML mirror is written and does not leak sensitive/restricted v
 
 test('readiness: CLI and MCP return equivalent plan on stable fields', async () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -714,7 +748,7 @@ test('readiness: CLI and MCP return equivalent plan on stable fields', async () 
 
 test('readiness: duplicate matching job with applied status yields warning/blocker, never receipt claim', async () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
 
   // Import first job and mark it as applied
@@ -793,7 +827,7 @@ test('readiness: duplicate matching job with applied status yields warning/block
 
 test('readiness: pursue --dry-run returns readiness and does NOT mutate state', async () => {
   const { out, root, jobos } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -831,7 +865,7 @@ test('readiness: pursue --dry-run returns readiness and does NOT mutate state', 
 
 test('readiness: plan policy never claims automatic submission or application', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -864,7 +898,7 @@ test('readiness: plan policy never claims automatic submission or application', 
 
 test('readiness: restricted answer with sensitivity=restricted reuse=never_auto_fill satisfies local completeness while redacted', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -905,7 +939,7 @@ test('readiness: restricted answer with sensitivity=restricted reuse=never_auto_
 
 test('readiness: unscoped or other-job restricted answer does not clear the restricted blocker', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -945,7 +979,7 @@ test('readiness: unscoped or other-job restricted answer does not clear the rest
 
 test('readiness: normal pursuit reports its local status change without claiming submission', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_FULL);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
@@ -970,7 +1004,7 @@ test('readiness: normal pursuit reports its local status change without claiming
 
 test('readiness: job-scoped restricted responses coexist without re-blocking earlier jobs', () => {
   const { out, root } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', SAMPLE_RESUME_SHORT);
+  const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
   const firstFile = fixtureFile(root, 'job-one.md', SAMPLE_JOB);
   const secondFile = fixtureFile(root, 'job-two.md', SAMPLE_JOB.replaceAll('Acme Learning Co', 'Beta Learning Co').replace('Senior Product Manager, Learning Platform', 'Product Lead, Learning Platform'));

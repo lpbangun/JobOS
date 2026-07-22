@@ -3,6 +3,7 @@ import { parseJson, tokenize, redFlags, now } from './utils.js';
 import { syncJob } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 import { listProofs } from './profiles.js';
+import { requirementTextsForJob } from './requirements.js';
 
 const dimensionKeys = ['roleFit', 'domainFit', 'seniority', 'locationWorkModel', 'compensation', 'missionInterest', 'networkAccess', 'redFlags'];
 
@@ -32,7 +33,7 @@ function deterministicScore(job, prof, proofs) {
   const preferenceAlignment = preferenceSignals >= 2 ? 8 : (preferenceSignals === 1 ? 4 : 0);
   const transferableEvidence = proofHitCount >= 3 ? 4 : 0;
   const profileText = `${prof.name} ${JSON.stringify(prefs)} ${proofs.map(p => `${p.summary} ${(p.skills || []).join(' ')}`).join(' ')}`.toLowerCase();
-  const decisiveRoleText = `${job.title}\n${parseJson(job.requirements_json, []).join('\n')}`;
+  const decisiveRoleText = `${job.title}\n${requirementTextsForJob(job).join('\n')}`;
   const outsideRequestedTrack = /\b(backend|infrastructure|payments engineer|enterprise account executive|quota|salesforce|cold outbound|closing deals)\b/i.test(decisiveRoleText)
     && !/\b(backend|infrastructure|payments|engineer|developer|software|salesforce|sales|account executive|quota|business development)\b/i.test(profileText);
   const weakFitPenalty = outsideRequestedTrack ? 18 : (preferenceSignals === 0 && proofHitCount < 2 ? 18 : 0);

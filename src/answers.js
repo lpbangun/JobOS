@@ -3,6 +3,7 @@ import { all, audit, one, run, save } from './db.js';
 import { id, now, parseJson } from './utils.js';
 import { writeMd, writeYaml } from './workspace.js';
 import { generateJson, llmConfig } from './llm.js';
+import { requirementTextsForJob } from './requirements.js';
 
 export const answerCategories = new Set([
   'identity', 'contact', 'education', 'employment', 'portfolio', 'motivation',
@@ -154,7 +155,7 @@ export function matchAnswers(s, { profileId, questions, employer = '' }) {
 }
 
 function applicationQuestions(job) {
-  const requirements = parseJson(job.requirements_json, []);
+  const requirements = requirementTextsForJob(job);
   const questions = [
     { category: 'motivation', question: `Why are you interested in ${job.company}?` },
     { category: 'experience_story', question: `Describe the experience that best prepares you for the ${job.title} role.` },

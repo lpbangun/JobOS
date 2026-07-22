@@ -4,6 +4,7 @@ import { parseJson, tokenize } from './utils.js';
 import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
+import { tailorResume } from './resume-tailoring.js';
 
 function relevant(job, proofs) {
   const jt = new Set(tokenize(`${job.title}\n${job.description}`));
@@ -83,13 +84,14 @@ function renderLlmCover({ job, prof, json, proofById }) {
   return { content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${letter}\n\n## Proof-grounded claims\n${proofLines}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`, warnings, evidence: items.map(x => ({ proofPointId: x.proofPointId, requirement: x.requirement, summary: x.proof.summary, metrics: x.proof.metrics })) };
 }
 
-export async function tailor(s, jid, pid, kind) {
+export async function tailor(s, jid, pid, kind, options = {}) {
+  if (kind === 'resume') return tailorResume(s, { jobId: jid, profileId: pid, ...options });
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) throw Error(`Unknown job: ${jid}`);
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   if (job.profile_id !== pid) throw Object.assign(new Error(`Job ${jid} belongs to profile ${job.profile_id}, not ${pid}`), { code: 'profile_job_mismatch', type: 'validation' });
-  const proofs = all(s, 'SELECT * FROM proof_points WHERE profile_id=?', [pid]);
+  const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified'", [pid]);
   const enriched = relevant(job, proofs);
   const chosen = enriched.filter(p => p.relevance > 0).slice(0, kind === 'resume' ? 5 : 3);
   const warnings = [];

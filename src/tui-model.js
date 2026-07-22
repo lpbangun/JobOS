@@ -7,6 +7,8 @@ import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
 import { due } from './tracking.js';
+import { outreachDue } from './outreach.js';
+import { requirementTextsForJob } from './requirements.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set([
   'saved',
@@ -197,7 +199,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     ...selected,
     job: { ...selected.job, ...statusStage(selected.job) },
     narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
-    requirements: parseJson(selectedRow?.requirements_json, []).slice(0, 6),
+    requirements: selectedRow ? requirementTextsForJob(selectedRow).slice(0, 6) : [],
     compensation: selectedRow?.compensation || '',
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),

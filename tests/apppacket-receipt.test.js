@@ -18,6 +18,7 @@ import YAML from 'yaml';
 import { openStore, all, one, queuePostCommit, run, save } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
+import { createResumeRevision } from '../src/resumes.js';
 import { addAnswer, inspectApplicationQuestions } from '../src/answers.js';
 import { createArtifact, approveArtifact } from '../src/artifacts.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
@@ -110,7 +111,17 @@ function artifactInput(fixture, type, content) {
     content,
     evidence: [{ proofPointId: fixture.proof.id }],
     warnings: [],
-    series: { kind: cover ? 'cover_letter' : 'resume' }
+    series: { kind: cover ? 'cover_letter' : 'resume' },
+    mutate: cover ? undefined : (store, created) => run(store, 'INSERT INTO artifact_resume_documents (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json) VALUES (?,?,?,?,?,?,?,?)', [
+      created.id,
+      1,
+      fixture.resumeSemantic.sourceResumeRevisionId,
+      JSON.stringify(fixture.resumeSemantic.document),
+      JSON.stringify(fixture.resumeSemantic.coverage),
+      JSON.stringify(fixture.resumeSemantic.validation),
+      JSON.stringify(fixture.resumeSemantic.layoutProfile),
+      JSON.stringify(fixture.resumeSemantic.renderManifest)
+    ])
   };
 }
 
@@ -135,8 +146,28 @@ async function baseFixture(t, {
     ['product', 'launch'],
     ['30%']
   );
+  const resumeDocument = {
+    schemaVersion: 1,
+    identity: { name: profile.name, email: 'packet@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_packet', text: 'Product manager with evidence-backed launch experience.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_packet', employer: 'Evidence Co', title: 'Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_packet', text: proof.summary, proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_packet', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_product', name: 'Product launches', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  };
+  const resumeRevision = createResumeRevision(store, { profileId: profile.id, document: resumeDocument, sourceText: JSON.stringify(resumeDocument), verificationStatus: 'verified' });
+  const resumeSemantic = {
+    sourceResumeRevisionId: resumeRevision.id,
+    document: resumeRevision.document,
+    coverage: { schemaVersion: 1, matrix: [{ requirementId: 'requirement_launch', status: 'supported', proofPointIds: [proof.id], sourceEntryIds: ['bullet_packet'], matchedTerms: ['launch'], confidence: 'high', requirement: { id: 'requirement_launch', sourceText: 'Must lead product launches and improve activation.', category: 'responsibility', priority: 'must_have', normalizedTerms: ['product launches'], years: null, credential: null } }], summary: { importantRequirementCount: 1, supportedImportantCount: 1, coverageRatio: 1, matchedRequirementIds: ['requirement_launch'], partiallySupportedRequirementIds: [], omittedSupportedRequirementIds: [], unsupportedRequirementIds: [] }, matched: [], partiallySupported: [], omittedSupported: [], unsupported: [] },
+    validation: { valid: true, schemaVersion: 1, sourceResumeRevisionId: resumeRevision.id, blockers: [], warnings: [] },
+    layoutProfile: { templateId: 'jobos-classic', templateVersion: 1, roleFamily: 'professional', sectionOrder: ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections'], density: 'standard', pageSize: 'letter', pageLimit: 2 },
+    renderManifest: { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] }
+  };
   const jobFile = path.join(root, 'job.md');
-  writeFileSync(jobFile, 'Title: Product Manager\nCompany: Packet Co\nLocation: Remote\n\nLead product launches and improve activation.');
+  writeFileSync(jobFile, 'Title: Product Manager\nCompany: Packet Co\nLocation: Remote\n\n## Requirements\n- Must lead product launches and improve activation.');
   const job = importText(store, { profileId: profile.id, filePath: jobFile }).job;
   const values = sentinels || {
     public: `PUBLIC-${crypto.randomUUID()}`,
@@ -190,7 +221,7 @@ async function baseFixture(t, {
     });
   }
 
-  const fixture = { root, store, profile, proof, job, sentinels: values, resume: null, cover: null };
+  const fixture = { root, store, profile, proof, job, sentinels: values, resumeSemantic, resume: null, cover: null };
   if (artifacts) {
     fixture.resume = createArtifact(store, artifactInput(fixture, 'resume', '# Resume\n\nEvidence-backed launch improved activation by 30%.'));
     if (cover) fixture.cover = createArtifact(store, artifactInput(fixture, 'cover_letter', '# Cover letter\n\nEvidence-backed interest in Packet Co.'));
@@ -777,9 +808,22 @@ test('AP15 packet CLI list show and diff are filterable parseable historical and
 test('AP16 approved materials freeze attest confirm end to end with honest local evidence', async t => {
   const root = workspace(t, 'jobos-packet-e2e-');
   const profile = cliOk(root, ['profile', 'create', 'Packet E2E PM', '--json']);
-  cliOk(root, ['proof', 'add', '--profile', profile.id, '--summary', 'Led a product launch that improved activation by 30%.', '--evidence', 'Portfolio evidence', '--skills', 'product,launch', '--json']);
+  const proof = cliOk(root, ['proof', 'add', '--profile', profile.id, '--summary', 'Led a product launch that improved activation by 30%.', '--evidence', 'Portfolio evidence', '--skills', 'product,launch', '--json']);
+  const resumeFile = path.join(root, 'resume.json');
+  writeFileSync(resumeFile, JSON.stringify({
+    schemaVersion: 1,
+    identity: { name: 'Packet Candidate', email: 'packet@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_e2e', text: 'Product manager with verified launch experience.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_e2e', employer: 'Evidence Co', title: 'Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_e2e', text: proof.summary, proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_e2e', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_launch', name: 'Product launches', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  }, null, 2));
+  cliOk(root, ['resume', 'import', '--profile', profile.id, '--file', resumeFile, '--json']);
   const jobFile = path.join(root, 'job.md');
-  writeFileSync(jobFile, 'Title: Product Manager\nCompany: E2E Packet Co\nLocation: Remote\n\nLead product launches and improve activation.');
+  writeFileSync(jobFile, 'Title: Product Manager\nCompany: E2E Packet Co\nLocation: Remote\n\n## Requirements\n- Must have product launch experience that improved activation.');
   const job = cliOk(root, ['jobs', 'import-text', '--profile', profile.id, '--file', jobFile, '--json']);
   cliOk(root, ['score', job.id, '--profile', profile.id, '--json']);
   cliOk(root, ['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--json']);

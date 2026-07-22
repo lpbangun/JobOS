@@ -41,13 +41,25 @@ function startFakeOpenAiScoringServer() {
         return;
       }
       const prompt = body.toLowerCase();
+      if (prompt.includes('jobos_resume_transformations')) {
+        const proofIds = [...prompt.matchAll(/proof_[a-f0-9]+/g)].map(match => match[0]);
+        const sourceEntryIds = [...prompt.matchAll(/resume_entry_[a-f0-9]+/g)].map(match => match[0]);
+        const payload = {
+          summary: { text: 'Invented $10M ARR ownership claim.', proofPointIds: [proofIds[0]] },
+          bulletRewrites: [{ sourceBulletId: sourceEntryIds[0], text: 'Invented $10M ARR ownership claim.', proofPointIds: [proofIds[0]] }],
+          selectedSkillIds: [],
+          layoutProfileId: 'professional'
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
+        return;
+      }
       if (prompt.includes('tailored resume') || prompt.includes('requirement-to-proof')) {
         const proofIds = [...prompt.matchAll(/proof_[a-f0-9]+/g)].map(m => m[0]);
         const payload = {
           title: 'LLM tailored resume draft',
           summary: 'Product leader focused on educator-centered learning platforms, workflow discovery, and evidence-backed launches.',
           requirementProofMap: [
-            { requirement: 'Invented $10M ARR ownership claim', proofPointId: proofIds[0], bullet: 'Invented claim: owned $10M ARR while leading educator discovery.' },
             { requirement: 'Ship cross-functional product improvements', proofPointId: proofIds[1], bullet: 'Shipped a cross-functional product launch with engineering and design partners to improve activation.' },
             { requirement: 'Use data to guide roadmap decisions', proofPointId: proofIds[2], bullet: 'Built dashboards and weekly operating reviews connecting adoption data to roadmap decisions.' }
           ],
@@ -72,6 +84,7 @@ function startFakeOpenAiScoringServer() {
           compensation: { score: 65, reason: 'The posting includes enough compensation or benefits context to avoid a major unknown. Final fit should still depend on the candidate salary band.' },
           missionInterest: { score: isGood ? 90 : 35, reason: 'The mission is assessed against the candidate interest in education, workforce learning, and human-centered systems. Roles outside that mission receive a lower score even if otherwise strong.' },
           networkAccess: { score: 60, reason: 'No direct stakeholder or alumni signal is present in the job text. This is a neutral score pending company and stakeholder research.' },
+
           redFlags: { score: 90, reason: 'No scam, unpaid, commission-only, or suspicious application language appears in the job text. This does not replace manual diligence.' }
         },
         redFlags: [],
@@ -82,6 +95,24 @@ function startFakeOpenAiScoringServer() {
     });
   });
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, requests, baseUrl: `http://127.0.0.1:${server.address().port}/v1` })));
+}
+
+function completeLlmResume(proofs) {
+  return {
+    schemaVersion: 1,
+    identity: { name: 'PM EdTech', email: 'pm@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_llm', text: 'Product manager focused on learning platforms.', proofPointIds: proofs.map(proof => proof.id), verificationStatus: 'verified' },
+    experience: [{
+      id: 'experience_llm', employer: 'Learning Studio', title: 'Product Manager', location: 'Remote', startDate: '2020-01', endDate: null,
+      dateSource: { startText: '2020-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified',
+      bullets: proofs.map((proof, index) => ({ id: `bullet_llm_${index}`, text: proof.summary, proofPointIds: [proof.id], verificationStatus: 'verified' }))
+    }],
+    education: [{ id: 'education_llm', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_research', name: 'User research', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  };
 }
 
 test('LLM scoring calls provider and differentiates good fit from poor fit by at least 30 points', async () => {
@@ -110,17 +141,23 @@ test('LLM tailoring grounds resume requirements to stored proof point IDs', asyn
   try {
     const { root, runAsync } = makeRunner({ JOBOS_LLM_PROVIDER: 'openai', JOBOS_LLM_MODEL: 'fake-tailoring-model', JOBOS_LLM_API_KEY: 'test-key', JOBOS_LLM_BASE_URL: fake.baseUrl });
     await runAsync(['init', '--json']);
-    const profile = JSON.parse(await runAsync(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--json']));
+    const profile = JSON.parse(await runAsync(['profile', 'create', 'PM EdTech', '--json']));
+    const proofSummaries = readFileSync(path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), 'utf8').split(/\r?\n/).map(line => line.replace(/^-\s*/, '').trim()).filter(Boolean);
+    const proofs = [];
+    for (const summary of proofSummaries) proofs.push(JSON.parse(await runAsync(['proof', 'add', '--profile', profile.id, '--summary', summary, '--evidence', 'Verified evaluation fixture', '--json'])));
+    const resumePath = path.join(root, 'resume.json');
+    writeFileSync(resumePath, JSON.stringify(completeLlmResume(proofs), null, 2));
+    await runAsync(['resume', 'import', '--profile', profile.id, '--file', resumePath, '--json']);
     const job = JSON.parse(await runAsync(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'tests/eval/jobs/good-fit-curriculum-pm.md'), '--json']));
-    const draft = await runAsync(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--output', 'markdown']);
-    assert.match(draft, /Requirement-to-proof map/i);
-    assert.doesNotMatch(draft, /10M ARR|Invented claim/i);
-    assert.doesNotMatch(draft, /Invented \\$10M ARR ownership claim/i);
-    const proofMatches = draft.match(/proof_[a-f0-9]+/g) || [];
-    assert.ok(new Set(proofMatches).size >= 3, `expected at least 3 proof point IDs in draft, got ${proofMatches.join(', ')}`);
-    assert.doesNotMatch(draft, /unsupported claim/i);
+    const draft = JSON.parse(await runAsync(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--json']));
+    assert.equal(draft.mode, 'llm');
+    assert.doesNotMatch(draft.content, /10M ARR|Invented claim/i);
+    assert.ok(draft.validation.warnings.some(warning => warning.code === 'resume_transformation_warning' && /Dropped generated summary/.test(warning.message)));
+    const cited = draft.coverage.matrix.flatMap(item => item.proofPointIds);
+    assert.ok(new Set(cited).size >= 3, `expected at least 3 proof point IDs in coverage, got ${cited.join(', ')}`);
+    assert.ok(draft.coverage.matrix.every(item => item.requirement.sourceText));
     const artifactPath = path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.md');
-    assert.match(readFileSync(artifactPath, 'utf8'), /draft_needs_human_review|human review required/i);
+    assert.doesNotMatch(readFileSync(artifactPath, 'utf8'), /10M ARR|Invented claim/i);
   } finally {
     fake.server.close();
   }

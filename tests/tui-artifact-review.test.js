@@ -70,13 +70,13 @@ test('T1 — Artifact review actions and audit', async t => {
     'T1-A: approval targets the highlighted review row, not stale selectedArtifactId'
   );
 
-  const auditsA = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=?", [artifacts.resumeV2.id]);
-  assert.equal(auditsA.length, 1, 'T1-A: exactly one artifact.reviewed audit');
+  const auditsA = all(store, "SELECT * FROM audit_log WHERE action='artifact.approved' AND entity_id=?", [artifacts.resumeV2.id]);
+  assert.equal(auditsA.length, 1, 'T1-A: exactly one artifact.approved audit');
   const aPayload = JSON.parse(auditsA[0].payload_json);
   assert.equal(aPayload.jobId, jobA.id);
   assert.equal(aPayload.approvalStatus, 'approved');
-  assert.equal(typeof aPayload.note, 'string');
-  assert.equal(aPayload.source, 'tui');
+  assert.equal(typeof aPayload.reviewNote, 'string');
+  assert.equal(aPayload.reviewedBy, 'tui');
   assert.equal(auditsA[0].external_side_effect, 'none');
 
   // Approved item leaves review queue
@@ -99,7 +99,7 @@ test('T1 — Artifact review actions and audit', async t => {
   // Empty feedback refused
   tui.state.input = '';
   tui.onKeypress(null, { name: 'enter' });
-  const auditsEmptyReject = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=? AND payload_json LIKE '%rejected%'", [nextArtifactId]);
+  const auditsEmptyReject = all(store, "SELECT * FROM audit_log WHERE action='artifact.rejected' AND entity_id=?", [nextArtifactId]);
   assert.equal(auditsEmptyReject.length, 0, 'T1-R: empty rejection writes zero audits');
 
   // Feedback entered then Enter rejects
@@ -109,10 +109,10 @@ test('T1 — Artifact review actions and audit', async t => {
   const afterReject = one(store, 'SELECT approval_status FROM artifacts WHERE id=?', [nextArtifactId]);
   assert.equal(afterReject.approval_status, 'rejected', 'T1-R: artifact rejected after feedback');
 
-  const rejectAudits = all(store, "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=?", [nextArtifactId]);
-  assert.ok(rejectAudits.length >= 1, 'T1-R: artifact.reviewed audit written');
+  const rejectAudits = all(store, "SELECT * FROM audit_log WHERE action='artifact.rejected' AND entity_id=?", [nextArtifactId]);
+  assert.ok(rejectAudits.length >= 1, 'T1-R: artifact.rejected audit written');
   const rPayload = JSON.parse(rejectAudits[rejectAudits.length - 1].payload_json);
-  assert.equal(rPayload.note, 'needs more metrics');
+  assert.equal(rPayload.reviewNote, 'needs more metrics');
 
   // PromptAgent called if client ready; otherwise status always includes CLI redraft nextAction
   if (tui.client?.state === 'ready' && !tui.state.busy) {
