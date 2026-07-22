@@ -21,8 +21,8 @@ This file captures must-meet criteria for the enhanced JobOS research and outrea
   - `src/research.js` remains the research CLI coordinator.
   - New contact-specific logic can live under `src/research/`.
   - `src/db.js` owns schema/migrations.
-  - `src/api.js`, `src/mcp.js`, and `src/web.js` expose the same local data.
-- SQLite is canonical for dashboard/API queries; workspace Markdown/YAML mirrors are generated for agent readability.
+  - `src/mcp.js` exposes agent-readable local data; the CLI/TUI provide trusted human interaction.
+- SQLite is canonical; workspace Markdown/YAML mirrors are generated for agent readability.
 - Search-provider prose is not truth. Search and page fetch results become `source_observations`, then extraction/scoring reads from observations.
 - Exact public contacts and user-approved contacts may persist in `contact_points`.
 - Guessed contacts remain review-visible and may persist only as unapproved candidates with clear evidence tier/status labels.
@@ -47,13 +47,9 @@ This file captures must-meet criteria for the enhanced JobOS research and outrea
   - `jobos network import --file <csv> --json`
   - `jobos research network --job <job-id> --json`
   - `jobos outreach plan --job <job-id> --profile <profile-id> --json`
-- API:
-  - `GET /api/research/contacts?jobId=...`
-  - `POST /api/research/contacts/:id/approve`
-  - `POST /api/research/network {"jobId":"..."}`
 - MCP:
-  - `discover_contacts`
-  - `approve_contact`
+  - Contact context and outreach planning remain agent-readable.
+  - Contact approval remains limited to trusted CLI/TUI paths.
   - `map_reachable_network`
 - Dashboard:
   - contact review with tier/confidence/approval labels
@@ -73,4 +69,4 @@ This file captures must-meet criteria for the enhanced JobOS research and outrea
   - `node --test` targeted tests for changed modules
   - `node run_eval_research.js`
   - `npm test`
-  - `npm run smoke` for broad CLI/dashboard behavior when changes are non-trivial
+  - `npm run smoke` for broad CLI/TUI behavior when changes are non-trivial

@@ -23,7 +23,6 @@ import { buildTuiModel } from '../src/tui-model.js';
 import { defaultTuiState, JobosTui, renderTui, TUI_DOMAIN_ACTIONS } from '../src/tui.js';
 import { callDomainTool, DOMAIN_TOOLS } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
-import { handleApi } from '../src/api.js';
 import { ingestEditedArtifact } from '../src/artifacts.js';
 import { renderArtifactDiff, sanitizeTerminalText } from '../src/tui-artifacts.js';
 import { seedArtifactReviewWorkspace } from './fixtures/artifact-review-seed.js';
@@ -140,8 +139,7 @@ test('T1 — Artifact review actions and audit', async t => {
   const submitAudits = all(store, "SELECT * FROM audit_log WHERE action LIKE '%submit%' OR action LIKE '%sent%' OR action LIKE '%applied%'");
   assert.equal(submitAudits.length, 0, 'T1: no submit/sent/applied audits from TUI');
 
-  // Returned row shape limited to id,job_id,profile_id,type,path,title,approval_status,created_at
-  // (verified via API PATCH or reviewArtifact return — share service boundary)
+  // Returned row shape is limited to id,job_id,profile_id,type,path,title,approval_status,created_at.
 });
 
 // ---------------------------------------------------------------------------
@@ -1278,66 +1276,28 @@ test('T11 — Editor lifecycle and versioning', async t => {
 });
 
 // ---------------------------------------------------------------------------
-// T12 — Human-gate mediation and shared mutation
+// T12 — Human-gate mediation
 // ---------------------------------------------------------------------------
-test('T12 — Human-gate mediation and shared mutation', async t => {
-  const { store, profile, jobs: { jobA }, artifacts, application } = await seedArtifactReviewWorkspace(t);
+test('T12 — Human-gate mediation', async t => {
+  const { store, jobs: { jobA }, artifacts, application } = await seedArtifactReviewWorkspace(t);
 
   // ── Setup: DOMAIN_TOOLS and MCP tool names ──
   const toolNames = DOMAIN_TOOLS.map(dt => dt.name);
   const mcpNames = mcpToolNames();
-  const deniedMcp = new Set(['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
+  const deniedMcp = new Set(['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
   assert.deepEqual(mcpNames, toolNames.filter(name => !deniedMcp.has(name)));
   assert.ok(toolNames.length > 0);
 
-  // ── Intended: TUI and API artifact actions use same service ──
-  // API PATCH creates artifact.reviewed with source='api'
-  const req = new PassThrough();
-  req.method = 'PATCH';
-  req.headers = {};
-  const bodyStr = JSON.stringify({ approvalStatus: 'approved', note: 'via api' });
-  req.push(bodyStr);
-  req.push(null);
-  const res = new PassThrough();
-  res.writeHead = function (status, headers) { this.statusCode = status; };
-  res.end = function () {};
-  const u = new URL(`http://localhost/api/artifacts/${encodeURIComponent(artifacts.resumeV1.id)}`);
-  await handleApi(store, req, res, u);
-
-  const apiAudits = all(store,
-    "SELECT * FROM audit_log WHERE action='artifact.reviewed' AND entity_id=? ORDER BY created_at DESC",
-    [artifacts.resumeV1.id]);
-  assert.equal(apiAudits.length, 1, 'T12: API creates artifact.reviewed audit');
-  const apiPayload = JSON.parse(apiAudits[0].payload_json);
-  assert.equal(apiPayload.source, 'api', 'T12: API audit has source=api');
-  assert.equal(apiPayload.note, 'via api', 'T12: API audit has note');
-  assert.equal(apiPayload.jobId, jobA.id);
-
-  const missingReq = new PassThrough();
-  missingReq.method = 'PATCH';
-  missingReq.headers = {};
-  missingReq.end(JSON.stringify({ approvalStatus: 'approved' }));
-  const missingRes = new PassThrough();
-  missingRes.writeHead = function (status) { this.statusCode = status; };
-  missingRes.end = function () {};
-  await handleApi(store, missingReq, missingRes, new URL('http://localhost/api/artifacts/missing'));
-  assert.equal(missingRes.statusCode, 404, 'T12: API preserves not-found status for unknown artifact');
   assert.throws(
     () => ingestEditedArtifact(store, { artifactId: artifacts.resumeV1.id, content: 'x', source: 'evil' }),
     /Invalid source/,
     'T12: edited-artifact mutation rejects untrusted audit sources'
   );
-  assert.equal(apiPayload.approvalStatus, 'approved');
 
-  // TUI would call same service with source='tui' (verified in T1)
-
-  // ── Intended: no ACP/MCP artifact-approval tool exists ──
-  const hasArtifactTool = toolNames.some(n => /^artifact_/.test(n));
-  assert.equal(hasArtifactTool, false,
-    'T12: no tool with artifact_ prefix');
-  const hasApproveTool = toolNames.some(n => /artifact.*(?:approv|reject)/i.test(n));
-  assert.equal(hasApproveTool, false,
-    'T12: no artifact approval domain tool');
+  // ── Intended: human-gated mutations are not advertised to ACP/MCP ──
+  for (const name of deniedMcp) {
+    assert.equal(mcpNames.includes(name), false, `T12: MCP does not advertise ${name}`);
+  }
 
   // ── Intended: agents cannot attest applied/submitted/sent ──
   await assert.rejects(

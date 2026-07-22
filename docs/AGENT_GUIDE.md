@@ -35,7 +35,9 @@ jobos pursue <job-id> --profile pm-edtech --json
 jobos network paths --job <job-id> --json
 ```
 
-`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `pursue` composes score, research, contact discovery, user-owned network mapping, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies.
+`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `discover run-all` is the advanced raw runner for callers that need per-search results without the daily workflow's cross-run dedupe and combined ranking. `pursue` composes score, research, contact discovery, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies. Full reachable-network mapping remains the standalone `network paths` operation.
+
+Prefer `pursue` for the first end-to-end pass. Standalone score, research, tailoring, application, and outreach commands intentionally run only their operation. The `loop ...` commands are bounded JSONL primitives for agents and test harnesses; use `scheduler start` or `scheduler run-once` for human-operated background automation.
 
 ## Extension surfaces
 

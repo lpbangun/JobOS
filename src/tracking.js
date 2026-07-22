@@ -62,7 +62,34 @@ export function appUpdate(s, aid, status, notes = null, { persist = true } = {})
   return one(s, 'SELECT * FROM applications WHERE id=?', [aid]);
 }
 
-export function due(s) { return all(s, 'SELECT * FROM tasks WHERE status="open" ORDER BY due_at IS NULL,due_at,created_at'); }
+function taskQueryFilters({ type = null, createdBy = null } = {}) {
+  const clauses = ['status="open"'];
+  const params = [];
+  if (type) {
+    clauses.push('type=?');
+    params.push(type);
+  }
+  if (createdBy) {
+    clauses.push('created_by=?');
+    params.push(createdBy);
+  }
+  return { clauses, params };
+}
+
+/** All open tasks, including future and undated inbox items. */
+export function openTasks(s, filters = {}) {
+  const { clauses, params } = taskQueryFilters(filters);
+  return all(s, `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY due_at IS NULL,due_at,created_at`, params);
+}
+
+/** Open tasks whose non-null due time has passed. */
+export function due(s, { at = now(), ...filters } = {}) {
+  const dueAt = at instanceof Date ? at.toISOString() : String(at);
+  const { clauses, params } = taskQueryFilters(filters);
+  clauses.push('due_at IS NOT NULL', 'due_at<=?');
+  params.push(dueAt);
+  return all(s, `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY due_at,created_at`, params);
+}
 
 export function _writeApp(s, jobId, profileId, status, notes = '', { receiptBound = false, skipIfExists = false, persist = true } = {}) {
   const appId = applicationId(jobId, profileId);

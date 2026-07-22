@@ -7,9 +7,23 @@ import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
 import { due } from './tracking.js';
-import { outreachDue } from './outreach.js';
 
-const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
+const ACTIVE_APPLICATION_STATUSES = new Set([
+  'saved',
+  'researching',
+  'materials-ready',
+  'applied',
+  'recruiter-screen',
+  'interview',
+  'offer'
+]);
+
+function statusStage(item) {
+  return {
+    stage: item.applicationStatus || item.discoveryStatus,
+    stageSource: item.applicationStatus ? 'application' : 'discovery'
+  };
+}
 
 function firstTask(s, jobId) {
   const row = one(s, "SELECT id,title,type,due_at,priority FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 1", [jobId]);
@@ -66,10 +80,10 @@ function stageState(s, context) {
 }
 
 function priorityStrip(s, jobs, at) {
-  const due = one(s, "SELECT tasks.title,tasks.due_at,jobs.id AS job_id,jobs.company FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id WHERE tasks.status='open' AND tasks.due_at IS NOT NULL ORDER BY tasks.due_at LIMIT 1");
+  const due = one(s, "SELECT tasks.title,tasks.due_at,jobs.id AS job_id,jobs.company FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id WHERE tasks.status='open' AND tasks.due_at IS NOT NULL AND tasks.due_at<=? ORDER BY tasks.due_at LIMIT 1", [at]);
   const interview = one(s, "SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at FROM applications JOIN jobs ON jobs.id=applications.job_id LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.status='open' WHERE applications.status='interview' ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1");
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
-  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.status) && String(job.updatedAt || '') >= recentThreshold);
+  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
   return [
     {
@@ -169,7 +183,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     : (profiles[0]?.id || null);
   const jobs = listJobSummaries(s, { profileId: selectedProfile }).map(job => ({
     ...job,
-    stage: job.applicationStatus || job.status,
+    ...statusStage(job),
     next: firstTask(s, job.id),
     signals: signals(s, job.id)
   }));
@@ -181,6 +195,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     : null;
   const details = selected ? {
     ...selected,
+    job: { ...selected.job, ...statusStage(selected.job) },
     narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
     requirements: parseJson(selectedRow?.requirements_json, []).slice(0, 6),
     compensation: selectedRow?.compensation || '',
@@ -213,7 +228,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     })) : []
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
-  const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
+  const openJobs = jobs.filter(job => job.discoveryStatus !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
   const dueCount = Number(one(s, "SELECT COUNT(*) AS count FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=?", [at])?.count || 0);
   const interviewCount = jobs.filter(job => job.applicationStatus === 'interview').length;
   const logs = all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 80')
@@ -299,8 +314,15 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details,
     review: reviews,
     log: logs,
-    dueTasks: due(s).slice(0, 20).map(row => ({ id: row.id, jobId: row.job_id || null, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority })),
-    outreachDue: outreachDue(s).slice(0, 20),
+    dueTasks: due(s, { at }).slice(0, 20).map(row => ({
+      id: row.id,
+      jobId: row.job_id || null,
+      title: row.title,
+      type: row.type,
+      source: row.created_by,
+      dueAt: row.due_at,
+      priority: row.priority
+    })),
     answers: {
       ...answerCounts,
       questions: readiness?.answers?.questions
@@ -309,7 +331,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
+    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
     networkSetup: {
       status: networkSetupStatus,
       intent: {

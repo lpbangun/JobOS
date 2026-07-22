@@ -2,7 +2,7 @@ import path from 'node:path';
 import { one, all, run, save, audit } from './db.js';
 import { now, id, parseJson } from './utils.js';
 import { writeMd } from './workspace.js';
-import { due } from './tracking.js';
+import { openTasks } from './tracking.js';
 import { listSearches, listWatchlist, discoveryRuns, reviewQueue } from './discovery.js';
 import { listOutreachThreads, outreachDue } from './outreach.js';
 import { listContactPoints } from './research/contacts.js';
@@ -15,7 +15,7 @@ export function state(s) {
     applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
     statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
     artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
-    tasks: due(s),
+    tasks: openTasks(s),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
     sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
@@ -146,7 +146,7 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   const metrics = funnel(s, pid, 30);
   const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=? ORDER BY fit_score DESC,created_at DESC', [pid]);
-  const tasks = due(s);
+  const tasks = openTasks(s);
   const top = jobs.slice(0, 5).map(x => `- ${x.title} at ${x.company}: ${x.fit_score ?? 'unscored'}/100 (${x.id})`).join('\n') || '- No jobs imported.';
   const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
   // Research recommendations

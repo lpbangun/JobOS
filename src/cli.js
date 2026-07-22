@@ -2,12 +2,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { all, audit, one, openStore, save } from './db.js';
+import { all, audit, one, openStore, reload, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof, setNetworkIntent } from './profiles.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
-import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
+import { appCreate, appUpdate, due, openTasks, recommendResearch } from './tracking.js';
 import { addStakeholder, researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
@@ -16,7 +16,7 @@ import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRu
 import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
-import { addWatchlist, configFromFlags, createSearch, listSearches, listWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
+import { configFromFlags, createCompanySearch, createSearch, listSearches, listWatchlist, migrateLegacyWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
 import { createAutomation, listAutomations, setAutomationEnabled } from './scheduler/store.js';
 import { recentRuns, runAutomation, runAutomationByName, runDueAutomations, schedulerStatus, startScheduler } from './scheduler/core.js';
 import { addAnswer, listAnswers } from './answers.js';
@@ -46,6 +46,11 @@ function cmd(pathParts, usage, summary, opts = {}) {
     flags: opts.flags || [],
     tests: opts.tests || ['tests/sprint9-frontend.test.js'],
     category: opts.category || 'advanced',
+    audience: opts.audience || 'all',
+    relatedWorkflow: opts.relatedWorkflow || null,
+    workflowStage: opts.workflowStage || null,
+    runsDependencies: opts.runsDependencies ?? null,
+    deprecated: opts.deprecated || null,
   };
 }
 
@@ -54,7 +59,7 @@ export const commandRegistry = [
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
   cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the locked data-bound terminal product shell with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
-  cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage <name>] [--dry-run] [--json]', 'Run integrated fit, research, networking, application preparation, and outreach planning.', { flags: ['--stage <name>', '--stage-timeout <ms>', '--dry-run'], category: 'workflow' }),
+  cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
   cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
@@ -67,13 +72,14 @@ export const commandRegistry = [
   cmd(['jobs', 'dedupe'], 'jobos jobs dedupe [--apply] [--json]', 'Find likely duplicate jobs and optionally apply local dedupe updates.', { flags: ['--apply'] }),
   cmd(['searches', 'create'], 'jobos searches create <name> --profile <profile> --adapter greenhouse|lever|ashby|career-page|portfolio [--board-token token|--company handle|--url URL] [--keywords a,b] [--location remote] [--json]', 'Create a routed public-source discovery search.', { flags: ['--adapter <id>', '--board-token <token>', '--company <handle>', '--handle <handle>', '--url <url>', '--max-companies <n>', '--keywords a,b', '--location <text>', '--min-fit <n>'] }),
   cmd(['searches', 'list'], 'jobos searches list [--json]', 'List saved discovery searches.'),
-  cmd(['watchlist', 'add'], 'jobos watchlist add --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Add a company to the local discovery watchlist.'),
-  cmd(['watchlist', 'list'], 'jobos watchlist list [--json]', 'List watchlist companies.'),
+  cmd(['searches', 'migrate-watchlist'], 'jobos searches migrate-watchlist --profile <profile> [--min-fit <n>] [--json]', 'Migrate legacy profile-less watchlist rows into executable saved searches for one profile.', { flags: ['--profile <profile>', '--min-fit <n>'] }),
+  cmd(['watchlist', 'add'], 'jobos watchlist add --profile <profile> --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Deprecated alias: create an executable company saved-search preset.', { deprecated: 'Use searches create with a company/ATS target.', relatedWorkflow: 'daily' }),
+  cmd(['watchlist', 'list'], 'jobos watchlist list [--json]', 'Compatibility view of legacy watchlist rows and canonical company-search presets.', { deprecated: 'Use searches list.' }),
   cmd(['discover', 'run'], 'jobos discover run --search <name-or-id> [--json]', 'Run one saved discovery search and queue results for review.'),
-  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Run all saved discovery searches, optionally scoped to a profile.'),
-  cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
-  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
-  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
+  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
+  cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
+  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone resume operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
+  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
   cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
@@ -87,7 +93,7 @@ export const commandRegistry = [
   cmd(['apply', 'packet', 'diff'], 'jobos apply packet diff <packet-a> <packet-b> [--json]', 'Diff two application packets by their canonical projections.', { category: 'workflow' }),
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
-  cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
+  cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Advanced standalone company-research operation; runs without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'company', runsDependencies: false }),
   cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
   cmd(['research', 'runs', 'get'], 'jobos research runs get <run-id> [--json]', 'Read a durable people-research run.'),
   cmd(['research', 'runs', 'resume'], 'jobos research runs resume <run-id> [--json]', 'Resume a paused_retryable people-research run.'),
@@ -100,14 +106,15 @@ export const commandRegistry = [
   cmd(['network', 'contacts'], 'jobos network contacts --job <job-id> [--json]', 'List ranked source-backed contacts for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'list'], 'jobos network list [--json]', 'List imported relationship edges.', { category: 'workflow' }),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
-  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Draft human-reviewed outreach without sending it.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'] }),
+  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Advanced standalone outreach drafting operation; does not run pursue dependencies or send anything.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'], relatedWorkflow: 'pursue', workflowStage: 'outreach', runsDependencies: false }),
   cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a reviewable outreach path from discovered contacts, network edges, and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
   cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
   cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
-  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
+  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'Show the outreach-thread context for due follow-up tasks; use tasks due --type followup --created-by outreach as the canonical filtered query.'),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
-  cmd(['tasks', 'due'], 'jobos tasks due [--watch] [--interval N] [--max-iterations N] [--json]', 'List due tasks, optionally watching on an interval.', { output: 'array-or-jsonl' }),
+  cmd(['tasks', 'list'], 'jobos tasks list [--type <type>] [--created-by <source>] [--json]', 'List the open task inbox, including future and undated tasks.', { flags: ['--type <type>', '--created-by <source>'] }),
+  cmd(['tasks', 'due'], 'jobos tasks due [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical filtered query for open tasks with a non-null due time that has passed, optionally watching on an interval.', { output: 'array-or-jsonl', flags: ['--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
   cmd(['review', 'weekly'], 'jobos review weekly --profile <profile> [--output markdown] [--json]', 'Generate a weekly review export.', { output: 'object-or-markdown' }),
   cmd(['automation', 'create'], 'jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled] [--json]', 'Create or update a scheduler automation.'),
   cmd(['automation', 'list'], 'jobos automation list [--json]', 'List configured automations.'),
@@ -118,9 +125,9 @@ export const commandRegistry = [
   cmd(['scheduler', 'start'], 'jobos scheduler start [--interval 60] [--json]', 'Start the long-running local scheduler loop.', { output: 'jsonl-or-log' }),
   cmd(['scheduler', 'status'], 'jobos scheduler status [--json]', 'Show scheduler lock, automation, and recent run state.'),
   cmd(['runs', 'list'], 'jobos runs list [--limit 25] [--json]', 'List recent automation runs.'),
-  cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Repeatedly run due scheduler automations with JSONL loop events.', { output: 'jsonl' }),
-  cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Repeatedly run one named automation through scheduler machinery.', { output: 'jsonl' }),
-  cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Repeatedly run one scheduler action through an ephemeral automation.', { output: 'jsonl' }),
+  cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run due scheduler automations with bounded JSONL events.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one persisted named automation.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one ephemeral scheduler action.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
   cmd(['agents', 'add'], 'jobos agents add <name> --command <executable> [--args <json>] [--transport stdin-json|prompt-arg] [--json]', 'Register a local Codex, Hermes, or compatible agent.', { flags: ['--command <executable>', '--args <json>', '--transport <type>'], category: 'extend' }),
   cmd(['agents', 'list'], 'jobos agents list [--json]', 'List configured and suggested local agents with availability.', { category: 'extend' }),
   cmd(['agents', 'test'], 'jobos agents test <name> [--json]', 'Check one agent executable and structured JSON protocol.', { category: 'extend' }),
@@ -186,6 +193,8 @@ function renderRootHelp({ allCommands = false } = {}) {
 Usage:
   jobos <command> [flags]
 
+Use \`tui\` for interactive work; use \`daily\` and \`pursue\` for scripted workflows.
+
 ${section('Setup', setup)}
 
 ${section('Workflows', workflows)}
@@ -244,13 +253,24 @@ function registryJson() {
       output: c.output,
       flags: c.flags,
       category: c.category,
+      audience: c.audience,
+      relatedWorkflow: c.relatedWorkflow,
+      workflowStage: c.workflowStage,
+      runsDependencies: c.runsDependencies,
+      deprecated: c.deprecated,
       tests: c.tests
     }))
   };
 }
 
 function renderAgentGuide() {
-  const commands = commandRegistry.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n');
+  const categoryOrder = ['workflow', 'advanced', 'agent-stream', 'extend'];
+  const commands = categoryOrder.map(category => {
+    const items = commandRegistry.filter(command => command.category === category);
+    if (!items.length) return '';
+    const heading = category === 'workflow' ? 'Primary workflows' : category === 'agent-stream' ? 'Agent streaming primitives' : category === 'extend' ? 'Extension surfaces' : 'Advanced standalone operations';
+    return `### ${heading}\n\n${items.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n')}`;
+  }).filter(Boolean).join('\n\n');
   return `# JobOS Agent Guide
 
 JobOS is the local-first host and source of truth for job state. The TUI is the primary interactive product: it launches a real Hermes ACP guest session and mediates JobOS MCP tools. The CLI and external \`jobos mcp\` server remain first-class automation doors. Core workflows may discover, score, research, draft, and stage actions. External effects are disabled by default.
@@ -273,6 +293,8 @@ JobOS is the local-first host and source of truth for job state. The TUI is the 
 - Never infer restricted answers, print browser cookies, bypass CAPTCHA, or claim an external action succeeded without its configured tool's result.
 
 ## Commands
+
+Prefer \`daily\` and \`pursue\` for complete workflows. Use advanced standalone operations when intentionally refreshing one operation without its pursuit dependencies. Streaming primitives are intended for agents and test harnesses; human background automation should use \`scheduler start\` or \`scheduler run-once\`.
 
 ${commands}
 
@@ -351,15 +373,61 @@ function parseConfig(flags) {
   }
 }
 
-function dueTasks(s) {
-  return due(s).map(t => ({
+function publicTasks(rows) {
+  return rows.map(t => ({
     id: t.id,
     title: t.title,
+    type: t.type,
+    createdBy: t.created_by,
     dueAt: t.due_at,
     priority: t.priority,
     status: t.status,
-    jobId: t.job_id
+    jobId: t.job_id,
+    applicationId: t.application_id
   }));
+}
+
+function taskFilters(flags) {
+  return {
+    type: flags.type ? String(flags.type) : null,
+    createdBy: flags['created-by'] ? String(flags['created-by']) : null
+  };
+}
+
+function watchlistProfile(s, flags) {
+  if (flags.profile) return String(flags.profile);
+  const profiles = all(s, 'SELECT id FROM profiles ORDER BY created_at');
+  if (profiles.length === 1) return profiles[0].id;
+  usage(profiles.length
+    ? 'Missing --profile <profile-id>; legacy watchlists were not profile-scoped'
+    : 'Missing --profile <profile-id>; create a profile first');
+}
+
+function compatibilityWatchlist(s) {
+  const legacy = listWatchlist(s).map(item => ({ ...item, legacy: true }));
+  const canonical = listSearches(s)
+    .filter(search => search.config?.preset === 'company-watch')
+    .map(search => ({
+      id: search.id,
+      searchId: search.id,
+      company: search.config.companyLabel || search.name,
+      adapter: search.adapter,
+      handle: search.config.boardToken || search.config.handle || '',
+      notes: search.config.notes || '',
+      profileId: search.profileId,
+      legacy: false
+    }));
+  const targetKey = item => [item.company, item.adapter, item.handle].map(value => String(value || '').trim().toLowerCase()).join('|');
+  const canonicalTargets = new Set(canonical.map(targetKey));
+  return [...canonical, ...legacy.filter(item => !canonicalTargets.has(targetKey(item)))];
+}
+
+function dueTasks(s, flags = {}) {
+  return publicTasks(due(s, taskFilters(flags)));
+}
+
+function inboxTasks(s, flags = {}) {
+  return publicTasks(openTasks(s, taskFilters(flags)));
 }
 
 function sleep(ms, isStopped) {
@@ -612,16 +680,36 @@ export async function main(argv = process.argv.slice(2)) {
     out(listSearches(s));
     return;
   }
+  if (group === 'searches' && action === 'migrate-watchlist') {
+    out(migrateLegacyWatchlist(s, {
+      profileId: needProfile(flags),
+      minFit: flags['min-fit'] ? Number(flags['min-fit']) : 70
+    }));
+    return;
+  }
   if (group === 'watchlist' && action === 'add') {
     const company = flags.company ? String(flags.company) : [subaction, ...rest].filter(Boolean).join(' ');
     if (!company) usage('Missing --company <company>');
     const handle = flags['board-token'] || flags.handle || '';
-    const item = addWatchlist(s, { company, adapter: String(flags.adapter || ''), handle: String(handle), notes: flags.notes ? String(flags.notes) : '' });
-    out(item);
+    const item = createCompanySearch(s, {
+      company,
+      profileId: watchlistProfile(s, flags),
+      adapter: String(flags.adapter || ''),
+      handle: String(handle),
+      notes: flags.notes ? String(flags.notes) : '',
+      minFit: flags['min-fit'] ? Number(flags['min-fit']) : 70
+    });
+    out({
+      ...item,
+      company,
+      handle: String(handle),
+      deprecated: true,
+      replacement: 'searches create'
+    });
     return;
   }
   if (group === 'watchlist' && action === 'list') {
-    out(listWatchlist(s));
+    out(compatibilityWatchlist(s));
     return;
   }
   if (group === 'discover' && action === 'run') {
@@ -899,11 +987,18 @@ export async function main(argv = process.argv.slice(2)) {
     else out(r);
     return;
   }
+  if (group === 'tasks' && action === 'list') {
+    out(inboxTasks(s, flags));
+    return;
+  }
   if (group === 'tasks' && action === 'due') {
     if (flags.watch) {
-      await repeat({ flags, s, eventType: 'watch.iteration', targetType: 'tasks', target: 'due', run: () => ({ tasks: dueTasks(s), checkedAt: new Date().toISOString() }) });
+      await repeat({ flags, s, eventType: 'watch.iteration', targetType: 'tasks', target: 'due', run: () => {
+        reload(s);
+        return { tasks: dueTasks(s, flags), checkedAt: new Date().toISOString() };
+      } });
     } else {
-      out(dueTasks(s));
+      out(dueTasks(s, flags));
     }
     return;
   }

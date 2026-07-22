@@ -1,8 +1,18 @@
 import { callDomainTool, DOMAIN_TOOLS } from './domain-tools.js';
 import { reload } from './db.js';
 
-const MUTATION_DENY = new Set(['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
-const tools = DOMAIN_TOOLS.filter(t => !MUTATION_DENY.has(t.name));
+// MCP agents must only be offered operations they can actually invoke. These
+// human-gated mutations remain available through the trusted CLI/TUI paths.
+const MCP_DENY = new Set([
+  'approve_artifact',
+  'reject_artifact',
+  'approve_contact',
+  'answers_add',
+  'create_application_packet',
+  'attest_application_submitted',
+  'confirm_application_receipt'
+]);
+const tools = DOMAIN_TOOLS.filter(t => !MCP_DENY.has(t.name));
 
 function result(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };

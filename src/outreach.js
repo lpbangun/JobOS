@@ -504,8 +504,8 @@ export function outreachDue(s, { nowDate = new Date() } = {}) {
     JOIN tasks ON tasks.id=outreach_threads.followup_task_id
     LEFT JOIN stakeholders ON stakeholders.id=outreach_threads.stakeholder_id
     LEFT JOIN jobs ON jobs.id=outreach_threads.job_id
-    WHERE tasks.status='open' AND (tasks.due_at IS NULL OR tasks.due_at<=?)
-    ORDER BY tasks.due_at IS NULL, tasks.due_at, tasks.created_at`, [nowDate.toISOString()]).map(row => ({
+    WHERE tasks.status='open' AND tasks.due_at IS NOT NULL AND tasks.due_at<=?
+    ORDER BY tasks.due_at, tasks.created_at`, [nowDate.toISOString()]).map(row => ({
     threadId: row.id,
     artifactId: row.artifact_id,
     jobId: row.job_id || null,
@@ -519,6 +519,6 @@ export function outreachDue(s, { nowDate = new Date() } = {}) {
     status: row.task_status,
     channel: row.channel || null,
     sentAt: row.sent_at || null,
-    note: 'Due follow-up is a local reminder only; JobOS does not send outreach.'
+    note: 'Enriched view of a due outreach follow-up task; this local reminder does not send outreach.'
   }));
 }
