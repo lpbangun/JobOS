@@ -296,7 +296,7 @@ function listPanel(model, state, width, height, color) {
       const fitScore = job.fitScore == null ? '—' : String(job.fitScore);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · ${job.stageSource}:${job.stage}`, width - 4));
+      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · live:${job.liveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
     }
@@ -310,16 +310,18 @@ function detailPanel(model, width, height, color) {
   const fitScore = item.fit?.overall ?? '—';
   const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.confidence || 'confidence —'}` : 'not scored';
   const next = item.next[0];
+  const compensation = item.job.compensation?.text || 'compensation —';
+  const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(',') : 'type —';
   const proofs = item.proofs.length ? item.proofs.map(proof => `${proof.id} ${proof.summary}`) : ['No matched proof IDs yet'];
   const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No artifacts — pursue to stage drafts'];
   const stages = item.stages.map(stage => `${stage.name}:${stage.state}`).join('  ');
   const lines = [
     paint(`${item.job.title}`, 'green', color),
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
+    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'} · liveness:${item.liveness?.status || 'uncertain'}`,
+    `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
     paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
     ...wrap(item.narrative, width - 4).slice(0, 3),
-    '',
     ...readinessLines(item.readiness, width - 4, color),
     '',
     ...policyLines(item.policy, width - 4, color),
@@ -685,7 +687,7 @@ function overlayPanel(model, state, width, height, color) {
       ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
       '',
       'NEW JOB REVIEW',
-      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
+      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · live ${item.liveness?.status || 'uncertain'} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
     ];
     if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
     if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');

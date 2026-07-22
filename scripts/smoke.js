@@ -3,6 +3,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { all, one, openStore } from '../src/db.js';
+import { createSearch, runSavedSearch } from '../src/discovery.js';
+import { greenhouse } from '../src/discovery/adapters.js';
+import { importNormalized } from '../src/jobs.js';
+import { score as scoreJob } from '../src/scoring.js';
+import { runPursuit } from '../src/workflows.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
 const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
@@ -33,6 +38,91 @@ try {
   JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json'), '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   const discovery = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   if (discovery.status !== 'succeeded' || discovery.counts.imported !== 1 || discovery.counts.highFit < 1) throw new Error('Fixture-backed discovery run did not import and flag a high-fit job');
+  const richFixture = path.join(process.cwd(), 'tests', 'fixtures', 'discovery-integrity', 'greenhouse-rich.json');
+  JSON.parse(run(['searches', 'create', 'W03 Rich Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme', '--board-token', 'acme', '--fixture', richFixture, '--posted-within-days', '30', '--remote-only', '--employment-types', 'full_time', '--min-fit', '50', '--json']));
+  const richDiscovery = JSON.parse(run(['discover', 'run', '--search', 'W03 Rich Discovery', '--json']));
+  if (richDiscovery.status !== 'succeeded' || richDiscovery.counts.imported !== 1) throw new Error('W03 rich fixture discovery did not succeed');
+  const richJobId = richDiscovery.jobs[0]?.id;
+  const richStore = await openStore({ workspace: root });
+  const richRow = one(richStore, 'SELECT * FROM jobs WHERE id=?', [richJobId]);
+  const richYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', richJobId, 'job.yaml'), 'utf8');
+  if (JSON.parse(richRow.compensation_json).min !== 150000 || richRow.work_model !== 'remote' || !JSON.parse(richRow.employment_types_json).includes('full_time') || richRow.department !== 'Product') {
+    throw new Error('W03 normalized native fields did not survive the SQLite round trip');
+  }
+  if (!richYaml.includes('compensationDetails:') || !richYaml.includes('workModel: remote') || !richYaml.includes('liveness:')) {
+    throw new Error('W03 normalized native fields or liveness did not survive the workspace projection');
+  }
+  richStore.db.close();
+
+  const w03Store = await openStore({ workspace: root });
+  const [fixtureJob] = await greenhouse.fetchJobs({ fixture: richFixture, company: 'Acme', boardToken: 'acme' });
+  const mixedJobs = [
+    { ...fixtureJob, sourceId: 'smoke-active', title: 'W03 Active', url: 'https://boards.greenhouse.io/acme/jobs/smoke-active' },
+    { ...fixtureJob, sourceId: 'smoke-expired', title: 'W03 Expired', url: 'https://boards.greenhouse.io/acme/jobs/smoke-expired' },
+    { ...fixtureJob, sourceId: 'smoke-broken', title: 'W03 Broken Import', url: 'https://boards.greenhouse.io/acme/jobs/smoke-broken' },
+    { ...fixtureJob, sourceId: 'smoke-uncertain', title: 'W03 Uncertain', url: 'https://boards.greenhouse.io/acme/jobs/smoke-uncertain' }
+  ];
+  const mixedSearch = createSearch(w03Store, {
+    name: 'W03 Mixed Discovery',
+    profileId: profile.id,
+    adapter: 'greenhouse',
+    config: { fixture: richFixture, company: 'Acme', boardToken: 'acme' },
+    minFit: 50
+  });
+  const scoredW03Jobs = [];
+  const mixedNow = () => Date.now();
+  const mixedLiveness = async candidate => {
+    const checkedAt = new Date(mixedNow()).toISOString();
+    const status = candidate.sourceId === 'smoke-expired' ? 'expired' : candidate.sourceId === 'smoke-uncertain' ? 'uncertain' : 'active';
+    return {
+      version: 1,
+      jobId: '',
+      status,
+      checkedAt,
+      requestedUrl: candidate.url,
+      finalUrl: candidate.url,
+      httpStatus: status === 'expired' ? 404 : status === 'active' ? 200 : 429,
+      reasonCodes: [status === 'expired' ? 'not_found' : status === 'active' ? 'listed_in_current_listing' : 'anti_bot'],
+      evidence: [{ kind: status === 'uncertain' ? 'anti_bot' : 'http_status', value: status === 'expired' ? '404' : status === 'active' ? '200' : 'challenge' }],
+      source: 'greenhouse',
+      freshUntil: new Date(mixedNow() + 86_400_000).toISOString()
+    };
+  };
+  const mixedDiscovery = await runSavedSearch(w03Store, mixedSearch.id, {
+    adapter: { fetchJobs: async () => mixedJobs },
+    importJob: (store, args) => {
+      if (args.job.sourceId === 'smoke-broken') throw Object.assign(new Error('deterministic smoke import failure'), { code: 'smoke_import_failure' });
+      return importNormalized(store, args);
+    },
+    scoreJob: async (store, jobId, profileId, options) => {
+      scoredW03Jobs.push(jobId);
+      return scoreJob(store, jobId, profileId, options);
+    },
+    checkLiveness: mixedLiveness,
+    now: mixedNow
+  });
+  if (mixedDiscovery.status !== 'partial' || !mixedDiscovery.errors.some(item => item.stage === 'import') || !mixedDiscovery.jobs.some(item => item.title === 'W03 Uncertain' && item.outcome === 'scored')) {
+    throw new Error('W03 mixed discovery did not preserve partial status, structured failure, and later-result progress');
+  }
+  const expiredW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Expired' AND profile_id=?", [profile.id]);
+  const uncertainW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Uncertain' AND profile_id=?", [profile.id]);
+  const activeW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Active' AND profile_id=?", [profile.id]);
+  if (!activeW03 || activeW03.liveness_status !== 'active' || !expiredW03 || expiredW03.liveness_status !== 'expired' || !uncertainW03 || uncertainW03.liveness_status !== 'uncertain') {
+    throw new Error('W03 active, expired, and uncertain liveness states are not visible');
+  }
+  if (expiredW03.fit_score != null || scoredW03Jobs.includes(expiredW03.id)) throw new Error('W03 expired result was scored');
+  let expiredPursuitError = null;
+  try {
+    await runPursuit(w03Store, { jobId: expiredW03.id, profileId: profile.id });
+  } catch (error) {
+    expiredPursuitError = error;
+  }
+  if (expiredPursuitError?.code !== 'job_expired') throw new Error('W03 expired result entered pursuit');
+  const w03Runs = all(w03Store, "SELECT external_side_effects FROM automation_runs WHERE trigger_name='discover.run'");
+  const w03Audits = all(w03Store, "SELECT external_side_effect FROM audit_log WHERE entity_id=? OR entity_id IN (?,?,?)", [mixedDiscovery.runId, activeW03.id, expiredW03.id, uncertainW03.id]);
+  if (w03Runs.some(item => item.external_side_effects !== 'none') || w03Audits.some(item => item.external_side_effect !== 'none')) throw new Error('W03 discovery claimed an external side effect');
+  if (one(w03Store, 'SELECT COUNT(*) AS count FROM applications WHERE job_id IN (?,?,?)', [activeW03.id, expiredW03.id, uncertainW03.id]).count !== 0) throw new Error('W03 discovery created an application');
+  w03Store.db.close();
   const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
   const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
   if (!(score.overall > 0)) throw new Error('Score did not compute');
@@ -143,7 +233,52 @@ try {
   if (!stalePlan.blockers.some(item => item.code === 'resume_stale_source_revision')) throw new Error('Canonical resume revision did not stale the tailored artifact');
   const stalePacket = JSON.parse(run(['apply', 'packet', 'show', applicationPacket.id, '--json']));
   if (stalePacket.currency !== 'stale') throw new Error('Canonical resume revision did not stale the frozen packet');
-  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, humanReview: { readyForReview: reviewPlan.status, approved: approvedPlan.status, reviewedArtifactIds: reviewQueue.map(item => item.id), applicationStatusChanged: false, externalSideEffects: 'none' }, receiptSpine: { packetId: applicationPacket.id, contentHash: applicationPacket.contentHash, receiptState: confirmedPlan.packet.receiptState, receiptCount: receiptRows.length, appliedStatusBound: true, submissionPerformed: false, externalSideEffects: 'none' }, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    root,
+    profile: profile.id,
+    job: job.id,
+    score: score.overall,
+    application: app.id,
+    humanReview: {
+      readyForReview: reviewPlan.status,
+      approved: approvedPlan.status,
+      reviewedArtifactIds: reviewQueue.map(item => item.id),
+      applicationStatusChanged: false,
+      externalSideEffects: 'none'
+    },
+    receiptSpine: {
+      packetId: applicationPacket.id,
+      contentHash: applicationPacket.contentHash,
+      receiptState: confirmedPlan.packet.receiptState,
+      receiptCount: receiptRows.length,
+      appliedStatusBound: true,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    discoveryRun: discovery.runId,
+    w03: {
+      richRun: richDiscovery.runId,
+      normalizedFieldsRoundTrip: true,
+      mixedRun: mixedDiscovery.runId,
+      mixedStatus: mixedDiscovery.status,
+      laterResultImported: Boolean(uncertainW03),
+      structuredErrors: mixedDiscovery.errors,
+      liveness: {
+        active: activeW03.liveness_status,
+        expired: expiredW03.liveness_status,
+        uncertain: uncertainW03.liveness_status
+      },
+      expiredScored: false,
+      expiredPursued: false,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    schedulerRun: schedulerRun.runs[0].id,
+    priorityBrief: briefPath,
+    interviewPrep: true,
+    interviews: funnel.totals.interviews
+  }, null, 2));
 } finally {
   if (!process.env.KEEP_JOBOS_SMOKE) rmSync(root, { recursive: true, force: true });
 }

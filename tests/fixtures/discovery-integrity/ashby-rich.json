@@ -1,0 +1,23 @@
+{
+  "organizationName": "Acme AI",
+  "jobs": [
+    {
+      "id": "ashby-rich-1",
+      "title": "Product Operations Lead",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/ashby-rich-1",
+      "location": "San Francisco, CA",
+      "workplaceType": "On-site",
+      "employmentType": "Contract",
+      "department": "Operations",
+      "compensation": {
+        "min": 90,
+        "max": 120,
+        "currency": "USD",
+        "interval": "hour"
+      },
+      "publishedAt": "2026-07-19T08:00:00Z",
+      "descriptionHtml": "<p>Build product operations systems.</p>",
+      "isListed": true
+    }
+  ]
+}

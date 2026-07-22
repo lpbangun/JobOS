@@ -1,0 +1,23 @@
+{
+  "name": "liveness-active-ats-listing",
+  "description": "W03-LIVE-01 case A: classifier input with a current successful public-ATS listing hint. No per-job fetch should be issued; classify should produce status=active with ats_listing evidence.",
+  "input": {
+    "jobId": "j1",
+    "source": "public-ats",
+    "url": "https://example.com/jobs/101",
+    "livenessHint": {
+      "kind": "listed_in_public_ats",
+      "observedAt": "2026-07-22T00:00:00.000Z",
+      "request": {
+        "requestedUrl": "https://api.example.com/v1/boards/acme/jobs?content=true",
+        "finalUrl": "https://api.example.com/v1/boards/acme/jobs?content=true",
+        "httpStatus": 200
+      }
+    },
+    "listingPresent": true
+  },
+  "clock": {
+    "nowIso": "2026-07-22T00:00:00.000Z",
+    "nowMs": 1784678400000
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "retry-after-exceeds-remaining-budget",
+  "description": "W03-HTTP-02: Retry-After delta-seconds 2 within 10s cap, but budget remainingMs=500 < delay. No clamp, no retry, code time_limit, fetch count 1.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "budget": { "remainingMs": 500 },
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "2" }, "body": "", "ok": false }
+  ],
+  "expectedError": {
+    "code": "time_limit"
+  }
+}

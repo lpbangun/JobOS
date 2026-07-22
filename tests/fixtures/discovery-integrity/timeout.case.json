@@ -1,0 +1,9 @@
+{
+  "name": "timeout",
+  "description": "W03-HTTP-05: injected fetch throws an AbortError. Timeout must not be retried as transient; fetch count is 1.",
+  "url": "https://timeout.example.com/jobs",
+  "fetchThrows": {
+    "name": "AbortError",
+    "message": "The operation was aborted"
+  }
+}

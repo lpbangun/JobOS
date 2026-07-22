@@ -54,13 +54,14 @@ async function dailyDiscovery(s, automation) {
       const runs = Array.isArray(result?.runs) ? result.runs : [];
       const totals = runs.reduce((acc, r) => {
         acc.jobsImported += Number(r?.counts?.imported || 0);
-        acc.jobsScored += Number((r?.counts?.imported || 0) + (r?.counts?.deduped || 0));
+        acc.jobsScored += Number(r?.counts?.scored ?? ((r?.counts?.imported || 0) + (r?.counts?.deduped || 0)));
         acc.highFit += Number(r?.counts?.highFit || 0);
         return acc;
       }, { jobsImported: 0, jobsScored: 0, highFit: 0 });
       return {
         outputs: { discovery: result },
-        counts: totals
+        counts: totals,
+        derivedStatus: ['succeeded', 'partial', 'failed'].includes(result?.status) ? result.status : 'succeeded'
       };
     }
   } catch (e) {
@@ -192,7 +193,7 @@ function morningPriorityBrief(s, automation, { nowDate = new Date() } = {}) {
     const jobs = all(s, `SELECT jobs.*, applications.status AS application_status
       FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id
       WHERE jobs.profile_id=? AND COALESCE(jobs.fit_score,0)>=70
-        AND (applications.status IS NULL OR applications.status IN ('saved','researching','materials-ready'))
+        AND COALESCE(jobs.liveness_status,'uncertain')<>'expired' AND (applications.status IS NULL OR applications.status IN ('saved','researching','materials-ready'))
       ORDER BY jobs.fit_score DESC, jobs.created_at DESC LIMIT 8`, [profile.id]);
     const interviews = all(s, `SELECT applications.*, jobs.title, jobs.company
       FROM applications JOIN jobs ON jobs.id=applications.job_id

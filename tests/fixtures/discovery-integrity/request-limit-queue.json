@@ -1,0 +1,11 @@
+{
+  "name": "request-limit-queue",
+  "description": "W03-HTTP-05: budget.maxRequests=2. After two enters, the next attempt must truncate with request_limit without an extra fetch. The 3rd response must remain unconsumed.",
+  "url": "https://example.com/jobs",
+  "budget": { "maxRequests": 2 },
+  "responses": [
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"step\":1}", "ok": true },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"step\":2}", "ok": true },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"step\":3}", "ok": true }
+  ]
+}

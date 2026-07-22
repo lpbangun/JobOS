@@ -1,0 +1,13 @@
+{
+  "name": "retry-after-imf-date-safe",
+  "description": "W03-HTTP-02: Retry-After IMF-fixdate = now+3000ms. Sleep ~3000ms then second fetch succeeds. Test wires the injected clock from the clock block below.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "clock": {
+    "nowIso": "2026-07-22T00:00:00.000Z",
+    "nowMs": 1784678400000
+  },
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "Wed, 22 Jul 2026 00:00:03 GMT" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ]
+}

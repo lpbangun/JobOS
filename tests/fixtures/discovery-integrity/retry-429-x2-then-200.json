@@ -1,0 +1,10 @@
+{
+  "name": "retry-429-x2-then-200",
+  "description": "W03-HTTP-01: 429, 429, 200. Three attempts total, 3rd succeeds.",
+  "url": "https://api.example.com/v1/boards/acme/jobs?content=true",
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 429, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ]
+}

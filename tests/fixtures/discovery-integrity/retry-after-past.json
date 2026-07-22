@@ -1,0 +1,17 @@
+{
+  "name": "retry-after-past",
+  "description": "W03-HTTP-03: past IMF-fixdate Retry-After is invalid and falls back to 250ms. Test iterates the pastHeaders list, substituting each into the first response.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "clock": {
+    "nowIso": "2026-07-22T00:00:00.000Z",
+    "nowMs": 1784678400000
+  },
+  "pastHeaders": [
+    "Wed, 01 Jan 2020 00:00:00 GMT",
+    "Tue, 21 Jul 2026 23:59:59 GMT"
+  ],
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "<past>" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ]
+}

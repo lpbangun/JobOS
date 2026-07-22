@@ -1,0 +1,12 @@
+{
+  "name": "retry-after-excessive-delta",
+  "description": "W03-HTTP-02: Retry-After delta-seconds 15 > 10s cap. No sleep, no retry, code retry_after_exceeds_limit, details.parsedDelayMs=15000.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "15" }, "body": "", "ok": false }
+  ],
+  "expectedError": {
+    "code": "retry_after_exceeds_limit",
+    "details": { "parsedDelayMs": 15000 }
+  }
+}
