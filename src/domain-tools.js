@@ -26,6 +26,10 @@ import {
   attestApplicationSubmitted,
   confirmApplicationReceipt
 } from './packets.js';
+import { DOM_ADAPTER_MANIFEST, inspectLiveForm } from './form-browser.js';
+import { getFormSnapshot } from './forms.js';
+import { checkpointApplicationForm, fillApplicationForm } from './form-actions.js';
+import { submitApplicationForm } from './form-submission.js';
 
 export class DomainToolError extends Error {
   constructor(code, message, details = {}) {
@@ -108,6 +112,11 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'create_application_packet', description: 'Freeze current approved materials, answers, and target into one immutable application packet. Requires approved local readiness.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'attest_application_submitted', description: 'Record trusted local human submission attestation for an exact packet. Binds pre-apply application status to applied.', inputSchema: required({ packetId: text, submittedAt: text }, ['packetId', 'submittedAt']) },
   { name: 'confirm_application_receipt', description: 'Record an external reference confirming receipt after a user_attestation exists. Does not change application status.', inputSchema: required({ packetId: text, reference: text }, ['packetId', 'reference']) },
+  { name: 'inspect_application_form', description: 'Inspect one live employer application form read-only and persist a secret-safe bound snapshot.', inputSchema: required({ jobId: text, profileId: text, url: text, browserProfile: text, expectedAdapterHash: text }, ['jobId', 'profileId', 'url']) },
+  { name: 'application_form_show', description: 'Show one persisted secret-safe application-form snapshot.', inputSchema: required({ snapshotId: text }, ['snapshotId']) },
+  { name: 'assist_application_form', description: 'Fill exact safe packet-bound fields and report transient read-back statuses without submitting.', inputSchema: required({ packetId: text, browserProfile: text, allowSideEffects: { type: 'boolean' } }, ['packetId']) },
+  { name: 'checkpoint_application_form', description: 'Accept a trusted human checkpoint after successful read-back and explicit manual-field confirmation.', inputSchema: required({ packetId: text, fillRunId: text, confirmedFieldKeys: { type: 'array', items: text } }, ['packetId', 'fillRunId']) },
+  { name: 'submit_application_form', description: 'Submit one exact packet/form/checkpoint through a separately enabled configured adapter and return structured outcome evidence.', inputSchema: required({ packetId: text, checkpointId: text, browserProfile: text, allowSubmit: { type: 'boolean' } }, ['packetId', 'checkpointId']) },
   { name: 'list_saved_searches', description: 'List configured local discovery searches.', inputSchema: object({}) },
   { name: 'search_jobs', description: 'Run a saved discovery search and queue results for human review.', inputSchema: required({ search: text }, ['search']) },
   { name: 'import_job_url', description: 'Import a human-provided job URL into local JobOS state.', inputSchema: required({ profileId: text, url: text }, ['profileId', 'url']) },
@@ -417,6 +426,59 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'application_packets_list') return listApplicationPackets(s, { jobId: args.jobId, profileId: args.profileId });
   if (name === 'application_packet_show') return showApplicationPacket(s, args.packetId);
   if (name === 'application_packet_diff') return diffApplicationPackets(s, args.firstPacketId, args.secondPacketId);
+  if (name === 'inspect_application_form') return await inspectLiveForm(s, {
+    jobId: args.jobId,
+    profileId: args.profileId,
+    url: args.url,
+    browserProfile: args.browserProfile || 'default',
+    expectedAdapterHash: args.expectedAdapterHash || null
+  });
+  if (name === 'application_form_show') return getFormSnapshot(s, args.snapshotId);
+  if (name === 'assist_application_form') {
+    const source = mediationSource(options);
+    if (['mcp', 'acp'].includes(source)) {
+      const packet = showApplicationPacket(s, args.packetId);
+      const profile = one(s, 'SELECT preferences_json FROM profiles WHERE id=?', [packet.profileId]);
+      const preferences = parseJson(profile?.preferences_json, {});
+      const enabled = preferences?.externalActions?.agentFormInvocationEnabled === true
+        || process.env.JOBOS_AGENT_FORM_INVOCATION_ENABLED === '1';
+      if (!enabled) throw new DomainToolError('agent_form_invocation_not_enabled', 'Mediated form actions are disabled for this profile/environment.', { source });
+    }
+    return await fillApplicationForm(s, {
+      packetId: args.packetId,
+      workspace: s.p.root,
+      browserProfile: args.browserProfile || 'default',
+      allowSideEffects: args.allowSideEffects === true,
+      adapterManifest: DOM_ADAPTER_MANIFEST,
+      expectedAdapterHash: args.expectedAdapterHash || null
+    });
+  }
+  if (name === 'checkpoint_application_form') return checkpointApplicationForm(s, {
+    packetId: args.packetId,
+    fillRunId: args.fillRunId,
+    confirmedFieldKeys: args.confirmedFieldKeys || [],
+    source: mediationSource(options)
+  });
+  if (name === 'submit_application_form') {
+    const source = mediationSource(options);
+    if (['mcp', 'acp'].includes(source)) {
+      const packet = showApplicationPacket(s, args.packetId);
+      const profile = one(s, 'SELECT preferences_json FROM profiles WHERE id=?', [packet.profileId]);
+      const preferences = parseJson(profile?.preferences_json, {});
+      const enabled = preferences?.externalActions?.agentFormInvocationEnabled === true
+        || process.env.JOBOS_AGENT_FORM_INVOCATION_ENABLED === '1';
+      if (!enabled) throw new DomainToolError('agent_form_invocation_not_enabled', 'Mediated form actions are disabled for this profile/environment.', { source });
+    }
+    return await submitApplicationForm(s, {
+      packetId: args.packetId,
+      checkpointId: args.checkpointId,
+      workspace: s.p.root,
+      browserProfile: args.browserProfile || 'default',
+      allowSubmit: args.allowSubmit === true,
+      invokedBy: source,
+      expectedAdapterHash: args.expectedAdapterHash || null
+    });
+  }
   if (name === 'create_application_packet') {
     const readiness = compileApplicationReadiness(s, { jobId: args.jobId, profileId: args.profileId, includePacket: false });
     return await createApplicationPacket(s, { jobId: args.jobId, profileId: args.profileId, createdBy: mediationSource(options), readiness });

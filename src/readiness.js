@@ -6,6 +6,8 @@ import { writeYaml } from './workspace.js';
 import { applicationId } from './tracking.js';
 import { readinessPacketSummary } from './packets.js';
 
+import { resolveFormBindings } from './forms.js';
+import { DOM_ADAPTER_MANIFEST } from './form-browser.js';
 const submittedEvidenceStatuses = new Set([
   'applied',
   'recruiter-screen',
@@ -92,7 +94,7 @@ function blocker(code, message, nextAction, details = {}) {
   return { code, message, nextAction, ...details };
 }
 
-function topLevelNextAction({ status, blockers, pendingArtifactIds, packet, jobId, profileId }) {
+function topLevelNextAction({ status, blockers, pendingArtifactIds, packet, jobId, profileId, form }) {
   if (status === 'blocked') {
     return blockers[0]?.nextAction || 'Resolve the first blocker listed above, then re-run readiness.';
   }
@@ -101,15 +103,22 @@ function topLevelNextAction({ status, blockers, pendingArtifactIds, packet, jobI
       ? `Approve the pending draft revision(s) after review: ${pendingArtifactIds.map(artifactId => `"jobos artifacts approve ${artifactId} --json"`).join(', ')}.`
       : 'Review the current material revisions and approve them with "jobos artifacts approve <artifact-id> --json".';
   }
-  // status === 'approved': local approval is complete; guidance follows the packet receipt lifecycle.
+  if (status === 'materials-ready') {
+    return `Inspect the real employer form before freezing a packet: "jobos apply form inspect --job ${jobId} --profile ${profileId} --url <application-url> --json".`;
+  }
+  if (status === 'form-blocked') {
+    return form?.unresolvedFieldKeys?.length
+      ? `Resolve the required live-form fields (${form.unresolvedFieldKeys.join(', ')}), then reinspect the form.`
+      : 'Resolve the live-form blocker, then reinspect the form.';
+  }
   const currency = packet?.currency || 'none';
   const receiptState = packet?.receiptState || 'none';
   if (!packet?.currentPacketId || currency !== 'current') {
     const staleNote = packet?.currentPacketId && currency !== 'none' ? ` The latest packet is ${currency}; a new one must be frozen.` : '';
-    return `Freeze an immutable application packet from the approved materials: "jobos apply packet create --job ${jobId} --profile ${profileId} --json".${staleNote}`;
+    return `Freeze an immutable packet bound to this exact form: "jobos apply packet create --job ${jobId} --profile ${profileId} --json".${staleNote}`;
   }
   if (receiptState === 'none') {
-    return `Submit the packet on the external job site yourself, then record the human submission: "jobos apply attest-submitted ${packet.currentPacketId} --submitted-at <rfc3339> --json".`;
+    return `Submit manually and attest, or use the separately configured exact-bound form submission command for packet ${packet.currentPacketId}.`;
   }
   if (receiptState === 'attested') {
     return `Submission attested. Once the external system confirms receipt, record it: "jobos apply confirm-receipt ${packet.currentPacketId} --reference <external-reference> --json".`;
@@ -120,7 +129,7 @@ function topLevelNextAction({ status, blockers, pendingArtifactIds, packet, jobI
 export function compileApplicationReadiness(s, { jobId, profileId, includePacket = true }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw readinessError('unknown_job', `Unknown job: ${jobId}`);
-  const profile = one(s, 'SELECT id,name FROM profiles WHERE id=?', [profileId]);
+  const profile = one(s, 'SELECT id,name,preferences_json FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw readinessError('unknown_profile', `Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw readinessError('profile_job_mismatch', `Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`);
 
@@ -207,18 +216,6 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --format pdf --json" after installing or correcting the local renderer.`,
     { renderStatus: resumeRenderManifest.status }
   ));
-  if (answers.unmatched) blockers.push(blocker(
-    'unmatched_questions',
-    `${answers.unmatched} ordinary application question(s) have no verified answer match.`,
-    `Review the question list and add verified answers with "jobos answers add --profile ${profileId} ... --json".`,
-    { count: answers.unmatched }
-  ));
-  if (answers.unresolvedRestricted) blockers.push(blocker(
-    'restricted_questions_require_input',
-    `${answers.unresolvedRestricted} restricted application question(s) require direct user input.`,
-    `Store each exact direct response with \"jobos answers add --profile ${profileId} --category <restricted-category> --question <exact-prompt> --answer <direct-response> --sensitivity restricted --reuse never_auto_fill --source job:${jobId} --json\"; JobOS redacts and never auto-fills the value.`,
-    { count: answers.unresolvedRestricted }
-  ));
   if (duplicates.length) blockers.push(blocker(
     'possible_duplicate_application',
     'Local status evidence indicates a possible prior application for the same source or identity key.',
@@ -258,8 +255,38 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
   const approvalsComplete = blockers.length === 0
     && requiredArtifactIds.length > 0
     && requiredArtifactIds.every(artifactId => approvedArtifactIds.includes(artifactId));
-  const status = blockers.length ? 'blocked' : approvalsComplete ? 'approved' : 'ready-for-review';
-  const readyForReview = status !== 'blocked';
+  const materialsStatus = blockers.length ? 'blocked' : approvalsComplete ? 'approved' : 'ready-for-review';
+  const resolvedForm = materialsStatus === 'approved'
+    ? resolveFormBindings(s, { jobId, profileId })
+    : { snapshot: null, bindings: [], requiredFieldCount: 0, resolvedFieldCount: 0, humanActionFieldKeys: [], unsupportedFieldKeys: [], unresolvedFieldKeys: [], formReady: false, autoFillComplete: false };
+  const adapterCurrent = Boolean(resolvedForm.snapshot
+    && resolvedForm.snapshot.adapter?.id === DOM_ADAPTER_MANIFEST.id
+    && resolvedForm.snapshot.adapter?.protocolVersion === DOM_ADAPTER_MANIFEST.protocolVersion
+    && resolvedForm.snapshot.adapter?.sourceHash === DOM_ADAPTER_MANIFEST.sourceHash);
+  const inspectionStatus = !resolvedForm.snapshot ? 'uninspected' : adapterCurrent ? 'current' : 'stale';
+  const form = {
+    inspectionStatus,
+    snapshotId: resolvedForm.snapshot?.snapshotId || null,
+    fingerprint: resolvedForm.snapshot?.fingerprint || null,
+    formReady: adapterCurrent && resolvedForm.formReady,
+    autoFillComplete: adapterCurrent && resolvedForm.autoFillComplete,
+    requiredFieldCount: resolvedForm.requiredFieldCount,
+    resolvedFieldCount: resolvedForm.resolvedFieldCount,
+    humanActionFieldKeys: resolvedForm.humanActionFieldKeys,
+    unsupportedFieldKeys: resolvedForm.unsupportedFieldKeys,
+    unresolvedFieldKeys: resolvedForm.unresolvedFieldKeys,
+    bindings: resolvedForm.bindings
+  };
+  const status = materialsStatus === 'blocked'
+    ? 'blocked'
+    : materialsStatus === 'ready-for-review'
+      ? 'ready-for-review'
+      : inspectionStatus !== 'current'
+        ? 'materials-ready'
+        : resolvedForm.formReady
+          ? 'form-ready'
+          : 'form-blocked';
+  const readyForReview = materialsStatus !== 'blocked';
   const mirrorPath = path.join('jobs', jobId, 'application-readiness.yaml');
   const packetSummary = includePacket ? readinessPacketSummary(s, { jobId, profileId }) : null;
   const packetView = includePacket ? (packetSummary || {
@@ -272,21 +299,31 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     attestable: false,
     latestReceiptId: null
   }) : null;
-  const nextAction = topLevelNextAction({ status, blockers, pendingArtifactIds, packet: packetView, jobId, profileId });
+  const preferences = parseJson(profile.preferences_json, {});
+  const externalActions = preferences.externalActions || {};
+  const actionPolicy = {
+    fillConfigured: externalActions.formFillEnabled === true || process.env.JOBOS_FORM_FILL_ENABLED === '1',
+    submitConfigured: externalActions.formSubmitEnabled === true || process.env.JOBOS_FORM_SUBMIT_ENABLED === '1',
+    mediatedFormInvocationConfigured: externalActions.agentFormInvocationEnabled === true || process.env.JOBOS_AGENT_FORM_INVOCATION_ENABLED === '1',
+    fillRequiresPerInvocationAllowSideEffects: true,
+    submitRequiresPerInvocationAllowSubmit: true
+  };
+  const nextAction = topLevelNextAction({ status, blockers, pendingArtifactIds, packet: packetView, jobId, profileId, form });
   return {
-    version: 3,
+    version: 4,
     generatedAt: now(),
     jobId,
     profileId,
     status,
+    materialsStatus,
     readyForReview,
-    localApprovalComplete: status === 'approved',
+    localApprovalComplete: materialsStatus === 'approved',
     review: {
       requiredArtifactIds,
       approvedArtifactIds,
       pendingArtifactIds,
       rejectedArtifactIds,
-      localApprovalComplete: status === 'approved'
+      localApprovalComplete: materialsStatus === 'approved'
     },
     identity: {
       identityKey,
@@ -306,6 +343,8 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
       coverLetter
     },
     answers,
+    form,
+    actionPolicy,
     blockers,
     nextAction,
     nextActions: blockers.map(item => ({ code: item.code, action: item.nextAction })),
@@ -314,11 +353,11 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     packet: packetView,
     mirrorPath,
     policy: {
-      meaning: 'Reviewable completeness and local human approval from local evidence only.',
+      meaning: 'Material approval and live-form readiness from exact local evidence only.',
       externalSideEffects: 'none',
       submissionPerformed: false,
       applicationStatusChanged: false,
-      readyDoesNotMean: ['submitted', 'applied', 'receipt-recorded', 'authorized-for-agent-submission']
+      readyDoesNotMean: ['filled', 'checkpointed', 'authorized-to-submit', 'authorized-for-agent-submission', 'submitted', 'applied', 'receipt-recorded']
     }
   };
 }

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Example Co (Changed)</title>
+  <meta name="fixture" content="application-changed">
+</head>
+<body>
+  <!--
+    application-changed.html
+    Identical to application-main.html EXCEPT one required field's option set
+    changes: "Preferred role" gains a fourth option and renames one label.
+    This is the deterministic fingerprint-staleness case (WF07): the same form,
+    but a semantic change in a required field's options alters the field-map
+    fingerprint. Do not change the form id/data-form so selection still matches.
+  -->
+  <header>
+    <h1>Apply to Example Co</h1>
+  </header>
+
+  <main id="main">
+    <form id="application-form" name="application-form" data-form="application-main" aria-label="Job application form" action="/submit/application" method="post" enctype="multipart/form-data">
+
+      <fieldset>
+        <legend>Identity &amp; contact</legend>
+        <div class="field">
+          <label for="full-name">Full name</label>
+          <input id="full-name" name="full_name" type="text" autocomplete="name" required>
+        </div>
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required>
+        </div>
+        <div class="field">
+          <label for="phone">Phone</label>
+          <input id="phone" name="phone" type="tel" autocomplete="tel" required>
+        </div>
+        <div class="field">
+          <label for="location">Location</label>
+          <input id="location" name="location" type="text" autocomplete="address-level1" required>
+        </div>
+        <div class="field">
+          <label for="website">Personal website</label>
+          <input id="website" name="website" type="url">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>About your application</legend>
+        <div class="field">
+          <label for="cover-letter-text">Cover letter (text)</label>
+          <textarea id="cover-letter-text" name="cover_letter_text" rows="6" cols="60"></textarea>
+        </div>
+        <div class="field">
+          <label for="experience-years">Years of relevant experience</label>
+          <input id="experience-years" name="experience_years" type="number" min="0" max="80" required>
+        </div>
+        <div class="field">
+          <label for="start-date">Earliest start date</label>
+          <input id="start-date" name="start_date" type="date" required>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Preferences</legend>
+
+        <!-- CHANGED: fourth option added and "Manager" label renamed to "People Manager". -->
+        <div class="field">
+          <label for="role-select">Preferred role</label>
+          <select id="role-select" name="role" required>
+            <option value="" disabled selected>Select a role…</option>
+            <option value="engineer">Engineer</option>
+            <option value="designer">Designer</option>
+            <option value="people-manager">People Manager</option>
+            <option value="product-manager">Product Manager</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <span class="label">Work arrangement</span>
+          <label><input type="radio" name="work_arrangement" value="remote" required> Remote</label>
+          <label><input type="radio" name="work_arrangement" value="hybrid"> Hybrid</label>
+          <label><input type="radio" name="work_arrangement" value="onsite"> On-site</label>
+        </div>
+
+        <div class="field">
+          <label>
+            <input type="checkbox" name="relocate" value="yes">
+            I am willing to relocate
+          </label>
+          <label>
+            <input type="checkbox" name="newsletter" value="yes">
+            Send me company news
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Documents</legend>
+        <div class="field">
+          <label for="resume-file">Resume (PDF)</label>
+          <input id="resume-file" name="resume_file" type="file" accept=".pdf,application/pdf" required>
+        </div>
+        <div class="field">
+          <label for="cover-file">Cover letter file (optional)</label>
+          <input id="cover-file" name="cover_file" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+        </div>
+      </fieldset>
+
+      <fieldset class="restricted">
+        <legend>Restricted &amp; legal (human action)</legend>
+        <div class="field">
+          <span class="label">Work authorization (required)</span>
+          <label><input type="radio" name="work_authorization" value="authorized" required> I am authorized to work in this country</label>
+          <label><input type="radio" name="work_authorization" value="need_sponsorship"> I need sponsorship</label>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" name="legal_consent" value="agree" required data-handling="human-action">
+            I have read and agree to the legal disclosure and consent terms
+          </label>
+        </div>
+        <div class="field">
+          <label for="eeo-gender">Voluntary demographic — gender (optional)</label>
+          <select id="eeo-gender" name="eeo_gender" data-sensitivity="restricted">
+            <option value="" disabled selected>Prefer not to say</option>
+            <option value="woman">Woman</option>
+            <option value="man">Man</option>
+            <option value="nonbinary">Non-binary</option>
+            <option value="self-describe">Self-describe</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <div class="actions">
+        <button id="save-draft" type="button" name="save_draft" data-action="save-draft">Save draft</button>
+        <button id="submit-application" type="submit" name="submit_application" data-submit="application-main">Submit application</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

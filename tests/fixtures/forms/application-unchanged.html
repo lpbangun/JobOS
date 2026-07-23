@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Unchanged confirmation marker</title></head>
+<body>
+  <h1>Apply to Example Co</h1>
+  <p data-confirmation-marker="dom-v1" data-confirmation-reference="APP-STALE-0001">Existing marker</p>
+  <p data-confirmation-status="confirmed">confirmed</p>
+  <form aria-label="Job application form" action="/submit/application?outcome=confirmed" method="post">
+    <label for="candidate-name">Full name</label>
+    <input id="candidate-name" name="full_name" type="text" required>
+    <button type="submit">Submit application</button>
+  </form>
+  <script>document.querySelector('form').addEventListener('submit', event => event.preventDefault());</script>
+</body>
+</html>

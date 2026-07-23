@@ -10,7 +10,8 @@ const MCP_DENY = new Set([
   'answers_add',
   'create_application_packet',
   'attest_application_submitted',
-  'confirm_application_receipt'
+  'confirm_application_receipt',
+  'checkpoint_application_form'
 ]);
 const tools = DOMAIN_TOOLS.filter(t => !MCP_DENY.has(t.name));
 

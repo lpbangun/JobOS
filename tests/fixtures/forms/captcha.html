@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — CAPTCHA Challenge</title>
+  <meta name="fixture" content="captcha">
+</head>
+<body>
+  <!--
+    captcha.html
+    A deterministic CAPTCHA challenge page presented before the application
+    submit boundary. The adapter must never bypass it (WF14): record a typed
+    `captcha` recovery, no successful fill/submission/receipt, and pre-submit
+    versus uncertain truth is preserved.
+
+    The "challenge" is a simple visible arithmetic prompt with a text input.
+    No real anti-bot; deterministic for local Chromium.
+  -->
+  <header>
+    <h1>Verify you are human</h1>
+  </header>
+
+  <main id="main">
+    <form id="captcha-form" name="captcha-form" data-form="captcha" aria-label="CAPTCHA challenge" action="/captcha/verify" method="post">
+      <fieldset>
+        <legend>Challenge</legend>
+        <p id="captcha-prompt" data-captcha-prompt>What is 7 + 3? Enter the answer below.</p>
+        <div class="field">
+          <label for="captcha-answer">Answer</label>
+          <input id="captcha-answer" name="captcha_answer" type="text" autocomplete="off" required>
+        </div>
+      </fieldset>
+      <div class="actions">
+        <button id="captcha-submit" type="submit" data-submit="captcha">Verify</button>
+      </div>
+    </form>
+
+    <!-- Marker so inspection can identify this as a CAPTCHA gate. -->
+    <p id="captcha-marker" data-captcha hidden>captcha</p>
+  </main>
+</body>
+</html>

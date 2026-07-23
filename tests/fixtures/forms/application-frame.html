@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application Frame</title>
+  <meta name="fixture" content="application-frame">
+</head>
+<body>
+  <!--
+    application-frame.html
+    Standalone copy of the richer application form that application-host.html
+    embeds via iframe srcdoc. Useful for direct-frame tests and as the canonical
+    content source for the host's iframe. Stable labels and explicit submit
+    marker are required for Playwright.
+  -->
+  <main id="frame-main">
+    <form id="application-form" name="application-form" data-form="application-frame" aria-label="Job application form" action="/submit/application" method="post" enctype="multipart/form-data">
+
+      <fieldset>
+        <legend>Identity &amp; contact</legend>
+        <div class="field">
+          <label for="frame-full-name">Full name</label>
+          <input id="frame-full-name" name="full_name" type="text" required>
+        </div>
+        <div class="field">
+          <label for="frame-email">Email</label>
+          <input id="frame-email" name="email" type="email" required>
+        </div>
+        <div class="field">
+          <label for="frame-phone">Phone</label>
+          <input id="frame-phone" name="phone" type="tel">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>About</legend>
+        <div class="field">
+          <label for="frame-notes">Notes</label>
+          <textarea id="frame-notes" name="notes" rows="5" cols="50"></textarea>
+        </div>
+        <div class="field">
+          <label for="frame-role">Preferred role</label>
+          <select id="frame-role" name="role" required>
+            <option value="" disabled selected>Select…</option>
+            <option value="engineer">Engineer</option>
+            <option value="designer">Designer</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="label">Work arrangement</span>
+          <label><input type="radio" name="work_arrangement" value="remote" required> Remote</label>
+          <label><input type="radio" name="work_arrangement" value="onsite"> On-site</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Documents</legend>
+        <div class="field">
+          <label for="frame-resume">Resume (PDF)</label>
+          <input id="frame-resume" name="resume_file" type="file" accept=".pdf,application/pdf" required>
+        </div>
+      </fieldset>
+
+      <fieldset class="restricted">
+        <legend>Restricted (human action)</legend>
+        <div class="field">
+          <span class="label">Work authorization</span>
+          <label><input type="radio" name="work_authorization" value="authorized" required> Authorized</label>
+          <label><input type="radio" name="work_authorization" value="sponsorship"> Need sponsorship</label>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" name="legal_consent" value="agree" required data-handling="human-action">
+            I agree to the legal consent terms
+          </label>
+        </div>
+      </fieldset>
+
+      <div class="actions">
+        <button id="frame-save-draft" type="button" data-action="save-draft">Save draft</button>
+        <button id="frame-submit-application" type="submit" data-submit="application-frame">Submit application</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

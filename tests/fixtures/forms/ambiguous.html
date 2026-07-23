@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Ambiguous Outcome</title>
+  <meta name="fixture" content="ambiguous">
+</head>
+<body>
+  <!--
+    ambiguous.html
+    Post-submit page with no structured confirmation marker. The adapter crossed
+    (or may have crossed) the submit boundary but found no explicit external
+    reference or validated confirmation marker (WF17/WF23).
+
+    Required result: status `uncertain`, no receipt, no `applied` transition,
+    replay blocked. Never convert ambiguity into success.
+  -->
+  <header>
+    <h1>We're processing your application</h1>
+  </header>
+
+  <main id="main">
+    <section id="ambiguous" aria-label="Processing">
+      <p>Your application was received and is being processed.</p>
+      <!-- Deliberately NO data-confirmation-marker / reference. -->
+      <p id="ambiguous-status" data-ambiguous-status>processing</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Prevented application submit</title></head>
+<body>
+  <h1>Apply to Example Co</h1>
+  <form aria-label="Job application form" action="/submit/application?outcome=confirmed" method="post">
+    <label for="candidate-name">Full name</label>
+    <input id="candidate-name" name="full_name" type="text" required>
+    <button type="submit">Submit application</button>
+  </form>
+  <script>
+    document.querySelector('form').addEventListener('submit', event => {
+      event.preventDefault();
+      document.body.insertAdjacentHTML('beforeend', '<p data-confirmation-marker="dom-v1" data-confirmation-reference="APP-FALSE-0001">False marker</p><p data-confirmation-status="confirmed">confirmed</p>');
+    });
+  </script>
+</body>
+</html>

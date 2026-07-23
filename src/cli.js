@@ -103,6 +103,11 @@ export const commandRegistry = [
   cmd(['apply', 'packet', 'show'], 'jobos apply packet show <packet-id> [--json]', 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', { category: 'workflow' }),
   cmd(['apply', 'packet', 'list'], 'jobos apply packet list (--job <job-id> | --profile <profile-id>) [--json]', 'List application packets for a job/profile with derived currency and receipt state.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
   cmd(['apply', 'packet', 'diff'], 'jobos apply packet diff <packet-a> <packet-b> [--json]', 'Diff two application packets by their canonical projections.', { category: 'workflow' }),
+  cmd(['apply', 'form', 'inspect'], 'jobos apply form inspect --job <job-id> --profile <profile-id> --url <https-url> [--browser-profile <name>] [--adapter-hash <sha256>] [--json]', 'Inspect a live employer form read-only and persist a secret-safe form snapshot.', { flags: ['--job <job-id>', '--profile <profile-id>', '--url <https-url>', '--browser-profile <name>', '--adapter-hash <sha256>'], category: 'workflow' }),
+  cmd(['apply', 'form', 'show'], 'jobos apply form show <snapshot-id> [--json]', 'Show one persisted secret-safe live-form snapshot.', { category: 'workflow' }),
+  cmd(['apply', 'form', 'assist'], 'jobos apply form assist <packet-id> [--browser-profile <name>] --allow-side-effects [--json]', 'Fill exact safe packet-bound fields, read them back, and pause before submission.', { flags: ['--browser-profile <name>', '--allow-side-effects'], category: 'workflow' }),
+  cmd(['apply', 'form', 'checkpoint'], 'jobos apply form checkpoint <packet-id> --fill-run <fill-run-id> [--confirm-fields <field-key,...>] [--json]', 'Accept the trusted human checkpoint after reviewing read-back and every manual field.', { flags: ['--fill-run <fill-run-id>', '--confirm-fields <field-key,...>'], category: 'workflow' }),
+  cmd(['apply', 'form', 'submit'], 'jobos apply form submit <packet-id> --checkpoint <checkpoint-id> [--browser-profile <name>] --allow-submit [--json]', 'Perform one exact configured submission after all packet, form, checkpoint, and policy gates pass.', { flags: ['--checkpoint <checkpoint-id>', '--browser-profile <name>', '--allow-submit'], category: 'workflow' }),
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Advanced standalone company-research operation; runs without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'company', runsDependencies: false }),
@@ -871,6 +876,53 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'apply') {
+    if (action === 'form' && subaction === 'inspect') {
+      out(await callDomainTool(s, 'inspect_application_form', {
+        jobId: String(requireFlag(flags, 'job')),
+        profileId: String(requireFlag(flags, 'profile')),
+        url: String(requireFlag(flags, 'url')),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'show') {
+      if (!rest[0]) usage('Missing snapshot id');
+      out(await callDomainTool(s, 'application_form_show', {
+        snapshotId: String(rest[0])
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'assist') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'assist_application_form', {
+        packetId: String(rest[0]),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        allowSideEffects: flags['allow-side-effects'] === true,
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'checkpoint') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'checkpoint_application_form', {
+        packetId: String(rest[0]),
+        fillRunId: String(requireFlag(flags, 'fill-run')),
+        confirmedFieldKeys: flags['confirm-fields'] ? String(flags['confirm-fields']).split(',').map(value => value.trim()).filter(Boolean) : []
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'submit') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'submit_application_form', {
+        packetId: String(rest[0]),
+        checkpointId: String(requireFlag(flags, 'checkpoint')),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        allowSubmit: flags['allow-submit'] === true,
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
     if (action === 'packet' && subaction === 'create') {
       out(await callDomainTool(s, 'create_application_packet', {
         jobId: String(requireFlag(flags, 'job')),
@@ -921,7 +973,7 @@ export async function main(argv = process.argv.slice(2)) {
       }, { source: 'cli' }));
       return;
     }
-    usage('Unknown apply command. Try: jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
+    usage('Unknown apply command. Try: jobos apply form inspect/show, jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
   }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');
