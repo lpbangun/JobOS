@@ -301,7 +301,7 @@ function companyDomains(job, company) {
   return [...domains].sort();
 }
 
-function tierForEmailObservation(email, observation, domains, companyId, nowAt) {
+function tierForEmailObservation(email, observation, domains, companyId, nowAt, { generic = false, hasIndependentAssociation = false } = {}) {
   const domain = emailDomain(email);
   const host = hostForUrl(observation.url);
   const companyDomainMatch = domains.some(expected => domain === expected || domain.endsWith(`.${expected}`));
@@ -311,9 +311,37 @@ function tierForEmailObservation(email, observation, domains, companyId, nowAt) 
   const current = Date.parse(nowAt || '');
   const nonStale = Number.isFinite(fetched) && Number.isFinite(current) && current - fetched <= 90 * 86_400_000;
   if (!companyDomainMatch || observation.companyId !== companyId || !nonStale) return 'D';
-  if (companyControlled && observation.sourceType === 'page_fetch') return 'A';
-  if (observation.sourceType === 'web_search' || observation.sourceType === 'profile_search') return 'B';
+  if (companyControlled && observation.sourceType === 'page_fetch' && !generic) return 'A';
+  if ((observation.sourceType === 'web_search' || observation.sourceType === 'profile_search') && hasIndependentAssociation) return 'B';
   return 'D';
+}
+
+function hasIndependentCompanyAssociation(s, personId, stakeholderId, companyId, excludeSourceId, additionalExcludes = []) {
+  const exclude = new Set([excludeSourceId, ...additionalExcludes].filter(Boolean));
+  if (stakeholderId) {
+    const stakeholder = one(s, 'SELECT company_id,links_json FROM stakeholders WHERE id=?', [stakeholderId]);
+    if (stakeholder?.company_id === companyId) {
+      const links = parseJson(stakeholder.links_json, []);
+      if (links.length) {
+        const linkPlaceholders = links.map(() => '?').join(',');
+        const independentIds = all(s, `SELECT id FROM source_observations WHERE company_id=? AND url IN (${linkPlaceholders})`, [companyId, ...links])
+          .map(row => row.id)
+          .filter(id => !exclude.has(id));
+        if (independentIds.length) return true;
+      }
+    }
+  }
+  if (personId && companyId) {
+    const candidates = all(s, 'SELECT source_observation_ids_json FROM person_candidates WHERE person_id=? AND company_id=?', [personId, companyId]);
+    const candidateIds = [...new Set(candidates.flatMap(c => parseJson(c.source_observation_ids_json, [])))]
+      .filter(sid => sid && !exclude.has(sid));
+    if (candidateIds.length) {
+      const placeholders = candidateIds.map(() => '?').join(',');
+      const real = all(s, `SELECT id FROM source_observations WHERE company_id=? AND id IN (${placeholders})`, [companyId, ...candidateIds]);
+      if (real.length) return true;
+    }
+  }
+  return false;
 }
 
 function confidenceForTier(tier, generic = false) {
@@ -594,10 +622,10 @@ ${patternRows}
 ${candidateRows}
 
 ## Evidence tiers
-- A: exact public email on a company-controlled page.
-- B: exact public email on a credible third-party or search-indexed public source.
+- A: exact named or role inbox observed on a company-controlled same-domain page, with company-domain match and non-stale evidence.
+- B: exact public contact on a credible third-party source, with independently supported person-company association, company-domain match, and non-stale evidence.
 - U: user-imported contact from network CSV import (unverified).
-- C: source-backed person plus company email pattern with multiple public examples.
+- C: generated candidate on a matching company domain, backed by at least two distinct non-stale exact public examples from at least two real qualifying source observations.
 - D: weak pattern/domain hypothesis, usually DNS-only or single-example support.
 - E: profile URL or role relevance without an email.
 
@@ -684,7 +712,17 @@ export async function verifyObservationContacts(s, {
       const linkedStakeholder = person
         ? stakeholderRows.find(row => row.person_id === person.id)
         : null;
-      const tier = tierForEmailObservation(ctx.email, observation, domains, resolvedCompanyId, at);
+      let existingSourceIds = [];
+      if (person) {
+        const contactType = generic ? 'generic_inbox' : 'email';
+        const normalizedContactValue = normalizeContactValue(contactType, ctx.email);
+        const existingContact = one(s, 'SELECT source_observation_ids_json FROM contact_points WHERE person_id=? AND type=? AND normalized_value=? ORDER BY created_at LIMIT 1', [person.id, contactType, normalizedContactValue]);
+        existingSourceIds = parseJson(existingContact?.source_observation_ids_json, []);
+      }
+      const hasIndependentAssociation = person
+        ? hasIndependentCompanyAssociation(s, person.id, linkedStakeholder?.id || null, resolvedCompanyId, observation.id, existingSourceIds)
+        : false;
+      const tier = tierForEmailObservation(ctx.email, observation, domains, resolvedCompanyId, at, { generic, hasIndependentAssociation });
       const domainCheck = await domainCheckFor(ctx.email);
       const smtp = await smtpProbe(ctx.email, domainCheck.checks, { env });
       const catchAll = catchAllCheck(ctx.email, { env });
@@ -745,7 +783,7 @@ export async function verifyObservationContacts(s, {
       for (const candidate of candidateRowsForGeneration(s, job.id)) {
         const guessed = generateFromPattern(candidate.name, pattern.domain, pattern.pattern);
         if (!guessed || existingEmailValues.has(guessed)) continue;
-        const tier = pattern.supportCount >= 2 ? 'C' : 'D';
+        const tier = pattern.supportCount >= 2 && pattern.supportSources.length >= 2 ? 'C' : 'D';
         const sourceIds = [...new Set([...(candidate.sourceObservationIds || []), ...pattern.supportSources])];
         const contact = upsertContactPoint(s, {
           companyId: resolvedCompanyId,

@@ -124,15 +124,24 @@ function observationSignal(observations, expectedDomains, observedEmailDomain, c
 }
 
 function companyAssociationSignal(s, contact) {
+  const contactSources = new Set(contact.sourceObservationIds || []);
   if (contact.stakeholderId) {
     const stakeholder = one(s, 'SELECT company_id,links_json FROM stakeholders WHERE id=?', [contact.stakeholderId]);
-    if (stakeholder?.company_id === contact.companyId && parseJson(stakeholder.links_json, []).length) {
-      return { state: 'supported', evidence: [{ type: 'stakeholder_source', id: contact.stakeholderId }] };
+    if (stakeholder?.company_id === contact.companyId) {
+      const links = parseJson(stakeholder.links_json, []);
+      if (links.length) {
+        const linkPlaceholders = links.map(() => '?').join(',');
+        const independentIds = all(s, `SELECT id FROM source_observations WHERE company_id=? AND url IN (${linkPlaceholders})`, [contact.companyId, ...links])
+          .map(row => row.id)
+          .filter(id => !contactSources.has(id));
+        if (independentIds.length) {
+          return { state: 'supported', evidence: [{ type: 'stakeholder_source', id: contact.stakeholderId }] };
+        }
+      }
     }
   }
   if (contact.personId && contact.companyId) {
     const candidates = all(s, 'SELECT source_observation_ids_json FROM person_candidates WHERE person_id=? AND company_id=?', [contact.personId, contact.companyId]);
-    const contactSources = new Set(contact.sourceObservationIds || []);
     const candidateIds = [...new Set(candidates.flatMap(candidate => parseJson(candidate.source_observation_ids_json, [])))]
       .filter(sourceId => sourceId && !contactSources.has(sourceId));
     if (candidateIds.length) {
@@ -305,7 +314,7 @@ function derivedTier({ contact, domain, publicObservation, association, pattern,
       tierReason: domain.matchState === 'mismatch'
         ? 'Observed contact domain does not match a company-controlled domain; unrelated-domain evidence cannot qualify for A, B, or C.'
         : 'Company-domain alignment is unknown; the contact cannot qualify for A, B, or C.',
-      freshness: freshnessSignal([], nowDate),
+      freshness: routeFreshness,
     };
   }
 
@@ -319,11 +328,18 @@ function derivedTier({ contact, domain, publicObservation, association, pattern,
   const companyFreshness = freshnessSignal(companyObservations, nowDate);
   const thirdPartyFreshness = freshnessSignal(thirdPartyObservations, nowDate);
 
-  if (exactPublic && companyObservations.length && nonStale(companyFreshness)) {
+  if (exactPublic && companyObservations.length && nonStale(companyFreshness) && contact.type !== 'generic_inbox') {
     return {
       evidenceTier: 'A',
       tierReason: 'Exact public contact observed on a company-controlled same-domain page with non-stale evidence.',
       freshness: companyFreshness,
+    };
+  }
+  if (contact.type === 'generic_inbox') {
+    return {
+      evidenceTier: 'D',
+      tierReason: 'Exact public generic inbox does not qualify as a named or role inbox for tier A; it remains a human-review-only contact path.',
+      freshness: companyObservations.length ? companyFreshness : (thirdPartyObservations.length ? thirdPartyFreshness : freshnessSignal([], nowDate)),
     };
   }
   if (exactPublic && thirdPartyObservations.length && association.state === 'supported' && nonStale(thirdPartyFreshness)) {
@@ -424,7 +440,7 @@ export function projectContactConfidenceV2(s, contact, { nowDate = new Date() } 
   } else if (catchAll.state === 'detected') {
     usable = false;
     usabilityReason = 'Catch-all detection keeps this generated route human-review-only and not outreach-ready.';
-  } else if (tier.evidenceTier === 'D') {
+  } else if (tier.evidenceTier === 'D' && !(contact.type === 'generic_inbox' && contact.checks?.exactPublic && domain.matchState === 'match')) {
     usable = false;
     usabilityReason = 'Tier D evidence is a weak hypothesis and is not outreach-ready.';
   }
