@@ -8,7 +8,7 @@ import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRu
 import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
-import { getJobLiveness, getPostingLiveness, importUrl, listJobs } from './jobs.js';
+import { getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
@@ -232,7 +232,6 @@ function publicJob(row) {
     employmentTypes: parseJson(row.employment_types_json, []),
     department: row.department || '',
     sourceNativeFields: parseJson(row.source_native_json, {}),
-    liveness: getJobLiveness(row),
     postingLiveness,
     updatedAt: row.updated_at
   };
@@ -322,9 +321,8 @@ export function selectedJobContext(s, jobId) {
       employmentTypes: parseJson(job.employment_types_json, []),
       department: job.department || '',
       sourceNativeFields: parseJson(job.source_native_json, {}),
-      postingLiveness: getPostingLiveness(job),
     },
-    liveness: getPostingLiveness(job),
+    postingLiveness: getPostingLiveness(job),
     fit: fitData ? {
       ...fitData,
       highFit: Boolean(job.high_fit) && qualifiesForHighFit(fitData, 0)

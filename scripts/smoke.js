@@ -2,11 +2,13 @@ import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { all, one, openStore } from '../src/db.js';
+import { all, one, openStore, run as dbRun, save } from '../src/db.js';
 import { createSearch, runSavedSearch } from '../src/discovery.js';
 import { greenhouse } from '../src/discovery/adapters.js';
 import { importNormalized } from '../src/jobs.js';
 import { score as scoreJob } from '../src/scoring.js';
+import { selectedJobContext } from '../src/domain-tools.js';
+import { compileApplicationReadiness } from '../src/readiness.js';
 import { runPursuit } from '../src/workflows.js';
 import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
 import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
@@ -17,6 +19,25 @@ function run(args, raw = false) {
   const result = spawnSync(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${args.join(' ')} failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
   return raw ? result.stdout : result.stdout.trim();
+}
+
+function setSmokeLiveness(s, jobId, status) {
+  const checkedAt = new Date().toISOString();
+  const value = {
+    version: 1,
+    jobId,
+    status,
+    checkedAt,
+    requestedUrl: '',
+    finalUrl: '',
+    httpStatus: status === 'active' ? 200 : status === 'expired' ? 404 : null,
+    reasonCodes: [status === 'active' ? 'listed_in_current_listing' : status === 'expired' ? 'http_404' : 'manual_or_unchecked'],
+    evidence: [],
+    source: status === 'active' ? 'greenhouse' : 'manual',
+    freshUntil: new Date(Date.now() + 86_400_000).toISOString()
+  };
+  dbRun(s, 'UPDATE jobs SET liveness_status=?,liveness_checked_at=?,liveness_json=? WHERE id=?', [status, checkedAt, JSON.stringify(value), jobId]);
+  save(s);
 }
 
 try {
@@ -135,7 +156,66 @@ try {
   w03Store.db.close();
   const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
   const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
-  if (!(score.overall > 0)) throw new Error('Score did not compute');
+  if (!(score.overall > 0) || score.contract !== 'jobos.fit-score.v1' || score.postingLiveness?.status !== 'uncertain') {
+    throw new Error('W04 manual score did not expose fit v1 beside uncertain posting liveness');
+  }
+  const w04Store = await openStore({ workspace: root });
+  const uncertainFit = JSON.parse(one(w04Store, 'SELECT score_json FROM jobs WHERE id=?', [job.id]).score_json);
+  setSmokeLiveness(w04Store, job.id, 'active');
+  const activeFit = await scoreJob(w04Store, job.id, profile.id);
+  if (activeFit.postingLiveness?.status !== 'active' || activeFit.overall !== uncertainFit.overall || activeFit.baseOverall !== uncertainFit.baseOverall || JSON.stringify(activeFit.dimensions) !== JSON.stringify(uncertainFit.dimensions)) {
+    throw new Error('W04 active and uncertain liveness changed identical candidate fit evidence');
+  }
+  const beforeExpiry = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  setSmokeLiveness(w04Store, job.id, 'expired');
+  let expiredScoreError = null;
+  try {
+    await scoreJob(w04Store, job.id, profile.id);
+  } catch (error) {
+    expiredScoreError = error;
+  }
+  const afterExpiry = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  if (expiredScoreError?.code !== 'job_expired' || JSON.stringify(afterExpiry) !== JSON.stringify(beforeExpiry)) {
+    throw new Error('W04 expired posting did not preserve its prior fit bytes');
+  }
+  setSmokeLiveness(w04Store, job.id, 'uncertain');
+  const networkAt = new Date().toISOString();
+  dbRun(w04Store, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+    ['smoke-w04-network-run', profile.id, 'job', job.id, 'succeeded', networkAt, networkAt, networkAt]);
+  dbRun(w04Store, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ['smoke-w04-network-candidate', job.id, 'Smoke Direct Connection', 'source-backed smoke path', 'high', 'candidate', networkAt, networkAt, 'smoke-w04-network-person', 'smoke-w04-network-run']);
+  dbRun(w04Store, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+    'smoke-w04-network-edge', 'profile', profile.id, 'person', 'smoke-w04-network-person', 'direct_connection',
+    '[{"label":"User-imported smoke connection","source":"smoke fixture"}]', 'high', networkAt
+  ]);
+  save(w04Store);
+  const networkFit = await scoreJob(w04Store, job.id, profile.id);
+  const knownDimensions = Object.values(networkFit.dimensions).filter(value => value.status !== 'unknown');
+  const expectedOverall = Math.round(
+    knownDimensions.reduce((sum, value) => sum + value.weight * value.score, 0)
+    / knownDimensions.reduce((sum, value) => sum + value.weight, 0)
+  );
+  const networkRow = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  const storedNetworkFit = JSON.parse(networkRow.score_json);
+  const scoreAudit = JSON.parse(one(w04Store, "SELECT payload_json FROM audit_log WHERE action='job.scored' AND entity_id=? ORDER BY created_at DESC,id DESC LIMIT 1", [job.id]).payload_json);
+  const w04Workspace = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml'), 'utf8');
+  const w04Readiness = compileApplicationReadiness(w04Store, { jobId: job.id, profileId: profile.id });
+  const w04Domain = selectedJobContext(w04Store, job.id);
+  if (networkFit.dimensions.networkAccess.score !== 90 || networkFit.overall === uncertainFit.overall || networkFit.overall !== expectedOverall
+    || networkRow.fit_score !== expectedOverall || storedNetworkFit.overall !== expectedOverall || scoreAudit.overall !== expectedOverall
+    || w04Readiness.materials.score.overall !== expectedOverall || w04Domain.fit.overall !== expectedOverall
+    || w04Domain.postingLiveness?.status !== 'uncertain'
+    || !w04Workspace.includes(`fitScore: ${expectedOverall}`) || !w04Workspace.includes('contract: jobos.fit-score.v1')) {
+    throw new Error('W04 network rescore did not preserve canonical overall across projections');
+  }
+  const scoringSideEffects = one(w04Store, `SELECT COUNT(*) AS count FROM audit_log
+    WHERE entity_id=? AND action='job.scored' AND external_side_effect<>'none'`, [job.id]).count;
+  if (one(w04Store, 'SELECT COUNT(*) AS count FROM applications WHERE job_id=?', [job.id]).count !== 0
+    || one(w04Store, 'SELECT COUNT(*) AS count FROM outreach_plans WHERE job_id=?', [job.id]).count !== 0
+    || scoringSideEffects !== 0) {
+    throw new Error('W04 scoring caused an application, outreach plan, or external side effect');
+  }
+  w04Store.db.close();
   const resumeDraft = run(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
   if (!resumeDraft.includes('## Experience') || !resumeDraft.includes('## Education') || resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft was not a complete semantic resume');
   run(['tailor', 'cover-letter', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
@@ -295,6 +375,17 @@ try {
       },
       expiredScored: false,
       expiredPursued: false,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    w04: {
+      contract: networkFit.contract,
+      initialOverall: uncertainFit.overall,
+      networkOverall: networkFit.overall,
+      networkAccess: networkFit.dimensions.networkAccess.score,
+      activeUncertainFitIdentity: true,
+      expiredPriorFitPreserved: true,
+      postingLivenessSeparated: true,
       submissionPerformed: false,
       externalSideEffects: 'none'
     },
