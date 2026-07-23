@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, job_id TEXT, profile_
 CREATE TABLE IF NOT EXISTS profile_resume_revisions (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), schema_version INTEGER NOT NULL, source_text TEXT NOT NULL DEFAULT '', source_text_hash TEXT NOT NULL, document_json TEXT NOT NULL, verification_status TEXT NOT NULL CHECK(verification_status IN ('verified','needs_verification','rejected')), supersedes_resume_id TEXT, is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0,1)), created_at TEXT NOT NULL, reviewed_at TEXT, UNIQUE(profile_id,revision), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_resume_id) REFERENCES profile_resume_revisions(id));
 CREATE UNIQUE INDEX IF NOT EXISTS profile_resume_current_idx ON profile_resume_revisions(profile_id) WHERE is_current=1;
 CREATE TABLE IF NOT EXISTS artifact_resume_documents (artifact_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, source_resume_revision_id TEXT NOT NULL, document_json TEXT NOT NULL, coverage_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}', layout_profile_json TEXT NOT NULL DEFAULT '{}', render_manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(artifact_id) REFERENCES artifacts(id), FOREIGN KEY(source_resume_revision_id) REFERENCES profile_resume_revisions(id));
-CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -300,6 +300,38 @@ function migrateW02Constraints(db) {
   if (violations.length) throw new Error('W02 packet/receipt migration left foreign-key violations');
 }
 
+const outreachOutcomesSchema = `CREATE TABLE IF NOT EXISTS outreach_outcomes (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  job_id TEXT,
+  stakeholder_id TEXT,
+  contact_point_id TEXT,
+  role_class TEXT NOT NULL,
+  contact_tier TEXT NOT NULL DEFAULT '',
+  contact_path TEXT NOT NULL DEFAULT '',
+  channel TEXT NOT NULL,
+  outcome_type TEXT NOT NULL CHECK(outcome_type IN ('reply_positive','reply_neutral','reply_negative','meeting_booked','no_response','bounced','declined')),
+  occurred_at TEXT NOT NULL,
+  window_end_at TEXT,
+  recorded_at TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  reference_id TEXT NOT NULL DEFAULT '',
+  supersedes_outcome_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(thread_id) REFERENCES outreach_threads(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_outcome_id) REFERENCES outreach_outcomes(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS outreach_outcomes_profile_reference_idx
+  ON outreach_outcomes(profile_id, reference_id) WHERE reference_id != '';
+CREATE INDEX IF NOT EXISTS outreach_outcomes_profile_time_idx
+  ON outreach_outcomes(profile_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS outreach_outcomes_thread_idx
+  ON outreach_outcomes(thread_id, recorded_at, id);`;
+
 function migrate(db){
   for (const sql of [
     "ALTER TABLE proof_points ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]'",
@@ -350,7 +382,7 @@ function migrate(db){
     "CREATE TABLE IF NOT EXISTS profile_resume_revisions (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), schema_version INTEGER NOT NULL, source_text TEXT NOT NULL DEFAULT '', source_text_hash TEXT NOT NULL, document_json TEXT NOT NULL, verification_status TEXT NOT NULL CHECK(verification_status IN ('verified','needs_verification','rejected')), supersedes_resume_id TEXT, is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0,1)), created_at TEXT NOT NULL, reviewed_at TEXT, UNIQUE(profile_id,revision), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_resume_id) REFERENCES profile_resume_revisions(id))",
     "CREATE UNIQUE INDEX IF NOT EXISTS profile_resume_current_idx ON profile_resume_revisions(profile_id) WHERE is_current=1",
     "CREATE TABLE IF NOT EXISTS artifact_resume_documents (artifact_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, source_resume_revision_id TEXT NOT NULL, document_json TEXT NOT NULL, coverage_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}', layout_profile_json TEXT NOT NULL DEFAULT '{}', render_manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(artifact_id) REFERENCES artifacts(id), FOREIGN KEY(source_resume_revision_id) REFERENCES profile_resume_revisions(id))",
-    "CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}')",
     "CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -395,7 +427,12 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS idx_person_candidates_run ON person_candidates(research_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_stakeholders_person ON stakeholders(person_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
-    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)"
+    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)",
+    "ALTER TABLE outreach_threads ADD COLUMN contact_point_id TEXT",
+    "CREATE TABLE IF NOT EXISTS outreach_outcomes (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, profile_id TEXT NOT NULL, job_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, role_class TEXT NOT NULL, contact_tier TEXT NOT NULL DEFAULT '', contact_path TEXT NOT NULL DEFAULT '', channel TEXT NOT NULL, outcome_type TEXT NOT NULL CHECK(outcome_type IN ('reply_positive','reply_neutral','reply_negative','meeting_booked','no_response','bounced','declined')), occurred_at TEXT NOT NULL, window_end_at TEXT, recorded_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL, source TEXT NOT NULL, reference_id TEXT NOT NULL DEFAULT '', supersedes_outcome_id TEXT, correction_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(thread_id) REFERENCES outreach_threads(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_outcome_id) REFERENCES outreach_outcomes(id))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS outreach_outcomes_profile_reference_idx ON outreach_outcomes(profile_id, reference_id) WHERE reference_id != ''",
+    "CREATE INDEX IF NOT EXISTS outreach_outcomes_profile_time_idx ON outreach_outcomes(profile_id, occurred_at, id)",
+    "CREATE INDEX IF NOT EXISTS outreach_outcomes_thread_idx ON outreach_outcomes(thread_id, recorded_at, id)"
   ]) {
     try { db.run(sql); } catch (e) {
       const message = String(e?.message || e);
@@ -776,14 +813,15 @@ export async function openStore(flags={}) {
   let previousSchemaVersion = '0';
   try { previousSchemaVersion = String(db.exec("SELECT value FROM meta WHERE key='schema_version'")[0]?.values?.[0]?.[0] || '0'); } catch {}
   db.run(schema);
+  db.run(outreachOutcomesSchema);
   migrate(db);
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','10']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','11']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '10') save(store);
+  if (!existed || previousSchemaVersion !== '11') save(store);
   return store;
 }
 

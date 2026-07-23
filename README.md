@@ -349,7 +349,7 @@ npm run jobos -- research people \
   --sources public_web,xai --max-cost-usd 0.50 --json
 ```
 
-Research and networking share canonical people, affiliations, source observations, staged candidates, contact points, and relationship edges. Identity resolves by canonical profile URL and then exact imported email—never by name alone. Email checks distinguish syntax, domain/MX, optional SMTP confidence, and user-imported data; guessed addresses are never labeled verified.
+Research and networking share canonical people, affiliations, immutable source observations, staged candidates, contact points, and relationship edges. Identity resolves by canonical profile URL and then exact imported email—never by name alone. `ContactConfidenceV2` reports observation ownership, company-domain alignment, pattern support, DNS, optional SMTP, catch-all, freshness, human approval, and suppression as separate signals. DNS/SMTP never become identity proof; unrelated-domain, stale, catch-all, unapproved, and suppressed states remain visible and downgrade or block usability. Raw observations are not rewritten when derived tiers change, and guessed addresses are never labeled verified.
 
 ```bash
 npm run jobos -- network list --json
@@ -360,7 +360,7 @@ npm run jobos -- outreach plan --job <job-id> --profile pm-edtech --json
 
 Warm, source-backed paths outrank cold routes. Network access scores describe evidence strength, not the probability of a reply. Contacts remain unapproved until a human explicitly approves them; suppressed contacts cannot be used. Research creates local evidence and review records only—it does not send outreach, create connection requests, apply, or access private accounts.
 
-Outreach drafting remains local by default. Marking a thread sent records what the user did elsewhere; it does not pretend JobOS delivered the message:
+Outreach drafting remains local by default. Recruiter, hiring-manager, peer, executive/founder, advisor/expert, and unknown-role strategies use distinct deterministic framing and asks grounded only in stored job, company, stakeholder, and active verified profile-proof evidence. Every artifact remains `draft_needs_human_review`. Marking a thread sent records what the user did elsewhere; it does not pretend JobOS delivered the message:
 
 ```bash
 npm run jobos -- outreach draft --job <job-id> \
@@ -368,6 +368,25 @@ npm run jobos -- outreach draft --job <job-id> \
 npm run jobos -- outreach mark-sent --artifact <artifact-id> \
   --channel email --json
 ```
+
+Record only outcomes the user actually observed. Records are profile-scoped and append-only; a correction supersedes an earlier row without deleting history. `no_response` requires `--window-end`, and `meeting_booked` records the meeting without claiming outreach caused it.
+
+```bash
+npm run jobos -- outreach outcome record \
+  --thread <thread-id> --profile pm-edtech \
+  --type reply_positive --occurred-at 2026-07-23T12:00:00Z \
+  --reference crm-event-123 --json
+
+npm run jobos -- outreach outcome record \
+  --thread <thread-id> --profile pm-edtech \
+  --type no_response --occurred-at 2026-07-23T12:00:00Z \
+  --window-end 2026-08-06T12:00:00Z --json
+
+npm run jobos -- outreach outcomes --profile pm-edtech --since 30 --json
+npm run jobos -- review weekly --profile pm-edtech --output markdown
+```
+
+Allowed outcome types are `reply_positive`, `reply_neutral`, `reply_negative`, `meeting_booked`, `no_response`, `bounced`, and `declined`. Weekly review reports observed counts, explicit denominators, the period, missing outcomes, and insufficient-data states. It does not produce probabilities, causal claims, W06 next-action policy, or W08 preference learning.
 
 ## Reusable application answers
 

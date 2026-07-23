@@ -16,6 +16,7 @@ import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
 import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
+import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
 import { configFromFlags, createCompanySearch, createSearch, listSearches, listWatchlist, migrateLegacyWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
@@ -128,6 +129,8 @@ export const commandRegistry = [
   cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
   cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
   cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'Show the outreach-thread context for due follow-up tasks; use tasks due --type followup --created-by outreach as the canonical filtered query.'),
+  cmd(['outreach', 'outcome', 'record'], 'jobos outreach outcome record --thread <id> --profile <profile-id> --type <type> --occurred-at <rfc3339> [--window-end <rfc3339>] [--channel <channel>] [--note <text>] [--reference <id>] [--supersedes <outcome-id>] [--correction-reason <text>] [--json]', 'Record an explicit local append-only outreach outcome observation; does not infer or cause an external action.', { flags: ['--thread <thread-id>', '--profile <profile-id>', '--type <outcome-type>', '--occurred-at <rfc3339>', '--window-end <rfc3339>', '--channel <channel>', '--note <text>', '--reference <id>', '--supersedes <outcome-id>', '--correction-reason <text>'] }),
+  cmd(['outreach', 'outcomes'], 'jobos outreach outcomes --profile <profile-id> [--since <days>] [--json]', 'List profile-scoped outreach outcome observations and correction history.', { flags: ['--profile <profile-id>', '--since <days>'] }),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
@@ -1075,9 +1078,34 @@ export async function main(argv = process.argv.slice(2)) {
     out(promoteStakeholder(s, { candidateId: String(requireFlag(flags, 'candidate')) }));
     return;
   }
+  if (group === 'outreach' && action === 'outcome' && subaction === 'record') {
+    out(recordOutreachOutcome(s, {
+      threadId: String(requireFlag(flags, 'thread', '--thread <thread-id>')),
+      profileId: needProfile(flags),
+      type: String(requireFlag(flags, 'type', '--type <outcome-type>')),
+      occurredAt: String(requireFlag(flags, 'occurred-at', '--occurred-at <rfc3339>')),
+      windowEndAt: flags['window-end'] ? String(flags['window-end']) : null,
+      channel: flags.channel ? String(flags.channel) : null,
+      note: flags.note ? String(flags.note) : '',
+      referenceId: flags.reference ? String(flags.reference) : '',
+      supersedesOutcomeId: flags.supersedes ? String(flags.supersedes) : null,
+      correctionReason: flags['correction-reason'] ? String(flags['correction-reason']) : '',
+      actor: 'user',
+      source: 'cli'
+    }));
+    return;
+  }
+  if (group === 'outreach' && action === 'outcomes') {
+    out(listOutreachOutcomes(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? null : Number(flags.since),
+      includeNotes: true
+    }));
+    return;
+  }
   if (group === 'outreach' && action === 'draft') {
     if (!flags.plan && (!flags.job || !flags.stakeholder)) usage('Missing --job/--stakeholder or --plan');
-    const r = await draftOutreach(s, { jobId: flags.job ? String(flags.job) : null, profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : 'informational', planId: flags.plan ? String(flags.plan) : null, contactId: flags.contact ? String(flags.contact) : null });
+    const r = await draftOutreach(s, { jobId: flags.job ? String(flags.job) : null, profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : null, planId: flags.plan ? String(flags.plan) : null, contactId: flags.contact ? String(flags.contact) : null });
     out(r);
     return;
   }
