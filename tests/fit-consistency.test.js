@@ -638,23 +638,29 @@ test('W04-PROOF-02 excludes retired superseded unverified and unknown proof refe
   assert.equal(result.dimensions.domainFit.score, baseline.dimensions.domainFit.score);
 });
 
-test('W04-PERSIST-01 keeps fit score JSON database audit workspace readiness and domain output consistent', async t => {
+test('W04-PERSIST-01 keeps fit score JSON database audit workspace readiness packet and domain output consistent', async t => {
   const f = await fixture(t);
   const result = await score(f.s, f.job.id, 'profile-test', scoreOpts);
   const row = one(f.s, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [f.job.id]);
   const stored = JSON.parse(row.score_json);
+  const audit = JSON.parse(one(f.s, "SELECT payload_json FROM audit_log WHERE action='job.scored' AND entity_id=? ORDER BY created_at DESC LIMIT 1", [f.job.id]).payload_json);
   const workspace = readFileSync(path.join(f.s.p.jobs, f.job.id, 'job.yaml'), 'utf8');
   const readiness = compileApplicationReadiness(f.s, { jobId: f.job.id, profileId: 'profile-test' });
   const domain = selectedJobContext(f.s, f.job.id);
+  const packet = await createPacketFor(f);
   assert.equal(result.contract, FIT_CONTRACT);
   assert.equal(stored.contract, FIT_CONTRACT);
   assert.equal(row.fit_score, result.overall);
+  assert.equal(audit.contract, FIT_CONTRACT);
+  assert.equal(audit.overall, result.overall);
   assert.match(workspace, new RegExp(`fitScore: ${result.overall}`));
   assert.match(workspace, new RegExp(`contract: ${FIT_CONTRACT.replaceAll('.', '\\.')}`));
   assert.equal(readiness.materials.score.contract, FIT_CONTRACT);
   assert.equal(readiness.materials.score.overall, result.overall);
   assert.equal(domain.fit.contract, FIT_CONTRACT);
   assert.equal(domain.fit.overall, result.overall);
+  assert.equal(Object.hasOwn(packet, 'fit'), false);
+  assert.equal(Object.hasOwn(packet.materials, 'score'), false);
 });
 
 test('W04-LEGACY-01 reads unversioned scores without silent rewrite and excludes them from new high fit decisions', async t => {
@@ -803,23 +809,29 @@ test('W04-LIVE-03 presents expired as unavailable without rewriting a prior fit 
   await assert.rejects(() => score(f.s, f.job.id, 'profile-test', scoreOpts), error => error.code === 'job_expired');
   const after = one(f.s, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [f.job.id]);
   assert.deepEqual(after, before);
-  assert.equal(selectedJobContext(f.s, f.job.id).liveness.status, 'expired');
+  assert.equal(selectedJobContext(f.s, f.job.id).postingLiveness.status, 'expired');
 });
 
 test('W04-LIVE-04 renders fit and posting status separately in CLI domain TUI and workspace views', async t => {
   const f = await fixture(t);
+  dbRun(f.s, "UPDATE jobs SET description=description || '\n\nTraining fee required before onboarding.' WHERE id=?", [f.job.id]);
+  save(f.s);
   const result = await score(f.s, f.job.id, 'profile-test', scoreOpts);
   const cli = cliScore(f.root, f.job.id);
   const context = selectedJobContext(f.s, f.job.id);
   assert.equal(cli.contract, FIT_CONTRACT);
   assert.equal(cli.postingLiveness.contract, 'jobos.posting-liveness.v1');
   assert.equal(context.fit.contract, FIT_CONTRACT);
-  assert.equal(context.liveness.contract, 'jobos.posting-liveness.v1');
+  assert.equal(context.postingLiveness.contract, 'jobos.posting-liveness.v1');
+  assert.equal(context.liveness, undefined);
   const model = buildTuiModel(f.s, { profileId: 'profile-test', selectedJobId: f.job.id, at: FIXED_AT });
   const state = { ...defaultTuiState(), selectedJobId: f.job.id };
-  const rendered = renderTui(model, state, { width: 140, height: 42, color: false });
+  const rendered = renderTui(model, state, { width: 140, height: 54, color: false });
   assert.match(rendered, new RegExp(`FIT ${result.overall}/100`));
-  assert.match(rendered, /POSTING STATUS|LIVENESS/i);
+  assert.match(rendered, /networkAccess: unknown/);
+  assert.match(rendered, /CANDIDATE CONSTRAINTS/);
+  assert.match(rendered, /POSTING STATUS \/ LEGITIMACY/);
+  assert.match(rendered, /training fee/i);
   const workspace = readFileSync(path.join(f.s.p.jobs, f.job.id, 'job.yaml'), 'utf8');
   assert.match(workspace, /fit:\n\s+contract: jobos\.fit-score\.v1/);
   assert.match(workspace, /postingLiveness:\n\s+contract: jobos\.posting-liveness\.v1/);

@@ -303,12 +303,41 @@ function listPanel(model, state, width, height, color) {
       const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · live:${job.liveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
+      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · posting:${job.postingLiveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
     }
   }
   return panel(`JOBS · ${state.filter}`, body.slice(0, Math.max(1, height - 2)), width, color);
+}
+
+function fitDimensionLines(fit, width) {
+  if (!fit?.dimensions) return ['No fit dimensions are stored.'];
+  const summary = Object.entries(fit.dimensions).map(([key, dimension]) => {
+    const value = dimension.status === 'unknown' ? 'unknown' : `${dimension.score}/100`;
+    return `${key}: ${value}`;
+  }).join(' · ');
+  return wrap(summary, width).slice(0, 3);
+}
+
+function constraintLine(fit, width) {
+  if (!fit?.constraints?.length) return crop('CANDIDATE CONSTRAINTS · none recorded', width);
+  const summary = fit.constraints.map(value => `${value.kind}/${value.status}: ${value.reason}`).join(' · ');
+  return crop(`CANDIDATE CONSTRAINTS · ${summary}`, width);
+}
+
+function postingStatusLines(item, width) {
+  const posting = item.postingLiveness;
+  const status = posting
+    ? `${posting.status} · ${posting.reasonCodes?.join(', ') || 'no reason codes'}`
+    : 'uncertain · no posting-liveness handoff';
+  const risks = item.fit?.postingRisks?.length
+    ? item.fit.postingRisks.map(value => {
+        const label = value.code.replace(/^posting_risk_/, '').replaceAll('_', ' ');
+        return crop(`${label} (${value.status}): ${value.reason}`, width);
+      })
+    : [];
+  return [crop(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width), ...risks];
 }
 
 function detailPanel(model, width, height, color) {
@@ -325,29 +354,26 @@ function detailPanel(model, width, height, color) {
   const lines = [
     paint(`${item.job.title}`, 'green', color),
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'} · liveness:${item.liveness?.status || 'uncertain'}`,
+    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
     `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
     paint(`FIT ${fitScore} · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    paint('FIT DIMENSIONS', 'cyan', color),
+    ...fitDimensionLines(item.fit, width - 4),
+    paint(constraintLine(item.fit, width - 4), 'cyan', color),
+    ...postingStatusLines(item, width - 4).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
     ...wrap(item.narrative, width - 4).slice(0, 3),
     ...readinessLines(item.readiness, width - 4, color),
-    '',
     ...policyLines(item.policy, width - 4, color),
-    '',
     paint('NEXT', 'cyan', color),
     next ? `${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
-    '',
     paint('PROOFS', 'cyan', color),
     ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PATH', 'cyan', color),
     item.path ? `${item.path.strength} · ${item.path.channel || 'channel —'} · ${JSON.stringify(item.path.reasoning)}` : 'No warm path yet',
-    '',
     paint('ARTIFACTS', 'cyan', color),
     ...artifacts.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
-    '',
     ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);

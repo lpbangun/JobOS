@@ -544,13 +544,14 @@ test('W03-COMPAT-01 opens legacy jobs as unchecked uncertain without network mig
   const versionRow = one(s, "SELECT value FROM meta WHERE key='schema_version'");
   assert.equal(versionRow.value, '11', 'schema version migrated through W02 and W05');
 
-  // Legacy liveness must deserialize as uncertain without network.
+  // Legacy liveness must project through the posting-liveness handoff without network.
   const [summary] = listJobSummaries(s, { profileId: 'profile-test' });
   assert.equal(summary.id, 'legacy-job-1', 'legacy projection keeps the job identifier');
-  assert.equal(summary.liveness.version, 1, 'legacy liveness deserialized as v1');
-  assert.equal(summary.liveness.status, 'uncertain', 'legacy job is uncertain');
-  assert.ok(summary.liveness.reasonCodes.includes('legacy_unchecked'), 'legacy_unchecked reason present');
-  assert.equal(summary.liveness.checkedAt, null, 'legacy liveness checkedAt is null');
+  assert.equal(summary.postingLiveness.contract, 'jobos.posting-liveness.v1', 'legacy liveness uses the handoff contract');
+  assert.equal(summary.postingLiveness.status, 'uncertain', 'legacy job is uncertain');
+  assert.ok(summary.postingLiveness.reasonCodes.includes('legacy_unchecked'), 'legacy_unchecked reason present');
+  assert.equal(summary.postingLiveness.checkedAt, null, 'legacy liveness checkedAt is null');
+  assert.equal(summary.liveness, undefined, 'legacy projection does not expose a duplicate liveness alias');
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -768,24 +769,26 @@ test('W03-HANDOFF-01 exposes posting-liveness v1 separately from candidate fit',
   await score(s, imported.id, 'profile-test', { now: fixedNow });
   save(s);
 
-  // Domain-tool selectedJobContext must expose liveness separately from fit.
+  // Domain-tool projections must expose posting liveness separately from fit.
   const ctx = selectedJobContext(s, imported.id);
-  assert.ok(ctx.liveness, 'selectedJobContext exposes liveness');
-  assert.equal(ctx.liveness.contract, 'jobos.posting-liveness.v1', 'handoff contract identifier present');
-  assert.equal(ctx.liveness.status, 'active', 'handoff status present');
-  assert.ok(Array.isArray(ctx.liveness.reasonCodes), 'handoff reasonCodes present');
-  assert.equal(ctx.liveness.source, 'greenhouse', 'handoff source present');
+  assert.ok(ctx.postingLiveness, 'selectedJobContext exposes posting liveness');
+  assert.equal(ctx.postingLiveness.contract, 'jobos.posting-liveness.v1', 'handoff contract identifier present');
+  assert.equal(ctx.postingLiveness.status, 'active', 'handoff status present');
+  assert.ok(Array.isArray(ctx.postingLiveness.reasonCodes), 'handoff reasonCodes present');
+  assert.equal(ctx.postingLiveness.source, 'greenhouse', 'handoff source present');
+  assert.equal(ctx.liveness, undefined, 'selectedJobContext does not expose a duplicate liveness alias');
   // Fit must NOT include a liveness dimension, penalty, or boost.
   assert.ok(ctx.fit, 'fit is present');
   assert.equal(ctx.fit.liveness, undefined, 'fit does not include liveness dimension');
   assert.equal(ctx.fit.livenessPenalty, undefined, 'fit does not include liveness penalty');
   assert.equal(ctx.fit.livenessBoost, undefined, 'fit does not include liveness boost');
 
-  // listJobSummaries must also expose liveness separately.
+  // listJobSummaries must expose the same posting-liveness sibling.
   const summaries = listJobSummaries(s, { profileId: 'profile-test' });
   const summary = summaries.find(j => j.id === imported.id);
-  assert.ok(summary.liveness, 'listJobSummaries exposes liveness');
-  assert.equal(summary.liveness.status, 'active', 'summary liveness status present');
+  assert.ok(summary.postingLiveness, 'listJobSummaries exposes posting liveness');
+  assert.equal(summary.postingLiveness.status, 'active', 'summary posting-liveness status present');
+  assert.equal(summary.liveness, undefined, 'listJobSummaries does not expose a duplicate liveness alias');
   rmSync(s.root, { recursive: true, force: true });
 });
 
