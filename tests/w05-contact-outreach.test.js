@@ -219,6 +219,36 @@ test('W05-CONTACT-01/02/03/04 confidence separates ownership, domain, verificati
   assert.notEqual(staleProjection.evidenceTier, 'A');
   assert.match(staleProjection.warnings.join(' '), /stale/i);
 
+  const exactFresh = insertObservation(f.s, {
+    id: 'src_exact_fresh_catch_all',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/team',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: 'exact@evidence.example',
+  });
+  const exactFreshContact = upsertContactPoint(f.s, {
+    companyId: f.job.company_id,
+    type: 'email',
+    value: 'exact@evidence.example',
+    evidenceTier: 'A',
+    verificationStatus: 'exact_public',
+    confidence: 'high',
+    sourceObservationIds: [exactFresh.id],
+    checks: {
+      exactPublic: true,
+      sourceUrl: exactFresh.url,
+      catchAll: { status: 'detected', method: 'fixture', evidence: 'domain accepts fixture sentinel' },
+    },
+    humanApproved: true,
+  }, FRESH_AT);
+  const exactFreshProjection = projectContactConfidenceV2(f.s, exactFreshContact, { nowDate: new Date(FIXED_NOW) });
+  assert.equal(exactFreshProjection.evidenceTier, 'A');
+  assert.equal(exactFreshProjection.signals.catchAll.state, 'detected');
+  assert.equal(exactFreshProjection.usable, true);
+  assert.match(exactFreshProjection.warnings.join(' '), /catch-all/i);
+
   const generated = upsertContactPoint(f.s, {
     companyId: f.job.company_id,
     type: 'email',
@@ -547,7 +577,7 @@ test('W05-CONTACT-04 genuine schema-9 contact migrates without fabricated compon
   db.close();
 
   const s = await openStore({ workspace: root });
-  assert.equal(one(s, "SELECT value FROM meta WHERE key='schema_version'").value, '11');
+  assert.equal(one(s, "SELECT value FROM meta WHERE key='schema_version'").value, '12');
   const raw = one(s, "SELECT * FROM contact_points WHERE id='legacy_contact'");
   const projection = projectContactConfidenceV2(s, {
     id: raw.id,
@@ -576,7 +606,7 @@ test('W05-CONTACT-04 genuine schema-9 contact migrates without fabricated compon
   assert.ok(all(s, "PRAGMA table_info(outreach_outcomes)").some(column => column.name === 'supersedes_outcome_id'));
 });
 
-test('W05 schema 11 composes over a persisted W02 schema-10 workspace', async () => {
+test('W05 schema 12 composes over a persisted W02 schema-10 workspace', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-w05-w02-migration-'));
   const w02 = await openStore({ workspace: root });
   assert.ok(one(w02, "SELECT name FROM sqlite_master WHERE type='table' AND name='form_submission_attempts'"));
@@ -586,7 +616,7 @@ test('W05 schema 11 composes over a persisted W02 schema-10 workspace', async ()
   w02.db.close();
 
   const composed = await openStore({ workspace: root });
-  assert.equal(one(composed, "SELECT value FROM meta WHERE key='schema_version'").value, '11');
+  assert.equal(one(composed, "SELECT value FROM meta WHERE key='schema_version'").value, '12');
   assert.ok(one(composed, "SELECT name FROM sqlite_master WHERE type='table' AND name='form_submission_attempts'"));
   assert.ok(one(composed, "SELECT name FROM sqlite_master WHERE type='table' AND name='outreach_outcomes'"));
   assert.deepEqual(all(composed, 'PRAGMA foreign_key_check'), []);

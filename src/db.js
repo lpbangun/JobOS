@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS form_snapshots (
   selection_json TEXT NOT NULL,
   field_map_json TEXT NOT NULL,
   fingerprint TEXT NOT NULL,
+  target_binding TEXT,
+  target_ciphertext TEXT,
+  target_iv TEXT,
+  target_tag TEXT,
   warnings_json TEXT NOT NULL DEFAULT '[]',
   FOREIGN KEY(job_id) REFERENCES jobs(id),
   FOREIGN KEY(profile_id) REFERENCES profiles(id)
@@ -410,6 +414,10 @@ function migrate(db){
     "ALTER TABLE application_receipts ADD COLUMN confirmation_path TEXT",
     "ALTER TABLE application_receipts ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
     "CREATE TABLE IF NOT EXISTS form_snapshots (id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version = 1), job_id TEXT NOT NULL, profile_id TEXT NOT NULL, captured_at TEXT NOT NULL, requested_origin TEXT NOT NULL, requested_path TEXT NOT NULL, final_origin TEXT NOT NULL, final_path TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_protocol_version INTEGER NOT NULL CHECK(adapter_protocol_version = 1), adapter_source_hash TEXT NOT NULL, selection_json TEXT NOT NULL, field_map_json TEXT NOT NULL, fingerprint TEXT NOT NULL, warnings_json TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id))",
+    "ALTER TABLE form_snapshots ADD COLUMN target_binding TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_ciphertext TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_iv TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_tag TEXT",
     "CREATE INDEX IF NOT EXISTS form_snapshots_target_idx ON form_snapshots(job_id, profile_id, captured_at, id)",
     "CREATE TABLE IF NOT EXISTS form_fill_runs (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, form_fingerprint TEXT NOT NULL, adapter_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('checkpoint-required','diverged','failed')), readback_json TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(packet_id) REFERENCES application_packets(id))",
     "CREATE TABLE IF NOT EXISTS human_checkpoints (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, fill_run_id TEXT NOT NULL, checkpoint_hash TEXT NOT NULL UNIQUE, confirmation_json TEXT NOT NULL, accepted_at TEXT NOT NULL, accepted_by_source TEXT NOT NULL CHECK(accepted_by_source IN ('cli','tui')), UNIQUE(packet_id,fill_run_id), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(fill_run_id) REFERENCES form_fill_runs(id))",
@@ -818,10 +826,10 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','11']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','12']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '11') save(store);
+  if (!existed || previousSchemaVersion !== '12') save(store);
   return store;
 }
 

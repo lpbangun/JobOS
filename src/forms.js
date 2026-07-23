@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { all, guardedWrite, one, run } from './db.js';
 import { parseJson } from './utils.js';
 
@@ -6,9 +8,9 @@ import { parseJson } from './utils.js';
 // W02 Live Form Packet Bridge — pure canonicalization, classification,
 // fingerprint, currency, and secret-safe formatting contracts.
 //
-// No Playwright imports. No DB persistence. No field values, raw HTML,
-// URL query/fragment/userinfo, or hashes of field values ever enter the
-// canonical projections or formatted output produced here.
+// Exact request targets are held only in an authenticated private envelope.
+// Public projections never contain query/fragment/userinfo, target bindings,
+// ciphertext metadata, raw HTML, field values, or hashes of field values.
 //
 // Contracts: FormFieldMapV1 / FormSnapshotV1 per
 // W02_LIVE_FORM_PACKET_BRIDGE_IMPLEMENTATION_PLAN.md sections 5.1-5.2.
@@ -40,6 +42,88 @@ export function canonicalJson(value) {
 
 function sha256Hex(input) {
   return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+const PRIVATE_EXACT_TARGET = Symbol('jobos.form.exact-target');
+const TARGET_KEY_BYTES = 32;
+const TARGET_IV_BYTES = 12;
+
+function exactTargetUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || ''));
+  } catch {
+    throw formError('form_contract_unsupported', 'Invalid exact target URL');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw formError('form_contract_unsupported', 'Exact target URL must be HTTP(S) without userinfo');
+  }
+  parsed.hash = '';
+  return parsed.href;
+}
+
+function targetKeyPath(s) {
+  return path.join(s.p.state, 'form-target.key');
+}
+
+function formTargetKey(s, { create = false } = {}) {
+  const keyPath = targetKeyPath(s);
+  if (create) {
+    fs.mkdirSync(s.p.state, { recursive: true, mode: 0o700 });
+    try {
+      fs.writeFileSync(keyPath, crypto.randomBytes(TARGET_KEY_BYTES), { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw formError('form_target_key_unavailable', 'Private form target key could not be created');
+    }
+  }
+  let key;
+  try {
+    const stat = fs.lstatSync(keyPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('unsafe key path');
+    key = fs.readFileSync(keyPath);
+  } catch {
+    throw formError('form_target_key_unavailable', 'Private form target key is unavailable');
+  }
+  if (key.length !== TARGET_KEY_BYTES) throw formError('form_target_key_unavailable', 'Private form target key is invalid');
+  return key;
+}
+
+function targetBinding(key, exactTarget) {
+  return crypto.createHmac('sha256', key)
+    .update('jobos.form-target.v1\0')
+    .update(canonicalJson(exactTarget))
+    .digest('hex');
+}
+
+function encryptTarget(key, snapshotId, exactTarget) {
+  const iv = crypto.randomBytes(TARGET_IV_BYTES);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(String(snapshotId)));
+  const ciphertext = Buffer.concat([cipher.update(canonicalJson(exactTarget), 'utf8'), cipher.final()]);
+  return {
+    ciphertext: ciphertext.toString('base64'),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64')
+  };
+}
+
+function decryptTarget(key, row) {
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(row.target_iv, 'base64'));
+    decipher.setAAD(Buffer.from(String(row.id)));
+    decipher.setAuthTag(Buffer.from(row.target_tag, 'base64'));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(row.target_ciphertext, 'base64')),
+      decipher.final()
+    ]).toString('utf8');
+    const target = JSON.parse(plaintext);
+    return {
+      requestedUrl: exactTargetUrl(target.requestedUrl),
+      finalUrl: exactTargetUrl(target.finalUrl)
+    };
+  } catch {
+    throw formError('form_target_reinspection_required', 'Private exact form target is unavailable; reinspect the form');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +445,7 @@ export function validateFormFieldMap(map) {
 
 const SNAPSHOT_VERSION = 1;
 
-export function formSnapshotFingerprint(snapshot) {
+export function formSnapshotFingerprint(snapshot, { targetBinding: binding = snapshot?.targetBinding || null } = {}) {
   const projection = {
     version: snapshot.version,
     adapter: {
@@ -377,6 +461,7 @@ export function formSnapshotFingerprint(snapshot) {
     },
     fieldMap: semanticFieldMapProjection(snapshot.fieldMap)
   };
+  if (binding) projection.targetBinding = binding;
   return sha256Hex(canonicalJson(projection));
 }
 
@@ -424,6 +509,12 @@ export function buildFormSnapshot(input) {
       message: String(w.message || '')
     }))
   };
+  Object.defineProperty(snapshot, PRIVATE_EXACT_TARGET, {
+    value: {
+      requestedUrl: exactTargetUrl(input.requestedUrl),
+      finalUrl: exactTargetUrl(input.finalUrl)
+    }
+  });
 
   snapshot.fingerprint = formSnapshotFingerprint(snapshot);
   return snapshot;
@@ -488,7 +579,7 @@ export function formatFormSnapshot(snapshot) {
 
 function rowToSnapshot(row) {
   if (!row) return null;
-  return {
+  const snapshot = {
     version: Number(row.version),
     snapshotId: row.id,
     jobId: row.job_id,
@@ -510,6 +601,8 @@ function rowToSnapshot(row) {
     fingerprint: row.fingerprint,
     warnings: parseJson(row.warnings_json, [])
   };
+  if (row.target_binding) Object.defineProperty(snapshot, 'targetBinding', { value: row.target_binding });
+  return snapshot;
 }
 
 function answerRowFingerprint(answer) {
@@ -694,6 +787,22 @@ export function canonicalPacketFormBinding(resolved) {
   };
 }
 
+export function bindFormSnapshotTarget(s, snapshot) {
+  validateFormSnapshot(snapshot);
+  const exactTarget = snapshot[PRIVATE_EXACT_TARGET];
+  if (!exactTarget) throw formError('form_target_reinspection_required', 'Live form inspection did not retain its exact target');
+  const key = formTargetKey(s);
+  const binding = targetBinding(key, exactTarget);
+  const structuralFingerprint = formSnapshotFingerprint(snapshot, { targetBinding: null });
+  const fingerprint = formSnapshotFingerprint(snapshot, { targetBinding: binding });
+  if (snapshot.fingerprint !== structuralFingerprint && snapshot.fingerprint !== fingerprint) {
+    throw formError('form_snapshot_invalid', 'Live form fingerprint does not match its canonical evidence');
+  }
+  Object.defineProperty(snapshot, 'targetBinding', { value: binding, configurable: true });
+  snapshot.fingerprint = fingerprint;
+  return snapshot;
+}
+
 export function persistFormSnapshot(s, snapshot) {
   validateFormSnapshot(snapshot);
   const warnings = (snapshot.warnings || []).map(item => ({
@@ -709,15 +818,23 @@ export function persistFormSnapshot(s, snapshot) {
       }
       return formatFormSnapshot(current);
     }
-    const expectedFingerprint = formSnapshotFingerprint(snapshot);
-    if (snapshot.fingerprint !== expectedFingerprint) {
+    const exactTarget = snapshot[PRIVATE_EXACT_TARGET];
+    if (!exactTarget) throw formError('form_snapshot_invalid', 'New form snapshots require a private exact target');
+    const structuralFingerprint = formSnapshotFingerprint(snapshot, { targetBinding: null });
+    if (snapshot.fingerprint !== structuralFingerprint) {
       throw formError('form_snapshot_invalid', 'Form snapshot fingerprint does not match its canonical evidence');
     }
+    const key = formTargetKey(s, { create: true });
+    const binding = targetBinding(key, exactTarget);
+    const fingerprint = formSnapshotFingerprint(snapshot, { targetBinding: binding });
+    const envelope = encryptTarget(key, snapshot.snapshotId, exactTarget);
+    Object.defineProperty(snapshot, 'targetBinding', { value: binding, configurable: true });
+    snapshot.fingerprint = fingerprint;
     run(s, `INSERT INTO form_snapshots (
       id,version,job_id,profile_id,captured_at,requested_origin,requested_path,
       final_origin,final_path,adapter_id,adapter_protocol_version,adapter_source_hash,
-      selection_json,field_map_json,fingerprint,warnings_json
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      selection_json,field_map_json,fingerprint,target_binding,target_ciphertext,target_iv,target_tag,warnings_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       snapshot.snapshotId,
       snapshot.version,
       snapshot.jobId,
@@ -732,11 +849,29 @@ export function persistFormSnapshot(s, snapshot) {
       snapshot.adapter.sourceHash,
       JSON.stringify(snapshot.selection),
       JSON.stringify(snapshot.fieldMap),
-      snapshot.fingerprint,
+      fingerprint,
+      binding,
+      envelope.ciphertext,
+      envelope.iv,
+      envelope.tag,
       JSON.stringify(warnings)
     ]);
     return formatFormSnapshot(rowToSnapshot(one(s, 'SELECT * FROM form_snapshots WHERE id=?', [snapshot.snapshotId])));
   });
+}
+
+export function getPrivateFormTarget(s, snapshotId) {
+  const row = one(s, 'SELECT id,target_binding,target_ciphertext,target_iv,target_tag FROM form_snapshots WHERE id=?', [snapshotId]);
+  if (!row) throw formError('form_snapshot_not_found', `Unknown form snapshot: ${snapshotId}`);
+  if (!row.target_binding || !row.target_ciphertext || !row.target_iv || !row.target_tag) {
+    throw formError('form_target_reinspection_required', 'This form snapshot predates exact-target protection; reinspect the form');
+  }
+  const key = formTargetKey(s);
+  const target = decryptTarget(key, row);
+  if (targetBinding(key, target) !== row.target_binding) {
+    throw formError('form_target_reinspection_required', 'Private exact form target binding is invalid; reinspect the form');
+  }
+  return target;
 }
 
 export function getFormSnapshot(s, snapshotId, { raw = false } = {}) {

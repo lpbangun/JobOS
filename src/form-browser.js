@@ -148,10 +148,11 @@ async function inspectFrame(frame, frameOrdinal) {
         return 'unsupported';
       }
       return [...document.forms].map((form, formIndex) => {
-        const controls = [...form.querySelectorAll('input,textarea,select,[role="combobox"],[contenteditable="true"]')].filter(visible);
+        const controls = [...form.querySelectorAll('input,textarea,select,[role="combobox"],[contenteditable="true"]')];
         const radioGroups = new Map();
         const fields = [];
         controls.forEach((control, ordinal) => {
+          if (!visible(control)) return;
           const controlKind = kind(control);
           if (controlKind === 'radio') {
             const key = control.name || `radio-${ordinal}`;
@@ -285,24 +286,26 @@ export async function inspectLiveForm(s, {
   browserProfile = 'default',
   expectedAdapterHash = null,
   playwright,
-  persist = true
+  persist = true,
+  protectRequests = true,
+  networkPolicyOptions
 } = {}) {
-  return withAuthenticatedPage({
+  const snapshot = await withAuthenticatedPage({
     workspace: s.root,
     name: browserProfile,
     url,
     playwright,
     headless: true,
-    createIfMissing: true
-  }, async ({ page }) => {
-    const snapshot = await inspectApplicationFormOnPage({
-      page,
-      requestedUrl: url,
-      jobId,
-      profileId,
-      adapterManifest: DOM_ADAPTER_MANIFEST,
-      expectedAdapterHash
-    });
-    return persist ? persistFormSnapshot(s, snapshot) : snapshot;
-  });
+    createIfMissing: true,
+    protectRequests,
+    networkPolicyOptions
+  }, async ({ page }) => inspectApplicationFormOnPage({
+    page,
+    requestedUrl: url,
+    jobId,
+    profileId,
+    adapterManifest: DOM_ADAPTER_MANIFEST,
+    expectedAdapterHash
+  }));
+  return persist ? persistFormSnapshot(s, snapshot) : snapshot;
 }
