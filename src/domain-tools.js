@@ -3,6 +3,7 @@ import { tailor } from './tailoring.js';
 import { researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { approveContact, createOutreachPlan } from './research/contacts.js';
+import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
 import { mapReachableNetwork } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
 import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
@@ -98,6 +99,8 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'mark_outreach_sent', description: 'Record a user-confirmed outreach send; agent mediation is denied unless explicitly enabled.', inputSchema: required({ artifactId: text, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: text }, ['artifactId', 'channel']) },
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: required({ threadId: text, afterDays: { type: 'number' } }, ['threadId', 'afterDays']) },
   { name: 'list_outreach_due', description: 'Show outreach-thread context for the canonical due outreach-followup task set (open, non-null due time passed); never sends anything.', inputSchema: object({}) },
+  { name: 'record_outreach_outcome', description: 'Record one explicit append-only profile-scoped outreach observation. No reply prediction, causality, or external action.', inputSchema: required({ threadId: text, profileId: text, type: { type: 'string', enum: ['reply_positive', 'reply_neutral', 'reply_negative', 'meeting_booked', 'no_response', 'bounced', 'declined'] }, occurredAt: text, windowEndAt: text, channel: text, referenceId: text, supersedesOutcomeId: text, correctionReason: text }, ['threadId', 'profileId', 'type', 'occurredAt']) },
+  { name: 'list_outreach_outcomes', description: 'List profile-scoped outreach observations and correction history without private notes.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
   { name: 'create_application', description: 'Create a local application tracking record; agent mediation cannot attest submission by default.', inputSchema: required({ jobId: text, status: text, notes: text }, ['jobId', 'status']) },
   { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
@@ -383,11 +386,29 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     if (!(args.jobId && args.stakeholderId) && !args.planId) {
       throw new DomainToolError('draft_outreach_missing_target', 'draft_outreach requires a jobId+stakeholderId or a planId', { args });
     }
-    return await draftOutreach(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null, profileId: args.profileId, goal: args.goal || 'informational', planId: args.planId || null, contactId: args.contactId || null });
+    return await draftOutreach(s, { jobId: args.jobId || null, stakeholderId: args.stakeholderId || null, profileId: args.profileId, goal: args.goal || null, planId: args.planId || null, contactId: args.contactId || null });
   }
   if (name === 'mark_outreach_sent') return markOutreachSent(s, { artifactId: args.artifactId, channel: args.channel, notes: args.notes || '' });
   if (name === 'schedule_outreach_followup') return scheduleFollowup(s, { threadId: args.threadId, afterDays: args.afterDays });
   if (name === 'list_outreach_due') return outreachDue(s);
+  if (name === 'record_outreach_outcome') return recordOutreachOutcome(s, {
+    threadId: args.threadId,
+    profileId: args.profileId,
+    type: args.type,
+    occurredAt: args.occurredAt,
+    windowEndAt: args.windowEndAt || null,
+    channel: args.channel || null,
+    referenceId: args.referenceId || '',
+    supersedesOutcomeId: args.supersedesOutcomeId || null,
+    correctionReason: args.correctionReason || '',
+    actor: mediationSource(options),
+    source: 'domain_tool'
+  }, { includeNotes: false });
+  if (name === 'list_outreach_outcomes') return listOutreachOutcomes(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays == null ? null : args.sinceDays,
+    includeNotes: false
+  });
   if (name === 'create_application') {
     const application = appCreate(s, args.jobId, args.status, args.notes || '');
     return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };

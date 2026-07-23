@@ -8,6 +8,7 @@ import { listSearches, listWatchlist, discoveryRuns, reviewQueue } from './disco
 import { listOutreachThreads, outreachDue } from './outreach.js';
 import { listContactPoints } from './research/contacts.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
+import { renderOutreachOutcomeSummaryMarkdown, summarizeOutreachOutcomes } from './outreach-outcomes.js';
 
 export function state(s) {
   return {
@@ -142,16 +143,17 @@ export function renderFunnelMarkdown(metrics) {
   return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
 }
 
-export function weekly(s, pid, { recordRun = true } = {}) {
+export function weekly(s, pid, { recordRun = true, nowDate = new Date() } = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   const metrics = funnel(s, pid, 30);
+  const outreachOutcomes = summarizeOutreachOutcomes(s, { profileId: pid, sinceDays: 30, nowDate });
+  metrics.outreachOutcomes = outreachOutcomes;
   const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=? ORDER BY fit_score DESC,created_at DESC', [pid]);
   const tasks = openTasks(s);
   const top = jobs.slice(0, 5).map(x => `- ${x.title} at ${x.company}: ${x.fit_score ?? 'unscored'}/100 (${x.id})`).join('\n') || '- No jobs imported.';
   const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
-  // Research recommendations
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(nowDate.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const staleRuns = all(s, `SELECT id,job_id,scope,finished_at FROM research_runs WHERE profile_id=? AND status IN ('succeeded','partial') AND finished_at<? ORDER BY finished_at ASC LIMIT 3`, [pid, cutoff]);
   const staleRunLines = staleRuns.map(r => `- Run ${r.id} (${r.scope}) finished ${r.finished_at}. Run \`jobos research runs resume ${r.id}\` to refresh.`).join('\n') || '';
   const highFitNoRun = all(s, `SELECT j.id,j.title,j.company,j.fit_score FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND COALESCE(j.liveness_status,'uncertain')<>'expired' AND rr.id IS NULL ORDER BY j.fit_score DESC LIMIT 5`, [pid, pid]);
@@ -159,17 +161,41 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   const networkIntent = parseJson(prof.preferences_json, {}).networkIntent;
   const networkSetupStatus = networkIntent?.completedAt ? 'complete' : 'not started or incomplete';
   const networkSetupLine = networkSetupStatus === 'complete' ? '' : '- Network setup is unfinished. Run \`jobos profile network-intent --profile <id> --file <json>\` to configure intent and import connections.';
-  const followupDue = all(s, `SELECT id,title,due_at FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=? LIMIT 5`, [now()]);
+  const followupDue = all(s, `SELECT id,title,due_at FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=? LIMIT 5`, [nowDate.toISOString()]);
   const followupLines = followupDue.map(t => `- Task "${t.title}" (${t.id}) is overdue as of ${t.due_at}.`).join('\n') || '';
   const researchRecs = [staleRunLines, highFitLines, networkSetupLine, followupLines].filter(Boolean).join('\n') || '- None.';
-  const content = `# Weekly JobOS review — ${prof.name}\n\nGenerated: ${now()}\n\n## Funnel analytics\n${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}\n\n## Top jobs\n${top}\n\n## Due / open tasks\n${taskLines}\n\n## Research recommendations (next actions, not auto-launched)\n${researchRecs}\n\n## Recommended experiments\n- Double down on sources or role families that generate interviews, not just imports.\n- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.\n- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.\n\n## Automation policy\nThis review is an internal summary. It did not submit applications, run start research, or send outreach.\n`;
-  const rel = path.join('exports', `weekly-review-${pid}-${new Date().toISOString().slice(0, 10)}.md`);
+  const generatedAt = nowDate.toISOString();
+  const content = `# Weekly JobOS review — ${prof.name}
+
+Generated: ${generatedAt}
+
+## Funnel analytics
+${renderFunnelMarkdown(metrics).replace(/^# Funnel analytics[^\n]*\n\n/, '')}
+
+${renderOutreachOutcomeSummaryMarkdown(outreachOutcomes)}
+
+## Top jobs
+${top}
+
+## Due / open tasks
+${taskLines}
+
+## Research recommendations (next actions, not auto-launched)
+${researchRecs}
+
+## Recommended experiments
+- Double down on sources or role families that generate interviews, not just imports.
+- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.
+- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.
+
+## Automation policy
+This review is an internal summary. It did not submit applications, run research, send outreach, or mutate W06 next-action policy.`;
+  const rel = path.join('exports', `weekly-review-${pid}-${generatedAt.slice(0, 10)}.md`);
   writeMd(path.join(s.p.ws, rel), content);
-  const rid = id('run', `weekly-review:${pid}:${now()}`);
+  const rid = id('run', `weekly-review:${pid}:${generatedAt}`);
   if (recordRun) {
-    const at = now();
     run(s, `INSERT INTO automation_runs (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,action_id,trigger_type,started_at,finished_at,duration_ms,counts_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [rid, 'weekly-review', JSON.stringify({ profileId: pid }), JSON.stringify({ path: rel, metrics }), 'succeeded', 'none', at, 'weekly_retrospective', 'manual', at, at, 0, JSON.stringify({ reviews: 1 })]);
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [rid, 'weekly-review', JSON.stringify({ profileId: pid }), JSON.stringify({ path: rel, metrics }), 'succeeded', 'none', generatedAt, 'weekly_retrospective', 'manual', generatedAt, generatedAt, 0, JSON.stringify({ reviews: 1 })]);
     audit(s, 'review.weekly.created', 'automation_run', rid, { profileId: pid, path: rel });
   }
   save(s);
