@@ -182,6 +182,13 @@ function mergeColumns(columns, widths, color, separator = '│') {
   return output;
 }
 
+function fitLabel(fit) {
+  if (!fit) return 'unscored';
+  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy unknown' : `legacy ${fit.overall}/100`;
+  if (fit.overall == null) return 'unknown';
+  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' review' : ''}`;
+}
+
 function filteredJobs(model, filter) {
   if (filter === 'all') return model.jobs;
   if (filter === 'today') return model.jobs.filter(job => job.next || ['new', 'imported', 'interview'].includes(job.stage));
@@ -293,7 +300,7 @@ function listPanel(model, state, width, height, color) {
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
     for (const job of jobs.slice(start, start + maxCards)) {
       const selected = job.id === selectedId;
-      const fitScore = job.fitScore == null ? '—' : String(job.fitScore);
+      const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
       body.push(crop(`  ${job.company} · ${job.location || 'location —'} · live:${job.liveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
@@ -307,8 +314,8 @@ function listPanel(model, state, width, height, color) {
 function detailPanel(model, width, height, color) {
   const item = model.selected;
   if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'JobOS will show real local state here after import.'], width, color);
-  const fitScore = item.fit?.overall ?? '—';
-  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.confidence || 'confidence —'}` : 'not scored';
+  const fitScore = fitLabel(item.fit);
+  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.scoreStatus} · coverage ${item.fit.evidenceCoverage ?? '—'}%` : 'not scored';
   const next = item.next[0];
   const compensation = item.job.compensation?.text || 'compensation —';
   const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(',') : 'type —';
@@ -320,7 +327,7 @@ function detailPanel(model, width, height, color) {
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
     `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'} · liveness:${item.liveness?.status || 'uncertain'}`,
     `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
-    paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    paint(`FIT ${fitScore} · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
     ...wrap(item.narrative, width - 4).slice(0, 3),
     ...readinessLines(item.readiness, width - 4, color),
     '',
@@ -687,7 +694,7 @@ function overlayPanel(model, state, width, height, color) {
       ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
       '',
       'NEW JOB REVIEW',
-      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · live ${item.liveness?.status || 'uncertain'} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
+      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · posting ${item.postingLiveness?.status || 'uncertain'} · fit ${fitLabel(item.fit)}${item.highFit ? ' · high' : ''}`)
     ];
     if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
     if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');

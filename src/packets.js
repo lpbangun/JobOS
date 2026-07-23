@@ -155,12 +155,7 @@ export function buildPacketProjection(s, { jobId, profileId }) {
       pdfHash: frozenResumePdf?.pdfHash || null
     },
     coverLetter: coverEntry,
-    proofPointIds: (readiness.materials.proofs.proofPointIds || []).slice().sort(),
-    score: {
-      overall: readiness.materials.score.overall,
-      confidence: readiness.materials.score.confidence,
-      mode: readiness.materials.score.mode
-    }
+    proofPointIds: (readiness.materials.proofs.proofPointIds || []).slice().sort()
   };
 
   // Target identity

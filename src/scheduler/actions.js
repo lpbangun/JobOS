@@ -4,8 +4,9 @@ import { all, one, run } from '../db.js';
 import { weekly } from '../analytics.js';
 import { id, now, parseJson, slug } from '../utils.js';
 import { writeMd } from '../workspace.js';
-import { syncJob } from '../jobs.js';
+import { getPostingLiveness, syncJob } from '../jobs.js';
 import { createArtifact } from '../artifacts.js';
+import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit } from '../scoring.js';
 
 const activeApplicationStatuses = new Set(['saved', 'researching', 'materials-ready', 'applied', 'recruiter-screen', 'interview']);
 const suppressedFollowupStatuses = new Set(['interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
@@ -192,15 +193,28 @@ function morningPriorityBrief(s, automation, { nowDate = new Date() } = {}) {
       ORDER BY tasks.due_at IS NULL, tasks.due_at, tasks.priority DESC, tasks.created_at LIMIT 12`, [dueBy, profile.id]);
     const jobs = all(s, `SELECT jobs.*, applications.status AS application_status
       FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id
-      WHERE jobs.profile_id=? AND COALESCE(jobs.fit_score,0)>=70
+      WHERE jobs.profile_id=? AND jobs.high_fit=1
         AND COALESCE(jobs.liveness_status,'uncertain')<>'expired' AND (applications.status IS NULL OR applications.status IN ('saved','researching','materials-ready'))
-      ORDER BY jobs.fit_score DESC, jobs.created_at DESC LIMIT 8`, [profile.id]);
+      ORDER BY jobs.created_at DESC`, [profile.id])
+      .map(job => ({
+        ...job,
+        jobId: job.id,
+        fit: deserializeFitScore(parseJson(job.score_json, null), {
+          persistedOverall: job.fit_score,
+          jobId: job.id,
+          profileId: job.profile_id
+        }),
+        postingLiveness: getPostingLiveness(job)
+      }))
+      .filter(job => qualifiesForHighFit(job.fit, 0))
+      .sort(compareFitDecisions)
+      .slice(0, 8);
     const interviews = all(s, `SELECT applications.*, jobs.title, jobs.company
       FROM applications JOIN jobs ON jobs.id=applications.job_id
       WHERE applications.profile_id=? AND applications.status='interview'
       ORDER BY applications.updated_at DESC LIMIT 8`, [profile.id]);
     const taskLines = tasks.length ? tasks.map(t => `- ${t.title}${t.due_at ? ` (due ${t.due_at})` : ''}${t.job_title ? ` — ${t.job_title} at ${t.job_company}` : ''}`).join('\n') : '- No due tasks.';
-    const jobLines = jobs.length ? jobs.map(j => `- ${j.title} at ${j.company}: ${j.fit_score ?? 'unscored'}/100 (${j.id})`).join('\n') : '- No high-fit jobs awaiting review.';
+    const jobLines = jobs.length ? jobs.map(job => `- ${job.title} at ${job.company}: ${job.fit.overall}/100 (${job.id})`).join('\n') : '- No high-fit jobs awaiting review.';
     const interviewLines = interviews.length ? interviews.map(i => `- ${i.title} at ${i.company} (${i.id})`).join('\n') : '- No active interview-stage applications.';
     const content = `# Morning priority brief — ${profile.name}
 

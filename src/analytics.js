@@ -8,11 +8,13 @@ import { listSearches, listWatchlist, discoveryRuns, reviewQueue } from './disco
 import { listOutreachThreads, outreachDue } from './outreach.js';
 import { listContactPoints } from './research/contacts.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
+import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit } from './scoring.js';
+import { getPostingLiveness } from './jobs.js';
 
 export function state(s) {
   return {
     profiles: all(s, 'SELECT id,name,preferences_json,created_at,updated_at FROM profiles ORDER BY created_at'),
-    jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: parseJson(x.score_json, null), requirements: parseJson(x.requirements_json, []), liveness: deserializeLiveness(x) })),
+    jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: deserializeFitScore(parseJson(x.score_json, null), { persistedOverall: x.fit_score, jobId: x.id, profileId: x.profile_id }), requirements: parseJson(x.requirements_json, []), liveness: deserializeLiveness(x), postingLiveness: getPostingLiveness(x) })),
     applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
     statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
     artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
@@ -35,6 +37,13 @@ export function state(s) {
     automationRuns: listRuns(s, { limit: 25 }),
     policy: { externalApply: 'user_configured', externalSend: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' }
   };
+}
+
+function fitSummary(fit) {
+  if (!fit) return 'unscored';
+  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy fit unknown' : `legacy ${fit.overall}/100`;
+  if (fit.overall == null) return 'fit unknown';
+  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' (review required)' : ''}`;
 }
 
 function sinceCutoff(days) {
@@ -146,16 +155,30 @@ export function weekly(s, pid, { recordRun = true } = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   const metrics = funnel(s, pid, 30);
-  const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=? ORDER BY fit_score DESC,created_at DESC', [pid]);
+  const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=?', [pid]).map(job => ({
+    ...job,
+    jobId: job.id,
+    fit: deserializeFitScore(parseJson(job.score_json, null), { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id }),
+    postingLiveness: getPostingLiveness(job)
+  })).sort(compareFitDecisions);
   const tasks = openTasks(s);
-  const top = jobs.slice(0, 5).map(x => `- ${x.title} at ${x.company}: ${x.fit_score ?? 'unscored'}/100 (${x.id})`).join('\n') || '- No jobs imported.';
+  const top = jobs.slice(0, 5).map(job => `- ${job.title} at ${job.company}: ${fitSummary(job.fit)} (${job.id})`).join('\n') || '- No jobs imported.';
   const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
   // Research recommendations
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const staleRuns = all(s, `SELECT id,job_id,scope,finished_at FROM research_runs WHERE profile_id=? AND status IN ('succeeded','partial') AND finished_at<? ORDER BY finished_at ASC LIMIT 3`, [pid, cutoff]);
   const staleRunLines = staleRuns.map(r => `- Run ${r.id} (${r.scope}) finished ${r.finished_at}. Run \`jobos research runs resume ${r.id}\` to refresh.`).join('\n') || '';
-  const highFitNoRun = all(s, `SELECT j.id,j.title,j.company,j.fit_score FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND COALESCE(j.liveness_status,'uncertain')<>'expired' AND rr.id IS NULL ORDER BY j.fit_score DESC LIMIT 5`, [pid, pid]);
-  const highFitLines = highFitNoRun.map(j => `- ${j.title} at ${j.company} (${j.fit_score ?? 'unscored'}/100). Run \`jobos research people --scope job --job ${j.id} --profile ${pid} --depth standard\` to start.`).join('\n') || '';
+  const highFitNoRun = all(s, `SELECT j.* FROM jobs j LEFT JOIN research_runs rr ON rr.job_id=j.id AND rr.profile_id=? AND rr.scope='job' WHERE j.profile_id=? AND j.high_fit=1 AND COALESCE(j.liveness_status,'uncertain')<>'expired' AND rr.id IS NULL ORDER BY j.fit_score DESC,j.id`, [pid, pid])
+    .map(job => ({
+      jobId: job.id,
+      job,
+      fit: deserializeFitScore(parseJson(job.score_json, null), { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id }),
+      postingLiveness: getPostingLiveness(job)
+    }))
+    .filter(({ fit }) => qualifiesForHighFit(fit, 0))
+    .sort(compareFitDecisions)
+    .slice(0, 5);
+  const highFitLines = highFitNoRun.map(({ job, fit }) => `- ${job.title} at ${job.company} (${fit.overall}/100). Run \`jobos research people --scope job --job ${job.id} --profile ${pid} --depth standard\` to start.`).join('\n') || '';
   const networkIntent = parseJson(prof.preferences_json, {}).networkIntent;
   const networkSetupStatus = networkIntent?.completedAt ? 'complete' : 'not started or incomplete';
   const networkSetupLine = networkSetupStatus === 'complete' ? '' : '- Network setup is unfinished. Run \`jobos profile network-intent --profile <id> --file <json>\` to configure intent and import connections.';
