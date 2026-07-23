@@ -13,7 +13,10 @@ import { openStore, all, one, run, save } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import {
+  approveContact,
   listContactPoints,
+  listPersonCandidates,
+  promoteStakeholder,
   projectContactConfidenceV2,
   upsertContactPoint,
   verifyObservationContacts,
@@ -192,6 +195,10 @@ test('W05-CONTACT-01/02/03/04 confidence separates ownership, domain, verificati
   assert.ok(!['A', 'B'].includes(unrelatedContact.evidenceTier));
   assert.equal(unrelatedContact.contactConfidence.signals.smtp.state, 'accepted');
   assert.equal(unrelatedContact.contactConfidence.usable, false);
+  const worksheet = readFileSync(path.join(f.root, 'jobos-workspace', 'jobs', f.job.id, 'research', 'contacts.md'), 'utf8');
+  assert.match(worksheet, /A: exact named or role inbox observed on a company-controlled same-domain page, with company-domain match and non-stale evidence\./);
+  assert.match(worksheet, /B: exact public contact on a credible third-party source, with independently supported person-company association, company-domain match, and non-stale evidence\./);
+  assert.match(worksheet, /C: generated candidate on a matching company domain, backed by at least two distinct non-stale exact public examples from at least two real qualifying source observations\./);
 
   const stale = insertObservation(f.s, {
     id: 'src_stale',
@@ -398,6 +405,16 @@ test('W05 finding 1/2 controlled domains, tier freshness, and pattern support us
     name: 'Casey Contact',
   });
   const stakeholderB = insertStakeholder(f.s, f.job, { id: 'stakeholder_stale_b', name: 'Casey Contact', role: 'Product Manager' });
+  insertObservation(f.s, {
+    id: 'src_stakeholder_stale_b_provenance',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/team/stakeholder_stale_b',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: '',
+    name: '',
+  });
   const staleB = upsertContactPoint(f.s, {
     companyId: f.job.company_id,
     stakeholderId: stakeholderB,
@@ -1403,4 +1420,419 @@ test('W05 outcome CLI JSON and domain tools expose deterministic profile-scoped 
   }, { actor: 'agent' });
   assert.equal(replay.idempotent, true);
   assert.equal(replay.note, undefined);
+});
+
+test('W05 strict tier A: generic inboxes do not qualify as named or role inboxes for tier A', async () => {
+  const f = await fixture();
+  const genericObs = insertObservation(f.s, {
+    id: 'src_generic_tier_a',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/contact',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: 'careers@evidence.example',
+    name: '',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_generic_tier_a',
+    jobId: f.job.id,
+    observationIds: [genericObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const genericContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'careers@evidence.example');
+  assert.ok(genericContact, 'expected a generic inbox contact');
+  assert.equal(genericContact.type, 'generic_inbox');
+  assert.notEqual(genericContact.rawEvidenceTier, 'A', 'generic inbox must not receive raw tier A');
+  assert.equal(genericContact.rawEvidenceTier, 'D', 'generic inbox raw tier must be D');
+  assert.equal(genericContact.evidenceTier, 'D', 'generic inbox derived tier must be D');
+  assert.match(genericContact.contactConfidence.tierReason, /generic inbox.*named or role/i, 'tier reason must explain generic inbox exclusion from A');
+  approveContact(f.s, { contactId: genericContact.id });
+  const projected = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'careers@evidence.example');
+  assert.equal(projected.humanApproved, true);
+  assert.equal(projected.usable, true, 'human-approved non-stale generic inbox with exact public evidence must remain usable for generic outreach');
+});
+
+test('W05 strict tier C: pattern from a single source observation does not qualify for tier C', async () => {
+  const f = await fixture();
+  saveSourceObservation(f.s, {
+    id: 'src_single_pattern',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/team',
+    canonicalUrl: 'https://evidence.example/team',
+    title: 'Team page',
+    snippet: 'alice.alpha@evidence.example bruno.beta@evidence.example',
+    sourceType: 'page_fetch',
+    provider: 'page_fetch',
+    query: '',
+    trust: 'public_company_or_web_page',
+    fetchedAt: FRESH_AT,
+    contentHash: 'hash-single-pattern',
+    metadata: {
+      emailContexts: [
+        { email: 'alice.alpha@evidence.example', name: 'Alice Alpha', context: 'Team', generic: false },
+        { email: 'bruno.beta@evidence.example', name: 'Bruno Beta', context: 'Team', generic: false },
+      ],
+    },
+  });
+  insertStakeholder(f.s, f.job, { id: 'stakeholder_single_pattern', name: 'Chris Candidate', role: 'Product Manager' });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_single_pattern',
+    jobId: f.job.id,
+    observationIds: ['src_single_pattern'],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const generated = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.checks?.generated);
+  assert.ok(generated, 'expected a generated pattern contact');
+  assert.notEqual(generated.rawEvidenceTier, 'C', 'pattern backed by only 1 source observation must not receive raw tier C');
+  assert.equal(generated.rawEvidenceTier, 'D', 'pattern with 1 source observation must receive raw tier D');
+  assert.equal(generated.evidenceTier, 'D', 'pattern with 1 source observation must derive to D');
+  assert.equal(generated.verificationStatus !== 'pattern_candidate', true, 'verification status must not be pattern_candidate for single-source pattern');
+});
+
+test('W05 strict tier B: third-party email without independent person-company association does not qualify for tier B', async () => {
+  const f = await fixture();
+  const thirdPartyObs = insertObservation(f.s, {
+    id: 'src_third_party_no_assoc',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-no-assoc',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.noassoc@evidence.example',
+    name: 'Casey Noassoc',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_third_party_no_assoc',
+    jobId: f.job.id,
+    observationIds: [thirdPartyObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const thirdPartyContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.noassoc@evidence.example');
+  assert.ok(thirdPartyContact, 'expected a third-party contact');
+  assert.notEqual(thirdPartyContact.rawEvidenceTier, 'B', 'third-party email without independent association must not receive raw tier B');
+  assert.equal(thirdPartyContact.rawEvidenceTier, 'D', 'third-party email without independent association must receive raw tier D');
+  assert.equal(thirdPartyContact.evidenceTier, 'D', 'third-party email without independent association must derive to D');
+  assert.notEqual(thirdPartyContact.verificationStatus, 'exact_public', 'verification status must not be exact_public without independent association');
+});
+
+test('W05 strict tier B: fresh third-party contact with independent stakeholder association derives to B', async () => {
+  const f = await fixture();
+  const thirdPartyFresh = insertObservation(f.s, {
+    id: 'src_fresh_third_party_b',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-fresh',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.freshb@evidence.example',
+    name: 'Casey Freshb',
+  });
+  const provenanceObs = insertObservation(f.s, {
+    id: 'src_stakeholder_provenance_b',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/team/stakeholder_fresh_b',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: '',
+    name: '',
+  });
+  const stakeholderId = insertStakeholder(f.s, f.job, { id: 'stakeholder_fresh_b', name: 'Casey Freshb', role: 'Product Manager' });
+  const contact = upsertContactPoint(f.s, {
+    companyId: f.job.company_id,
+    stakeholderId,
+    type: 'email',
+    value: 'casey.freshb@evidence.example',
+    evidenceTier: 'B',
+    verificationStatus: 'exact_public',
+    confidence: 'medium',
+    sourceObservationIds: [thirdPartyFresh.id],
+    checks: { exactPublic: true },
+    humanApproved: true,
+  }, FRESH_AT);
+  const projection = projectContactConfidenceV2(f.s, contact, { nowDate: new Date(FIXED_NOW) });
+  assert.equal(projection.signals.observationOwnership.association.state, 'supported', 'stakeholder with distinct provenance must provide independent association');
+  assert.equal(projection.evidenceTier, 'B', 'fresh third-party with stakeholder association must derive to B');
+});
+
+test('W05 strict usability: human-approved exactPublic generic inbox on unrelated domain is not usable', async () => {
+  const f = await fixture();
+  const unrelatedGenericObs = insertObservation(f.s, {
+    id: 'src_generic_unrelated',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://unrelated.example/contact',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: 'careers@unrelated.example',
+    name: '',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_generic_unrelated',
+    jobId: f.job.id,
+    observationIds: [unrelatedGenericObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'unrelated.example': { mx: [{ exchange: 'mx.unrelated.example', priority: 10 }], ns: ['ns.unrelated.example'] },
+      }),
+    },
+  });
+  const genericContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'careers@unrelated.example');
+  assert.ok(genericContact, 'expected a generic inbox contact from unrelated domain');
+  assert.equal(genericContact.type, 'generic_inbox');
+  assert.equal(genericContact.contactConfidence.signals.companyDomain.matchState, 'mismatch');
+  approveContact(f.s, { contactId: genericContact.id });
+  const projected = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'careers@unrelated.example');
+  assert.equal(projected.humanApproved, true);
+  assert.equal(projected.usable, false, 'human-approved generic inbox from unrelated domain must not be usable despite exactPublic');
+});
+
+test('W05 strict tier B: stakeholder linked only from same observation does not provide independent derived association', async () => {
+  const f = await fixture();
+  const thirdPartyObs = insertObservation(f.s, {
+    id: 'src_sameobs_third_party',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-sameobs',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.sameobs@evidence.example',
+    name: 'Casey Sameobs',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_sameobs_first',
+    jobId: f.job.id,
+    observationIds: [thirdPartyObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const candidates = listPersonCandidates(f.s, { jobId: f.job.id });
+  const candidate = candidates.find(c => c.name === 'Casey Sameobs');
+  assert.ok(candidate, 'expected a person candidate from the first run');
+  const promoted = promoteStakeholder(f.s, { candidateId: candidate.id });
+  const stakeholder = one(f.s, 'SELECT links_json FROM stakeholders WHERE id=?', [promoted.id]);
+  assert.ok(JSON.parse(stakeholder.links_json).includes('https://credible.example/casey-sameobs'),
+    'stakeholder links must originate from the same observation being graded');
+  const contact = upsertContactPoint(f.s, {
+    companyId: f.job.company_id,
+    stakeholderId: promoted.id,
+    type: 'email',
+    value: 'casey.sameobs@evidence.example',
+    evidenceTier: 'D',
+    verificationStatus: 'dns_verified',
+    confidence: 'low',
+    sourceObservationIds: [thirdPartyObs.id],
+    checks: { exactPublic: true },
+    humanApproved: true,
+  }, FRESH_AT);
+  const projection = projectContactConfidenceV2(f.s, contact, { nowDate: new Date(FIXED_NOW) });
+  assert.notEqual(projection.signals.observationOwnership.association.state, 'supported',
+    'stakeholder linked only from the same observation must not provide independent association');
+  assert.notEqual(projection.evidenceTier, 'B',
+    'third-party email with same-observation-only stakeholder must not derive to tier B');
+});
+
+test('W05 strict tier B: stakeholder promoted from same observation does not yield raw tier B on re-run', async () => {
+  const f = await fixture();
+  const thirdPartyObs = insertObservation(f.s, {
+    id: 'src_sameobs_rerun',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-rerun',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.rerun@evidence.example',
+    name: 'Casey Rerun',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_rerun_first',
+    jobId: f.job.id,
+    observationIds: [thirdPartyObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const firstContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.rerun@evidence.example');
+  assert.ok(firstContact, 'expected a contact after first run');
+  assert.equal(firstContact.rawEvidenceTier, 'D', 'first run without stakeholder must produce tier D');
+  const candidates = listPersonCandidates(f.s, { jobId: f.job.id });
+  const candidate = candidates.find(c => c.name === 'Casey Rerun');
+  assert.ok(candidate, 'expected a person candidate from the first run');
+  promoteStakeholder(f.s, { candidateId: candidate.id });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_rerun_second',
+    jobId: f.job.id,
+    observationIds: [thirdPartyObs.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const secondContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.rerun@evidence.example');
+  assert.ok(secondContact, 'expected a contact after second run');
+  assert.notEqual(secondContact.rawEvidenceTier, 'B',
+    'stakeholder promoted only from the same observation must not yield raw tier B on re-run');
+  assert.notEqual(secondContact.evidenceTier, 'B',
+    'stakeholder promoted only from the same observation must not yield derived tier B on re-run');
+});
+
+test('W05 strict tier B: multi-source contact excludes all accumulated contact sources from independence check', async () => {
+  const f = await fixture();
+  const obs1 = insertObservation(f.s, {
+    id: 'src_multi_obs1',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-multi-1',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.multi@evidence.example',
+    name: 'Casey Multi',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_multi_first',
+    jobId: f.job.id,
+    observationIds: [obs1.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const firstContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.multi@evidence.example');
+  assert.ok(firstContact, 'expected a contact after first run');
+  assert.equal(firstContact.rawEvidenceTier, 'D', 'first run without stakeholder must produce tier D');
+  const candidates = listPersonCandidates(f.s, { jobId: f.job.id });
+  const candidate = candidates.find(c => c.name === 'Casey Multi');
+  assert.ok(candidate, 'expected a person candidate from the first run');
+  promoteStakeholder(f.s, { candidateId: candidate.id });
+  const obs2 = insertObservation(f.s, {
+    id: 'src_multi_obs2',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-multi-2',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.multi@evidence.example',
+    name: 'Casey Multi',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_multi_second',
+    jobId: f.job.id,
+    observationIds: [obs2.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const secondContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.multi@evidence.example');
+  assert.ok(secondContact, 'expected a contact after second run');
+  assert.equal(secondContact.rawEvidenceTier, 'D',
+    'raw tier must remain D when stakeholder provenance resolves to obs1, an existing contact source');
+  assert.equal(secondContact.evidenceTier, 'D',
+    'derived tier must remain D when all association provenance is excluded as contact sources');
+});
+
+test('W05 strict tier B: multi-source contact with distinct provenance obs3 yields both raw and derived tier B', async () => {
+  const f = await fixture();
+  const obs3 = insertObservation(f.s, {
+    id: 'src_distinct_provenance',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://evidence.example/team/casey-distinct-provenance',
+    fetchedAt: FRESH_AT,
+    sourceType: 'page_fetch',
+    email: '',
+    name: '',
+  });
+  const obs1 = insertObservation(f.s, {
+    id: 'src_distinct_obs1',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-distinct-1',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.distinct@evidence.example',
+    name: 'Casey Distinct',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_distinct_first',
+    jobId: f.job.id,
+    observationIds: [obs1.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const firstContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.distinct@evidence.example');
+  assert.ok(firstContact, 'expected a contact after first run');
+  assert.equal(firstContact.rawEvidenceTier, 'D', 'first run without stakeholder must produce tier D');
+  const candidates = listPersonCandidates(f.s, { jobId: f.job.id });
+  const candidate = candidates.find(c => c.name === 'Casey Distinct');
+  assert.ok(candidate, 'expected a person candidate from the first run');
+  run(f.s, 'UPDATE person_candidates SET source_observation_ids_json=? WHERE id=?', [
+    JSON.stringify([...new Set([...candidate.sourceObservationIds, obs3.id])]),
+    candidate.id,
+  ]);
+  save(f.s);
+  promoteStakeholder(f.s, { candidateId: candidate.id });
+  const obs2 = insertObservation(f.s, {
+    id: 'src_distinct_obs2',
+    companyId: f.job.company_id,
+    jobId: f.job.id,
+    url: 'https://credible.example/casey-distinct-2',
+    fetchedAt: FRESH_AT,
+    sourceType: 'web_search',
+    email: 'casey.distinct@evidence.example',
+    name: 'Casey Distinct',
+  });
+  await verifyObservationContacts(f.s, {
+    runId: 'run_distinct_second',
+    jobId: f.job.id,
+    observationIds: [obs2.id],
+    env: {
+      JOBOS_DNS_FIXTURE_JSON: JSON.stringify({
+        'evidence.example': { mx: [{ exchange: 'mx.evidence.example', priority: 10 }], ns: ['ns.evidence.example'] },
+      }),
+    },
+  });
+  const secondContact = listContactPoints(f.s, { companyId: f.job.company_id, nowDate: new Date(FIXED_NOW) })
+    .find(c => c.value === 'casey.distinct@evidence.example');
+  assert.ok(secondContact, 'expected a contact after second run');
+  assert.equal(secondContact.rawEvidenceTier, 'B',
+    'stakeholder with distinct provenance obs3 (not a contact source) must yield raw tier B');
+  assert.equal(secondContact.evidenceTier, 'B',
+    'derived tier must also be B when independent association exists outside contact sources');
 });
