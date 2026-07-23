@@ -1,4 +1,4 @@
-import { score } from './scoring.js';
+import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit, score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
@@ -203,7 +203,18 @@ function enforcePolicy(name, args, options) {
 }
 
 
+function fitForRow(row) {
+  return deserializeFitScore(parseJson(row.score_json, null), {
+    persistedOverall: row.fit_score,
+    jobId: row.id,
+    profileId: row.profile_id
+  });
+}
+
 function publicJob(row) {
+  const fit = fitForRow(row);
+  const highFit = Boolean(row.high_fit) && qualifiesForHighFit(fit, 0);
+  const postingLiveness = getPostingLiveness(row);
   return {
     id: row.id,
     profileId: row.profile_id,
@@ -212,10 +223,11 @@ function publicJob(row) {
     location: row.location || '',
     source: row.source,
     discoveryStatus: row.status,
-    fitScore: row.fit_score == null ? null : Number(row.fit_score),
-    score: row.fit_score == null ? null : Number(row.fit_score),
-    highFit: Boolean(row.high_fit),
-    scoringMode: parseJson(row.score_json, {})?.mode || null,
+    fitScore: fit?.overall ?? null,
+    score: fit?.overall ?? null,
+    fit: fit ? { ...fit, highFit } : null,
+    highFit,
+    scoringMode: fit?.mode || null,
     applicationStatus: row.application_status || null,
     url: String(row.url || '').startsWith('jobos:text:') ? '' : (row.url || ''),
     compensation: parseJson(row.compensation_json, {}),
@@ -224,6 +236,7 @@ function publicJob(row) {
     department: row.department || '',
     sourceNativeFields: parseJson(row.source_native_json, {}),
     liveness: getJobLiveness(row),
+    postingLiveness,
     updatedAt: row.updated_at
   };
 }
@@ -237,7 +250,8 @@ export function listJobSummaries(s, {
     .filter(row => !profileId || row.profile_id === profileId)
     .filter(row => !discoveryStatus || row.status === discoveryStatus)
     .filter(row => !applicationStatus || row.application_status === applicationStatus)
-    .map(publicJob);
+    .map(publicJob)
+    .sort(compareFitDecisions);
 }
 
 export function reviewQueue(s, { profileId = null, jobId = null } = {}) {
@@ -264,7 +278,7 @@ export function selectedJobContext(s, jobId) {
   const job = one(s, `SELECT jobs.*,applications.id AS application_id,applications.status AS application_status
     FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id WHERE jobs.id=?`, [jobId]);
   if (!job) throw new DomainToolError('unknown_job', `Unknown job: ${jobId}`, { jobId });
-  const scoreData = parseJson(job.score_json, {});
+  const fitData = fitForRow(job);
   const tasks = all(s, "SELECT id,title,type,due_at,priority,status FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 8", [jobId])
     .map(row => ({ id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority }));
   const artifacts = all(s, `SELECT artifacts.*,
@@ -314,13 +328,10 @@ export function selectedJobContext(s, jobId) {
       postingLiveness: getPostingLiveness(job),
     },
     liveness: getPostingLiveness(job),
-    fit: job.fit_score == null ? null : {
-      overall: Number(job.fit_score),
-      highFit: Boolean(job.high_fit),
-      mode: scoreData.mode || 'unknown',
-      confidence: scoreData.confidence || null,
-      reasoning: scoreData.reasoning || ''
-    },
+    fit: fitData ? {
+      ...fitData,
+      highFit: Boolean(job.high_fit) && qualifiesForHighFit(fitData, 0)
+    } : null,
     next: tasks,
     proofs,
     path: path ? {

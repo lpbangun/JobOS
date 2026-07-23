@@ -1,0 +1,11 @@
+{
+  "targetRoleFamilies": ["Curriculum Product Manager", "Product Manager"],
+  "industries": ["education technology", "EdTech"],
+  "locations": ["Remote US"],
+  "salary": { "min": 120000, "max": 180000, "currency": "USD" },
+  "dealbreakers": [],
+  "skills": ["product management", "educator research", "analytics"],
+  "missionKeywords": ["learning", "education"],
+  "values": ["access", "evidence"],
+  "workModel": "remote"
+}

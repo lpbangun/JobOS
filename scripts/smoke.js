@@ -22,7 +22,15 @@ function run(args, raw = false) {
 try {
   const guide = JSON.parse(run(['agent-guide', '--json']));
   if (!guide.commands?.length || !existsSync(path.join(root, '.jobos', 'jobos.sqlite')) || !existsSync(path.join(root, 'jobos-workspace'))) throw new Error('First command did not auto-create the JobOS workspace');
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
+  const preferences = path.join(root, 'preferences.json');
+  writeFileSync(preferences, JSON.stringify({
+    targetRoleFamilies: ['Product Manager'],
+    industries: ['EdTech', 'learning'],
+    locations: ['Remote'],
+    workModel: 'remote',
+    missionKeywords: ['learning', 'educator']
+  }));
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--preferences', preferences, '--json']));
   const proof = JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', '--evidence', 'Verified portfolio case study', '--skills', 'product discovery,user research,stakeholder management,launch execution', '--json']));
   const resume = path.join(root, 'resume.json');
   writeFileSync(resume, JSON.stringify({

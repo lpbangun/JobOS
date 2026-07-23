@@ -54,12 +54,24 @@ test('status history preserves stages reached for analytics after terminal outco
 test('deterministic eval scoring cases stay within declared ranges', () => {
   const { run } = makeRunner();
   run(['init', '--json']);
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--json']));
+  const defaultPreferences = path.join(process.cwd(), 'tests/eval/profiles/remote-only.json');
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--preferences', defaultPreferences, '--json']));
+  const profiles = new Map([['default', profile]]);
   const cases = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/eval/scoring-cases.json'), 'utf8'));
   const results = [];
   for (const c of cases) {
-    const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'tests/eval', c.file), '--json']));
-    const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
+    const profileKey = c.profile || 'default';
+    if (!profiles.has(profileKey)) {
+      profiles.set(profileKey, JSON.parse(run([
+        'profile', 'create', `PM ${c.id}`,
+        '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'),
+        '--preferences', path.join(process.cwd(), 'tests/eval', profileKey),
+        '--json'
+      ])));
+    }
+    const caseProfile = profiles.get(profileKey);
+    const job = JSON.parse(run(['jobs', 'import-text', '--profile', caseProfile.id, '--file', path.join(process.cwd(), 'tests/eval', c.file), '--json']));
+    const score = JSON.parse(run(['score', job.id, '--profile', caseProfile.id, '--json']));
     results.push(`${c.id}: ${score.overall} expected ${c.expectedRange.join('-')}`);
     assert.ok(score.overall >= c.expectedRange[0] && score.overall <= c.expectedRange[1], results.join('\n'));
   }

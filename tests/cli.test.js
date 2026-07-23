@@ -35,7 +35,7 @@ test('CLI initializes, imports, scores, tailors, and tracks an application', () 
   const { root, run } = makeRunner();
   const init = JSON.parse(run(['init', '--json']));
   assert.equal(init.policy.externalActions, 'user_configured');
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--json']));
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--preferences', path.join(process.cwd(), 'tests/eval/profiles/remote-only.json'), '--json']));
   assert.equal(profile.id, 'pm-edtech');
   const proof = JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.', '--evidence', 'Portfolio case study', '--skills', 'product,discovery', '--json']));
   const resume = path.join(root, 'resume.json');

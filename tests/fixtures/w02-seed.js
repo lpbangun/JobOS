@@ -26,7 +26,6 @@ function semanticResume(revision, proof, renderManifest) {
     renderManifest
   };
 }
-
 export async function seedW02Workspace(t, { withSnapshot = true, withApplication = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-w02-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

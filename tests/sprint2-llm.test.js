@@ -34,14 +34,16 @@ function startFakeOpenAiScoringServer() {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
-      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization, body: JSON.parse(body) });
+      const requestBody = JSON.parse(body);
+      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization, body: requestBody });
       if (body.includes('fake-malformed-model')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
         return;
       }
-      const prompt = body.toLowerCase();
-      if (prompt.includes('jobos_resume_transformations')) {
+      const userPrompt = requestBody.messages?.find(message => message.role === 'user')?.content || body;
+      const prompt = userPrompt.toLowerCase();
+      if (body.includes('jobos_resume_transformations')) {
         const proofIds = [...prompt.matchAll(/proof_[a-f0-9]+/g)].map(match => match[0]);
         const sourceEntryIds = [...prompt.matchAll(/resume_entry_[a-f0-9]+/g)].map(match => match[0]);
         const payload = {
@@ -72,23 +74,30 @@ function startFakeOpenAiScoringServer() {
       }
       const isPoor = prompt.includes('backend payments engineer') || prompt.includes('kubernetes') || prompt.includes('fraud models');
       const isGood = !isPoor && (prompt.includes('curriculum product manager') || prompt.includes('learning platform') || prompt.includes('educators'));
-      const overall = isGood ? 88 : isPoor ? 38 : 68;
+      const profileId = userPrompt.match(/PROFILE:\s*\{\s*\"id\":\s*\"([^\"]+)\"/)?.[1];
+      const jobId = userPrompt.match(/JOB:\s*\{\s*\"id\":\s*\"([^\"]+)\"/)?.[1];
+      const compared = (score, reason, preferenceField, jobField = 'description') => ({
+        status: 'scored',
+        score,
+        reason,
+        evidenceRefs: [
+          { kind: 'profile_preference', id: profileId, field: preferenceField },
+          { kind: 'job_field', id: jobId, field: jobField }
+        ]
+      });
       const payload = {
-        overall,
-        confidence: 'high',
         dimensions: {
-          roleFit: { score: isGood ? 90 : 35, reason: 'The role responsibilities are compared against the profile target role families and proof points. The rating reflects whether the work is product/discovery oriented or primarily unrelated engineering execution.' },
-          domainFit: { score: isGood ? 92 : 30, reason: 'The company and problem space are evaluated against the profile emphasis on EdTech, learning systems, and educator workflows. A learning platform is strongly aligned while payments infrastructure is not.' },
-          seniority: { score: 82, reason: 'The role expectations appear appropriate for a candidate with cross-functional product and research proof points. There is no explicit executive-level mismatch or junior-only signal.' },
-          locationWorkModel: { score: 75, reason: 'The location and work model do not create an obvious blocker from the provided preferences. The candidate should still verify hybrid or remote expectations manually.' },
-          compensation: { score: 65, reason: 'The posting includes enough compensation or benefits context to avoid a major unknown. Final fit should still depend on the candidate salary band.' },
-          missionInterest: { score: isGood ? 90 : 35, reason: 'The mission is assessed against the candidate interest in education, workforce learning, and human-centered systems. Roles outside that mission receive a lower score even if otherwise strong.' },
-          networkAccess: { score: 60, reason: 'No direct stakeholder or alumni signal is present in the job text. This is a neutral score pending company and stakeholder research.' },
-
-          redFlags: { score: 90, reason: 'No scam, unpaid, commission-only, or suspicious application language appears in the job text. This does not replace manual diligence.' }
+          roleFit: compared(isGood ? 90 : 35, 'The role responsibilities are compared against the profile target role families and proof points.', 'targetRoleFamilies', 'title'),
+          domainFit: compared(isGood ? 92 : 30, 'The company and problem space are evaluated against the profile industry emphasis.', 'industries'),
+          seniority: compared(82, 'The explicit role level is compared against target role-family level.', 'targetRoleFamilies', 'title'),
+          locationWorkModel: compared(75, 'The posting location is compared against the declared work-model preference.', 'workModel', 'location'),
+          compensation: compared(65, 'Posting compensation evidence is compared against the candidate salary band.', 'salary'),
+          missionInterest: compared(isGood ? 90 : 35, 'The posting mission is compared against declared mission interests.', 'missionKeywords'),
+          networkAccess: { status: 'unknown', score: null, reason: 'Local stored network evidence is authoritative.', evidenceRefs: [] }
         },
-        redFlags: [],
-        reasoning: 'This structured score is based on profile preferences, proof points, and the job description rather than keyword counts. The strong-fit role aligns with PM, EdTech, educator discovery, and learning workflow proof; the poor-fit role is mainly backend payments infrastructure.'
+        constraints: [],
+        postingRisks: [],
+        reasoning: 'This provider proposal uses only evidence-backed dimensions. JobOS derives the overall after local network evidence is applied.'
       };
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
@@ -120,7 +129,12 @@ test('LLM scoring calls provider and differentiates good fit from poor fit by at
   try {
     const { runAsync } = makeRunner({ JOBOS_LLM_PROVIDER: 'openai', JOBOS_LLM_MODEL: 'fake-scoring-model', JOBOS_LLM_API_KEY: 'test-key', JOBOS_LLM_BASE_URL: fake.baseUrl });
     await runAsync(['init', '--json']);
-    const profile = JSON.parse(await runAsync(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--json']));
+    const profile = JSON.parse(await runAsync([
+      'profile', 'create', 'PM EdTech',
+      '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'),
+      '--preferences', path.join(process.cwd(), 'tests/eval/profiles/remote-only.json'),
+      '--json'
+    ]));
     const good = JSON.parse(await runAsync(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'tests/eval/jobs/good-fit-curriculum-pm.md'), '--json']));
     const poor = JSON.parse(await runAsync(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'tests/eval/jobs/poor-fit-backend-payments.md'), '--json']));
     const goodScore = JSON.parse(await runAsync(['score', good.id, '--profile', profile.id, '--json']));

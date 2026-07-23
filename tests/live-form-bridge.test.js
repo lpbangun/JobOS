@@ -456,6 +456,22 @@ test('WF01 live inspection selects the richest application form across main and 
   assert.equal(snapshot.target.requestedPath, '/application-host.html');
 });
 
+test('W04 compatibility: fit metadata cannot gate readiness or alter packet identity', async t => {
+  const f = await seedW02Workspace(t);
+  const before = compileApplicationReadiness(f.store, { jobId: f.job.id, profileId: f.profile.id });
+  const firstPacket = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
+
+  run(f.store, 'UPDATE jobs SET fit_score=NULL,score_json=NULL,high_fit=0 WHERE id=?', [f.job.id]);
+  save(f.store);
+
+  const after = compileApplicationReadiness(f.store, { jobId: f.job.id, profileId: f.profile.id });
+  const replayedPacket = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
+  assert.equal(after.status, before.status);
+  assert.equal(after.blockers.some(item => ['missing_score', 'legacy_fit_score', 'insufficient_fit_evidence'].includes(item.code)), false);
+  assert.equal(replayedPacket.id, firstPacket.id);
+  assert.equal(Object.hasOwn(replayedPacket.materials, 'score'), false);
+});
+
 test('WF13 adapter hash drift is rejected before inspection fill submission and receipt handling', async t => {
   assert.throws(
     () => validateAdapterManifest(DOM_ADAPTER_MANIFEST, { expectedSourceHash: 'b'.repeat(64) }),

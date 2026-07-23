@@ -37,10 +37,18 @@ export function mcpToolNames() {
 export function startMcp(s, { input = process.stdin } = {}) {
   let buffer = Buffer.alloc(0);
   let queue = Promise.resolve();
+  let settled = false;
+  let resolveCompleted;
+  const completed = new Promise(resolve => { resolveCompleted = resolve; });
   const dispatch = (line, framing) => {
     queue = queue.then(() => handleLine(s, line, message => send(message, framing))).catch(() => {});
   };
-  input.on('data', chunk => {
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    queue.finally(resolveCompleted);
+  };
+  const onData = chunk => {
     buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))]);
     while (buffer.length) {
       if (buffer.toString('utf8', 0, Math.min(buffer.length, 15)).startsWith('Content-Length:')) {
@@ -66,7 +74,20 @@ export function startMcp(s, { input = process.stdin } = {}) {
       buffer = buffer.subarray(idx + 1);
       if (line) dispatch(line, 'jsonl');
     }
-  });
+  };
+  input.on('data', onData);
+  input.once('end', settle);
+  input.once('error', settle);
+  return {
+    completed,
+    close() {
+      input.off('data', onData);
+      input.off('end', settle);
+      input.off('error', settle);
+      if (input !== process.stdin && typeof input.destroy === 'function') input.destroy();
+      settle();
+    }
+  };
 }
 
 async function handleLine(s, line, respond) {

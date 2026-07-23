@@ -4,13 +4,27 @@ import * as cheerio from 'cheerio';
 import { id, now, slug, parseJson } from './utils.js';
 import { one, all, run, save, audit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
-import { scoreMd } from './scoring.js';
+import { deserializeFitScore, qualifiesForHighFit, scoreMd } from './scoring.js';
 import { extractRequirementInventory } from './requirements.js';
 import { classifyLiveness, deserializeLiveness, isLivenessFresh, livenessGate, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
 
 export function requirementInventory(text){ return extractRequirementInventory(text); }
 export function requirements(text){ return requirementInventory(text).requirements.map(requirement => requirement.sourceText); }
-export function parseJob(text, fb={}){ const lines=String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean); const find=k=>lines.find(l=>new RegExp('^'+k+'\\s*:','i').test(l))?.replace(new RegExp('^'+k+'\\s*:\\s*','i'),''); const heading=lines.find(l=>/^#\s+/.test(l)); return {title:fb.title||find('title')||(heading?heading.replace(/^#\s+/,''):'Imported role'),company:fb.company||find('company')||'Unknown company',location:fb.location||find('location')||'',description:text}; }
+export function parseJob(text, fb = {}) {
+  const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const find = key => lines.find(line => new RegExp(`^${key}\\s*:`, 'i').test(line))?.replace(new RegExp(`^${key}\\s*:\\s*`, 'i'), '');
+  const heading = lines.find(line => /^#\s+/.test(line));
+  const workModelText = String(fb.workModel || find('work model') || '').trim().toLowerCase();
+  const workModel = /\bremote\b/.test(workModelText) ? 'remote' : /\bhybrid\b/.test(workModelText) ? 'hybrid' : /\b(on[- ]?site|in office)\b/.test(workModelText) ? 'onsite' : 'unknown';
+  return {
+    title: fb.title || find('title') || (heading ? heading.replace(/^#\s+/, '') : 'Imported role'),
+    company: fb.company || find('company') || 'Unknown company',
+    location: fb.location || find('location') || '',
+    compensation: fb.compensation || { text: find('compensation') || '' },
+    workModel,
+    description: text
+  };
+}
 export function ensureCompany(s,name){ const cid=slug(name||'unknown-company'), at=now(); run(s,'INSERT OR IGNORE INTO companies (id,name,created_at,updated_at) VALUES (?,?,?,?)',[cid,name||'Unknown company',at,at]); return one(s,'SELECT * FROM companies WHERE id=?',[cid]); }
 function publicUrl(u){ return String(u || '').startsWith('jobos:text:') ? '' : (u || ''); }
 export function dedupeKey(job){ return [job.company,job.title,job.location].map(x=>String(x||'').trim().toLowerCase().replace(/\s+/g,' ')).join('|'); }
@@ -185,7 +199,8 @@ export function assertJobLivenessGate(gate, operation = 'continue') {
 export function syncJob(s, jid) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) return;
-  const score = parseJson(job.score_json, null);
+  const storedScore = parseJson(job.score_json, null);
+  const fit = deserializeFitScore(storedScore, { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id });
   const app = one(s, 'SELECT * FROM applications WHERE job_id=?', [jid]);
   const tasks = all(s, 'SELECT * FROM tasks WHERE job_id=? ORDER BY due_at IS NULL,due_at,created_at', [jid]);
   const liveness = deserializeLiveness(job);
@@ -208,14 +223,15 @@ export function syncJob(s, jid) {
     department: job.department || '',
     sourceNativeFields: parseJson(job.source_native_json, {}),
     liveness,
+    postingLiveness: getPostingLiveness(job),
     status: job.status,
-    fitScore: job.fit_score,
-    highFit: Boolean(job.high_fit),
+    fitScore: fit?.overall ?? null,
+    highFit: Boolean(job.high_fit) && qualifiesForHighFit(fit, 0),
     dedupeKey: job.dedupe_key,
     lastSeenAt: job.last_seen_at,
     reposted: Boolean(job.reposted),
     discoveryRunId: job.discovery_run_id || '',
-    score,
+    fit,
     application: app ? {
       id: app.id,
       status: app.status,
@@ -242,7 +258,7 @@ export function syncJob(s, jid) {
     status: task.status,
     createdBy: task.created_by
   })));
-  if (score) writeMd(path.join(dir, 'score.md'), scoreMd(job, score));
+  if (storedScore) writeMd(path.join(dir, 'score.md'), scoreMd(job, fit));
 }
 export function importNormalized(s, { profileId, job, source = 'discovery', status = 'new', runId = '' }) {
   if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);

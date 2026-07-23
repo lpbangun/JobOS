@@ -45,7 +45,15 @@ test('saved search discovery run imports, scores, dedupes, flags high fit, write
   run(['init', '--json']);
   const resume = path.join(root, 'resume.md');
   writeFileSync(resume, '- Led educator discovery for an AI-assisted learning workflow and reduced manual review time by 30%.\n- Shipped activation experiments for adult learning products with design and engineering partners.\n- Managed stakeholder tradeoffs across operations, product, and research teams for a learning platform launch.\n');
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--json']));
+  const preferences = path.join(root, 'preferences.json');
+  writeFileSync(preferences, JSON.stringify({
+    targetRoleFamilies: ['Product Manager'],
+    industries: ['EdTech', 'learning'],
+    locations: ['Remote'],
+    workModel: 'remote',
+    missionKeywords: ['learning', 'educator']
+  }));
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--preferences', preferences, '--json']));
   const fixture = path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json');
   const search = JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', fixture, '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   assert.equal(search.adapter, 'greenhouse');
