@@ -194,7 +194,7 @@ function packetCtaLine(row) {
   const currency = row?.currency || 'none';
   const receiptState = row?.receiptState || 'none';
   if (currency !== 'current') return 'next :packet create — freeze a packet from the approved materials';
-  if (receiptState === 'none') return 'next submit externally, then :attest <rfc3339> (or :attest for now)';
+  if (receiptState === 'none') return `next :form assist ${row?.id || '<packet-id>'} (configured fill), or submit manually; configured submit requires a read-back checkpoint`;
   if (receiptState === 'attested') return 'next :receipt <external-reference> once the site confirms receipt';
   return 'receipt confirmed · follow-ups only (outreach, interview prep)';
 }
@@ -746,7 +746,7 @@ function overlayPanel(model, state, width, height, color) {
         ':packet create',
         `CLI parity: jobos apply packet create --job ${selected?.job.id || '<job-id>'} --profile ${model.profileId || '<profile-id>'} --json`,
         '',
-        'Then submit externally, :attest <rfc3339>, and :receipt <reference> once confirmed.'
+        'Then inspect/fill/checkpoint with :form, submit manually or through separately configured :form submit, and record receipt evidence.'
       ];
     } else {
       const row = detail && !detail.empty ? detail : meta;
@@ -760,7 +760,7 @@ function overlayPanel(model, state, width, height, color) {
         row.applicationId ? `application ${row.applicationId}` : '',
         '',
         packetCtaLine(row),
-        'Esc closes · :packet refreshes · :packet create / :attest / :receipt run the trusted human mutations'
+        'Esc closes · :form inspect/assist/checkpoint/submit runs the packet-bound bridge · :attest/:receipt record manual evidence'
       ].filter(Boolean);
     }
     body.push('', 'Esc closes');
@@ -1468,6 +1468,7 @@ export class JobosTui {
       if (!sub) return void this.showPacketSummary();
       if (sub === 'create') return void this.packetMutate('create');
     }
+    if (command === 'form') return void this.formAction(argText);
     if (command === 'attest') return void this.packetMutate('attest', argText);
     if (command === 'receipt') return void this.packetMutate('receipt', argText);
     if (command === 'answer') return void this.answerAdd(argText);
@@ -1483,7 +1484,7 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${trimmed}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
     this.render();
   }
 
@@ -1618,6 +1619,67 @@ export class JobosTui {
     }
   }
 
+  async formAction(argText = '') {
+    if (this.state.busy) return;
+    const [action, first, second, third] = String(argText || '').trim().split(/\s+/);
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    const usage = 'Usage: :form inspect <url> | :form assist <packet-id> [browser-profile] | :form checkpoint <packet-id> <fill-run-id> [field-key,...] | :form submit <packet-id> <checkpoint-id> [browser-profile]';
+    if (!jobId || !profileId) {
+      this.state.error = 'No job/profile selected';
+      this.state.status = 'Select a job and profile before form actions.';
+      return this.render();
+    }
+    if (!['inspect', 'assist', 'checkpoint', 'submit'].includes(action)
+      || !first
+      || (['checkpoint', 'submit'].includes(action) && !second)) {
+      this.state.error = 'Invalid form command';
+      this.state.status = usage;
+      return this.render();
+    }
+    this.state.busy = `form_${action}`;
+    this.state.error = null;
+    this.state.status = `Running form ${action}…`;
+    this.render();
+    try {
+      let result;
+      if (action === 'inspect') {
+        result = await callDomainTool(this.store, 'inspect_application_form', { jobId, profileId, url: first, browserProfile: 'default' }, { source: 'tui' });
+      } else if (action === 'assist') {
+        result = await callDomainTool(this.store, 'assist_application_form', { packetId: first, browserProfile: second || 'default', allowSideEffects: true }, { source: 'tui' });
+      } else if (action === 'checkpoint') {
+        result = await callDomainTool(this.store, 'checkpoint_application_form', {
+          packetId: first,
+          fillRunId: second,
+          confirmedFieldKeys: third ? third.split(',').map(value => value.trim()).filter(Boolean) : []
+        }, { source: 'tui' });
+      } else {
+        result = await callDomainTool(this.store, 'submit_application_form', {
+          packetId: first,
+          checkpointId: second,
+          browserProfile: third || 'default',
+          allowSubmit: true
+        }, { source: 'tui' });
+      }
+      this.refresh({ disk: false });
+      this.state.status = action === 'inspect'
+        ? `form inspected · snapshot ${result.snapshotId}`
+        : action === 'assist'
+          ? `form filled and read back · run ${result.fillRunId} · checkpoint required`
+          : action === 'checkpoint'
+            ? `human checkpoint accepted · ${result.checkpointId}`
+            : result.status === 'confirmed'
+              ? `configured submission confirmed · receipt ${result.receipt?.id || 'recorded'}`
+              : `configured submission outcome uncertain · do not retry automatically`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `form ${action} failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   async packetMutate(kind, argText = '') {
     if (this.state.busy) return;
     const jobId = this.state.selectedJobId;
@@ -1658,7 +1720,7 @@ export class JobosTui {
       }
       this.refresh({ disk: false });
       if (this.state.overlay === 'packet') await this.showPacketSummary();
-      this.state.status = kind === 'create' ? `${done} · next: submit externally, then :attest <rfc3339>`
+      this.state.status = kind === 'create' ? `${done} · next: :form assist ${readinessPacketSummary(this.store, { jobId, profileId }).currentPacketId} or submit manually`
         : kind === 'attest' ? `${done} · next: :receipt <external-reference> once the site confirms`
           : `${done} · application loop complete locally`;
     } catch (error) {

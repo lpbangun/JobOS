@@ -572,7 +572,7 @@ test('browser status reports unavailable with recovery on headless VPS', () => {
   const status = out(['browser', 'status']);
   assert.ok(typeof status.available === 'boolean');
   assert.ok(Array.isArray(status.recovery));
-  assert.ok(status.recovery.length > 0, 'recovery instructions should exist');
+  if (!status.available) assert.ok(status.recovery.length > 0, 'unavailable browser status should include recovery instructions');
   assert.equal(status.browser, 'chromium');
 });
 

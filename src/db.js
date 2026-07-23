@@ -51,8 +51,12 @@ CREATE TABLE IF NOT EXISTS application_packets (
   attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
   revision INTEGER NOT NULL CHECK(revision > 0),
   content_hash TEXT NOT NULL,
-  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'),
+  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create IN ('approved','form-ready')),
   readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+  packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2)),
+  form_snapshot_id TEXT,
+  form_fingerprint TEXT,
+  form_binding_json TEXT,
   resume_artifact_id TEXT NOT NULL,
   resume_content_hash TEXT NOT NULL,
   cover_artifact_id TEXT,
@@ -88,14 +92,213 @@ CREATE TABLE IF NOT EXISTS application_receipts (
   evidence_hash TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   receipt_hash TEXT NOT NULL UNIQUE,
-  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
-  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'),
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp')),
+  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+  evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2)),
+  form_fingerprint TEXT,
+  checkpoint_id TEXT,
+  checkpoint_hash TEXT,
+  submission_attempt_id TEXT,
+  submission_actor TEXT NOT NULL DEFAULT 'human' CHECK(submission_actor IN ('human','configured_adapter')),
+  adapter_json TEXT,
+  confirmation_origin TEXT,
+  confirmation_path TEXT,
+  policy_json TEXT NOT NULL DEFAULT '{}',
   UNIQUE(packet_id, type),
   FOREIGN KEY(packet_id) REFERENCES application_packets(id),
   FOREIGN KEY(application_id) REFERENCES applications(id)
 );
 CREATE INDEX IF NOT EXISTS application_receipts_application_idx
-  ON application_receipts(application_id, recorded_at, id);`;
+  ON application_receipts(application_id, recorded_at, id);
+CREATE TABLE IF NOT EXISTS form_snapshots (
+  id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL CHECK(version = 1),
+  job_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  requested_origin TEXT NOT NULL,
+  requested_path TEXT NOT NULL,
+  final_origin TEXT NOT NULL,
+  final_path TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  adapter_protocol_version INTEGER NOT NULL CHECK(adapter_protocol_version = 1),
+  adapter_source_hash TEXT NOT NULL,
+  selection_json TEXT NOT NULL,
+  field_map_json TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS form_snapshots_target_idx
+  ON form_snapshots(job_id, profile_id, captured_at, id);
+CREATE TABLE IF NOT EXISTS form_fill_runs (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  form_fingerprint TEXT NOT NULL,
+  adapter_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('checkpoint-required','diverged','failed')),
+  readback_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id)
+);
+CREATE TABLE IF NOT EXISTS human_checkpoints (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  fill_run_id TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL UNIQUE,
+  confirmation_json TEXT NOT NULL,
+  accepted_at TEXT NOT NULL,
+  accepted_by_source TEXT NOT NULL CHECK(accepted_by_source IN ('cli','tui')),
+  UNIQUE(packet_id,fill_run_id),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(fill_run_id) REFERENCES form_fill_runs(id)
+);
+CREATE TABLE IF NOT EXISTS form_submission_attempts (
+  id TEXT PRIMARY KEY,
+  submission_key TEXT NOT NULL UNIQUE,
+  packet_id TEXT NOT NULL,
+  packet_hash TEXT NOT NULL,
+  form_fingerprint TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL,
+  adapter_json TEXT NOT NULL,
+  invoked_by TEXT NOT NULL CHECK(invoked_by IN ('cli','tui','mcp','acp')),
+  configuration_source TEXT NOT NULL CHECK(configuration_source IN ('profile','environment')),
+  status TEXT NOT NULL CHECK(status IN ('armed','confirmed','uncertain','failed-before-submit')),
+  outcome_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id)
+);`;
+
+function tableDefinition(db, name) {
+  return String(dbRows(db, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [name])[0]?.sql || '');
+}
+
+function migrateW02Constraints(db) {
+  const packetDefinition = tableDefinition(db, 'application_packets');
+  const receiptDefinition = tableDefinition(db, 'application_receipts');
+  const rebuildPackets = packetDefinition && !packetDefinition.includes("'form-ready'");
+  const rebuildReceipts = receiptDefinition
+    && (!receiptDefinition.includes("'user_configured_form_submission'") || !receiptDefinition.includes("'mcp'"));
+  if (!rebuildPackets && !rebuildReceipts) return;
+
+  db.run('PRAGMA foreign_keys=OFF');
+  try {
+    db.run('BEGIN');
+    if (rebuildPackets) {
+      db.run(`CREATE TABLE application_packets_w02 (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+        revision INTEGER NOT NULL CHECK(revision > 0),
+        content_hash TEXT NOT NULL,
+        readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create IN ('approved','form-ready')),
+        readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+        packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2)),
+        form_snapshot_id TEXT,
+        form_fingerprint TEXT,
+        form_binding_json TEXT,
+        resume_artifact_id TEXT NOT NULL,
+        resume_content_hash TEXT NOT NULL,
+        cover_artifact_id TEXT,
+        cover_content_hash TEXT,
+        answers_json TEXT NOT NULL DEFAULT '[]',
+        identity_json TEXT NOT NULL DEFAULT '{}',
+        materials_json TEXT NOT NULL DEFAULT '{}',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')),
+        supersedes_packet_id TEXT,
+        UNIQUE(job_id, profile_id, attempt_number, revision),
+        CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(profile_id) REFERENCES profiles(id),
+        FOREIGN KEY(application_id) REFERENCES applications(id),
+        FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id),
+        FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id),
+        FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets_w02(id)
+      )`);
+      db.run(`INSERT INTO application_packets_w02 (
+        id,job_id,profile_id,application_id,attempt_number,revision,content_hash,
+        readiness_status_at_create,readiness_version,packet_version,form_snapshot_id,
+        form_fingerprint,form_binding_json,resume_artifact_id,resume_content_hash,
+        cover_artifact_id,cover_content_hash,answers_json,identity_json,materials_json,
+        blockers_json,warnings_json,created_at,created_by_source,supersedes_packet_id
+      ) SELECT
+        id,job_id,profile_id,application_id,attempt_number,revision,content_hash,
+        readiness_status_at_create,readiness_version,packet_version,form_snapshot_id,
+        form_fingerprint,form_binding_json,resume_artifact_id,resume_content_hash,
+        cover_artifact_id,cover_content_hash,answers_json,identity_json,materials_json,
+        blockers_json,warnings_json,created_at,created_by_source,supersedes_packet_id
+      FROM application_packets`);
+      db.run('DROP TABLE application_packets');
+      db.run('ALTER TABLE application_packets_w02 RENAME TO application_packets');
+      db.run('CREATE INDEX application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)');
+      db.run('CREATE INDEX application_packets_form_idx ON application_packets(form_fingerprint,packet_version)');
+    }
+    if (rebuildReceipts) {
+      db.run(`CREATE TABLE application_receipts_w02 (
+        id TEXT PRIMARY KEY,
+        packet_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')),
+        submitted_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        external_reference TEXT NOT NULL DEFAULT '',
+        evidence_path TEXT NOT NULL DEFAULT '',
+        evidence_hash TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        receipt_hash TEXT NOT NULL UNIQUE,
+        source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp')),
+        external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+        evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2)),
+        form_fingerprint TEXT,
+        checkpoint_id TEXT,
+        checkpoint_hash TEXT,
+        submission_attempt_id TEXT,
+        submission_actor TEXT NOT NULL DEFAULT 'human' CHECK(submission_actor IN ('human','configured_adapter')),
+        adapter_json TEXT,
+        confirmation_origin TEXT,
+        confirmation_path TEXT,
+        policy_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(packet_id, type),
+        FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+        FOREIGN KEY(application_id) REFERENCES applications(id)
+      )`);
+      db.run(`INSERT INTO application_receipts_w02 (
+        id,packet_id,application_id,type,submitted_at,recorded_at,external_reference,
+        evidence_path,evidence_hash,note,receipt_hash,source,external_side_effect,
+        evidence_version,form_fingerprint,checkpoint_id,checkpoint_hash,
+        submission_attempt_id,submission_actor,adapter_json,confirmation_origin,
+        confirmation_path,policy_json
+      ) SELECT
+        id,packet_id,application_id,type,submitted_at,recorded_at,external_reference,
+        evidence_path,evidence_hash,note,receipt_hash,source,external_side_effect,
+        evidence_version,form_fingerprint,checkpoint_id,checkpoint_hash,
+        submission_attempt_id,COALESCE(submission_actor,'human'),adapter_json,
+        confirmation_origin,confirmation_path,policy_json
+      FROM application_receipts`);
+      db.run('DROP TABLE application_receipts');
+      db.run('ALTER TABLE application_receipts_w02 RENAME TO application_receipts');
+      db.run('CREATE INDEX application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)');
+    }
+    db.run('COMMIT');
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw error;
+  } finally {
+    db.run('PRAGMA foreign_keys=ON');
+  }
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W02 packet/receipt migration left foreign-key violations');
+}
 
 function migrate(db){
   for (const sql of [
@@ -159,6 +362,26 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)",
     "CREATE TABLE IF NOT EXISTS application_receipts (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, application_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')), submitted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, external_reference TEXT NOT NULL DEFAULT '', evidence_path TEXT NOT NULL DEFAULT '', evidence_hash TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', receipt_hash TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK(source IN ('cli','tui')), external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'), UNIQUE(packet_id, type), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(application_id) REFERENCES applications(id))",
     "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)",
+    "ALTER TABLE application_packets ADD COLUMN packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2))",
+    "ALTER TABLE application_packets ADD COLUMN form_snapshot_id TEXT",
+    "ALTER TABLE application_packets ADD COLUMN form_fingerprint TEXT",
+    "ALTER TABLE application_packets ADD COLUMN form_binding_json TEXT",
+    "CREATE INDEX IF NOT EXISTS application_packets_form_idx ON application_packets(form_fingerprint,packet_version)",
+    "ALTER TABLE application_receipts ADD COLUMN evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2))",
+    "ALTER TABLE application_receipts ADD COLUMN form_fingerprint TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN checkpoint_id TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN checkpoint_hash TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN submission_attempt_id TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN submission_actor TEXT NOT NULL DEFAULT 'human'",
+    "ALTER TABLE application_receipts ADD COLUMN adapter_json TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN confirmation_origin TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN confirmation_path TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
+    "CREATE TABLE IF NOT EXISTS form_snapshots (id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version = 1), job_id TEXT NOT NULL, profile_id TEXT NOT NULL, captured_at TEXT NOT NULL, requested_origin TEXT NOT NULL, requested_path TEXT NOT NULL, final_origin TEXT NOT NULL, final_path TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_protocol_version INTEGER NOT NULL CHECK(adapter_protocol_version = 1), adapter_source_hash TEXT NOT NULL, selection_json TEXT NOT NULL, field_map_json TEXT NOT NULL, fingerprint TEXT NOT NULL, warnings_json TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id))",
+    "CREATE INDEX IF NOT EXISTS form_snapshots_target_idx ON form_snapshots(job_id, profile_id, captured_at, id)",
+    "CREATE TABLE IF NOT EXISTS form_fill_runs (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, form_fingerprint TEXT NOT NULL, adapter_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('checkpoint-required','diverged','failed')), readback_json TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(packet_id) REFERENCES application_packets(id))",
+    "CREATE TABLE IF NOT EXISTS human_checkpoints (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, fill_run_id TEXT NOT NULL, checkpoint_hash TEXT NOT NULL UNIQUE, confirmation_json TEXT NOT NULL, accepted_at TEXT NOT NULL, accepted_by_source TEXT NOT NULL CHECK(accepted_by_source IN ('cli','tui')), UNIQUE(packet_id,fill_run_id), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(fill_run_id) REFERENCES form_fill_runs(id))",
+    "CREATE TABLE IF NOT EXISTS form_submission_attempts (id TEXT PRIMARY KEY, submission_key TEXT NOT NULL UNIQUE, packet_id TEXT NOT NULL, packet_hash TEXT NOT NULL, form_fingerprint TEXT NOT NULL, checkpoint_id TEXT NOT NULL, checkpoint_hash TEXT NOT NULL, adapter_json TEXT NOT NULL, invoked_by TEXT NOT NULL CHECK(invoked_by IN ('cli','tui','mcp','acp')), configuration_source TEXT NOT NULL CHECK(configuration_source IN ('profile','environment')), status TEXT NOT NULL CHECK(status IN ('armed','confirmed','uncertain','failed-before-submit')), outcome_json TEXT NOT NULL DEFAULT '{}', started_at TEXT NOT NULL, completed_at TEXT, external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id))",
     "ALTER TABLE person_candidates ADD COLUMN person_id TEXT",
     "ALTER TABLE person_candidates ADD COLUMN research_run_id TEXT",
     "ALTER TABLE stakeholders ADD COLUMN person_id TEXT",
@@ -179,6 +402,7 @@ function migrate(db){
       if (!/duplicate column name/i.test(message) && !/already exists/i.test(message)) throw e;
     }
   }
+  migrateW02Constraints(db);
   const backfillKey = 'migration_resume_import_backfill';
   const check = db.prepare('SELECT value FROM meta WHERE key=?', [backfillKey]);
   let alreadyBackfilled = false;
@@ -556,10 +780,10 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','9']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','10']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '9') save(store);
+  if (!existed || previousSchemaVersion !== '10') save(store);
   return store;
 }
 

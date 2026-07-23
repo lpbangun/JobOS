@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Example Co (Main Form)</title>
+  <meta name="fixture" content="application-main">
+</head>
+<body>
+  <header>
+    <h1>Apply to Example Co</h1>
+    <p>Deterministic local application form fixture.</p>
+  </header>
+
+  <main id="main">
+    <!--
+      application-main.html
+      A single-document application form with the full control surface used by
+      W02 live inspection/selection/fill/read-back/checkpoint/submit fixtures.
+      Stable labels and explicit form/submit markers are required for Playwright.
+    -->
+
+    <form id="application-form" name="application-form" data-form="application-main" aria-label="Job application form" action="/submit/application" method="post" enctype="multipart/form-data">
+
+      <fieldset>
+        <legend>Identity &amp; contact</legend>
+
+        <div class="field">
+          <label for="full-name">Full name</label>
+          <input id="full-name" name="full_name" type="text" autocomplete="name" required>
+        </div>
+
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required>
+        </div>
+
+        <div class="field">
+          <label for="phone">Phone</label>
+          <input id="phone" name="phone" type="tel" autocomplete="tel" required>
+        </div>
+
+        <div class="field">
+          <label for="location">Location</label>
+          <input id="location" name="location" type="text" autocomplete="address-level1" required>
+        </div>
+
+        <div class="field">
+          <label for="website">Personal website</label>
+          <input id="website" name="website" type="url">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>About your application</legend>
+
+        <div class="field">
+          <label for="cover-letter-text">Cover letter (text)</label>
+          <textarea id="cover-letter-text" name="cover_letter_text" rows="6" cols="60"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="experience-years">Years of relevant experience</label>
+          <input id="experience-years" name="experience_years" type="number" min="0" max="80" required>
+        </div>
+
+        <div class="field">
+          <label for="start-date">Earliest start date</label>
+          <input id="start-date" name="start_date" type="date" required>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Preferences</legend>
+
+        <div class="field">
+          <label for="role-select">Preferred role</label>
+          <select id="role-select" name="role" required>
+            <option value="" disabled selected>Select a role…</option>
+            <option value="engineer">Engineer</option>
+            <option value="designer">Designer</option>
+            <option value="manager">Manager</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <span class="label">Work arrangement</span>
+          <label><input type="radio" name="work_arrangement" value="remote" required> Remote</label>
+          <label><input type="radio" name="work_arrangement" value="hybrid"> Hybrid</label>
+          <label><input type="radio" name="work_arrangement" value="onsite"> On-site</label>
+        </div>
+
+        <div class="field">
+          <label>
+            <input type="checkbox" name="relocate" value="yes">
+            I am willing to relocate
+          </label>
+          <label>
+            <input type="checkbox" name="newsletter" value="yes">
+            Send me company news
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Documents</legend>
+
+        <div class="field">
+          <label for="resume-file">Resume (PDF)</label>
+          <input id="resume-file" name="resume_file" type="file" accept=".pdf,application/pdf" required>
+        </div>
+
+        <div class="field">
+          <label for="cover-file">Cover letter file (optional)</label>
+          <input id="cover-file" name="cover_file" type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+        </div>
+      </fieldset>
+
+      <fieldset class="restricted">
+        <legend>Restricted &amp; legal (human action)</legend>
+
+        <div class="field">
+          <span class="label">Work authorization (required)</span>
+          <label><input type="radio" name="work_authorization" value="authorized" required> I am authorized to work in this country</label>
+          <label><input type="radio" name="work_authorization" value="need_sponsorship"> I need sponsorship</label>
+        </div>
+
+        <div class="field">
+          <label>
+            <input type="checkbox" name="legal_consent" value="agree" required data-handling="human-action">
+            I have read and agree to the legal disclosure and consent terms
+          </label>
+        </div>
+
+        <div class="field">
+          <label for="eeo-gender">Voluntary demographic — gender (optional)</label>
+          <select id="eeo-gender" name="eeo_gender" data-sensitivity="restricted">
+            <option value="" disabled selected>Prefer not to say</option>
+            <option value="woman">Woman</option>
+            <option value="man">Man</option>
+            <option value="nonbinary">Non-binary</option>
+            <option value="self-describe">Self-describe</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <div class="actions">
+        <!-- Non-submit action button: explicitly type="button" so it does NOT submit. -->
+        <button id="save-draft" type="button" name="save_draft" data-action="save-draft">Save draft</button>
+
+        <!-- Explicit submit control with a stable marker. -->
+        <button id="submit-application" type="submit" name="submit_application" data-submit="application-main">Submit application</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

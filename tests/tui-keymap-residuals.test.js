@@ -11,6 +11,8 @@ import { tailor } from '../src/tailoring.js';
 import { addAnswer } from '../src/answers.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { readinessPacketSummary } from '../src/packets.js';
+import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 import {
   TUI_KEYMAP,
   TUI_HANDLED_KEYS,
@@ -306,7 +308,7 @@ test('packet overlay renders readiness packet fields when present', async t => {
   assert.match(screen, /pkt_test/);
   assert.match(screen, /currency current/);
   assert.match(screen, /receipt none/);
-  assert.match(screen, /next submit externally, then :attest/);
+  assert.match(screen, /next :form assist pkt_test .* or submit manually/);
 });
 
 // Wave 1 — packet CTA follows receiptState
@@ -319,15 +321,15 @@ test('packet overlay CTA follows currency/receiptState', async t => {
     { width: 120, height: 36, color: false }
   );
   assert.match(renderWith({ id: 'p1', currency: 'stale', receiptState: 'none' }), /next :packet create — freeze a packet/);
-  assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'none', attestable: true }), /next submit externally, then :attest/);
+  assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'none', attestable: true }), /next :form assist p1 .* or submit manually/);
   assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'attested' }), /next :receipt <external-reference>/);
   assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'confirmed' }), /receipt confirmed · follow-ups only/);
 });
 
-async function driveToApproved(store, profile, job) {
+async function driveToFormReady(store, profile, job) {
   for (let round = 0; round < 3; round++) {
     const plan = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id });
-    if (plan.status === 'approved') return plan;
+    if (plan.status === 'materials-ready') break;
     for (const q of plan.answers.questions) {
       if (q.status === 'unmatched') {
         addAnswer(store, { profileId: profile.id, category: q.category, question: q.question, answer: 'A verified response grounded in stored evidence.', sensitivity: 'public', verificationStatus: 'verified' });
@@ -339,15 +341,27 @@ async function driveToApproved(store, profile, job) {
       await callDomainTool(store, 'approve_artifact', { artifactId }, { source: 'tui' });
     }
   }
+  persistFormSnapshot(store, buildFormSnapshot({
+    snapshotId: 'form_tui_apply_loop',
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.example.test/jobs/tui/apply',
+    finalUrl: 'https://apply.example.test/jobs/tui/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 10 },
+    fields: [{ frameKey: 'main', locatorPath: '#name', prompt: 'Full name', control: 'text', required: false }],
+    warnings: []
+  }));
   const plan = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id });
-  assert.equal(plan.status, 'approved', `expected approved, got ${plan.status}: ${plan.blockers.map(b => b.code).join(',')}`);
+  assert.equal(plan.status, 'form-ready', `expected form-ready, got ${plan.status}: ${plan.blockers.map(b => b.code).join(',')}`);
   return plan;
 }
 
 // Wave 1 — full apply loop inside the TUI
 test('packet create/attest/receipt commands run the apply loop inside the TUI', async t => {
   const { store, profile, job } = await seeded(t);
-  await driveToApproved(store, profile, job);
+  await driveToFormReady(store, profile, job);
   const io = streams();
   const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
   tui.state.selectedJobId = job.id;
@@ -363,9 +377,9 @@ test('packet create/attest/receipt commands run the apply loop inside the TUI', 
   await tick();
   assert.ok(summary().currentPacketId, 'packet should be frozen from the TUI');
   assert.equal(tui.state.overlay, 'packet', 'overlay stays open and refreshes');
-  assert.match(tui.state.status, /packet frozen · next: submit externally, then :attest/);
+  assert.match(tui.state.status, /packet frozen · next: :form assist .* or submit manually/);
   let screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  assert.match(screen, /next submit externally, then :attest/);
+  assert.match(screen, /next :form assist .* or submit manually/);
 
   // Invalid RFC3339 is rejected without mutating
   tui.executeCommand('attest not-a-date');
@@ -397,6 +411,16 @@ test('packet create/attest/receipt commands run the apply loop inside the TUI', 
   // Mutations were recorded as trusted human/TUI source, never agent
   const sources = all(store, 'SELECT DISTINCT source FROM application_receipts').map(row => row.source);
   assert.deepEqual(sources, ['tui']);
+});
+
+test('TUI form command exposes explicit packet-bound inspect assist checkpoint and submit usage', async t => {
+  const { store, profile, job } = await seeded(t, { draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = job.id;
+  tui.refresh({ disk: false });
+  tui.executeCommand('form');
+  assert.match(tui.state.status, /:form inspect <url>.*:form assist <packet-id>.*:form checkpoint <packet-id>.*:form submit <packet-id>/);
 });
 
 // Wave 1 — freeze refuses unapproved readiness

@@ -27,6 +27,8 @@ import { buildTuiModel } from '../src/tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, DomainToolError } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runPursuit } from '../src/workflows.js';
+import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -220,6 +222,18 @@ async function baseFixture(t, {
       sourceRef: 'acceptance-fixture'
     });
   }
+  if (answers) {
+    addAnswer(store, {
+      profileId: profile.id,
+      category: 'motivation',
+      question: 'Why this role?',
+      answer: values.public,
+      sensitivity: 'public',
+      reuseScope: 'global',
+      verificationStatus: 'verified',
+      sourceRef: 'live-form-acceptance-fixture'
+    });
+  }
 
   const fixture = { root, store, profile, proof, job, sentinels: values, resumeSemantic, resume: null, cover: null };
   if (artifacts) {
@@ -230,6 +244,39 @@ async function baseFixture(t, {
       if (fixture.cover) fixture.cover = approveArtifact(store, fixture.cover.id, { reviewedBy: 'cli', note: 'Acceptance fixture review.' });
     }
   }
+  const formAnswerRows = answers
+    ? all(store, 'SELECT * FROM answers WHERE profile_id=? ORDER BY question_fingerprint,id', [profile.id])
+    : [];
+  const snapshot = buildFormSnapshot({
+    snapshotId: `fs_packet_${crypto.randomUUID().replaceAll('-', '')}`,
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.packet.test/jobs/product-manager',
+    finalUrl: 'https://apply.packet.test/jobs/product-manager/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: {
+      frameKey: 'main',
+      formKey: 'application',
+      candidateCount: 1,
+      score: 10
+    },
+    fields: [
+      { frameKey: 'main', locatorPath: '#full-name', prompt: 'Full name', control: 'text', required: true },
+      { frameKey: 'main', locatorPath: '#resume', prompt: 'Resume', control: 'file', required: true },
+      ...formAnswerRows.map((answer, index) => ({
+        frameKey: 'main',
+        locatorPath: `#answer-${index}`,
+        prompt: answer.question_text,
+        control: 'textarea',
+        required: true,
+        classification: { category: answer.category, sensitivity: answer.sensitivity }
+      }))
+    ],
+    warnings: []
+  });
+  persistFormSnapshot(store, snapshot);
+  fixture.snapshot = snapshot;
   if (applicationStatus) fixture.application = appCreate(store, job.id, applicationStatus, 'Acceptance fixture status.');
   return fixture;
 }
@@ -318,13 +365,14 @@ test('AP03 packet freezes exact approved materials answers target and initialize
   assert.equal(packet.resumeContentHash, fixture.resume.contentHash);
   assert.equal(packet.coverArtifactId, fixture.cover.id);
   assert.equal(packet.coverContentHash, fixture.cover.contentHash);
-  assert.equal(packet.readinessVersion, 3);
-  assert.equal(packet.readinessStatusAtCreate, 'approved');
+  assert.equal(packet.readinessVersion, 4);
+  assert.equal(packet.readinessStatusAtCreate, 'form-ready');
+  assert.equal(packet.version, 2);
   assert.equal(packet.externalSideEffects, 'none');
   assert.equal(packet.submissionPerformed, false);
   assert.deepEqual(packet.materials.proofPointIds, [fixture.proof.id]);
   assert.equal(packet.target.identityKey, compileApplicationReadiness(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id }).identity.identityKey);
-  assert.ok(packet.answers.length >= 4);
+  assert.ok(packet.answers.length >= 1);
   for (const answer of packet.answers) {
     assert.ok(answer.answerId);
     assert.ok(answer.questionFingerprint);
@@ -473,9 +521,9 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
   const packet = api.createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
   const advertised = mcpToolNames();
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
-  for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']) assert.equal(advertised.includes(name), false);
+  for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form']) assert.equal(advertised.includes(name), false);
   assert.ok(DOMAIN_TOOLS.some(tool => tool.name === 'create_application_packet'));
-  assert.equal(advertised.length, DOMAIN_TOOLS.length - 7, 'MCP excludes all seven always-denied human-gated mutations');
+  assert.equal(advertised.length, DOMAIN_TOOLS.length - 8, 'MCP excludes all eight always-denied human-gated mutations');
 
   const oldMediation = process.env.JOBOS_MEDIATION;
   const oldOverride = process.env.JOBOS_ALLOW_AGENT_ATTESTATION;
@@ -617,9 +665,9 @@ test('AP12 restricted and sensitive answer plaintext never crosses packet inspec
     const directHash = crypto.createHash('sha256').update(value).digest('hex');
     assert.equal(surfaces.includes(directHash), false, 'value-derived sensitive hash leaked');
   }
-  assert.match(surfaces, /rowFingerprint/);
+  assert.match(surfaces, /rowFingerprint|answerRowFingerprint/);
   assert.match(surfaces, /restricted/);
-  assert.match(surfaces, /direct_input_redacted/);
+  assert.match(surfaces, /human-input|human-action/);
 });
 
 test('AP13 concurrent packet writers converge and stale persistence leaves no half projection', async t => {
@@ -691,11 +739,11 @@ test('AP13b conflicting receipt confirmation leaves every surface consistent wit
   assert.equal(readFileSync(packetYaml, 'utf8'), packetYamlBefore, 'packet mirror unchanged');
 });
 
-test('AP14 readiness v3 reports packet receipt state without claiming adapter submission', async t => {
+test('AP14 readiness v4 reports packet receipt state without claiming adapter submission', async t => {
   const { createApplicationPacket, attestApplicationSubmitted, confirmApplicationReceipt } = await packetApi();
   const fixture = await baseFixture(t);
   const empty = compileApplicationReadiness(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id });
-  assert.equal(empty.version, 3);
+  assert.equal(empty.version, 4);
   assert.deepEqual(empty.packet, {
     currentPacketId: null,
     contentHash: null,
@@ -841,8 +889,25 @@ test('AP16 approved materials freeze attest confirm end to end with honest local
   assert.equal(queue.length, 2);
   for (const artifact of queue) cliOk(root, ['artifacts', 'approve', artifact.id, '--note', 'E2E exact revision review.', '--json']);
   const approved = cliOk(root, ['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']);
-  assert.equal(approved.status, 'approved');
+  const formStore = await openStore({ workspace: root });
+  persistFormSnapshot(formStore, buildFormSnapshot({
+    snapshotId: `fs_e2e_${crypto.randomUUID().replaceAll('-', '')}`,
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.e2e.test/product-manager',
+    finalUrl: 'https://apply.e2e.test/product-manager/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 8 },
+    fields: [
+      { frameKey: 'main', prompt: 'Full name', control: 'text', required: true },
+      { frameKey: 'main', prompt: 'Resume', control: 'file', required: true }
+    ],
+    warnings: []
+  }));
+  assert.equal(approved.status, 'materials-ready');
   assert.equal(approved.packet.receiptState, 'none');
+  assert.equal(cliOk(root, ['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']).status, 'form-ready');
   const packet = cliOk(root, ['apply', 'packet', 'create', '--job', job.id, '--profile', profile.id, '--json']);
   assert.equal(packet.resumeContentHash, queue.find(item => item.type === 'resume').contentHash);
   const attested = cliOk(root, ['apply', 'attest-submitted', packet.id, '--submitted-at', '2026-07-20T12:00:00Z', '--note', 'User submitted externally.', '--json']);

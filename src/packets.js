@@ -7,6 +7,7 @@ import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { applicationId, _writeApp } from './tracking.js';
 import { syncJob } from './jobs.js';
 import { writeYaml } from './workspace.js';
+import { canonicalPacketFormBinding, resolveFormBindings } from './forms.js';
 
 // ---------------------------------------------------------------------------
 // Error helper
@@ -51,11 +52,40 @@ function answerRowFingerprint(answer) {
   };
   return crypto.createHash('sha256').update(canonicalJson(obj)).digest('hex');
 }
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+function freezeApprovedResumePdf(s, renderManifest) {
+  if (renderManifest?.format !== 'pdf' || renderManifest?.status !== 'passed') return null;
+  const pdfPath = String(renderManifest.pdfPath || '').replaceAll('\\', '/');
+  const pdfHash = String(renderManifest.pdfHash || '');
+  if (!pdfPath || pdfPath.length > 512 || path.isAbsolute(pdfPath) || pdfPath.split('/').includes('..')
+    || !pdfPath.toLowerCase().endsWith('.pdf') || !SHA256_HEX.test(pdfHash)) {
+    throw packetError('resume_pdf_binding_invalid', 'Approved resume render manifest does not contain a bounded PDF path and SHA-256 hash');
+  }
+  let workspace;
+  let resolved;
+  let bytes;
+  try {
+    workspace = fs.realpathSync(s.p.ws);
+    resolved = fs.realpathSync(path.resolve(workspace, pdfPath));
+    const outside = path.relative(workspace, resolved);
+    if (outside.startsWith('..') || path.isAbsolute(outside)) throw new Error('outside workspace');
+    bytes = fs.readFileSync(resolved);
+  } catch {
+    throw packetError('resume_pdf_missing', 'Approved rendered resume PDF bytes are missing');
+  }
+  const actualHash = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actualHash !== pdfHash) {
+    throw packetError('resume_pdf_diverged', 'Approved rendered resume PDF bytes no longer match the render manifest');
+  }
+  return { pdfPath, pdfHash };
+}
+
 
 // ---------------------------------------------------------------------------
-// Build the canonical version-1 packet projection from current state
-// ---------------------------------------------------------------------------
-function buildPacketProjection(s, { jobId, profileId }) {
+// Build the canonical version-2 packet projection from current state.
+// W01 target/material shapes are preserved verbatim; form is a sibling binding.
+export function buildPacketProjection(s, { jobId, profileId }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw packetError('unknown_job', `Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT id,name FROM profiles WHERE id=?', [profileId]);
@@ -67,19 +97,29 @@ function buildPacketProjection(s, { jobId, profileId }) {
   // Compile readiness WITHOUT packet decoration to avoid recursion.
   // The integration peer accepts includePacket: false.
   const readiness = compileApplicationReadiness(s, { jobId, profileId, includePacket: false });
+  if (readiness.form?.inspectionStatus === 'stale') {
+    throw packetError('adapter_hash_mismatch', 'The installed form adapter changed; reinspect before freezing a packet');
+  }
 
   // Current resume and cover artifacts
   const currentResume = one(s, `SELECT * FROM artifacts WHERE job_id=? AND profile_id=? AND type='resume' ORDER BY revision DESC LIMIT 1`, [jobId, profileId]);
   const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND profile_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId, profileId]);
   const resumeDocument = currentResume ? one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [currentResume.id]) : null;
   const resumeRenderManifest = parseJson(resumeDocument?.render_manifest_json, null);
+  const frozenResumePdf = freezeApprovedResumePdf(s, resumeRenderManifest);
 
   if (!currentResume || currentResume.approval_status !== 'approved') {
     throw packetError('artifact_unapproved', 'The current resume revision is not approved');
   }
 
-  const pinnedAnswerIds = new Set((readiness.answers?.questions || [])
-    .map(question => question.answerId)
+  const resolvedForm = resolveFormBindings(s, { jobId, profileId });
+  if (!resolvedForm.snapshot) throw packetError('form_inspection_required', 'Inspect the current employer form before freezing a packet');
+  if (!resolvedForm.formReady) throw packetError('packet_not_ready', 'The current employer form has unresolved required fields', {
+    fieldKeys: resolvedForm.unresolvedFieldKeys
+  });
+  const form = canonicalPacketFormBinding(resolvedForm);
+  const pinnedAnswerIds = new Set(resolvedForm.bindings
+    .map(binding => binding.answerId)
     .filter(Boolean));
   const answers = all(s, `SELECT id, category, question_fingerprint, sensitivity, reuse_scope, verification_status, updated_at
     FROM answers WHERE profile_id=? ORDER BY question_fingerprint, id`, [profileId])
@@ -111,7 +151,8 @@ function buildPacketProjection(s, { jobId, profileId }) {
       revision: Number(currentResume.revision),
       contentHash: currentResume.content_hash,
       sourceResumeRevisionId: resumeDocument?.source_resume_revision_id || null,
-      pdfHash: resumeRenderManifest?.status === 'passed' ? resumeRenderManifest.pdfHash || null : null
+      pdfPath: frozenResumePdf?.pdfPath || null,
+      pdfHash: frozenResumePdf?.pdfHash || null
     },
     coverLetter: coverEntry,
     proofPointIds: (readiness.materials.proofs.proofPointIds || []).slice().sort(),
@@ -138,10 +179,11 @@ function buildPacketProjection(s, { jobId, profileId }) {
   };
 
   return {
-    version: 1,
+    version: 2,
     target,
     materials,
     answers: answerEntries,
+    form,
     readiness: {
       version: readiness.version,
       status: readiness.status,
@@ -160,8 +202,14 @@ function packetReceiptState(s, packetId) {
     ORDER BY CASE type WHEN 'imported_evidence' THEN 2 WHEN 'user_attestation' THEN 1 ELSE 0 END DESC, recorded_at DESC, id DESC
     LIMIT 1`, [packetId]);
   if (!receipt) return { receiptState: 'none', latestReceiptId: null };
-  const state = receipt.type === 'imported_evidence' ? 'confirmed' : 'attested';
+  const state = ['imported_evidence', 'adapter_receipt'].includes(receipt.type) ? 'confirmed' : 'attested';
   return { receiptState: state, latestReceiptId: receipt.id };
+}
+
+function packetAttemptClosed(s, packetId) {
+  const receipt = one(s, 'SELECT id FROM application_receipts WHERE packet_id=? LIMIT 1', [packetId]);
+  if (receipt) return true;
+  return Boolean(one(s, "SELECT id FROM form_submission_attempts WHERE packet_id=? AND status='confirmed' LIMIT 1", [packetId]));
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +223,7 @@ function packetCurrency(s, packet, currentProjectionHash) {
     LIMIT 1`,
     [packet.job_id, packet.profile_id, packet.attempt_number, packet.attempt_number, packet.revision]);
   if (newer) return 'superseded';
+  if (Number(packet.packet_version || 1) !== 2 || !packet.form_fingerprint || !packet.form_binding_json) return 'legacy-unbound';
 
   // Check staleness — compare stored hash with current projection
   if (currentProjectionHash == null || currentProjectionHash !== packet.content_hash) return 'stale';
@@ -209,11 +258,15 @@ function normalizeRfc3339(value) {
 // ---------------------------------------------------------------------------
 // Build canonical receipt content object for hashing
 // ---------------------------------------------------------------------------
-function buildReceiptContent({ type, packetHash, submittedAt, externalReference, evidenceHash, note }) {
+function buildReceiptContent({ type, packetHash, submittedAt, externalReference, evidenceHash, note, formFingerprint = null, checkpointHash = null, submissionAttemptId = null, submissionActor = 'human' }) {
   return {
-    version: 1,
+    version: formFingerprint ? 2 : 1,
     type,
     packetHash,
+    formFingerprint,
+    checkpointHash,
+    submissionAttemptId,
+    submissionActor,
     submittedAt,
     externalReference: externalReference || '',
     evidenceHash: evidenceHash || '',
@@ -286,17 +339,22 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
 
   // Compile readiness (without packet decoration) and validate
   const readiness = compileApplicationReadiness(s, { jobId, profileId, includePacket: false });
-  if (readiness.status !== 'approved' || !readiness.localApprovalComplete) {
+  if (readiness.status !== 'form-ready' || !readiness.localApprovalComplete) {
     const blockerCodes = readiness.blockers.map(b => b.code);
     if (blockerCodes.length > 0) {
       throw packetError('packet_not_ready', `Readiness is blocked: ${blockerCodes.join(', ')}`);
     }
-    // Check if missing artifact approval is the only gap
     const pendingArtifacts = readiness.review.pendingArtifactIds;
     if (pendingArtifacts.length > 0) {
       throw packetError('artifact_unapproved', `Pending artifact review required: ${pendingArtifacts.join(', ')}`);
     }
-    throw packetError('packet_not_ready', 'Readiness must be approved with localApprovalComplete');
+    if (readiness.form?.inspectionStatus === 'uninspected') {
+      throw packetError('form_inspection_required', 'Inspect the current employer form before freezing a packet');
+    }
+    if (readiness.form?.inspectionStatus === 'stale') {
+      throw packetError('adapter_hash_mismatch', 'The installed form adapter changed; reinspect before freezing a packet');
+    }
+    throw packetError('packet_not_ready', 'Readiness must be form-ready with exact current bindings');
   }
 
   // Helper: verify artifact content hash against workspace mirror
@@ -328,7 +386,7 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
 
   return guardedWrite(s, () => {
     const readiness = compileApplicationReadiness(s, { jobId, profileId, includePacket: false });
-    if (readiness.status !== 'approved' || !readiness.localApprovalComplete) {
+    if (readiness.status !== 'form-ready' || !readiness.localApprovalComplete) {
       const blockerCodes = readiness.blockers.map(blocker => blocker.code);
       if (blockerCodes.length) throw packetError('packet_not_ready', `Readiness is blocked: ${blockerCodes.join(', ')}`, { blockerCodes });
       if (readiness.review.pendingArtifactIds.length) {
@@ -336,7 +394,9 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
           artifactIds: readiness.review.pendingArtifactIds
         });
       }
-      throw packetError('packet_not_ready', 'Readiness must be approved with localApprovalComplete');
+      if (readiness.form?.inspectionStatus === 'uninspected') throw packetError('form_inspection_required', 'Inspect the current employer form before freezing a packet');
+      if (readiness.form?.inspectionStatus === 'stale') throw packetError('adapter_hash_mismatch', 'The installed form adapter changed; reinspect before freezing a packet');
+      throw packetError('packet_not_ready', 'Readiness must be form-ready with exact current bindings');
     }
     const resumeArtifact = one(s, `SELECT * FROM artifacts WHERE job_id=? AND type='resume' AND approval_status='approved' ORDER BY revision DESC LIMIT 1`, [jobId]);
     if (!resumeArtifact) throw packetError('artifact_unapproved', `No approved resume artifact for job ${jobId}`);
@@ -356,31 +416,22 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
     let supersedesPacketId = null;
 
     if (latestPacket) {
-      // Check idempotency: same hash and no attestation
-      if (latestPacket.content_hash === contentHash) {
-        const att = one(s, "SELECT id FROM application_receipts WHERE packet_id=? AND type='user_attestation' LIMIT 1", [latestPacket.id]);
-        if (!att) {
-          // Idempotent — return the existing packet
-          const app = one(s, 'SELECT * FROM applications WHERE id=?', [latestPacket.application_id]);
-          const display = formatPacketRow(s, latestPacket, contentHash);
-          return {
-            ...display,
-            application: app,
-            idempotent: true,
-            externalSideEffects: 'none',
-            submissionPerformed: false
-          };
-        }
+      const closed = packetAttemptClosed(s, latestPacket.id);
+      if (latestPacket.content_hash === contentHash && !closed) {
+        const app = one(s, 'SELECT * FROM applications WHERE id=?', [latestPacket.application_id]);
+        const display = formatPacketRow(s, latestPacket, contentHash);
+        return {
+          ...display,
+          application: app,
+          idempotent: true,
+          externalSideEffects: 'none',
+          submissionPerformed: false
+        };
       }
-
-      // Check attestation state
-      const att = one(s, "SELECT id FROM application_receipts WHERE packet_id=? AND type='user_attestation' LIMIT 1", [latestPacket.id]);
-      if (att) {
-        // Has attestation — start new attempt
+      if (closed) {
         attemptNumber = latestPacket.attempt_number + 1;
         revision = 1;
       } else {
-        // No attestation — increment revision
         attemptNumber = latestPacket.attempt_number;
         revision = latestPacket.revision + 1;
       }
@@ -405,25 +456,26 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
     const materialsJson = JSON.stringify(projection.materials);
     const blockersJson = JSON.stringify(readiness.blockers || []);
     const warningsJson = JSON.stringify(readiness.warnings || []);
+    const formBindingJson = JSON.stringify(projection.form);
 
     const packetId = id('pkt', `${jobId}:${profileId}:${attemptNumber}:${revision}:${contentHash}`);
     const createdAt = now();
 
     run(s, `INSERT INTO application_packets
       (id, job_id, profile_id, application_id, attempt_number, revision, content_hash,
-       readiness_status_at_create, readiness_version,
+       readiness_status_at_create, readiness_version, packet_version, form_snapshot_id, form_fingerprint, form_binding_json,
        resume_artifact_id, resume_content_hash,
        cover_artifact_id, cover_content_hash,
        answers_json, identity_json, materials_json, blockers_json, warnings_json,
        created_at, created_by_source, supersedes_packet_id)
       VALUES (?,?,?,?,?,?,?,
-              ?,?,
+              ?,?,?,?,?,?,
               ?,?,
               ?,?,
               ?,?,?,?,?,
               ?,?,?)`,
       [packetId, jobId, profileId, appId, attemptNumber, revision, contentHash,
-       'approved', readiness.version || 3,
+       'form-ready', readiness.version || 4, 2, readiness.form.snapshotId, projection.form.formFingerprint, formBindingJson,
        resumeArtifact.id, resumeArtifact.content_hash,
        coverArtifact ? coverArtifact.id : null, coverArtifact ? coverArtifact.content_hash : null,
        answersJson, identityJson, materialsJson, blockersJson, warningsJson,
@@ -506,6 +558,7 @@ function derivePacketDisplay(s, row, currentProjectionHash) {
     attemptNumber: row.attempt_number,
     revision: row.revision,
     contentHash: row.content_hash,
+    version: Number(row.packet_version || 1),
     readinessStatusAtCreate: row.readiness_status_at_create,
     readinessVersion: row.readiness_version,
     resumeArtifactId: row.resume_artifact_id,
@@ -517,12 +570,13 @@ function derivePacketDisplay(s, row, currentProjectionHash) {
     materials: parseJson(row.materials_json, {}),
     blockers: parseJson(row.blockers_json, []),
     warnings: parseJson(row.warnings_json, []),
+    form: row.form_binding_json ? { ...parseJson(row.form_binding_json, {}), snapshotId: row.form_snapshot_id || null } : null,
     createdAt: row.created_at,
     createdBySource: row.created_by_source,
     supersedesPacketId: row.supersedes_packet_id || null,
     currency,
     receiptState,
-    attestable: currency === 'current' && receiptState === 'none',
+    attestable: Number(row.packet_version || 1) === 2 && currency === 'current' && receiptState === 'none',
     latestReceiptId,
     receipts
   };
@@ -593,8 +647,9 @@ export function diffApplicationPackets(s, firstPacketId, secondPacketId) {
 
   // Build canonical projections from the stored JSON columns
   function rebuildProjection(row) {
-    return {
-      version: 1,
+    const version = Number(row.packet_version || 1);
+    const projection = {
+      version,
       target: parseJson(row.identity_json, {}),
       materials: parseJson(row.materials_json, {}),
       answers: parseJson(row.answers_json, []),
@@ -606,6 +661,8 @@ export function diffApplicationPackets(s, firstPacketId, secondPacketId) {
         warnings: parseJson(row.warnings_json, [])
       }
     };
+    if (version === 2) projection.form = parseJson(row.form_binding_json, null);
+    return projection;
   }
 
   const projA = rebuildProjection(a);
@@ -656,6 +713,9 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
 
   const packet = one(s, 'SELECT * FROM application_packets WHERE id=?', [packetId]);
   if (!packet) throw packetError('unknown_packet', `Unknown packet: ${packetId}`);
+  if (Number(packet.packet_version || 1) !== 2 || !packet.form_fingerprint || !packet.form_binding_json) {
+    throw packetError('legacy_packet_unbound', `Packet ${packetId} is not bound to a versioned live form; re-inspect and freeze a packet v2`);
+  }
 
   // Validate submitted_at
   const normalizedAt = normalizeRfc3339(submittedAt);
@@ -663,9 +723,25 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
 
 
   return guardedWrite(s, () => {
-    // Re-check receipt state
-    const existing = one(s, "SELECT * FROM application_receipts WHERE packet_id=? AND type='user_attestation'", [packetId]);
-
+    // Re-check every receipt/confirmed-attempt closure before allowing manual evidence.
+    const anyReceipt = one(s, 'SELECT * FROM application_receipts WHERE packet_id=? ORDER BY recorded_at,id LIMIT 1', [packetId]);
+    if (anyReceipt && anyReceipt.type !== 'user_attestation') {
+      throw packetError('packet_already_submitted', `Packet ${packetId} already has confirmed submission evidence`, {
+        receiptId: anyReceipt.id,
+        receiptType: anyReceipt.type,
+        idempotent: true
+      });
+    }
+    if (!anyReceipt) {
+      const confirmedAttempt = one(s, "SELECT id FROM form_submission_attempts WHERE packet_id=? AND status='confirmed' LIMIT 1", [packetId]);
+      if (confirmedAttempt) {
+        throw packetError('packet_already_submitted', `Packet ${packetId} already has a confirmed configured submission`, {
+          submissionAttemptId: confirmedAttempt.id,
+          idempotent: true
+        });
+      }
+    }
+    const existing = anyReceipt;
     if (existing) {
       // Idempotency check
       const rc = buildReceiptContent({
@@ -674,7 +750,8 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
         submittedAt: normalizedAt,
         externalReference: '',
         evidenceHash: '',
-        note: note || ''
+        note: note || '',
+        formFingerprint: packet.form_fingerprint
       });
       const receiptHash = packetContentHash(rc);
       if (existing.receipt_hash === receiptHash) {
@@ -721,16 +798,19 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       submittedAt: normalizedAt,
       externalReference: '',
       evidenceHash: '',
-      note: note || ''
+      note: note || '',
+      formFingerprint: packet.form_fingerprint
     });
     const receiptHash = packetContentHash(receiptContent);
 
     run(s, `INSERT INTO application_receipts
       (id, packet_id, application_id, type, submitted_at, recorded_at,
-       external_reference, evidence_path, evidence_hash, note, receipt_hash, source, external_side_effect)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       external_reference, evidence_path, evidence_hash, note, receipt_hash, source, external_side_effect,
+       evidence_version, form_fingerprint, submission_actor, policy_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [receiptId, packetId, packet.application_id, 'user_attestation', normalizedAt, at,
-       '', '', '', note || '', receiptHash, source, 'none']);
+       '', '', '', note || '', receiptHash, source, 'none',
+       2, packet.form_fingerprint, 'human', JSON.stringify({ submissionPerformed: false, evidenceKind: 'manual_attestation' })]);
 
     // Application status transition
     const app = one(s, 'SELECT * FROM applications WHERE id=?', [packet.application_id]);
@@ -919,6 +999,16 @@ function formatReceiptRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    evidenceVersion: Number(row.evidence_version || 1),
+    formFingerprint: row.form_fingerprint || null,
+    checkpointId: row.checkpoint_id || null,
+    checkpointHash: row.checkpoint_hash || null,
+    submissionAttemptId: row.submission_attempt_id || null,
+    submissionActor: row.submission_actor || 'human',
+    adapter: parseJson(row.adapter_json, null),
+    confirmationOrigin: row.confirmation_origin || null,
+    confirmationPath: row.confirmation_path || null,
+    policy: parseJson(row.policy_json, {}),
     packetId: row.packet_id,
     applicationId: row.application_id,
     type: row.type,

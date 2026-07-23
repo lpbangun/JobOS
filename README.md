@@ -165,31 +165,53 @@ npm run jobos -- artifacts reject <artifact-id> [--note <text>] --json
 
 Each artifact has a stable `seriesKey`, increasing `revision`, predecessor ID, and SHA-256 `contentHash`. Review is allowed only for the exact current revision when its SQLite content and workspace mirror both match that hash. Approval is idempotent; rejection is terminal for that revision. A redraft creates a successor, makes the prior approval stale for current readiness, and returns readiness to `ready-for-review`. Review audit events are `artifact.approved` or `artifact.rejected` with `externalSideEffect: "none"`.
 
-### Immutable application packets and receipts
+### Live form, immutable packet, and receipt bridge
 
-After readiness reaches `approved`, freeze the exact approved materials, redacted answer-row versions, and target identity before recording an application attempt:
+Local material approval produces `materials-ready`; it is not application readiness. Inspect the actual employer form before freezing a packet:
 
 ```bash
-# Trusted local freeze. This creates no external action.
-npm run jobos -- apply packet create --job <job-id> --profile <profile-id> --json
+# Read-only live inspection. The persisted snapshot contains canonical labels,
+# controls, classifications, locators, option keys, and normalized origin/path,
+# but never entered values, URL query/fragment secrets, cookies, or storage state.
+npm run jobos -- apply form inspect --job <job-id> --profile <profile-id> \
+  --url <application-url> [--browser-profile <name>] --json
+npm run jobos -- apply form show <snapshot-id> --json
 
-# Inspect immutable history. List requires --job, --profile, or both.
+# Trusted local freeze. Requires current form-ready evidence and creates no
+# external action.
+npm run jobos -- apply packet create --job <job-id> --profile <profile-id> --json
 npm run jobos -- apply packet list --job <job-id> --json
 npm run jobos -- apply packet show <packet-id> --json
 npm run jobos -- apply packet diff <packet-a> <packet-b> --json
 
-# Record what the user did outside JobOS against one exact packet.
+# Optional configured fill. Both persistent configuration and this explicit
+# invocation flag are required; this never activates a submit control.
+JOBOS_FORM_FILL_ENABLED=1 npm run jobos -- apply form assist <packet-id> \
+  [--browser-profile <name>] --allow-side-effects --json
+
+# Trusted human confirmation after read-back. Restricted, legal, demographic,
+# CAPTCHA, and unsupported fields remain human-owned.
+npm run jobos -- apply form checkpoint <packet-id> --fill-run <fill-run-id> \
+  [--confirm-fields <field-key,...>] --json
+
+# Optional configured submit. It has a separate default-off gate and requires
+# the exact current checkpoint plus per-run consent.
+JOBOS_FORM_SUBMIT_ENABLED=1 npm run jobos -- apply form submit <packet-id> \
+  --checkpoint <checkpoint-id> [--browser-profile <name>] --allow-submit --json
+
+# Manual submission remains first-class. Record what the user did outside
+# JobOS against the exact packet.
 npm run jobos -- apply attest-submitted <packet-id> \
   --submitted-at <timezone-qualified-rfc3339> [--note <text>] --json
 npm run jobos -- apply confirm-receipt <packet-id> \
   --reference <external-reference> [--note <text>] --json
 ```
 
-Packet creation requires current readiness `approved`; there is no unapproved bypass. The packet SHA-256 covers approved resume/optional-cover IDs and hashes, matched answer IDs with non-secret row-version fingerprints, target identity, proof IDs, score, blockers, and warnings. It never contains answer plaintext. Equal unchanged input is idempotent. A material, answer, or target edit makes the old packet non-attestable; the next explicit create adds a revision, or starts a new attempt after an attestation. Historical rows remain immutable. Redacted mirrors live under `jobos-workspace/jobs/<job-id>/packets/`.
+Packet v2 freezes the current form fingerprint and adapter source hash together with exact approved material revisions/hashes, non-secret answer-row fingerprints, W01 resume identity, target identity, proof IDs, score, blockers, and warnings. It never contains answer plaintext. A semantic form change, adapter hash change, material/identity revision, answer edit, or target edit makes the packet stale. Equal unchanged input is idempotent; historical rows remain immutable. Redacted mirrors live under `jobos-workspace/jobs/<job-id>/packets/`.
 
-`attest-submitted` records a `user_attestation`; from `saved`, `researching`, or `materials-ready` it also advances local tracking to `applied` with a status-history note bound to the packet ID, packet hash, and receipt ID. `confirm-receipt` requires that attestation and records the external reference without another status transition. These commands record user evidence only: responses, audits, and readiness retain `externalSideEffects: \"none\"` and `submissionPerformed: false`.
+Configured fill and submit are disabled by default. Fill re-inspects the live form, checks the frozen fingerprint, populates only exact safe bindings, compares transient read-back values, and persists statuses without values. Configured submit rechecks the packet, form, adapter, bindings, and human checkpoint; when required human-owned fields exist it opens a headed session and waits for the user to complete them before any submit control can activate. A structured confirmation creates an `adapter_receipt` and advances tracking to `applied`; an ambiguous post-submit outcome is stored as `uncertain`, creates no receipt or applied transition, and cannot be replayed automatically.
 
-Direct `applications create|update --status applied` remains available for manual/backward-compatible tracking, but it creates no receipt and audits `receiptBound: false`. Application status alone is never presented as receipt evidence. Readiness v3 exposes the independent packet `receiptState` (`none`, `attested`, or `confirmed`).
+`attest-submitted` records a `user_attestation`; from a pre-apply state it advances local tracking to `applied` with packet-bound history. `confirm-receipt` adds the external reference. These manual commands retain `externalSideEffects: "none"` and `submissionPerformed: false`. Direct `applications create|update --status applied` remains available for backward-compatible tracking but creates no receipt. Readiness v4 exposes independent packet currency and `receiptState` (`none`, `attested`, or `confirmed`).
 
 ### Identity and duplicate detection
 
@@ -201,11 +223,11 @@ Sensitive and restricted answer values are always redacted in JSON and YAML outp
 
 ### Mirror
 
-The readiness v3 plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call, during the `application` stage of `pursue`, and after resume/cover, packet, or receipt changes. The mirror carries the same redaction guarantee as JSON and includes an always-present secret-safe packet summary.
+The readiness v4 plan is written to `jobos-workspace/jobs/<job-id>/application-readiness.yaml` on every `applications plan` call, during the `application` stage of `pursue`, and after material, form, packet, or receipt changes. The mirror carries the same redaction guarantee as JSON and includes secret-safe form and packet summaries.
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical readiness v3 structure. Agents may inspect `review_queue`, `diff_artifact`, `application_packets_list`, `application_packet_show`, and `application_packet_diff` to recommend a human action. MCP and the embedded ACP guest are not offered artifact decisions, contact approval, human answer entry, or packet freeze/attestation/confirmation tools; service-level policy also rejects direct calls. The removed local web/API interface provides no mutation bypass. Approval, packet freeze, and receipt evidence remain limited to trusted CLI/TUI policy sources. The `pursue` workflow includes `readiness` in dry-run and real execution but never creates a packet automatically.
+The MCP tool `applications_plan` returns the identical readiness v4 structure. Agents may inspect review/artifact, packet, and secret-safe form evidence. MCP and the embedded ACP guest may invoke form inspection, fill, or configured submission only when the profile/environment-mediated gate and the operation-specific per-run gate are both enabled. They cannot create the trusted human checkpoint. Artifact decisions, contact approval, human answer entry, packet freeze, manual attestation, and receipt confirmation are omitted from the MCP catalog and rejected at the service boundary. The `pursue` workflow includes readiness in dry-run and real execution but never freezes a packet or performs a form action automatically.
 
 ## Daily automatic discovery
 
@@ -537,13 +559,13 @@ The full low-level CLI—manual imports, standalone scoring and tailoring, conta
 - Core state is local; there is no telemetry or required cloud sync.
 - Generated claims must trace to stored proof points or cited public sources.
 - Draft artifacts default to `draft_needs_human_review`. Local approval or rejection is bound to an exact current revision and never triggers an external effect.
-- External effects default off. A browser script runs them only after explicit configuration and `--allow-side-effects`.
+- External effects default off. Generic trusted browser scripts and packet-bound form fill require explicit configuration plus per-run `--allow-side-effects`; configured form submit has its own `JOBOS_FORM_SUBMIT_ENABLED`/profile gate plus `--allow-submit`.
 - No CAPTCHA bypass, employer-account creation, proprietary global job corpus, or universal Workday/iCIMS/Taleo automation.
 - User-exported LinkedIn connection files are local inputs. JobOS records public LinkedIn URLs but does not fetch profile pages, sign in, or bypass platform controls.
-- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, immutable application packet/receipt graphs, PDF/DOCX production rendering, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred.
+- LinkedIn/Indeed DOM-specific bots, universal unattended auto-apply, SMTP auto-send, mail reconciliation, voice rehearsal, offers, and frontend redesign are intentionally deferred. The live-form bridge is deliberately narrow and adapter-pinned rather than a universal ATS bot.
 - `sql.js` is portable but write-heavy concurrent workflows are rejected on stale snapshots rather than merged automatically; reopen and retry.
 - A headed browser login needs a display. Headless hosts can import user-owned storage state, but expired auth, MFA, CAPTCHA, and site defenses still require manual recovery.
-- `ready-for-review` indicates complete local evidence awaiting human review; `approved` adds only trusted local approval of every current required revision. Neither status means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive answer values are redacted from workspace mirrors and never auto-filled.
+- `ready-for-review` means local evidence awaits artifact review; `materials-ready` means current required artifacts are approved but no live form is bound; `form-ready` requires the current inspected form's required fields to be resolved. None of these means submitted, applied, sent, receipt-recorded, or agent-authorized. Restricted and sensitive values remain redacted and are never auto-filled.
 - Trusted browser scripts are not sandboxed.
 
 ## Verification

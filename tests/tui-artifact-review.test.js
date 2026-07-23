@@ -1284,7 +1284,7 @@ test('T12 — Human-gate mediation', async t => {
   // ── Setup: DOMAIN_TOOLS and MCP tool names ──
   const toolNames = DOMAIN_TOOLS.map(dt => dt.name);
   const mcpNames = mcpToolNames();
-  const deniedMcp = new Set(['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']);
+  const deniedMcp = new Set(['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form']);
   assert.deepEqual(mcpNames, toolNames.filter(name => !deniedMcp.has(name)));
   assert.ok(toolNames.length > 0);
 

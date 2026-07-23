@@ -24,8 +24,8 @@ A branch-local passing test does not mean `DONE`. A partial slice does not compl
 | ID | Bundle | Priority | Status | Owner / worktree | Dependency gate | Next integration decision |
 |---|---|---:|---|---|---|---|
 | W01 | Candidate truth and complete document pipeline | P0 | **IN_PROGRESS** | Existing user-managed tailored-resume worktree | Preserve artifact/proof/packet contracts | Confirm whether active branch covers only tailoring or the full W01 schema, validation, and renderer scope |
-| W02 | Live form, answer readiness, and packet bridge | P0 | PLANNED | Unassigned | W01 artifact/document interface frozen | Choose stable form-snapshot, field-map, and packet-binding contract |
-| W03 | Discovery integrity, liveness, and normalized intake | P0 | `READY_FOR_MERGE` | `fix/discovery-integrity` | None; implemented on the integrated W01 base while preserving its schema/workflow contracts | Integration owner review, merge, and merged-runtime verification; W04 may consume `jobos.posting-liveness.v1` without treating it as fit |
+| W02 | Live form, answer readiness, and packet bridge | P0 | **READY_FOR_MERGE** | Implementation: `fix/live-form-packet-bridge` | Reviewed W01 artifact interface and W03 identity/liveness contracts verified | Merge/rebase through the integration owner, then rerun focused W02/W01/W03 checks, both smokes, and the full suite before `DONE` |
+| W03 | Discovery integrity, liveness, and normalized intake | P0 | **DONE** | `fix/discovery-integrity` merged as `5af9766` | None; preserves W01 schema/workflow contracts | Integrated focused 34/34, smoke, and full 274/274 pass; W04 may consume `jobos.posting-liveness.v1` without treating it as fit |
 | W04 | Fit consistency, legitimacy boundary, and calibration | P0 | PLANNED | Unassigned | W03 legitimacy contract; W06 aggregate interface for calibration | Separate immediate score-math fix from later outcome calibration without splitting ownership |
 | W05 | Contact confidence, outreach relevance, and outcomes | P1 | PLANNED | Unassigned | Existing research/outreach contracts | Freeze inspectable confidence components and lightweight outcome vocabulary |
 | W06 | Lifecycle next actions, follow-up, velocity, and analytics | P1 | PLANNED | Unassigned | Stable status/attestation events | Freeze one-current-next-action and observation/aggregate interfaces for W04/W07/W08 |
@@ -72,11 +72,13 @@ These briefs are intentionally meta-level. A new worktree should inspect current
 
 **Goal:** Make application readiness and configured form assistance truthful to the real employer form.
 
-**Owns:** form/frame inspection, stable snapshot/fingerprint, field normalization/classification, answer matching, blockers, fill/read-back, human checkpoints, packet binding, and structured receipt handoff.
+**Owns:** form/frame inspection, stable snapshot/fingerprint, field normalization/classification, answer matching, blockers, fill/read-back, human checkpoints, packet binding, narrow configured submission, replay-safe attempt state, and structured receipt/uncertainty handoff.
 
-**Must preserve:** restricted-answer exclusions, redaction, adapter hash pinning, explicit side-effect configuration, CAPTCHA/auth recovery, packet idempotency, and human submission responsibility.
+**Must preserve:** restricted-answer exclusions, redaction, adapter hash pinning, separate default-off action enablement and per-invocation authorization, CAPTCHA/auth recovery without bypass, packet/submission idempotency, honest uncertain outcomes, and the complete manual human submission/attestation path.
 
-**Must not own:** broad board scraping (W03), document generation (W01), or a generic autonomous browser agent.
+**Must not own:** broad board scraping (W03), document generation (W01), generic autonomous browsing, scheduled/bulk submission, or broad ATS automation.
+
+**Implementation note (2026-07-23):** `fix/live-form-packet-bridge` implements the bounded W02 slice: deterministic main/frame inspection and secret-safe snapshots; hard-safety field classification; exact W01 material/identity and answer bindings; truthful readiness v4; packet v2 with non-hashed snapshot evidence; default-off fill/read-back; trusted human checkpoints; packet/form-bound manual attestation; separately configured and per-run-authorized submission; replay-safe attempts; and confirmed-versus-uncertain receipt handling. Populated packet-v1/receipt tables migrate without losing historical hashes. Acceptance passed `tests/live-form-bridge.test.js` **25/25**, readiness/packet/human-review **35/35**, `npm run smoke`, real-Chromium `npm run smoke:live-form`, and the full suite **302/302**. Independent critic convergence iteration 2 returned `accept` / `ready_for_merge: true`. W02 is `READY_FOR_MERGE`, not `DONE`; integration must rerun cross-bundle verification.
 
 **Acceptance evidence to record:**
 
@@ -86,6 +88,8 @@ These briefs are intentionally meta-level. A new worktree should inspect current
 - stale packet refusal;
 - fill divergence detection;
 - exact packet/form-bound handoff and receipt.
+- configured submission is default-off, exact-binding-only, idempotent, and records explicit external side effects;
+- ambiguous post-submit state is uncertain rather than success, while manual human submission/attestation remains supported.
 
 ### W03 — Discovery integrity, liveness, and normalized intake
 

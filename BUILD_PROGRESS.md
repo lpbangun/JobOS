@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-22
+## Current status — 2026-07-23
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -9,12 +9,13 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
-- `jobos applications plan --job <id> --profile <id>` compiles review readiness from score, proofs, materials, answers, and identity evidence, returning blocked/ready-for-review status with actionable blockers and a redacted YAML mirror.
+- `jobos applications plan --job <id> --profile <id>` compiles readiness v4: artifact review produces `materials-ready`; only a current inspected employer form with resolved required bindings produces `form-ready`. Blockers and mirrors remain secret-safe.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
 - `jobos research people --scope profile|target|job|person ...` runs budgeted, checkpointed people research; `research runs get|resume|cancel` exposes the durable lifecycle.
 - `jobos profile network-intent ...` and the TUI `b` flow confirm progressive networking goals, exclusions, sources, and affiliations before an open profile network map is built.
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
+- `jobos apply form inspect|show|assist|checkpoint|submit` provides the narrow packet-bound live-form bridge. Inspection is read-only; fill and configured submit have separate default-off configuration and per-invocation gates; manual submission/attestation remains first-class.
 
 ### Implemented in the ACP host, lean CLI, and people-research passes
 
@@ -42,7 +43,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, and redacted packet list/show/diff inspection. Always-denied human mutations are omitted from the MCP catalog and remain denied at the service boundary.
 - The obsolete, unmounted HTTP API implementation is removed; CLI/TUI and MCP remain the supported human and agent surfaces.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
-- Application readiness compiler: `applications plan --job <job-id> --profile <profile-id> --json`, MCP `applications_plan`, blocked/ready-for-review statuses with actionable blockers, YAML mirror with redaction guarantees, stable identity keys, precision-first duplicate evidence, and restricted-value safe handling. Integrated into `pursue` dry-run and real execution.
+- Live-form/packet bridge: deterministic semantic form and adapter fingerprints; main/iframe inspection; restricted/legal/unsupported human ownership; exact W01 identity/material and answer-row bindings; readiness v4; packet v2; fill/read-back without persisted values; trusted checkpoints; replay-safe configured submission; honest uncertain outcomes; and bound adapter/manual receipt evidence across CLI, TUI, MCP, and ACP mediation.
 - Canonical `people`, profile/person affiliations, durable `research_runs`, and run-source joins with an idempotent migration that preserves contact, edge, stakeholder, and outreach-plan references.
 - Identity resolution by canonical profile URL and then exact imported email; same-name records never merge automatically.
 - User-exported LinkedIn connection import with tier `U` unapproved contacts, idempotent direct edges, skipped-row warnings, local mirrors, and privacy-safe audit metadata.
@@ -58,21 +59,21 @@ Not required for the smallest coherent CLI product:
 
 - Universal auto-apply, Workday/iCIMS/Taleo automation, or LinkedIn/Indeed DOM-specific bots.
 - SMTP auto-send, mailbox reconciliation, and hardcoded platform automation.
-- PDF/DOCX production rendering, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
+- Additional document export formats, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
-
+- `npm test`: **302/302 passed** on 2026-07-23 after final W02 remediation, including populated-v1 migration, semantic packet idempotency/diff, restricted-field and file-hash safety, honest uncertainty, W01 artifact identity, W03 compatibility, CLI, TUI, ACP, and MCP regressions.
 - `npm test`: **265/265 passed** on 2026-07-22, including discovery-integrity retry/budget/isolation/liveness/gate contracts, status-namespace, canonical outreach-due semantics, MCP catalog, removed-API, workflow-help and TUI-command vocabulary, watchlist consolidation, CLI compatibility, and all established CLI, TUI, ACP, MCP, readiness, research, outreach, and workflow checks.
-- `npm run smoke`: passed on 2026-07-22 in a clean temporary workspace through fixture-backed active/expired/uncertain discovery, expired score/pursuit hard stops, scoring, tailoring, application readiness, packet/receipt confirmation, interview, analytics, scheduler, workspace exports, and zero external effects.
+- `npm run smoke` and `npm run smoke:live-form`: passed on 2026-07-23. The general clean-workspace smoke reaches materials-ready → form-ready → packet/manual receipt confirmation; the real Chromium live-form smoke proves one-submit manual (`externalSideEffects: none`) and configured (`user_configured_form_submission`) paths.
 - Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
-- Real external MCP drill: initialize, 37-tool list (DOMAIN_TOOLS minus seven always-denied human mutations; includes `applications_plan` and packet list/show/diff inspection), `score_job`, `get_job_context`, persisted audit/state, and exit `0`. The advertised count and deny set are pinned by `tests/apppacket-receipt.test.js` (AP08), `tests/sprint4-interview-analytics-mcp.test.js`, and the external MCP demo test.
+- External MCP catalog now exposes 41 policy-eligible tools, including secret-safe form inspection and separately gated fill/configured-submit operations. Eight always-denied human mutations—including the form checkpoint—are omitted and still rejected at the service boundary.
 - Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
 - People-research critic suite `tests/people-research-orchestration.test.js`: **14/14 passed**; companion contact/TUI/integration suites: **25/25 passed**.
-- Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
-- Application readiness suite `tests/readiness.test.js`: **14/14 passed** covering plan shape, blocked/ready-for-review transitions, answer redaction and job scoping, CLI/MCP equivalence, YAML mirror integrity, duplicate evidence, dry-run purity, normal-pursuit local status disclosure, and no submission claims.
+- Application readiness suite `tests/readiness.test.js`: **16/16 passed** covering readiness v4 shape, materials-ready/form-ready transitions, exact review and live-form authority, redaction/job scoping, CLI/MCP equivalence, mirror integrity, duplicate evidence, dry-run purity, packet/receipt next actions, and no false submission claims.
 - Independent people-research convergence gate passed on critic pass 3 with no failures or unmet criteria. It covers migration and identity, onboarding/import privacy, all four scopes, adapter isolation, budgets, cache/resume/cancel/deadline behavior, xAI gates/citations, integrated alumni path ranking, deterministic network-access bands, status launch recommendations, MCP/TUI mediation, exact mirrors, and zero external effects.
 - W03 discovery-integrity critic convergence: iteration 1 found truncation-only status and missing shared run-budget defects; targeted corrections passed the combined W03 suite **25/25**, and iteration 2 returned `CONVERGED` with no residual findings.
+- W02 live-form bridge critic convergence: iteration 1 found legacy CHECK migration, snapshot-ID hashing, restricted-sensitivity auto-fill, file re-hash, uncertain-result, and packet-diff defects; all were corrected with targeted acceptance evidence, and iteration 2 returned `accept` / `ready_for_merge: true` with no remaining blocker or high-severity finding.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
 

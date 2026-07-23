@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Confirmation</title>
+  <meta name="fixture" content="confirmation">
+</head>
+<body>
+  <!--
+    confirmation.html
+    Structured confirmation page reached after a configured submission that
+    produced explicit external confirmation evidence (WF17/WF23). The adapter
+    reads a deterministic external reference and confirmation origin/path.
+
+    The confirmation marker and external reference are stable for receipt
+    binding. No field values are echoed here.
+  -->
+  <header>
+    <h1>Application received</h1>
+  </header>
+
+  <main id="main">
+    <section id="confirmation" aria-label="Confirmation">
+      <p>Thank you. Your application has been received.</p>
+
+      <!-- Structured confirmation marker used for receipt evidence. -->
+      <p id="confirmation-marker" data-confirmation-marker="dom-v1" data-confirmation-reference="APP-CONF-0001">
+        Confirmation reference: <strong id="confirmation-reference">APP-CONF-0001</strong>
+      </p>
+
+      <dl>
+        <dt>Status</dt>
+        <dd id="confirmation-status" data-confirmation-status="confirmed">confirmed</dd>
+      </dl>
+    </section>
+  </main>
+</body>
+</html>

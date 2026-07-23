@@ -481,7 +481,7 @@ async function inspectPage(page) {
   }
 }
 
-async function assertPageAccessible(page, response, profileName, requestedUrl) {
+export async function assertPageAccessible(page, response, profileName, requestedUrl) {
   const state = await inspectPage(page);
   const finalUrl = currentPageUrl(page, requestedUrl);
   const status = responseStatus(response);
@@ -816,6 +816,52 @@ export async function authenticatedFetch({ workspace, name, url, selector, playw
       finalUrl: boundedString(finalUrl, MAX_URL_LENGTH, secrets),
       ...extracted
     };
+  } finally {
+    await closeContext(context);
+  }
+}
+
+export async function withAuthenticatedPage({
+  workspace,
+  name = 'default',
+  url,
+  playwright,
+  headless = true,
+  createIfMissing = false,
+  navigationTimeoutMs = NAVIGATION_TIMEOUT_MS
+} = {}, operation) {
+  if (typeof operation !== 'function') throw browserError('browser_operation_required', 'A bounded browser operation is required.');
+  const profileName = requireSafeName(name, 'profile name');
+  const requestedUrl = parseHttpUrl(url);
+  const timeoutMs = navigationTimeout(navigationTimeoutMs);
+  const paths = statePaths(workspace);
+  let profile;
+  if (createIfMissing) {
+    try {
+      profile = await existingProfile(paths, profileName);
+    } catch (error) {
+      if (error?.code !== 'auth_required') throw error;
+      profile = await createProfile(paths, profileName);
+    }
+  } else {
+    profile = await existingProfile(paths, profileName);
+  }
+  let context;
+  try {
+    context = await launchPersistent(profile.profilePath, profileName, { playwright, headless });
+    const page = await pageForContext(context, { profileName });
+    const response = await navigate(page, requestedUrl, timeoutMs, profileName);
+    await assertPageAccessible(page, response, profileName, requestedUrl);
+    const result = await operation({ page, context, response, requestedUrl, profileName });
+    await assertPageAccessible(page, response, profileName, requestedUrl);
+    const timestamp = now();
+    await saveProfileMetadata(profile.profilePath, {
+      ...profile.metadata,
+      updatedAt: timestamp,
+      lastUsedAt: timestamp,
+      lastOrigin: requestedUrl.origin
+    });
+    return result;
   } finally {
     await closeContext(context);
   }

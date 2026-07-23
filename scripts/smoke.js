@@ -8,6 +8,8 @@ import { greenhouse } from '../src/discovery/adapters.js';
 import { importNormalized } from '../src/jobs.js';
 import { score as scoreJob } from '../src/scoring.js';
 import { runPursuit } from '../src/workflows.js';
+import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
 const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
@@ -159,8 +161,20 @@ try {
     if (approval.approvalStatus !== 'approved' || approval.externalSideEffects !== 'none' || approval.submissionPerformed !== false || approval.applicationStatusChanged !== false) throw new Error(`Unsafe approval metadata for ${item.id}`);
   }
   const approvedPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
-  if (approvedPlan.status !== 'approved' || approvedPlan.localApprovalComplete !== true) throw new Error(`Application did not reach approved local readiness: ${approvedPlan.status}`);
+  if (approvedPlan.status !== 'materials-ready' || approvedPlan.localApprovalComplete !== true) throw new Error(`Application did not reach materials-ready local readiness: ${approvedPlan.status}`);
   const afterReviewStore = await openStore({ workspace: root });
+  persistFormSnapshot(afterReviewStore, buildFormSnapshot({
+    snapshotId: 'form_smoke_application',
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: new Date().toISOString(),
+    requestedUrl: 'https://board.example/jobs/smoke/apply',
+    finalUrl: 'https://board.example/jobs/smoke/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 10 },
+    fields: [{ frameKey: 'main', locatorPath: '#full-name', prompt: 'Full name', control: 'text', required: true }],
+    warnings: []
+  }));
   const applicationAfterReview = one(afterReviewStore, 'SELECT status,notes,confirmation_url,updated_at FROM applications WHERE id=?', [app.id]);
   const statusChangesAfterReview = Number(one(afterReviewStore, 'SELECT COUNT(*) AS count FROM status_changes WHERE application_id=?', [app.id]).count);
   const auditsAfterReview = Number(one(afterReviewStore, 'SELECT COUNT(*) AS count FROM audit_log').count);
@@ -169,6 +183,8 @@ try {
   afterReviewStore.db.close();
   if (JSON.stringify(applicationAfterReview) !== JSON.stringify(applicationBeforeReview) || statusChangesAfterReview !== statusChangesBeforeReview) throw new Error('Local artifact approval changed application tracking state');
   if (auditsAfterReview !== auditsBeforeReview + 2 || approvalAudits.length !== 2 || approvalAudits.some(event => event.external_side_effect !== 'none')) throw new Error('Approval audit events were missing or claimed an external side effect');
+  const formReadyPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (formReadyPlan.status !== 'form-ready' || formReadyPlan.form?.formReady !== true) throw new Error(`Application did not reach live form readiness: ${formReadyPlan.status}`);
 
   const applicationPacket = JSON.parse(run(['apply', 'packet', 'create', '--job', job.id, '--profile', profile.id, '--json']));
   const resumeReview = reviewQueue.find(item => item.type === 'resume');

@@ -73,8 +73,8 @@ test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const json = result.stdout.slice(result.stdout.indexOf('\r\n\r\n') + 4);
   const response = JSON.parse(json);
   assert.ok(response.result.tools.some(t => t.name === 'interview_prep'));
-  assert.equal(response.result.tools.length, 37, 'advertised MCP tool count excludes all seven always-denied MCP mutations');
-  for (const name of ['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']) {
+  assert.equal(response.result.tools.length, names.length, 'stdio tools/list matches the policy-filtered MCP registry');
+  for (const name of ['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form']) {
     assert.equal(response.result.tools.some(tool => tool.name === name), false, `${name} must not be advertised to MCP agents`);
   }
   const listJobs = response.result.tools.find(tool => tool.name === 'list_jobs');

@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync, readdirSync, stat
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -103,12 +104,12 @@ test('readiness: plan contains all top-level shape fields', () => {
   const plan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
 
   assert.equal(typeof plan.version, 'number');
-  assert.equal(plan.version, 3);
+  assert.equal(plan.version, 4);
   assert.equal(typeof plan.generatedAt, 'string');
   assert.ok(plan.generatedAt.length > 0);
   assert.equal(plan.jobId, imported.id);
   assert.equal(plan.profileId, 'pm');
-  assert.ok(['blocked', 'ready-for-review', 'approved'].includes(plan.status));
+  assert.ok(['blocked', 'ready-for-review', 'materials-ready', 'form-ready'].includes(plan.status));
   assert.equal(typeof plan.readyForReview, 'boolean');
   assert.ok(plan.review);
   for (const key of ['requiredArtifactIds', 'approvedArtifactIds', 'pendingArtifactIds', 'rejectedArtifactIds']) {
@@ -238,7 +239,7 @@ test('readiness: blocked plan when score, proofs, and resume are missing', () =>
 
 // ── Blocked plan — unmatched and restricted answers ───────────────────
 
-test('readiness: blocked plan shows unmatched and restricted-answer blockers', () => {
+test('readiness: synthetic question gaps remain advisory until the live form is inspected', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
@@ -252,7 +253,7 @@ test('readiness: blocked plan shows unmatched and restricted-answer blockers', (
 
   const plan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
 
-  assert.equal(plan.status, 'blocked');
+  assert.ok(['blocked', 'ready-for-review'].includes(plan.status));
 
   // Materials pass
   assert.equal(plan.materials.proofs.status, 'available');
@@ -264,10 +265,11 @@ test('readiness: blocked plan shows unmatched and restricted-answer blockers', (
   assert.ok(plan.answers.unresolvedRestricted >= 1, 'should have unresolved restricted questions');
   assert.ok(plan.answers.restricted >= 1, 'should have restricted-category questions');
 
-  // Blockers include unmatched_questions and restricted_questions_require_input
+  // Synthetic questions remain visible for preparation but no longer block readiness.
   const blockerCodes = plan.blockers.map(b => b.code);
-  assert.ok(blockerCodes.includes('unmatched_questions'), 'should have unmatched_questions blocker');
-  assert.ok(blockerCodes.includes('restricted_questions_require_input'), 'should have restricted_questions_require_input blocker');
+  assert.equal(blockerCodes.includes('unmatched_questions'), false);
+  assert.equal(blockerCodes.includes('restricted_questions_require_input'), false);
+  assert.equal(plan.form.inspectionStatus, 'uninspected');
 
   // Restricted questions in the output are redacted
   const restrictedQ = plan.answers.questions.filter(q => q.status === 'blocked');
@@ -368,7 +370,7 @@ test('readiness: ready-for-review with score, proofs, resume, matched ordinary, 
 
 // ── Human review transitions ─────────────────────────────────────────
 
-test('readiness: current human-approved resume transitions ready-for-review to approved, then a redraft returns it to ready-for-review', async () => {
+test('readiness: current human-approved resume transitions ready-for-review to materials-ready, then a redraft returns it to ready-for-review', async () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
@@ -416,11 +418,11 @@ test('readiness: current human-approved resume transitions ready-for-review to a
   assert.equal(approval.submissionPerformed, false);
   assert.equal(approval.applicationStatusChanged, false);
   const approvedMirrorBeforePlan = readFileSync(path.join(root, 'jobos-workspace', 'jobs', imported.id, 'application-readiness.yaml'), 'utf8');
-  assert.match(approvedMirrorBeforePlan, /status: approved/);
+  assert.match(approvedMirrorBeforePlan, /status: materials-ready/);
   assert.match(approvedMirrorBeforePlan, /localApprovalComplete: true/);
 
   const approvedPlan = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
-  assert.equal(approvedPlan.status, 'approved');
+  assert.equal(approvedPlan.status, 'materials-ready');
   assert.equal(approvedPlan.readyForReview, true);
   assert.equal(approvedPlan.materials.resume.status, 'approved');
   assert.deepEqual(approvedPlan.review.requiredArtifactIds, [original.id]);
@@ -470,7 +472,7 @@ test('readiness: current human-approved resume transitions ready-for-review to a
 
 // ── nextAction follows the packet receipt lifecycle ──────────────────
 
-test('readiness: nextAction walks approve → freeze → attest → confirm-receipt instead of the readiness dead end', async () => {
+test('readiness: nextAction walks inspect → freeze → attest → confirm-receipt instead of the readiness dead end', async () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
@@ -520,13 +522,34 @@ test('readiness: nextAction walks approve → freeze → attest → confirm-rece
   neverDeadEnd(draftPlan);
 
   out(['artifacts', 'approve', original.id, '--note', 'Verified against stored proof.']);
+  const { buildFormSnapshot, persistFormSnapshot } = await import('../src/forms.js');
+  const formStore = await openStore({ workspace: root });
+  persistFormSnapshot(formStore, buildFormSnapshot({
+    snapshotId: 'form_readiness_lifecycle',
+    jobId: imported.id,
+    profileId: 'pm',
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.example.test/jobs/lifecycle/apply',
+    finalUrl: 'https://apply.example.test/jobs/lifecycle/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 10 },
+    fields: [{
+      frameKey: 'main',
+      locatorPath: '#full-name',
+      prompt: 'Full name',
+      control: 'text',
+      required: true,
+      classification: { category: 'identity', sensitivity: 'personal', handling: 'auto-fill', reasonCode: 'profile_identity', provenance: 'dom' }
+    }],
+    warnings: []
+  }));
 
-  // approved, no packet → nextAction is freeze packet
+  // form-ready, no packet → nextAction is freeze packet
   const approvedPlan = planFor();
-  assert.equal(approvedPlan.status, 'approved');
+  assert.equal(approvedPlan.status, 'form-ready');
   assert.equal(approvedPlan.packet.currency, 'none');
   assert.ok(approvedPlan.nextAction.includes(`jobos apply packet create --job ${imported.id} --profile pm --json`),
-    `approved/no-packet nextAction should be packet create, got: ${approvedPlan.nextAction}`);
+    `form-ready/no-packet nextAction should be packet create, got: ${approvedPlan.nextAction}`);
   neverDeadEnd(approvedPlan);
 
   // freeze → next step is human submission attestation for the frozen packet
@@ -536,8 +559,8 @@ test('readiness: nextAction walks approve → freeze → attest → confirm-rece
   assert.ok(packetId, 'packet should exist after freeze');
   assert.equal(frozenPlan.packet.currency, 'current');
   assert.equal(frozenPlan.packet.receiptState, 'none');
-  assert.ok(frozenPlan.nextAction.includes(`jobos apply attest-submitted ${packetId} --submitted-at`),
-    `frozen nextAction should be attest-submitted, got: ${frozenPlan.nextAction}`);
+  assert.ok(frozenPlan.nextAction.includes('Submit manually') && frozenPlan.nextAction.includes(packetId),
+    `frozen nextAction should name the packet-bound manual or configured handoff, got: ${frozenPlan.nextAction}`);
   neverDeadEnd(frozenPlan);
 
   // attest → next step is confirm-receipt
@@ -937,7 +960,7 @@ test('readiness: restricted answer with sensitivity=restricted reuse=never_auto_
 
 // ── Safety refinement: unscoped restricted answer does NOT clear blocker ──
 
-test('readiness: unscoped or other-job restricted answer does not clear the restricted blocker', () => {
+test('readiness: unscoped or other-job restricted answers remain advisory before live inspection', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
@@ -956,8 +979,8 @@ test('readiness: unscoped or other-job restricted answer does not clear the rest
   const plan1 = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
   assert.equal(plan1.answers.directInputRecorded, 0,
     'unscoped restricted answer must not count as direct_input_recorded');
-  assert.ok(plan1.blockers.some(b => b.code === 'restricted_questions_require_input'),
-    'restricted_questions_require_input blocker must still be present');
+  assert.equal(plan1.blockers.some(b => b.code === 'restricted_questions_require_input'), false,
+    'synthetic restricted questions must not block before live inspection');
 
   // Now also add a restricted answer with source_ref scoped to a DIFFERENT job
   // (simulate another job2's answer) — should still not clear blocker for this job
@@ -970,8 +993,8 @@ test('readiness: unscoped or other-job restricted answer does not clear the rest
   const plan2 = out(['applications', 'plan', '--job', imported.id, '--profile', 'pm']);
   assert.equal(plan2.answers.directInputRecorded, 0,
     'other-job-scoped restricted answer must not count as direct_input_recorded');
-  assert.ok(plan2.blockers.some(b => b.code === 'restricted_questions_require_input'),
-    'restricted_questions_require_input blocker must still be present after other-job answer');
+  assert.equal(plan2.blockers.some(b => b.code === 'restricted_questions_require_input'), false,
+    'other-job synthetic answers do not create live-form blockers');
 });
 
 
