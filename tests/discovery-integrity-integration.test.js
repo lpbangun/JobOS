@@ -542,7 +542,7 @@ test('W03-COMPAT-01 opens legacy jobs as unchecked uncertain without network mig
 
   // Verify W02 and W05 migrations compose without mutating legacy job identity.
   const versionRow = one(s, "SELECT value FROM meta WHERE key='schema_version'");
-  assert.equal(versionRow.value, '11', 'schema version migrated through W02 and W05');
+  assert.equal(versionRow.value, '12', 'schema version migrated through protected form targets and W05');
 
   // Legacy liveness must deserialize as uncertain without network.
   const [summary] = listJobSummaries(s, { profileId: 'profile-test' });

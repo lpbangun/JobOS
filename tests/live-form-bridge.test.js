@@ -516,19 +516,15 @@ test('WF13 adapter hash drift is rejected before inspection fill submission and 
   );
   let browserLaunches = 0;
   const playwright = { chromium: { launchPersistentContext: async () => { browserLaunches += 1; throw new Error('must not launch'); } } };
-  await assert.rejects(() => fillApplicationForm(f.store, {
-    packetId: packet.id,
-    workspace: f.root,
-    allowSideEffects: true,
-    playwright
-  }), error => error.code === 'packet_stale');
-  await assert.rejects(() => submitApplicationForm(f.store, {
-    packetId: packet.id,
-    checkpointId: 'check_unused',
-    workspace: f.root,
-    allowSubmit: true,
-    playwright
-  }), error => error.code === 'packet_stale');
+  await assert.rejects(() => fillApplicationForm(f.store, { packetId: packet.id,
+  workspace: f.root,
+  allowSideEffects: true,
+  playwright, protectRequests: false }), error => error.code === 'packet_stale');
+  await assert.rejects(() => submitApplicationForm(f.store, { packetId: packet.id,
+  checkpointId: 'check_unused',
+  workspace: f.root,
+  allowSubmit: true,
+  playwright, protectRequests: false }), error => error.code === 'packet_stale');
   assert.equal(browserLaunches, 0);
 });
 
@@ -637,15 +633,22 @@ test('WF09 packet v2 binds exact form fields materials answers and adapter hash 
   assert.equal(first.materials.resume.sourceResumeRevisionId, f.resumeRevision.id);
   assert.equal(first.form.bindings.some(binding => binding.mode === 'answer'), true);
 
-  const identicalInspection = structuredClone(f.snapshot);
-  identicalInspection.snapshotId = `form_snapshot_${crypto.randomUUID()}`;
-  identicalInspection.capturedAt = '2026-07-22T13:00:00.000Z';
+  const targetUrl = `${f.snapshot.target.finalOrigin}${f.snapshot.target.finalPath}`;
+  const identicalInspection = buildFormSnapshot({
+    snapshotId: `form_snapshot_${crypto.randomUUID()}`,
+    jobId: f.job.id,
+    profileId: f.profile.id,
+    requestedUrl: 'https://apply.w02.test/jobs/1?token=drop',
+    finalUrl: targetUrl,
+    adapter: f.snapshot.adapter,
+    selection: { ...f.snapshot.selection },
+    fields: f.snapshot.fieldMap.fields
+  });
   persistFormSnapshot(f.store, identicalInspection);
   const afterReinspection = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
   assert.equal(afterReinspection.id, first.id, 'snapshot evidence identity must not affect the packet hash');
   assert.equal(afterReinspection.contentHash, first.contentHash);
 
-  const targetUrl = `${f.snapshot.target.finalOrigin}${f.snapshot.target.finalPath}`;
   const changedInspection = buildFormSnapshot({
     snapshotId: `form_snapshot_${crypto.randomUUID()}`,
     jobId: f.job.id,
@@ -869,12 +872,10 @@ test('WF10 assist requires configured and per-run fill enablement then fills sup
       sourceRef: 'localhost-fill-fixture'
     });
   }
-  await inspectLiveForm(f.store, {
-    jobId: f.job.id,
-    profileId: f.profile.id,
-    url: server.url('/application-frame.html'),
-    browserProfile: 'fill-acceptance'
-  });
+  await inspectLiveForm(f.store, { jobId: f.job.id,
+  profileId: f.profile.id,
+  url: server.url('/application-frame.html'),
+  browserProfile: 'fill-acceptance', protectRequests: false });
   const packet = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
   const previous = process.env.JOBOS_FORM_FILL_ENABLED;
   process.env.JOBOS_FORM_FILL_ENABLED = '1';
@@ -883,7 +884,7 @@ test('WF10 assist requires configured and per-run fill enablement then fills sup
       packetId: packet.id,
       browserProfile: 'fill-acceptance',
       allowSideEffects: true
-    }, { source: 'cli' });
+    }, { source: 'cli', protectRequests: false });
     assert.equal(result.status, 'checkpoint-required');
     assert.equal(result.readback.some(item => item.status === 'diverged' || item.status === 'failed'), false);
     assert.ok(result.readback.some(item => item.status === 'equal'));
@@ -897,7 +898,7 @@ test('WF10 assist requires configured and per-run fill enablement then fills sup
       packetId: packet.id,
       browserProfile: 'fill-acceptance',
       allowSideEffects: true
-    }, { source: 'cli' }), error => error.code === 'artifact_mirror_diverged');
+    }, { source: 'cli', protectRequests: false }), error => error.code === 'artifact_mirror_diverged');
     assert.equal(server.state.submits, 0);
   } finally {
     if (previous === undefined) delete process.env.JOBOS_FORM_FILL_ENABLED;
@@ -934,12 +935,10 @@ async function configuredSubmissionFixture(t, fixturePath = '/application-config
   const f = await seedW02Workspace(t);
   const server = await startFormServer(t);
   const browserProfile = `submit-${crypto.randomUUID().slice(0, 8)}`;
-  await inspectLiveForm(f.store, {
-    jobId: f.job.id,
-    profileId: f.profile.id,
-    url: server.url(fixturePath),
-    browserProfile
-  });
+  await inspectLiveForm(f.store, { jobId: f.job.id,
+  profileId: f.profile.id,
+  url: server.url(fixturePath),
+  browserProfile, protectRequests: false });
   const packet = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
   const previousFill = process.env.JOBOS_FORM_FILL_ENABLED;
   process.env.JOBOS_FORM_FILL_ENABLED = '1';
@@ -947,13 +946,11 @@ async function configuredSubmissionFixture(t, fixturePath = '/application-config
     if (previousFill === undefined) delete process.env.JOBOS_FORM_FILL_ENABLED;
     else process.env.JOBOS_FORM_FILL_ENABLED = previousFill;
   });
-  const fill = await fillApplicationForm(f.store, {
-    packetId: packet.id,
-    workspace: f.root,
-    browserProfile,
-    allowSideEffects: true,
-    adapterManifest: DOM_ADAPTER_MANIFEST
-  });
+  const fill = await fillApplicationForm(f.store, { packetId: packet.id,
+  workspace: f.root,
+  browserProfile,
+  allowSideEffects: true,
+  adapterManifest: DOM_ADAPTER_MANIFEST, protectRequests: false });
   const checkpoint = checkpointApplicationForm(f.store, {
     packetId: packet.id,
     fillRunId: fill.fillRunId,
@@ -1001,47 +998,39 @@ test('W02 direct callers cannot override the packet-frozen adapter identity', as
   ];
 
   for (const replacement of replacements) {
-    await assert.rejects(() => fillApplicationForm(f.store, {
-      packetId: f.packet.id,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSideEffects: true,
-      adapterManifest: replacement.manifest,
-      expectedAdapterHash: replacement.expectedHash,
-      playwright: noLaunchPlaywright
-    }), error => error.code === replacement.errorCode);
-    await assert.rejects(() => submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true,
-      adapterManifest: replacement.manifest,
-      expectedAdapterHash: replacement.expectedHash,
-      playwright: noLaunchPlaywright
-    }), error => error.code === replacement.errorCode);
-  }
-
-  assert.equal(browserLaunches, 0);
-  assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM form_submission_attempts').count, 0);
-  const fill = await fillApplicationForm(f.store, {
-    packetId: f.packet.id,
+    await assert.rejects(() => fillApplicationForm(f.store, { packetId: f.packet.id,
     workspace: f.root,
     browserProfile: f.browserProfile,
     allowSideEffects: true,
-    adapterManifest: DOM_ADAPTER_MANIFEST,
-    expectedAdapterHash: packetHash
-  });
-  assert.equal(fill.status, 'checkpoint-required');
-  const submission = await submitApplicationForm(f.store, {
-    packetId: f.packet.id,
+    adapterManifest: replacement.manifest,
+    expectedAdapterHash: replacement.expectedHash,
+    playwright: noLaunchPlaywright, protectRequests: false }), error => error.code === replacement.errorCode);
+    await assert.rejects(() => submitApplicationForm(f.store, { packetId: f.packet.id,
     checkpointId: f.checkpoint.checkpointId,
     workspace: f.root,
     browserProfile: f.browserProfile,
     allowSubmit: true,
-    adapterManifest: DOM_ADAPTER_MANIFEST,
-    expectedAdapterHash: packetHash
-  });
+    adapterManifest: replacement.manifest,
+    expectedAdapterHash: replacement.expectedHash,
+    playwright: noLaunchPlaywright, protectRequests: false }), error => error.code === replacement.errorCode);
+  }
+
+  assert.equal(browserLaunches, 0);
+  assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM form_submission_attempts').count, 0);
+  const fill = await fillApplicationForm(f.store, { packetId: f.packet.id,
+  workspace: f.root,
+  browserProfile: f.browserProfile,
+  allowSideEffects: true,
+  adapterManifest: DOM_ADAPTER_MANIFEST,
+  expectedAdapterHash: packetHash, protectRequests: false });
+  assert.equal(fill.status, 'checkpoint-required');
+  const submission = await submitApplicationForm(f.store, { packetId: f.packet.id,
+  checkpointId: f.checkpoint.checkpointId,
+  workspace: f.root,
+  browserProfile: f.browserProfile,
+  allowSubmit: true,
+  adapterManifest: DOM_ADAPTER_MANIFEST,
+  expectedAdapterHash: packetHash, protectRequests: false });
   assert.equal(submission.status, 'confirmed');
   assert.equal(f.server.state.submits, 1);
 });
@@ -1051,21 +1040,17 @@ test('WF15 configured submission requires separate enablement per-run allow-subm
   const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
   delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
   try {
-    await assert.rejects(() => submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    }), error => error.code === 'form_submission_not_enabled');
+    await assert.rejects(() => submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false }), error => error.code === 'form_submission_not_enabled');
     process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
-    await assert.rejects(() => submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: false
-    }), error => error.code === 'form_submission_not_enabled');
+    await assert.rejects(() => submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: false, protectRequests: false }), error => error.code === 'form_submission_not_enabled');
     assert.equal(f.server.state.submits, 0);
     assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM form_submission_attempts').count, 0);
   } finally {
@@ -1079,20 +1064,16 @@ test('WF16 submission idempotency returns confirmed evidence and blocks armed un
   const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
   process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
   try {
-    const first = await submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    });
-    const second = await submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    });
+    const first = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false });
+    const second = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false });
     assert.equal(first.status, 'confirmed');
     assert.equal(second.idempotent, true);
     assert.equal(second.attemptId, first.attemptId);
@@ -1124,25 +1105,21 @@ test('WF17 configured submission confirms only with structured receipt and recor
   const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
   process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
   try {
-    const result = await submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    });
+    const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false });
     assert.equal(result.status, 'uncertain');
     assert.equal(result.submissionPerformed, null);
     assert.equal(result.externalSideEffects, 'user_configured_form_submission');
     assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM application_receipts').count, 0);
     assert.notEqual(one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status, 'applied');
-    await assert.rejects(() => submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    }), error => error.code === 'submission_replay_blocked');
+    await assert.rejects(() => submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false }), error => error.code === 'submission_replay_blocked');
     assert.equal(f.server.state.submits, 1);
   } finally {
     if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
@@ -1178,7 +1155,7 @@ test('WF23 localhost configured bridge submits once records external side effect
       checkpointId: f.checkpoint.checkpointId,
       browserProfile: f.browserProfile,
       allowSubmit: true
-    }, { source: 'mcp' });
+    }, { source: 'mcp', protectRequests: false });
     assert.equal(result.status, 'confirmed');
     assert.equal(result.submissionPerformed, true);
     assert.equal(result.externalSideEffects, 'user_configured_form_submission');
@@ -1212,12 +1189,10 @@ test('W02 packet upload uses exact frozen PDF bytes and refuses mutation before 
       sourceRef: 'pdf-upload-regression'
     });
   }
-  await inspectLiveForm(f.store, {
-    jobId: f.job.id,
-    profileId: f.profile.id,
-    url: server.url('/application-frame.html'),
-    browserProfile: 'pdf-freeze'
-  });
+  await inspectLiveForm(f.store, { jobId: f.job.id,
+  profileId: f.profile.id,
+  url: server.url('/application-frame.html'),
+  browserProfile: 'pdf-freeze', protectRequests: false });
   const packet = createApplicationPacket(f.store, { jobId: f.job.id, profileId: f.profile.id, createdBy: 'cli' });
   assert.equal(packet.materials.resume.pdfPath, f.resumePdfPath);
   assert.equal(packet.materials.resume.pdfHash, f.resumePdfHash);
@@ -1299,12 +1274,10 @@ test('W02 structural locators stay secret-free, scope to the selected form, and 
     verificationStatus: 'verified',
     sourceRef: 'false-checkbox-regression'
   });
-  const inspectedPublic = await inspectLiveForm(f.store, {
-    jobId: f.job.id,
-    profileId: f.profile.id,
-    url: server.url('/application-secret-locators.html'),
-    browserProfile: 'structural-locators'
-  });
+  const inspectedPublic = await inspectLiveForm(f.store, { jobId: f.job.id,
+  profileId: f.profile.id,
+  url: server.url('/application-secret-locators.html'),
+  browserProfile: 'structural-locators', protectRequests: false });
   assert.equal(inspectedPublic.selection.formKey, 'form-1');
   const raw = getFormSnapshot(f.store, inspectedPublic.snapshotId, { raw: true });
   assert.equal(raw.fieldMap.fields.every(field => field.locator.strategy === 'selected-form-control'), true);
@@ -1327,12 +1300,18 @@ test('W02 structural locators stay secret-free, scope to the selected form, and 
   const readback = await applyBoundFormFields(f.store, page, packet, inspected);
   const values = await page.evaluate(() => ({
     decoy: document.querySelector('#decoy-name').value,
+    hidden: document.querySelector('#hidden-routing-token').value,
     selected: document.querySelector('#SECRET_DOM_TOKEN_ID_7YQ9').value,
-    checked: document.querySelector('input[name="newsletter"]').checked
+    email: document.querySelector('#candidate-email').value,
+    checked: document.querySelector('input[name="newsletter"]').checked,
+    fileName: document.querySelector('#candidate-resume').files?.[0]?.name || ''
   }));
   assert.equal(values.decoy, '');
+  assert.equal(values.hidden, '');
   assert.equal(values.selected, f.resumeRevision.document.identity.name);
+  assert.equal(values.email, f.resumeRevision.document.identity.email);
   assert.equal(values.checked, false);
+  assert.equal(values.fileName, path.basename(f.resumePdfPath));
   const checkbox = inspected.fieldMap.fields.find(field => field.control === 'checkbox');
   assert.equal(readback.find(item => item.fieldKey === checkbox.fieldKey).status, 'equal');
 });
@@ -1349,14 +1328,12 @@ test('W02 stale, prevented, unchanged, and unrelated-origin confirmation evidenc
     ]) {
       const f = await configuredSubmissionFixture(t, scenario.path);
       const beforeStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
-      const result = await submitApplicationForm(f.store, {
-        packetId: f.packet.id,
-        checkpointId: f.checkpoint.checkpointId,
-        workspace: f.root,
-        browserProfile: f.browserProfile,
-        allowSubmit: true,
-        navigationTimeoutMs: 1_000
-      });
+      const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+      checkpointId: f.checkpoint.checkpointId,
+      workspace: f.root,
+      browserProfile: f.browserProfile,
+      allowSubmit: true,
+      navigationTimeoutMs: 1_000, protectRequests: false });
       assert.equal(result.status, 'uncertain', scenario.path);
       assert.equal(result.submissionPerformed, null, scenario.path);
       assert.equal(f.server.state.submits, scenario.submits, scenario.path);
@@ -1374,24 +1351,20 @@ test('W02 post-click 422 remains uncertain and replay-blocked after exactly one 
   const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
   process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
   try {
-    const result = await submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true,
-      navigationTimeoutMs: 1_000
-    });
+    const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true,
+    navigationTimeoutMs: 1_000, protectRequests: false });
     assert.equal(result.status, 'uncertain');
     assert.equal(result.externalSideEffects, 'user_configured_form_submission');
     assert.equal(f.server.state.submits, 1);
-    await assert.rejects(() => submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    }), error => error.code === 'submission_replay_blocked');
+    await assert.rejects(() => submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false }), error => error.code === 'submission_replay_blocked');
     assert.equal(f.server.state.submits, 1);
   } finally {
     if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
@@ -1406,13 +1379,11 @@ test('W02 secret-shaped confirmation references never reach SQLite audits mirror
   process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
   try {
     const beforeStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
-    const result = await submitApplicationForm(f.store, {
-      packetId: f.packet.id,
-      checkpointId: f.checkpoint.checkpointId,
-      workspace: f.root,
-      browserProfile: f.browserProfile,
-      allowSubmit: true
-    });
+    const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false });
     assert.equal(result.status, 'uncertain');
     assert.equal(JSON.stringify(result).includes(sentinel), false);
     assert.equal(Buffer.from(f.store.db.export()).includes(Buffer.from(sentinel)), false);
@@ -1432,17 +1403,38 @@ test('W02 confirmed configured submission advances a pre-apply application statu
   try {
     const beforeStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
     assert.equal(['saved', 'researching', 'materials-ready'].includes(beforeStatus), true);
+    const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+    checkpointId: f.checkpoint.checkpointId,
+    workspace: f.root,
+    browserProfile: f.browserProfile,
+    allowSubmit: true, protectRequests: false });
+    assert.equal(result.status, 'confirmed');
+    assert.equal(result.submissionPerformed, true);
+    const afterStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
+    assert.equal(afterStatus, 'applied');
+  } finally {
+    if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
+    else process.env.JOBOS_FORM_SUBMIT_ENABLED = previousSubmit;
+  }
+});
+
+test('validated confirmation on a login-shaped URL is not discarded by the generic auth heuristic', async t => {
+  const f = await configuredSubmissionFixture(t, '/application-login-confirmation.html');
+  const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
+  process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
+  try {
     const result = await submitApplicationForm(f.store, {
       packetId: f.packet.id,
       checkpointId: f.checkpoint.checkpointId,
       workspace: f.root,
       browserProfile: f.browserProfile,
-      allowSubmit: true
+      allowSubmit: true,
+      protectRequests: false
     });
     assert.equal(result.status, 'confirmed');
-    assert.equal(result.submissionPerformed, true);
-    const afterStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
-    assert.equal(afterStatus, 'applied');
+    assert.equal(result.outcome.confirmationPath, '/login/complete');
+    assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM application_receipts').count, 1);
+    assert.equal(one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status, 'applied');
   } finally {
     if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
     else process.env.JOBOS_FORM_SUBMIT_ENABLED = previousSubmit;
@@ -1457,13 +1449,11 @@ test('W02 confirmed configured submission never regresses recruiter-screen inter
       const f = await configuredSubmissionFixture(t);
       run(f.store, 'UPDATE applications SET status=? WHERE id=?', [postApplyStatus, f.packet.applicationId]);
       save(f.store);
-      const result = await submitApplicationForm(f.store, {
-        packetId: f.packet.id,
-        checkpointId: f.checkpoint.checkpointId,
-        workspace: f.root,
-        browserProfile: f.browserProfile,
-        allowSubmit: true
-      });
+      const result = await submitApplicationForm(f.store, { packetId: f.packet.id,
+      checkpointId: f.checkpoint.checkpointId,
+      workspace: f.root,
+      browserProfile: f.browserProfile,
+      allowSubmit: true, protectRequests: false });
       assert.equal(result.status, 'confirmed', postApplyStatus);
       assert.equal(result.submissionPerformed, true, postApplyStatus);
       const afterStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;

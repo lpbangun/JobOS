@@ -463,7 +463,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     profileId: args.profileId,
     url: args.url,
     browserProfile: args.browserProfile || 'default',
-    expectedAdapterHash: args.expectedAdapterHash || null
+    expectedAdapterHash: args.expectedAdapterHash || null,
+    protectRequests: options.protectRequests !== false
   });
   if (name === 'application_form_show') return getFormSnapshot(s, args.snapshotId);
   if (name === 'assist_application_form') {
@@ -482,7 +483,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       browserProfile: args.browserProfile || 'default',
       allowSideEffects: args.allowSideEffects === true,
       adapterManifest: DOM_ADAPTER_MANIFEST,
-      expectedAdapterHash: args.expectedAdapterHash || null
+      expectedAdapterHash: args.expectedAdapterHash || null,
+      protectRequests: options.protectRequests !== false
     });
   }
   if (name === 'checkpoint_application_form') return checkpointApplicationForm(s, {
@@ -508,7 +510,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       browserProfile: args.browserProfile || 'default',
       allowSubmit: args.allowSubmit === true,
       invokedBy: source,
-      expectedAdapterHash: args.expectedAdapterHash || null
+      expectedAdapterHash: args.expectedAdapterHash || null,
+      protectRequests: options.protectRequests !== false
     });
   }
   if (name === 'create_application_packet') {

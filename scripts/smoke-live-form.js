@@ -12,23 +12,19 @@ async function withFixtureFlow(mode) {
     const fixture = await seedW02Workspace(context);
     const server = await startFormServer(context);
     const browserProfile = `smoke-${mode}`;
-    const snapshot = await inspectLiveForm(fixture.store, {
-      jobId: fixture.job.id,
-      profileId: fixture.profile.id,
-      url: server.url('/application-configured.html'),
-      browserProfile
-    });
+    const snapshot = await inspectLiveForm(fixture.store, { jobId: fixture.job.id,
+    profileId: fixture.profile.id,
+    url: server.url('/application-configured.html'),
+    browserProfile, protectRequests: false });
     const packet = createApplicationPacket(fixture.store, {
       jobId: fixture.job.id,
       profileId: fixture.profile.id,
       createdBy: 'cli'
     });
-    const fill = await fillApplicationForm(fixture.store, {
-      packetId: packet.id,
-      workspace: fixture.root,
-      browserProfile,
-      allowSideEffects: true
-    });
+    const fill = await fillApplicationForm(fixture.store, { packetId: packet.id,
+    workspace: fixture.root,
+    browserProfile,
+    allowSideEffects: true, protectRequests: false });
     const checkpoint = checkpointApplicationForm(fixture.store, {
       packetId: packet.id,
       fillRunId: fill.fillRunId,
@@ -49,14 +45,12 @@ async function withFixtureFlow(mode) {
       }
       return { mode, snapshotId: snapshot.snapshotId, packetId: packet.id, fillRunId: fill.fillRunId, checkpointId: checkpoint.checkpointId, receiptState: showApplicationPacket(fixture.store, packet.id).receiptState, submissionPerformed: false, externalSideEffects: 'none', submitCount: server.state.submits };
     }
-    const submission = await submitApplicationForm(fixture.store, {
-      packetId: packet.id,
-      checkpointId: checkpoint.checkpointId,
-      workspace: fixture.root,
-      browserProfile,
-      allowSubmit: true,
-      invokedBy: 'cli'
-    });
+    const submission = await submitApplicationForm(fixture.store, { packetId: packet.id,
+    checkpointId: checkpoint.checkpointId,
+    workspace: fixture.root,
+    browserProfile,
+    allowSubmit: true,
+    invokedBy: 'cli', protectRequests: false });
     if (submission.status !== 'confirmed' || submission.submissionPerformed !== true || submission.externalSideEffects !== 'user_configured_form_submission') {
       throw new Error(`Configured smoke flow was not confirmed honestly: ${submission.status}`);
     }

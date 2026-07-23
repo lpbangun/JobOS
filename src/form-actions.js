@@ -4,7 +4,7 @@ import path from 'node:path';
 import { all, guardedWrite, one, run } from './db.js';
 import { withAuthenticatedPage } from './browser.js';
 import { DOM_ADAPTER_MANIFEST, inspectApplicationFormOnPage, validateAdapterManifest } from './form-browser.js';
-import { getFormSnapshot, normalizeFrameKey } from './forms.js';
+import { bindFormSnapshotTarget, getFormSnapshot, getPrivateFormTarget, normalizeFrameKey } from './forms.js';
 import { canonicalJson, packetContentHash, showApplicationPacket } from './packets.js';
 import { id, now, parseJson } from './utils.js';
 
@@ -221,7 +221,9 @@ export async function fillApplicationForm(s, {
   adapterManifest = DOM_ADAPTER_MANIFEST,
   expectedAdapterHash = null,
   playwright,
-  navigationTimeoutMs
+  navigationTimeoutMs,
+  protectRequests = true,
+  networkPolicyOptions
 } = {}) {
   const packet = assertCurrentPacket(s, packetId);
   const policy = validateFormFillAuthorization(s, { profileId: packet.profileId, allowSideEffects });
@@ -235,8 +237,8 @@ export async function fillApplicationForm(s, {
     expectedSourceHash: packetAdapter.sourceHash
   });
   const frozenSnapshot = getFormSnapshot(s, packet.form.snapshotId, { raw: false });
-  const url = `${frozenSnapshot.target.finalOrigin}${frozenSnapshot.target.finalPath}`;
-  const result = await withAuthenticatedPage({ workspace, name: browserProfile, url, playwright, headless: true, createIfMissing: true, navigationTimeoutMs }, async ({ page }) => {
+  const url = getPrivateFormTarget(s, packet.form.snapshotId).requestedUrl;
+  const result = await withAuthenticatedPage({ workspace, name: browserProfile, url, playwright, headless: true, createIfMissing: true, navigationTimeoutMs, protectRequests, networkPolicyOptions }, async ({ page }) => {
     const inspected = await inspectApplicationFormOnPage({
       page,
       requestedUrl: url,
@@ -245,6 +247,7 @@ export async function fillApplicationForm(s, {
       adapterManifest: adapter,
       expectedAdapterHash: adapter.sourceHash
     });
+    bindFormSnapshotTarget(s, inspected);
     if (inspected.fingerprint !== packet.form.formFingerprint) {
       throw actionError('form_fingerprint_stale', 'The live form changed after packet freeze; re-inspect and freeze a new packet', {
         packetFingerprint: packet.form.formFingerprint,

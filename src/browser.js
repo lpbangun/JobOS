@@ -3,6 +3,7 @@ import { constants as FS_CONSTANTS, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { now, workspaceRoot } from './utils.js';
+import { createBrowserNetworkPolicy } from './browser-network-policy.js';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -343,7 +344,7 @@ async function loadPlaywright(injected, { optional = false, profileName } = {}) 
   }
 }
 
-async function launchPersistent(profilePath, profileName, { playwright, headless }) {
+async function launchPersistent(profilePath, profileName, { playwright, headless, launchOptions = {} }) {
   const loaded = await loadPlaywright(playwright, { profileName });
   if (!headless && !loaded.injected && process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     throw browserError('browser_unavailable', 'Headed browser login requires a display. Import cookies on this host or run login in a desktop session.', {
@@ -353,9 +354,11 @@ async function launchPersistent(profilePath, profileName, { playwright, headless
   try {
     return await loaded.api.chromium.launchPersistentContext(profilePath, {
       acceptDownloads: false,
-      headless
+      headless,
+      ...launchOptions
     });
-  } catch {
+  } catch (error) {
+    if (error?.code) throw error;
     throw browserError('browser_unavailable', 'Chromium could not start for this browser command.', {
       recovery: unavailableRecovery(profileName)
     });
@@ -828,7 +831,10 @@ export async function withAuthenticatedPage({
   playwright,
   headless = true,
   createIfMissing = false,
-  navigationTimeoutMs = NAVIGATION_TIMEOUT_MS
+  navigationTimeoutMs = NAVIGATION_TIMEOUT_MS,
+  protectRequests = false,
+  networkPolicyOptions = {},
+  postOperationValidator = null
 } = {}, operation) {
   if (typeof operation !== 'function') throw browserError('browser_operation_required', 'A bounded browser operation is required.');
   const profileName = requireSafeName(name, 'profile name');
@@ -847,13 +853,30 @@ export async function withAuthenticatedPage({
     profile = await existingProfile(paths, profileName);
   }
   let context;
+  let policy;
   try {
-    context = await launchPersistent(profile.profilePath, profileName, { playwright, headless });
+    if (protectRequests) {
+      policy = await createBrowserNetworkPolicy({ ownedOrigin: requestedUrl.origin, ...networkPolicyOptions });
+    }
+    context = await launchPersistent(profile.profilePath, profileName, {
+      playwright,
+      headless,
+      launchOptions: policy ? {
+        proxy: { server: policy.proxyServer },
+        serviceWorkers: 'block',
+        args: ['--disable-quic']
+      } : {}
+    });
+    if (policy) await policy.install(context);
     const page = await pageForContext(context, { profileName });
     const response = await navigate(page, requestedUrl, timeoutMs, profileName);
     await assertPageAccessible(page, response, profileName, requestedUrl);
     const result = await operation({ page, context, response, requestedUrl, profileName });
-    await assertPageAccessible(page, response, profileName, requestedUrl);
+    const postValidated = typeof postOperationValidator === 'function'
+      ? await postOperationValidator({ result, page, context, response, requestedUrl, profileName }) === true
+      : false;
+    if (!postValidated) await assertPageAccessible(page, response, profileName, requestedUrl);
+    if (policy) await policy.seal();
     const timestamp = now();
     await saveProfileMetadata(profile.profilePath, {
       ...profile.metadata,
@@ -864,6 +887,7 @@ export async function withAuthenticatedPage({
     return result;
   } finally {
     await closeContext(context);
+    await policy?.close?.();
   }
 }
 

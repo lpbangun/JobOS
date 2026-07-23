@@ -2,7 +2,7 @@ import { guardedWrite, one, run, queuePostCommit, recordAudit, projectAudit } fr
 import { withAuthenticatedPage } from './browser.js';
 import { DOM_ADAPTER_MANIFEST, DOM_CONFIRMATION_POLICY, inspectApplicationFormOnPage, validateAdapterManifest } from './form-browser.js';
 import { applyBoundFormFields } from './form-actions.js';
-import { getFormSnapshot, normalizeFrameKey } from './forms.js';
+import { bindFormSnapshotTarget, getFormSnapshot, getPrivateFormTarget, normalizeFrameKey } from './forms.js';
 import { canonicalJson, packetContentHash, showApplicationPacket } from './packets.js';
 import { planApplication } from './readiness.js';
 import { syncJob } from './jobs.js';
@@ -204,7 +204,9 @@ export async function submitApplicationForm(s, {
   adapterManifest = DOM_ADAPTER_MANIFEST,
   expectedAdapterHash = null,
   playwright,
-  navigationTimeoutMs
+  navigationTimeoutMs,
+  protectRequests = true,
+  networkPolicyOptions
 } = {}) {
   if (!['cli', 'tui', 'mcp', 'acp'].includes(invokedBy)) throw submissionError('invalid_submission_source', `Unsupported submission source: ${invokedBy}`);
   const packet = showApplicationPacket(s, packetId);
@@ -260,11 +262,22 @@ export async function submitApplicationForm(s, {
   if (attempt.status === 'confirmed') return { ...attemptView(attempt), idempotent: true };
 
   const frozenSnapshot = getFormSnapshot(s, packet.form.snapshotId);
-  const url = `${frozenSnapshot.target.finalOrigin}${frozenSnapshot.target.finalPath}`;
+  const url = getPrivateFormTarget(s, packet.form.snapshotId).requestedUrl;
   let boundaryInvoked = false;
   let outcome;
   try {
-    outcome = await withAuthenticatedPage({ workspace, name: browserProfile, url, playwright, headless: !(packet.form.humanActionFieldKeys || []).length, createIfMissing: true, navigationTimeoutMs }, async ({ page }) => {
+    outcome = await withAuthenticatedPage({
+      workspace,
+      name: browserProfile,
+      url,
+      playwright,
+      headless: !(packet.form.humanActionFieldKeys || []).length,
+      createIfMissing: true,
+      navigationTimeoutMs,
+      protectRequests,
+      networkPolicyOptions,
+      postOperationValidator: ({ result }) => result?.status === 'confirmed'
+    }, async ({ page }) => {
       const inspected = await inspectApplicationFormOnPage({
         page,
         requestedUrl: url,
@@ -273,6 +286,7 @@ export async function submitApplicationForm(s, {
         adapterManifest: adapter,
         expectedAdapterHash: adapter.sourceHash
       });
+      bindFormSnapshotTarget(s, inspected);
       if (inspected.fingerprint !== packet.form.formFingerprint) throw submissionError('form_fingerprint_stale', 'The live form changed after checkpoint');
       const readback = await applyBoundFormFields(s, page, packet, inspected);
       const failed = readback.filter(item => !['equal', 'present-human'].includes(item.status)).map(item => item.fieldKey);

@@ -62,6 +62,7 @@ const ROUTES = {
   '/application-changed.html': 'application-changed.html',
   '/application-unsupported.html': 'application-unsupported.html',
   '/application-configured.html': 'application-configured.html',
+  '/application-login-confirmation.html': 'application-login-confirmation.html',
   '/application-uncertain.html': 'application-uncertain.html',
   '/application-preexisting.html': 'application-preexisting.html',
   '/application-prevented.html': 'application-prevented.html',
@@ -73,12 +74,13 @@ const ROUTES = {
   '/application-opaque-frame.html': 'application-opaque-frame.html',
   '/captcha.html': 'captcha.html',
   '/login.html': 'login.html',
+  '/login/complete': 'confirmation.html',
   '/confirmation.html': 'confirmation.html',
   '/confirmation-secret.html': 'confirmation-secret.html',
   '/ambiguous.html': 'ambiguous.html'
 };
 
-const VALID_OUTCOMES = new Set(['confirmed', 'failed-before-submit', 'uncertain', 'unrelated', 'secret']);
+const VALID_OUTCOMES = new Set(['confirmed', 'login-confirmed', 'failed-before-submit', 'uncertain', 'unrelated', 'secret']);
 
 /**
  * Start a deterministic localhost form-fixture server for a node:test context.
@@ -138,7 +140,9 @@ export function startFormServer(t) {
           ? '/ambiguous.html'
           : outcome === 'secret'
             ? '/confirmation-secret.html'
-            : '/confirmation.html';
+            : outcome === 'login-confirmed'
+              ? '/login/complete'
+              : '/confirmation.html';
         const location = outcome === 'unrelated'
           ? `http://localhost:${String(req.headers.host || '').split(':').at(-1)}${target}`
           : target;
