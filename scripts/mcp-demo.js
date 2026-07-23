@@ -175,9 +175,11 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
     ok: initialize?.result?.serverInfo?.name === 'jobos'
       && toolNames.includes('score_job')
       && toolNames.includes('get_job_context')
-      && Number.isFinite(score?.overall)
-      && mediatedContext?.fit?.overall === score.overall
-      && after.context.fit?.overall === score.overall
+      && score?.contract === 'jobos.fit-score.v1'
+      && mediatedContext?.fit?.contract === score.contract
+      && mediatedContext.fit.overall === score.overall
+      && after.context.fit?.contract === score.contract
+      && after.context.fit.overall === score.overall
       && after.scoreAudits > before.scoreAudits
       && exit?.code === 0,
     workspace: root,

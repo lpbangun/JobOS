@@ -9,6 +9,7 @@ import { listPersonCandidates } from './research/contacts.js';
 import { due } from './tracking.js';
 import { outreachDue } from './outreach.js';
 import { requirementTextsForJob } from './requirements.js';
+import { compareFitDecisions } from './scoring.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set([
   'saved',
@@ -333,7 +334,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
+    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions) },
     networkSetup: {
       status: networkSetupStatus,
       intent: {

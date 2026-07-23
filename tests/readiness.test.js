@@ -51,6 +51,16 @@ function fixtureFile(root, name, content) {
   writeFileSync(p, content, 'utf8');
   return p;
 }
+function fitPreferences(root) {
+  return fixtureFile(root, 'fit-preferences.json', JSON.stringify({
+    targetRoleFamilies: ['Senior Product Manager'],
+    industries: ['EdTech', 'learning'],
+    locations: ['Remote US'],
+    workModel: 'remote',
+    missionKeywords: ['learning', 'educators']
+  }));
+}
+
 
 // ── SETUP ────────────────────────────────────────────────────────────
 
@@ -204,9 +214,9 @@ test('readiness: plan contains all top-level shape fields', () => {
   assert.ok(plan.mirrorPath.endsWith('application-readiness.yaml'));
 });
 
-// ── Blocked plan — missing score, proofs, resume ──────────────────────
+// ── Blocked plan — missing proofs and resume; fit remains advisory ────
 
-test('readiness: blocked plan when score, proofs, and resume are missing', () => {
+test('readiness: missing fit metadata does not block when proofs and resume are missing', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_SHORT);
   out(['profile', 'create', 'PM', '--from-resume', resume]);
@@ -224,11 +234,11 @@ test('readiness: blocked plan when score, proofs, and resume are missing', () =>
   assert.equal(plan.materials.resume.status, 'missing');
   assert.equal(plan.materials.coverLetter.status, 'missing');
 
-  // Blockers for each missing item
+  // Proof and resume are blockers; fit metadata is advisory only.
   const blockerCodes = plan.blockers.map(b => b.code);
   assert.ok(blockerCodes.includes('missing_proofs'), 'missing_proofs blocker');
-  assert.ok(blockerCodes.includes('missing_score'), 'missing_score blocker');
   assert.ok(blockerCodes.includes('missing_resume_material'), 'missing_resume_material blocker');
+  assert.equal(blockerCodes.some(code => ['missing_score', 'legacy_fit_score', 'insufficient_fit_evidence'].includes(code)), false);
 
   // Each blocker has machine-readable code and concrete next action
   for (const b of plan.blockers) {
@@ -242,7 +252,7 @@ test('readiness: blocked plan when score, proofs, and resume are missing', () =>
 test('readiness: synthetic question gaps remain advisory until the live form is inspected', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', fitPreferences(root)]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
 
@@ -286,7 +296,7 @@ test('readiness: synthetic question gaps remain advisory until the live form is 
 test('readiness: ready-for-review with score, proofs, resume, matched ordinary, and direct-input restricted answers', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', fitPreferences(root)]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
 
@@ -373,7 +383,7 @@ test('readiness: ready-for-review with score, proofs, resume, matched ordinary, 
 test('readiness: current human-approved resume transitions ready-for-review to materials-ready, then a redraft returns it to ready-for-review', async () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', fitPreferences(root)]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
   const { openStore, one, run, save } = await import('../src/db.js');
@@ -475,7 +485,7 @@ test('readiness: current human-approved resume transitions ready-for-review to m
 test('readiness: nextAction walks inspect → freeze → attest → confirm-receipt instead of the readiness dead end', async () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.json', SAMPLE_RESUME_FULL);
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', fitPreferences(root)]);
   const job = fixtureFile(root, 'job.md', SAMPLE_JOB);
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
   const { openStore, one, run, save } = await import('../src/db.js');
@@ -709,10 +719,11 @@ test('readiness: CLI and MCP return equivalent plan on stable fields', async () 
     return true;
   };
   process.stdout.write = captureWrite;
+  let mcpSession;
   try {
     const input = new Readable({ read() { this.push(framed); this.push(null); } });
-    startMcp(s, { input });
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    mcpSession = startMcp(s, { input });
+    await mcpSession.completed;
     process.stdout.write = originalWrite;
 
     const responses = [];
@@ -763,6 +774,7 @@ test('readiness: CLI and MCP return equivalent plan on stable fields', async () 
       assert.equal(mcpPlan.blockers[i].code, cliPlan.blockers[i].code);
     }
   } finally {
+    mcpSession?.close();
     process.stdout.write = originalWrite;
   }
 });

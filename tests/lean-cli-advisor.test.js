@@ -822,10 +822,11 @@ test('MCP answers_match tool returns structured match result', async () => {
   const originalWrite = process.stdout.write.bind(process.stdout);
   const captureWrite = (chunk) => { output += chunk; return true; };
   process.stdout.write = captureWrite;
+  let mcpSession;
   try {
     const input = new Readable({ read() { this.push(framed); this.push(null); } });
-    startMcp(s, { input });
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    mcpSession = startMcp(s, { input });
+    await mcpSession.completed;
     process.stdout.write = originalWrite;
     // Parse the response(s) from output stream
     const responses = output.split('\r\n\r\n').filter(Boolean).map(chunk => {
@@ -841,9 +842,9 @@ test('MCP answers_match tool returns structured match result', async () => {
     const content = callResult.result.content[0].text;
     const parsed = JSON.parse(content);
     assert.equal(parsed.profileId, 'pm');
-  } catch (e) {
+  } finally {
+    mcpSession?.close();
     process.stdout.write = originalWrite;
-    throw e;
   }
 });
 
@@ -864,7 +865,12 @@ test('concurrent writer: lock file cleaned up after write, revision increments',
 test('score works with matching profile', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.md', '- Built a thing.\n');
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  const preferences = fixtureFile(root, 'preferences.json', JSON.stringify({
+    targetRoleFamilies: ['Senior Product Manager'],
+    industries: ['product'],
+    missionKeywords: ['product', 'strategy']
+  }));
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', preferences]);
   const job = fixtureFile(root, 'job.md', '# Senior Product Manager at Acme Corp\nRemote. Lead product strategy.');
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
   const result = out(['score', imported.id, '--profile', 'pm']);

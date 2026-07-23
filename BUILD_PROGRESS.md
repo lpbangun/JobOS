@@ -43,9 +43,11 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Policy migration from obsolete `human_approval_required` wording to `user_configured`; external effects remain disabled until configured/enabled.
 - Explicit `JOBOS_SEARCH_PROVIDER=none` mode for deterministic offline pursuit and research.
 - MCP additions: `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, and redacted packet list/show/diff inspection. Always-denied human mutations are omitted from the MCP catalog and remain denied at the service boundary.
+- MCP stdio framing keeps one active request, pauses input, bounds headers/bodies, rejects oversized or incomplete frames, and closes atomically after the running request while dropping buffered work.
 - The obsolete, unmounted HTTP API implementation is removed; CLI/TUI and MCP remain the supported human and agent surfaces.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
 - Live-form/packet bridge: deterministic semantic form and adapter fingerprints; main/iframe inspection; restricted/legal/unsupported human ownership; exact W01 identity/material and answer-row bindings; readiness v4; packet v2; fill/read-back without persisted values; trusted checkpoints; replay-safe configured submission; honest uncertain outcomes; and bound adapter/manual receipt evidence across CLI, TUI, MCP, and ACP mediation.
+- Live-form hardening: exact targets are encrypted under a workspace-private key while public snapshots remain query-secret-safe; Chromium routing pins public DNS, freezes main-frame origin, blocks service workers/WebSockets, and seals before persistence; structural locators use absolute selected-form ordinals; validated confirmations outrank generic login-URL heuristics.
 - Canonical `people`, profile/person affiliations, durable `research_runs`, and run-source joins with an idempotent migration that preserves contact, edge, stakeholder, and outreach-plan references.
 - Identity resolution by canonical profile URL and then exact imported email; same-name records never merge automatically.
 - User-exported LinkedIn connection import with tier `U` unapproved contacts, idempotent direct edges, skipped-row warnings, local mirrors, and privacy-safe audit metadata.
@@ -65,7 +67,7 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
-- `npm test`: **310/310 passed** on 2026-07-23 after final W02 remediation and integration, including populated-v1 migration, semantic packet idempotency/diff, restricted-field and file-hash safety, honest uncertainty, W01 artifact identity, W03 compatibility, CLI, TUI, ACP, and MCP regressions.
+- `npm test`: **368/368 passed** on 2026-07-23 after live-form/browser/MCP hardening, including private exact-target migration, public snapshot privacy, pinned protected routing, locator alignment, confirmed login-shaped outcomes, catch-all exact-contact handling, and leadership LaTeX semantics.
 - `npm test`: **265/265 passed** on 2026-07-22, including discovery-integrity retry/budget/isolation/liveness/gate contracts, status-namespace, canonical outreach-due semantics, MCP catalog, removed-API, workflow-help and TUI-command vocabulary, watchlist consolidation, CLI compatibility, and all established CLI, TUI, ACP, MCP, readiness, research, outreach, and workflow checks.
 - `npm run smoke` and `npm run smoke:live-form`: passed on 2026-07-23. The general clean-workspace smoke reaches materials-ready → form-ready → packet/manual receipt confirmation; the real Chromium live-form smoke proves one-submit manual (`externalSideEffects: none`) and configured (`user_configured_form_submission`) paths.
 - W05 targeted acceptance: **52/52 passed** on 2026-07-23 across confidence, migration, role-aware outreach, append-only outcomes, weekly review, CLI/domain tools, W01 proof grounding, W03 source integrity, and post-review safety corrections.

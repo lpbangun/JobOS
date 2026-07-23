@@ -1,4 +1,4 @@
-import { score } from './scoring.js';
+import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit, score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
@@ -9,7 +9,7 @@ import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRu
 import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
 import { weekly } from './analytics.js';
 import { prepInterview } from './interview.js';
-import { getJobLiveness, getPostingLiveness, importUrl, listJobs } from './jobs.js';
+import { getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
 import { recentRuns, runAutomationByName } from './scheduler/core.js';
@@ -203,7 +203,18 @@ function enforcePolicy(name, args, options) {
 }
 
 
+function fitForRow(row) {
+  return deserializeFitScore(parseJson(row.score_json, null), {
+    persistedOverall: row.fit_score,
+    jobId: row.id,
+    profileId: row.profile_id
+  });
+}
+
 function publicJob(row) {
+  const fit = fitForRow(row);
+  const highFit = Boolean(row.high_fit) && qualifiesForHighFit(fit, 0);
+  const postingLiveness = getPostingLiveness(row);
   return {
     id: row.id,
     profileId: row.profile_id,
@@ -212,10 +223,11 @@ function publicJob(row) {
     location: row.location || '',
     source: row.source,
     discoveryStatus: row.status,
-    fitScore: row.fit_score == null ? null : Number(row.fit_score),
-    score: row.fit_score == null ? null : Number(row.fit_score),
-    highFit: Boolean(row.high_fit),
-    scoringMode: parseJson(row.score_json, {})?.mode || null,
+    fitScore: fit?.overall ?? null,
+    score: fit?.overall ?? null,
+    fit: fit ? { ...fit, highFit } : null,
+    highFit,
+    scoringMode: fit?.mode || null,
     applicationStatus: row.application_status || null,
     url: String(row.url || '').startsWith('jobos:text:') ? '' : (row.url || ''),
     compensation: parseJson(row.compensation_json, {}),
@@ -223,7 +235,7 @@ function publicJob(row) {
     employmentTypes: parseJson(row.employment_types_json, []),
     department: row.department || '',
     sourceNativeFields: parseJson(row.source_native_json, {}),
-    liveness: getJobLiveness(row),
+    postingLiveness,
     updatedAt: row.updated_at
   };
 }
@@ -237,7 +249,8 @@ export function listJobSummaries(s, {
     .filter(row => !profileId || row.profile_id === profileId)
     .filter(row => !discoveryStatus || row.status === discoveryStatus)
     .filter(row => !applicationStatus || row.application_status === applicationStatus)
-    .map(publicJob);
+    .map(publicJob)
+    .sort(compareFitDecisions);
 }
 
 export function reviewQueue(s, { profileId = null, jobId = null } = {}) {
@@ -264,7 +277,7 @@ export function selectedJobContext(s, jobId) {
   const job = one(s, `SELECT jobs.*,applications.id AS application_id,applications.status AS application_status
     FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id WHERE jobs.id=?`, [jobId]);
   if (!job) throw new DomainToolError('unknown_job', `Unknown job: ${jobId}`, { jobId });
-  const scoreData = parseJson(job.score_json, {});
+  const fitData = fitForRow(job);
   const tasks = all(s, "SELECT id,title,type,due_at,priority,status FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 8", [jobId])
     .map(row => ({ id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority }));
   const artifacts = all(s, `SELECT artifacts.*,
@@ -311,16 +324,12 @@ export function selectedJobContext(s, jobId) {
       employmentTypes: parseJson(job.employment_types_json, []),
       department: job.department || '',
       sourceNativeFields: parseJson(job.source_native_json, {}),
-      postingLiveness: getPostingLiveness(job),
     },
-    liveness: getPostingLiveness(job),
-    fit: job.fit_score == null ? null : {
-      overall: Number(job.fit_score),
-      highFit: Boolean(job.high_fit),
-      mode: scoreData.mode || 'unknown',
-      confidence: scoreData.confidence || null,
-      reasoning: scoreData.reasoning || ''
-    },
+    postingLiveness: getPostingLiveness(job),
+    fit: fitData ? {
+      ...fitData,
+      highFit: Boolean(job.high_fit) && qualifiesForHighFit(fitData, 0)
+    } : null,
     next: tasks,
     proofs,
     path: path ? {
@@ -452,7 +461,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     profileId: args.profileId,
     url: args.url,
     browserProfile: args.browserProfile || 'default',
-    expectedAdapterHash: args.expectedAdapterHash || null
+    expectedAdapterHash: args.expectedAdapterHash || null,
+    protectRequests: options.protectRequests !== false
   });
   if (name === 'application_form_show') return getFormSnapshot(s, args.snapshotId);
   if (name === 'assist_application_form') {
@@ -471,7 +481,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       browserProfile: args.browserProfile || 'default',
       allowSideEffects: args.allowSideEffects === true,
       adapterManifest: DOM_ADAPTER_MANIFEST,
-      expectedAdapterHash: args.expectedAdapterHash || null
+      expectedAdapterHash: args.expectedAdapterHash || null,
+      protectRequests: options.protectRequests !== false
     });
   }
   if (name === 'checkpoint_application_form') return checkpointApplicationForm(s, {
@@ -497,7 +508,8 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       browserProfile: args.browserProfile || 'default',
       allowSubmit: args.allowSubmit === true,
       invokedBy: source,
-      expectedAdapterHash: args.expectedAdapterHash || null
+      expectedAdapterHash: args.expectedAdapterHash || null,
+      protectRequests: options.protectRequests !== false
     });
   }
   if (name === 'create_application_packet') {

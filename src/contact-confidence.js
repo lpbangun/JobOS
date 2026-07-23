@@ -414,6 +414,7 @@ export function projectContactConfidenceV2(s, contact, { nowDate = new Date() } 
   const domain = { expectedDomains, observedEmailDomain: observedEmailDomain || null, matchState };
   const tier = derivedTier({ contact, domain, publicObservation, association, pattern, catchAll, nowDate });
   const freshness = tier.freshness;
+  const generatedRoute = contact.checks?.generated === true || /pattern_candidate/i.test(String(contact.verificationStatus || ''));
   const warnings = [];
   if (matchState === 'mismatch') warnings.push('Contact domain is unrelated to the company-controlled domain.');
   if (matchState === 'unknown' && ['email', 'generic_inbox'].includes(contact.type)) warnings.push('Company-domain alignment is unknown.');
@@ -437,7 +438,7 @@ export function projectContactConfidenceV2(s, contact, { nowDate = new Date() } 
   } else if (freshness.state === 'stale' || freshness.state === 'unknown') {
     usable = false;
     usabilityReason = freshness.state === 'stale' ? 'Evidence is stale and requires fresh verification.' : 'Evidence freshness is unknown.';
-  } else if (catchAll.state === 'detected') {
+  } else if (catchAll.state === 'detected' && generatedRoute) {
     usable = false;
     usabilityReason = 'Catch-all detection keeps this generated route human-review-only and not outreach-ready.';
   } else if (tier.evidenceTier === 'D' && !(contact.type === 'generic_inbox' && contact.checks?.exactPublic && domain.matchState === 'match')) {

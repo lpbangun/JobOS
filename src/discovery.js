@@ -3,9 +3,9 @@ import { all, one, run, save, audit } from './db.js';
 import { id, now, parseJson, slug, splitCsv } from './utils.js';
 import { writeYaml, writeMd } from './workspace.js';
 import { importNormalized, syncJob } from './jobs.js';
-import { score } from './scoring.js';
+import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit, score } from './scoring.js';
 import { getAdapter } from './discovery/adapters.js';
-import { classifyLiveness, deserializeLiveness, normalizeLiveness } from './discovery/liveness.js';
+import { classifyLiveness, deserializeLiveness, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
 import { createDiscoveryBudget } from './discovery/http.js';
 
 function parseConfig(value) {
@@ -367,6 +367,8 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
             score: null,
             highFit: false,
             liveness,
+            fit: null,
+            postingLiveness: postingLivenessHandoff(liveness),
             error: null
           });
           continue;
@@ -378,7 +380,7 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
           now: runOptions.now
         });
         outputs.counts.scored += 1;
-        const highFit = Number(sc.overall || 0) >= Number(row.min_fit || 70);
+        const highFit = qualifiesForHighFit(sc, Number(row.min_fit || 70));
         run(s, 'UPDATE jobs SET high_fit=?, updated_at=? WHERE id=?', [highFit ? 1 : 0, now(), imported.job.id]);
         syncJob(s, imported.job.id);
         outputs.counts.highFit += highFit ? 1 : 0;
@@ -392,7 +394,9 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
           deduped: !imported.created,
           score: sc.overall,
           highFit,
-          liveness: sc.postingLiveness || liveness,
+          liveness,
+          fit: sc,
+          postingLiveness: sc.postingLiveness || postingLivenessHandoff(liveness),
           error: null
         });
       } catch (error) {
@@ -424,6 +428,8 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
             score: null,
             highFit: false,
             liveness: failedLiveness,
+            fit: null,
+            postingLiveness: postingLivenessHandoff(failedLiveness),
             error: structured
           });
         } else {
@@ -438,6 +444,8 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
             score: null,
             highFit: false,
             liveness: failedLiveness,
+            fit: null,
+            postingLiveness: postingLivenessHandoff(failedLiveness),
             error: structured
           });
         }
@@ -457,6 +465,7 @@ export async function runSavedSearch(s, searchRef, opts = {}) {
     outputs.metadata.truncated = true;
     outputs.metadata.reason ||= budgetSnapshot.reason;
   }
+  outputs.jobs.sort(compareFitDecisions);
   outputs.status = deriveDiscoveryStatus(outputs);
   outputs.finishedAt = now();
   recordAutomationRun(s, outputs, opts);
@@ -488,19 +497,38 @@ export function discoveryRuns(s) {
 }
 
 export function reviewQueue(s) {
-  return all(s, "SELECT * FROM jobs WHERE status='new' ORDER BY high_fit DESC, fit_score DESC, created_at DESC").map(j => ({ ...j, score: parseJson(j.score_json, null), sourceHistory: parseJson(j.source_history_json, []), liveness: deserializeLiveness(j) }));
+  return all(s, "SELECT * FROM jobs WHERE status='new'").map(job => {
+    const fit = deserializeFitScore(parseJson(job.score_json, null), { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id });
+    return {
+      ...job,
+      score: fit,
+      fit,
+      postingLiveness: postingLivenessHandoff(deserializeLiveness(job)),
+      sourceHistory: parseJson(job.source_history_json, []),
+      liveness: deserializeLiveness(job)
+    };
+  }).sort(compareFitDecisions);
 }
 
 export function recommendResearchForJobs(s, { profileId, limit = 5 }) {
-  const highFitJobs = all(s, `SELECT jobs.*, applications.status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id AND applications.profile_id=? WHERE jobs.profile_id=? AND jobs.high_fit=1 AND COALESCE(jobs.liveness_status,'uncertain')<>'expired' AND (applications.id IS NULL OR applications.status IN ('researching','saved','materials-ready','applied')) ORDER BY jobs.fit_score DESC LIMIT ?`, [profileId, profileId, limit]);
-  return highFitJobs.map(job => ({
+  const candidates = all(s, `SELECT jobs.*, applications.status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id AND applications.profile_id=? WHERE jobs.profile_id=? AND jobs.high_fit=1 AND COALESCE(jobs.liveness_status,'uncertain')<>'expired' AND (applications.id IS NULL OR applications.status IN ('researching','saved','materials-ready','applied')) ORDER BY jobs.fit_score DESC, jobs.id`, [profileId, profileId]);
+  return candidates.map(job => ({
     jobId: job.id,
-    title: job.title,
-    company: job.company,
-    fitScore: job.fit_score,
-    nextAction: `jobos research people --scope job --job ${job.id} --profile ${profileId} --depth standard`,
-    label: `High-fit job "${job.title}" at ${job.company} (${job.fit_score}/100) has no fresh people-research run.`
-  }));
+    job,
+    fit: deserializeFitScore(parseJson(job.score_json, null), { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id }),
+    postingLiveness: postingLivenessHandoff(deserializeLiveness(job))
+  }))
+    .filter(({ fit }) => qualifiesForHighFit(fit, 0))
+    .sort(compareFitDecisions)
+    .slice(0, limit)
+    .map(({ job, fit }) => ({
+      jobId: job.id,
+      title: job.title,
+      company: job.company,
+      fitScore: fit.overall,
+      nextAction: `jobos research people --scope job --job ${job.id} --profile ${profileId} --depth standard`,
+      label: `High-fit job "${job.title}" at ${job.company} (${fit.overall}/100) has no fresh people-research run.`
+    }));
 }
 
 export function configFromFlags(flags = {}) {

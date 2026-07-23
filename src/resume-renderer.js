@@ -33,7 +33,9 @@ function roleFamilyFor(job) {
   return 'professional';
 }
 export function resolveLayoutProfile(job, options = {}) {
-  const roleFamily = PROFILE_ORDERS[options.layout] ? options.layout : roleFamilyFor(job);
+  const roleFamily = PROFILE_ORDERS[options.layout]
+    ? options.layout
+    : PROFILE_ORDERS[options.roleFamily] ? options.roleFamily : roleFamilyFor(job);
   const requestedOrder = Array.isArray(options.sectionOrder) ? options.sectionOrder : PROFILE_ORDERS[roleFamily];
   const sectionOrder = [...new Set(requestedOrder.filter(sectionName => ALLOWED_SECTIONS.has(sectionName)))];
   for (const sectionName of PROFILE_ORDERS[roleFamily]) if (!sectionOrder.includes(sectionName)) sectionOrder.push(sectionName);

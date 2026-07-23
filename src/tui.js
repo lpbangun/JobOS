@@ -182,6 +182,13 @@ function mergeColumns(columns, widths, color, separator = '│') {
   return output;
 }
 
+function fitLabel(fit) {
+  if (!fit) return 'unscored';
+  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy unknown' : `legacy ${fit.overall}/100`;
+  if (fit.overall == null) return 'unknown';
+  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' review' : ''}`;
+}
+
 function filteredJobs(model, filter) {
   if (filter === 'all') return model.jobs;
   if (filter === 'today') return model.jobs.filter(job => job.next || ['new', 'imported', 'interview'].includes(job.stage));
@@ -293,10 +300,10 @@ function listPanel(model, state, width, height, color) {
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
     for (const job of jobs.slice(start, start + maxCards)) {
       const selected = job.id === selectedId;
-      const fitScore = job.fitScore == null ? '—' : String(job.fitScore);
+      const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · live:${job.liveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
+      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · posting:${job.postingLiveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
     }
@@ -304,11 +311,40 @@ function listPanel(model, state, width, height, color) {
   return panel(`JOBS · ${state.filter}`, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
+function fitDimensionLines(fit, width) {
+  if (!fit?.dimensions) return ['No fit dimensions are stored.'];
+  const summary = Object.entries(fit.dimensions).map(([key, dimension]) => {
+    const value = dimension.status === 'unknown' ? 'unknown' : `${dimension.score}/100`;
+    return `${key}: ${value}`;
+  }).join(' · ');
+  return wrap(summary, width).slice(0, 3);
+}
+
+function constraintLine(fit, width) {
+  if (!fit?.constraints?.length) return crop('CANDIDATE CONSTRAINTS · none recorded', width);
+  const summary = fit.constraints.map(value => `${value.kind}/${value.status}: ${value.reason}`).join(' · ');
+  return crop(`CANDIDATE CONSTRAINTS · ${summary}`, width);
+}
+
+function postingStatusLines(item, width) {
+  const posting = item.postingLiveness;
+  const status = posting
+    ? `${posting.status} · ${posting.reasonCodes?.join(', ') || 'no reason codes'}`
+    : 'uncertain · no posting-liveness handoff';
+  const risks = item.fit?.postingRisks?.length
+    ? item.fit.postingRisks.map(value => {
+        const label = value.code.replace(/^posting_risk_/, '').replaceAll('_', ' ');
+        return crop(`${label} (${value.status}): ${value.reason}`, width);
+      })
+    : [];
+  return [crop(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width), ...risks];
+}
+
 function detailPanel(model, width, height, color) {
   const item = model.selected;
   if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'JobOS will show real local state here after import.'], width, color);
-  const fitScore = item.fit?.overall ?? '—';
-  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.confidence || 'confidence —'}` : 'not scored';
+  const fitScore = fitLabel(item.fit);
+  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.scoreStatus} · coverage ${item.fit.evidenceCoverage ?? '—'}%` : 'not scored';
   const next = item.next[0];
   const compensation = item.job.compensation?.text || 'compensation —';
   const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(',') : 'type —';
@@ -318,29 +354,26 @@ function detailPanel(model, width, height, color) {
   const lines = [
     paint(`${item.job.title}`, 'green', color),
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'} · liveness:${item.liveness?.status || 'uncertain'}`,
+    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
     `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
-    paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    paint(`FIT ${fitScore} · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    paint('FIT DIMENSIONS', 'cyan', color),
+    ...fitDimensionLines(item.fit, width - 4),
+    paint(constraintLine(item.fit, width - 4), 'cyan', color),
+    ...postingStatusLines(item, width - 4).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
     ...wrap(item.narrative, width - 4).slice(0, 3),
     ...readinessLines(item.readiness, width - 4, color),
-    '',
     ...policyLines(item.policy, width - 4, color),
-    '',
     paint('NEXT', 'cyan', color),
     next ? `${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
-    '',
     paint('PROOFS', 'cyan', color),
     ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PATH', 'cyan', color),
     item.path ? `${item.path.strength} · ${item.path.channel || 'channel —'} · ${JSON.stringify(item.path.reasoning)}` : 'No warm path yet',
-    '',
     paint('ARTIFACTS', 'cyan', color),
     ...artifacts.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
-    '',
     ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);
@@ -687,7 +720,7 @@ function overlayPanel(model, state, width, height, color) {
       ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
       '',
       'NEW JOB REVIEW',
-      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · live ${item.liveness?.status || 'uncertain'} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
+      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · posting ${item.postingLiveness?.status || 'uncertain'} · fit ${fitLabel(item.fit)}${item.highFit ? ' · high' : ''}`)
     ];
     if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
     if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');

@@ -5,6 +5,7 @@ import { id, now, parseJson, slug } from './utils.js';
 import { writeYaml } from './workspace.js';
 import { applicationId } from './tracking.js';
 import { readinessPacketSummary } from './packets.js';
+import { FIT_CONTRACT, deserializeFitScore } from './scoring.js';
 
 import { resolveFormBindings } from './forms.js';
 import { DOM_ADAPTER_MANIFEST } from './form-browser.js';
@@ -149,8 +150,12 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     coverage: resumeCoverage?.summary || null,
     renderManifest: resumeRenderManifest
   });
-  const score = parseJson(job.score_json, null);
-  const scoreAvailable = job.fit_score != null && Number.isFinite(Number(job.fit_score)) && score && typeof score === 'object';
+  const storedScore = parseJson(job.score_json, null);
+  const fit = deserializeFitScore(storedScore, { persistedOverall: job.fit_score, jobId, profileId });
+  const scoreAvailable = fit?.contract === FIT_CONTRACT
+    && fit.scoreStatus !== 'insufficient_evidence'
+    && fit.overall != null
+    && Number.isFinite(Number(fit.overall));
   const answers = inspectApplicationQuestions(s, { jobId, profileId });
   const application = one(s, 'SELECT id,status,notes,updated_at FROM applications WHERE job_id=? AND profile_id=?', [jobId, profileId]);
   const duplicates = possibleDuplicateApplications(s, job);
@@ -165,11 +170,6 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     'missing_proofs',
     'The profile has no stored proof points, so JobOS cannot ground application claims.',
     `Add evidence with "jobos proof add --profile ${profileId} --summary <claim> --evidence <source> --json".`
-  ));
-  if (!scoreAvailable) blockers.push(blocker(
-    'missing_score',
-    'This job has no persisted fit score for the selected profile.',
-    `Run "jobos score ${jobId} --profile ${profileId} --json".`
   ));
   if (!resume.artifactId) blockers.push(blocker(
     'missing_resume_material',
@@ -338,7 +338,25 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
     application: application ? { id: application.id, status: application.status, updatedAt: application.updated_at } : null,
     materials: {
       proofs: { status: proofs.length ? 'available' : 'missing', count: proofs.length, proofPointIds: proofs.map(proof => proof.id) },
-      score: scoreAvailable ? { status: 'available', overall: Number(job.fit_score), confidence: score.confidence || null, mode: score.mode || null } : { status: 'missing', overall: null, confidence: null, mode: null },
+      score: scoreAvailable ? {
+        status: 'available',
+        contract: fit.contract,
+        overall: Number(fit.overall),
+        baseOverall: fit.baseOverall,
+        scoreStatus: fit.scoreStatus,
+        evidenceCoverage: fit.evidenceCoverage,
+        confidence: fit.confidence || null,
+        mode: fit.mode || null
+      } : {
+        status: 'missing',
+        contract: fit?.contract || null,
+        overall: fit?.overall ?? null,
+        baseOverall: fit?.baseOverall ?? null,
+        scoreStatus: fit?.scoreStatus || null,
+        evidenceCoverage: fit?.evidenceCoverage ?? null,
+        confidence: fit?.confidence || null,
+        mode: fit?.mode || null
+      },
       resume,
       coverLetter
     },

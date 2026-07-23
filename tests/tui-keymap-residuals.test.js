@@ -43,7 +43,15 @@ async function seeded(t, { draft = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-keymap-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = await openStore({ workspace: root });
-  const profile = createProfile(store, 'PM EdTech').profile;
+  const preferences = path.join(root, 'preferences.json');
+  writeFileSync(preferences, JSON.stringify({
+    targetRoleFamilies: ['Product Manager'],
+    industries: ['learning'],
+    locations: ['Remote'],
+    workModel: 'remote',
+    missionKeywords: ['educator', 'learning']
+  }));
+  const profile = createProfile(store, 'PM EdTech', { preferences }).profile;
   const proof = addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio', ['product'], ['30%']);
   createCompleteResumeFixture(store, profile, proof);
   const file = path.join(root, 'job.md');

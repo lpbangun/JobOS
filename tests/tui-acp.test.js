@@ -219,7 +219,8 @@ test('TUI refresh observes an agent-side database mutation and shared capabiliti
   const agentStore = await openStore({ workspace: root });
   await callDomainTool(agentStore, 'score_job', { jobId: jobs[1].id, profileId: profile.id }, { source: 'acp' });
   tui.refresh();
-  assert.equal(typeof tui.model.jobs.find(job => job.id === jobs[1].id).fitScore, 'number');
+  const scoredJob = tui.model.jobs.find(job => job.id === jobs[1].id);
+  assert.equal(scoredJob.fit.contract, 'jobos.fit-score.v1');
 
   const externalTools = new Set(mcpToolNames());
   for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) assert.ok(externalTools.has(tool), `${tool} is missing from external MCP`);

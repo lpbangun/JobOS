@@ -362,9 +362,13 @@ test('LaTeX renderer is deterministic, escaped, and profile-constrained', () => 
   const letterFirst = renderResumeLatex(document, professional);
   const letterSecond = renderResumeLatex(document, professional);
   const a4 = renderResumeLatex(document, technical);
+  const leadershipTex = renderResumeLatex(document, leadership);
   assert.equal(letterFirst, letterSecond);
   assert.match(letterFirst, /letterpaper/);
   assert.match(a4, /a4paper/);
+  assert.match(leadershipTex, /Executive Summary/);
+  assert.doesNotMatch(leadershipTex, /Professional Summary/);
+  assert.ok(leadershipTex.indexOf('Projects') < leadershipTex.indexOf('Skills'));
   assert.doesNotMatch(letterFirst, /\\\\input\\{evil\\}/);
   assert.ok(letterFirst.includes('Avery \\& Co \\textbackslash{}'));
   assert.equal(latexEscape('%_$&#{}'), ['%', '_', '$', '&', '#', '{', '}'].map(character => `\\${character}`).join(''));
