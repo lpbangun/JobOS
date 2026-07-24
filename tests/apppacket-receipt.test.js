@@ -23,6 +23,7 @@ import { addAnswer, inspectApplicationQuestions } from '../src/answers.js';
 import { createArtifact, approveArtifact } from '../src/artifacts.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { appCreate, appUpdate } from '../src/tracking.js';
+import { rescheduleApplicationNextAction } from '../src/lifecycle.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, DomainToolError } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
@@ -503,11 +504,22 @@ test('AP07 CLI attestation creates one receipt and binds pre-apply status to the
     const shouldChange = ['saved', 'researching', 'materials-ready'].includes(status);
     assert.equal(app.status, shouldChange ? 'applied' : status);
     assert.equal(count(check, 'status_changes', 'application_id=?', [fixture.application.id]), beforeChanges + (shouldChange ? 1 : 0));
-    const change = one(check, 'SELECT note FROM status_changes WHERE application_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [fixture.application.id]);
+    const actions = all(check, `SELECT * FROM tasks WHERE application_id=?
+      AND action_kind='application_next_action' AND status='open'`, [fixture.application.id]);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].action_code, status === 'interview' ? 'prepare-interview' : 'employer-follow-up');
+    if (status !== 'interview') {
+      assert.equal(actions[0].source_event_id, result.json.receipt.id);
+      assert.equal(actions[0].policy_due_at, '2026-07-27T16:00:00.000Z');
+    }
+    const change = one(check, 'SELECT * FROM status_changes WHERE application_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [fixture.application.id]);
     if (shouldChange) {
       assert.match(change.note, new RegExp(packet.id));
       assert.match(change.note, new RegExp(packet.contentHash));
       assert.match(change.note, new RegExp(result.json.receipt.id));
+      assert.equal(change.actor, 'human');
+      assert.equal(change.source, 'cli');
+      assert.equal(change.source_event_id, result.json.receipt.id);
     }
     const audit = one(check, "SELECT payload_json,external_side_effect FROM audit_log WHERE action='application.submission_attested' ORDER BY created_at DESC,id DESC LIMIT 1");
     assert.equal(audit.external_side_effect, 'none');
@@ -566,6 +578,17 @@ test('AP09 exact receipt replay is idempotent and conflicting immutable evidence
   const packet = createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
   const input = { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', note: 'Exact note.', source: 'cli' };
   const first = attestApplicationSubmitted(fixture.store, input);
+  const initialAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(initialAction.action_code, 'employer-follow-up');
+  const manual = rescheduleApplicationNextAction(fixture.store, {
+    taskId: initialAction.id,
+    profileId: fixture.profile.id,
+    dueAt: '2026-08-10T12:00:00Z',
+    reason: 'Fixture manual schedule.',
+    nowDate: new Date('2026-07-21T12:00:00.000Z'),
+  });
+  assert.equal(manual.scheduleSource, 'manual');
   const before = {
     receipts: count(fixture.store, 'application_receipts'),
     audits: count(fixture.store, 'audit_log', "action='application.submission_attested'"),
@@ -577,6 +600,11 @@ test('AP09 exact receipt replay is idempotent and conflicting immutable evidence
   assert.equal(count(fixture.store, 'application_receipts'), before.receipts);
   assert.equal(count(fixture.store, 'audit_log', "action='application.submission_attested'"), before.audits);
   assert.equal(count(fixture.store, 'status_changes'), before.statuses);
+  const replayedAction = one(fixture.store, 'SELECT * FROM tasks WHERE id=?', [initialAction.id]);
+  assert.equal(replayedAction.status, 'open');
+  assert.equal(replayedAction.due_at, '2026-08-10T12:00:00.000Z');
+  assert.equal(replayedAction.policy_due_at, initialAction.policy_due_at);
+  assert.equal(replayedAction.schedule_source, 'manual');
   for (const conflict of [
     { ...input, submittedAt: '2026-07-20T13:00:00Z' },
     { ...input, note: 'Different note.' }
@@ -595,6 +623,9 @@ test('AP10 confirmation requires prior attestation and records reference without
     'receipt_attestation_required'
   );
   const attested = attestApplicationSubmitted(fixture.store, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source: 'cli' });
+  const attestedAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(attestedAction.action_code, 'employer-follow-up');
   await assertRejectCode(
     () => Promise.resolve().then(() => confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: '', source: 'cli' })),
     'receipt_reference_required'
@@ -608,6 +639,11 @@ test('AP10 confirmation requires prior attestation and records reference without
   assert.equal(count(fixture.store, 'status_changes'), beforeChanges);
   assert.equal(one(fixture.store, 'SELECT confirmation_url FROM applications WHERE id=?', [packet.applicationId]).confirmation_url, 'https://board.example/receipt/123');
   assert.equal(confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'https://board.example/receipt/123', note: 'Board confirmation.', source: 'cli' }).idempotent, true);
+  const confirmedAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(confirmedAction.id, attestedAction.id);
+  assert.equal(confirmedAction.due_at, attestedAction.due_at);
+  assert.equal(confirmedAction.source_event_id, attested.receipt.id);
   await assertRejectCode(
     () => Promise.resolve().then(() => confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'REF-DIFFERENT', note: 'Board confirmation.', source: 'cli' })),
     'receipt_conflict'
@@ -634,10 +670,23 @@ test('AP11 bare application applied update creates no receipt and remains explic
   assert.equal(payload.receiptBound, false);
   assert.equal(Object.hasOwn(payload, 'receiptId'), false);
   assert.equal(compileApplicationReadiness(check, { jobId: fixture.job.id, profileId: fixture.profile.id }).packet.receiptState, 'none');
+  const bareAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(bareAction.action_code, 'record-submission-evidence');
+  assert.notEqual(bareAction.action_code, 'employer-follow-up');
   const before = count(check, 'status_changes');
   const attested = attestApplicationSubmitted(check, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source: 'cli' });
   assert.equal(attested.applicationStatusChanged, false);
   assert.equal(count(check, 'status_changes'), before);
+  const attestedAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(attestedAction.action_code, 'employer-follow-up');
+  assert.equal(one(check, 'SELECT status FROM tasks WHERE id=?', [bareAction.id]).status, 'superseded');
+  appUpdate(check, packet.applicationId, 'interview', 'Interview scheduled.');
+  const interviewAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(interviewAction.action_code, 'prepare-interview');
+  assert.equal(one(check, 'SELECT status FROM tasks WHERE id=?', [attestedAction.id]).status, 'superseded');
 });
 
 test('AP12 restricted and sensitive answer plaintext never crosses packet inspection surfaces', async t => {

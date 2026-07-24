@@ -110,7 +110,7 @@ test('followup watch creates review-gated draft artifacts without sending', asyn
   const profile = JSON.parse(cli(root, ['profile', 'create', 'PM EdTech', '--json']));
   const job = JSON.parse(cli(root, ['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
   const s = await openStore({ workspace: root });
-  run(s, 'INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ['task_followup_test', job.id, null, 'Follow up with recruiter', 'Ask whether there is a timeline update.', 'followup', '2026-07-04T09:00:00.000Z', 'normal', 'open', 'test', '2026-07-04T08:00:00.000Z', '2026-07-04T08:00:00.000Z']);
+  run(s, 'INSERT INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ['task_followup_test', job.id, null, 'Follow up with recruiter', 'Ask whether there is a timeline update.', 'followup', '2026-07-04T09:00:00.000Z', 'normal', 'open', 'test', '2026-07-04T08:00:00.000Z', '2026-07-04T08:00:00.000Z']);
   save(s);
   createAutomation(s, { name: 'followup_now', actionId: 'followup_watch', schedule: '* * * * *', profileId: profile.id, enabled: true });
   const runRecord = await runAutomationByName(s, 'followup_now', { nowDate: new Date('2026-07-04T09:01:00.000Z') });

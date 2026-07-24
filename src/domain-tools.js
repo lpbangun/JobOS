@@ -419,13 +419,15 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     includeNotes: false
   });
   if (name === 'create_application') {
-    const application = appCreate(s, args.jobId, args.status, args.notes || '');
-    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+    const provenance = mediationSource(options);
+    const application = appCreate(s, args.jobId, args.status, args.notes || '', { actor: provenance, source: 'domain_tool' });
+    return { ...application, nextAction: application.nextAction, researchRecommendation: application.researchRecommendation };
   }
   if (name === 'applications_plan') return planApplication(s, { jobId: args.jobId, profileId: args.profileId });
   if (name === 'update_application_status') {
-    const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null);
-    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+    const provenance = mediationSource(options);
+    const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null, { actor: provenance, source: 'domain_tool' });
+    return { ...application, nextAction: application.nextAction, researchRecommendation: application.researchRecommendation };
   }
   if (name === 'list_tasks') return openTasks(s, { type: args.type || null, createdBy: args.createdBy || null });
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');

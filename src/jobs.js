@@ -41,7 +41,7 @@ function canMergeByKey(existing, dbUrl){ const a=publicUrl(existing?.url), b=pub
 function createPossibleDuplicateTask(s, job, candidates, at){
   if(!candidates.length) return null;
   const ids=candidates.map(c=>c.id).sort(), tid=id('task',`possible-duplicate:${job.id}:${ids.join(':')}`);
-  run(s,'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at]);
+  run(s,'INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at,job.profile_id]);
   audit(s,'job.possible_duplicate','job',job.id,{jobId:job.id,candidateJobIds:ids,dedupeKey:job.dedupe_key});
   return tid;
 }

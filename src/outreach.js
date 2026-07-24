@@ -711,7 +711,7 @@ export function scheduleFollowup(s, { threadId, afterDays }) {
   if (thread.followup_task_id && one(s, 'SELECT id FROM tasks WHERE id=?', [thread.followup_task_id])) {
     run(s, 'UPDATE tasks SET title=?, description=?, due_at=?, priority=?, status=?, updated_at=? WHERE id=?', [title, description, due, 'normal', 'open', at, thread.followup_task_id]);
   } else {
-    run(s, 'INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [taskId, thread.job_id || null, null, title, description, 'followup', due, 'normal', 'open', 'outreach', at, at]);
+    run(s, 'INSERT INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [taskId, thread.job_id || null, null, title, description, 'followup', due, 'normal', 'open', 'outreach', at, at, thread.profile_id || null]);
   }
   run(s, 'UPDATE outreach_threads SET status=?, next_followup_at=?, followup_task_id=?, updated_at=? WHERE id=?', ['followup_scheduled', due, taskId, at, thread.id]);
   audit(s, 'outreach.followup_scheduled', 'outreach_thread', thread.id, { jobId: thread.job_id, taskId, dueAt: due });

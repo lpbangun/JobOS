@@ -8,12 +8,32 @@ import { applicationId, _writeApp } from './tracking.js';
 import { syncJob } from './jobs.js';
 import { writeYaml } from './workspace.js';
 import { canonicalPacketFormBinding, resolveFormBindings } from './forms.js';
+import {
+  LIFECYCLE_EVENT_INPUT_SCHEMA,
+  lifecycleTaskView,
+  reconcileApplicationNextAction,
+} from './lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
 function packetError(code, message, details = {}) {
   return Object.assign(new Error(message), { code, type: 'validation', details });
+}
+function reconcileReceiptAction(s, packet, { eventId, eventType, occurredAt }) {
+  const action = reconcileApplicationNextAction(s, {
+    applicationId: packet.application_id,
+    trigger: {
+      schema: LIFECYCLE_EVENT_INPUT_SCHEMA,
+      profileId: packet.profile_id,
+      applicationId: packet.application_id,
+      eventId,
+      eventType,
+      occurredAt,
+    },
+    nowDate: new Date(occurredAt),
+  });
+  return action ? lifecycleTaskView(action, { nowDate: new Date(occurredAt) }) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +460,7 @@ export function createApplicationPacket(s, { jobId, profileId, createdBy }) {
     let auditEvents = [];
 
     if (!existingApp) {
-      application = _writeApp(s, jobId, profileId, 'materials-ready', '', { receiptBound: false, skipIfExists: true, persist: false });
+      application = _writeApp(s, jobId, profileId, 'materials-ready', '', { receiptBound: false, skipIfExists: true, persist: false, actor: 'human', source: createdBy });
     } else {
       application = existingApp;
     }
@@ -751,6 +771,11 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       const receiptHash = packetContentHash(rc);
       if (existing.receipt_hash === receiptHash) {
         // Idempotent
+        const nextAction = reconcileReceiptAction(s, packet, {
+          eventId: existing.id,
+          eventType: 'submission_attested',
+          occurredAt: existing.submitted_at,
+        });
         queuePostCommit(s, () => {
           // Refresh readiness YAML
           try { planApplication(s, { jobId: packet.job_id, profileId: packet.profile_id, writeMirror: true }); } catch {}
@@ -765,7 +790,8 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
           previousStatus: null,
           currentStatus: null,
           externalSideEffects: 'none',
-          submissionPerformed: false
+          submissionPerformed: false,
+          nextAction,
         };
       }
       // Conflict — different hash for same packet/type
@@ -818,12 +844,19 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       // Advance to applied
       const changeNote = `Packet: ${packetId} Hash: ${packetHash} Receipt: ${receiptId}`;
       const statusChangeId = id('status', `${app.id}:${app.status}:applied:${at}`);
-      run(s, 'INSERT INTO status_changes VALUES (?,?,?,?,?,?,?,?)',
-        [statusChangeId, app.id, packet.job_id, packet.profile_id, app.status, 'applied', changeNote, at]);
+      run(s, `INSERT INTO status_changes
+        (id,application_id,job_id,profile_id,from_status,to_status,note,created_at,actor,source,source_event_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        [statusChangeId, app.id, packet.job_id, packet.profile_id, app.status, 'applied', changeNote, at, 'human', source, receiptId]);
       run(s, 'UPDATE applications SET status=?, updated_at=? WHERE id=?', ['applied', at, app.id]);
       currentStatus = 'applied';
       statusChanged = true;
     }
+    const nextAction = reconcileReceiptAction(s, packet, {
+      eventId: receiptId,
+      eventType: 'submission_attested',
+      occurredAt: normalizedAt,
+    });
 
     // Audit
     const auditPayload = {
@@ -869,7 +902,8 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       previousStatus,
       currentStatus: currentStatus,
       externalSideEffects: 'none',
-      submissionPerformed: false
+      submissionPerformed: false,
+      nextAction,
     };
   });
 }
@@ -912,6 +946,11 @@ export function confirmApplicationReceipt(s, { packetId, reference, note, source
     if (existing) {
       if (existing.receipt_hash === receiptHash) {
         // Idempotent
+        const nextAction = reconcileReceiptAction(s, packet, {
+          eventId: existing.id,
+          eventType: 'receipt_confirmed',
+          occurredAt: existing.recorded_at,
+        });
         queuePostCommit(s, () => {
           try { planApplication(s, { jobId: packet.job_id, profileId: packet.profile_id, writeMirror: true }); } catch {}
           syncJob(s, packet.job_id);
@@ -923,7 +962,8 @@ export function confirmApplicationReceipt(s, { packetId, reference, note, source
           receiptState: 'confirmed',
           confirmationUrl: isHttpUrl ? reference.trim() : null,
           externalSideEffects: 'none',
-          submissionPerformed: false
+          submissionPerformed: false,
+          nextAction,
         };
       }
       throw packetError('receipt_conflict', `Existing confirmation for packet ${packetId} has different content; original unchanged`);
@@ -944,6 +984,11 @@ export function confirmApplicationReceipt(s, { packetId, reference, note, source
       run(s, 'UPDATE applications SET confirmation_url=?, updated_at=? WHERE id=?',
         [reference.trim(), at, packet.application_id]);
     }
+    const nextAction = reconcileReceiptAction(s, packet, {
+      eventId: receiptId,
+      eventType: 'receipt_confirmed',
+      occurredAt: at,
+    });
 
     // Audit
     const auditPayload = {
@@ -982,7 +1027,8 @@ export function confirmApplicationReceipt(s, { packetId, reference, note, source
       receiptState: 'confirmed',
       confirmationUrl: isHttpUrl ? reference.trim() : null,
       externalSideEffects: 'none',
-      submissionPerformed: false
+      submissionPerformed: false,
+      nextAction,
     };
   });
 }

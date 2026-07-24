@@ -7,6 +7,11 @@ import { canonicalJson, packetContentHash, showApplicationPacket } from './packe
 import { planApplication } from './readiness.js';
 import { syncJob } from './jobs.js';
 import { id, now, parseJson } from './utils.js';
+import {
+  LIFECYCLE_EVENT_INPUT_SCHEMA,
+  lifecycleTaskView,
+  reconcileApplicationNextAction,
+} from './lifecycle.js';
 
 function submissionError(code, message, details = {}) {
   return Object.assign(new Error(message), { code, type: 'validation', details });
@@ -371,9 +376,28 @@ export async function submitApplicationForm(s, {
     const application = one(s, 'SELECT * FROM applications WHERE id=?', [packet.applicationId]);
     if (application && ['saved', 'researching', 'materials-ready'].includes(application.status)) {
       const statusChangeId = id('status', `${application.id}:${application.status}:applied:${completedAt}`);
-      run(s, 'INSERT INTO status_changes VALUES (?,?,?,?,?,?,?,?)', [statusChangeId, application.id, packet.jobId, packet.profileId, application.status, 'applied', `Configured form submission: ${attempt.id}`, completedAt]);
+      run(s, `INSERT INTO status_changes
+        (id,application_id,job_id,profile_id,from_status,to_status,note,created_at,actor,source,source_event_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [
+        statusChangeId, application.id, packet.jobId, packet.profileId, application.status,
+        'applied', `Configured form submission: ${attempt.id}`, completedAt,
+        'configured_adapter', invokedBy, receiptId,
+      ]);
       run(s, 'UPDATE applications SET status=?,confirmation_url=?,updated_at=? WHERE id=?', ['applied', `${outcome.confirmationOrigin}${outcome.confirmationPath}`, completedAt, application.id]);
     }
+    const action = reconcileApplicationNextAction(s, {
+      applicationId: packet.applicationId,
+      trigger: {
+        schema: LIFECYCLE_EVENT_INPUT_SCHEMA,
+        profileId: packet.profileId,
+        applicationId: packet.applicationId,
+        eventId: receiptId,
+        eventType: 'configured_submission_confirmed',
+        occurredAt: completedAt,
+      },
+      nowDate: new Date(completedAt),
+    });
+    const nextAction = action ? lifecycleTaskView(action, { nowDate: new Date(completedAt) }) : null;
     const audit = recordAudit(s, 'application.form_submission_confirmed', 'form_submission_attempt', attempt.id, {
       packetId: packet.id,
       formFingerprint: packet.form.formFingerprint,
@@ -402,7 +426,8 @@ export async function submitApplicationForm(s, {
         submissionAttemptId: attempt.id,
         submissionActor: 'configured_adapter',
         externalSideEffect: 'user_configured_form_submission'
-      }
+      },
+      nextAction,
     };
   });
 }

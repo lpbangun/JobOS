@@ -29,7 +29,7 @@ test('task CLI separates the inbox from due tasks and applies category filters',
     ['undated-review', 'review', 'system', null]
   ];
   for (const [id, type, createdBy, dueAt] of rows) {
-    dbRun(store, 'INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [id, null, null, id, '', type, dueAt, 'normal', 'open', createdBy, '2026-07-20T08:00:00.000Z', '2026-07-20T08:00:00.000Z']);
+    dbRun(store, 'INSERT INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [id, null, null, id, '', type, dueAt, 'normal', 'open', createdBy, '2026-07-20T08:00:00.000Z', '2026-07-20T08:00:00.000Z']);
   }
   save(store);
 

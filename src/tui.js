@@ -2012,9 +2012,9 @@ export class JobosTui {
       if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
       const application = one(this.store, 'SELECT id FROM applications WHERE job_id=? AND profile_id=?', [this.state.selectedJobId, this.model.profileId]);
       if (application) {
-        appUpdate(this.store, application.id, status, note || undefined);
+        appUpdate(this.store, application.id, status, note || undefined, { actor: 'user', source: 'tui' });
       } else {
-        appCreate(this.store, this.state.selectedJobId, status, note || undefined);
+        appCreate(this.store, this.state.selectedJobId, status, note || undefined, { actor: 'user', source: 'tui' });
       }
       this.state.error = null;
       this.refresh({ disk: false });

@@ -152,7 +152,7 @@ function staleApplicationCheck(s, automation, { nowDate = new Date() } = {}) {
     const lastActivity = [lastStatus, lastTask, app.updated_at, app.created_at].filter(Boolean).sort().at(-1);
     if (lastActivity && lastActivity > cutoff) continue;
     const at = now(), tid = id('task', `stale:${app.id}:${days}`);
-    run(s, `INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    run(s, `INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
       tid,
       app.job_id,
       app.id,
@@ -164,7 +164,8 @@ function staleApplicationCheck(s, automation, { nowDate = new Date() } = {}) {
       'open',
       'automation',
       at,
-      at
+      at,
+      app.profile_id
     ]);
     created.push({ applicationId: app.id, taskId: tid, lastActivity });
     syncJob(s, app.job_id);

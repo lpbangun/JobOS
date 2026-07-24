@@ -868,14 +868,14 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'applications' && action === 'create') {
     if (!flags.job || !flags.status) usage('Missing --job or --status');
-    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '');
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
+    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '', { actor: 'user', source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, nextAction: a.nextAction, researchRecommendation: a.researchRecommendation });
     return;
   }
   if (group === 'applications' && action === 'update') {
     if (!subaction || !flags.status) usage('Missing application id or --status');
-    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null);
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
+    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null, { actor: 'user', source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, nextAction: a.nextAction, researchRecommendation: a.researchRecommendation });
     return;
   }
   if (group === 'apply') {
