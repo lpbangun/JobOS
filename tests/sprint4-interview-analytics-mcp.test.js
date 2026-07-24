@@ -25,7 +25,9 @@ function seed(run, root) {
   const jobFile = path.join(root, 'acme-job.md');
   writeFileSync(jobFile, 'Title: Product Manager, Learning Platform\nCompany: Acme Learning\nLocation: Remote\n\nAcme Learning needs a PM to lead educator discovery, roadmap tradeoffs, activation metrics, stakeholder communication, and AI learning workflow experiments. Requirements include product discovery, learning technology, analytics, and cross-functional launch leadership.');
   const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', jobFile, '--json']));
-  const app = JSON.parse(run(['applications', 'create', '--job', job.id, '--status', 'interview', '--json']));
+  const app = JSON.parse(run(['applications', 'create', '--job', job.id, '--status', 'materials-ready', '--json']));
+  run(['applications', 'update', app.id, '--status', 'applied', '--json']);
+  run(['applications', 'update', app.id, '--status', 'interview', '--json']);
   return { profile, job, app };
 }
 
@@ -47,17 +49,28 @@ test('interview prep creates role-specific proof-grounded packet', () => {
 test('analytics funnel reports conversion by source, stage, and role family', () => {
   const { run } = makeRunner();
   const { profile, app } = seed(run, mkdtempSync(path.join(tmpdir(), 'jobos-sprint4-seed-')));
-  run(['applications', 'update', app.id, '--status', 'interview', '--json']);
   const funnel = JSON.parse(run(['analytics', 'funnel', '--profile', profile.id, '--since', '30', '--json']));
   assert.equal(funnel.totals.applications, 1);
   assert.equal(funnel.totals.interviews, 1);
   assert.ok(funnel.byStage.some(s => s.stage === 'interview' && s.count === 1));
   assert.ok(funnel.bySource.some(s => s.source === 'text_file'));
   assert.ok(funnel.byRoleFamily.some(r => r.roleFamily === 'product'));
-  assert.ok(funnel.insights.some(i => /Interview conversion|largest source/.test(i)));
+  assert.deepEqual(funnel.basis, {
+    totals: 'mixed_labeled_inventory_and_observed_events',
+    conversion: 'observed_events_only',
+    byStage: 'current_snapshot',
+    stageReached: 'observed_status_events',
+    bySource: 'observed_applied_cohort',
+    byRoleFamily: 'observed_applied_cohort',
+  });
+  assert.equal(funnel.lifecycle.schema, 'jobos.lifecycle-analytics.v1');
+  assert.equal(funnel.lifecycle.denominators.appliedCohort, 1);
+  assert.ok(funnel.insights.some(insight => /insufficient|observed|descriptive|censored/i.test(insight)));
+  assert.doesNotMatch(JSON.stringify(funnel.insights), /caused|will improve|produced those interviews/i);
   const review = run(['review', 'weekly', '--profile', profile.id, '--output', 'markdown']);
   assert.match(review, /Funnel analytics/);
-  assert.match(review, /Recommended experiments/);
+  assert.match(review, /Generated recommendations/);
+  assert.doesNotMatch(review, /## Recommended experiments/);
 });
 
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
