@@ -197,6 +197,53 @@ export function assertJobLivenessGate(gate, operation = 'continue') {
     }
   );
 }
+function interviewMirrorSummary(s, job, application, currentW06Action) {
+  if (!application) {
+    return {
+      latestPrepArtifactId: null,
+      coveredCount: 0,
+      gapCount: 0,
+      latestDebriefId: null,
+      latestDebriefRevision: null,
+      currentW06Action: null,
+    };
+  }
+  const latestPrep = one(s, `SELECT * FROM artifacts
+    WHERE job_id=? AND profile_id=? AND type='interview_prep' AND series_key GLOB ?
+    ORDER BY created_at DESC,revision DESC,id DESC LIMIT 1`, [
+    job.id,
+    job.profile_id,
+    `interview_prep:${application.id}:*`,
+  ]);
+  const packCounts = latestPrep
+    ? one(s, `SELECT
+        SUM(CASE WHEN coverage_status='covered' THEN 1 ELSE 0 END) AS covered_count,
+        SUM(CASE WHEN coverage_status='gap' THEN 1 ELSE 0 END) AS gap_count
+      FROM interview_pack_items WHERE artifact_id=?`, [latestPrep.id])
+    : null;
+  const latestDebrief = one(s, `SELECT d.id,r.revision
+    FROM interview_debriefs d
+    JOIN interview_debrief_revisions r ON r.debrief_id=d.id
+    WHERE d.profile_id=? AND d.job_id=? AND d.application_id=?
+    ORDER BY r.recorded_at DESC,r.revision DESC,r.id DESC LIMIT 1`, [
+    job.profile_id,
+    job.id,
+    application.id,
+  ]);
+  return {
+    latestPrepArtifactId: latestPrep?.id || null,
+    coveredCount: Number(packCounts?.covered_count || 0),
+    gapCount: Number(packCounts?.gap_count || 0),
+    latestDebriefId: latestDebrief?.id || null,
+    latestDebriefRevision: latestDebrief ? Number(latestDebrief.revision) : null,
+    currentW06Action,
+  };
+}
+
+function cloneMirrorValue(value) {
+  return value == null ? null : structuredClone(value);
+}
+
 export function syncJob(s, jid) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
   if (!job) return;
@@ -208,6 +255,12 @@ export function syncJob(s, jid) {
       due_at IS NULL,due_at,created_at,id`, [jid, job.profile_id]);
   const nextActionRow = tasks.find(task => task.action_kind === 'application_next_action') || null;
   const nextAction = nextActionRow ? lifecycleTaskView(nextActionRow) : null;
+  const interview = interviewMirrorSummary(
+    s,
+    job,
+    app,
+    cloneMirrorValue(nextAction),
+  );
   const liveness = deserializeLiveness(job);
   const dir = path.join(s.p.jobs, jid);
   writeYaml(path.join(dir, 'job.yaml'), {
@@ -237,12 +290,14 @@ export function syncJob(s, jid) {
     reposted: Boolean(job.reposted),
     discoveryRunId: job.discovery_run_id || '',
     fit,
+    interview,
     application: app ? {
       id: app.id,
       status: app.status,
       notes: app.notes,
       confirmationUrl: app.confirmation_url,
       nextAction,
+      interview: cloneMirrorValue(interview),
       updatedAt: app.updated_at
     } : null,
     updatedAt: job.updated_at
@@ -254,6 +309,7 @@ export function syncJob(s, jid) {
     notes: app.notes,
     confirmationUrl: app.confirmation_url,
     nextAction,
+    interview: cloneMirrorValue(interview),
     updatedAt: app.updated_at
   });
   writeYaml(path.join(dir, 'tasks.yaml'), tasks.map(task => {

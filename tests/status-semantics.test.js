@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import YAML from 'yaml';
 import { openStore, run } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText, updateJobStatus } from '../src/jobs.js';
@@ -10,6 +11,7 @@ import { appCreate } from '../src/tracking.js';
 import { listJobSummaries, selectedJobContext } from '../src/domain-tools.js';
 import { buildTuiModel } from '../src/tui-model.js';
 
+const YAML_GRAPH_REFERENCE = /^[ \t]*(?:(?:-\s*)|(?:[^#\n][^:\n]*:\s*))?[&*][A-Za-z0-9_-]+(?:[ \t]*(?:#.*)?$|[ \t]+)/m;
 async function fixture(t) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-status-semantics-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -106,6 +108,23 @@ test('selected context prefers the profile-owned W06 action and task mirrors cle
   const tasksYaml = readFileSync(path.join(dir, 'tasks.yaml'), 'utf8');
   assert.match(jobYaml, /nextAction:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
   assert.match(applicationYaml, /nextAction:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
+  assert.match(jobYaml, /currentW06Action:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
+  assert.match(applicationYaml, /currentW06Action:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
+  assert.doesNotMatch(jobYaml, /(?:nextAction|currentW06Action):\s+[&*][A-Za-z0-9_-]+/);
+  assert.doesNotMatch(applicationYaml, /(?:nextAction|currentW06Action):\s+[&*][A-Za-z0-9_-]+/);
+  assert.doesNotMatch(jobYaml, YAML_GRAPH_REFERENCE);
+  assert.doesNotMatch(applicationYaml, YAML_GRAPH_REFERENCE);
+  const parsedJobMirror = YAML.parse(jobYaml);
+  const parsedApplicationMirror = YAML.parse(applicationYaml);
+  assert.deepEqual(
+    parsedJobMirror.application.nextAction,
+    parsedJobMirror.interview.currentW06Action,
+  );
+  assert.deepEqual(parsedJobMirror.application.interview, parsedJobMirror.interview);
+  assert.deepEqual(
+    parsedApplicationMirror.nextAction,
+    parsedApplicationMirror.interview.currentW06Action,
+  );
   assert.match(tasksYaml, /profileId:/);
   assert.match(tasksYaml, /actionKind: application_next_action/);
   assert.match(tasksYaml, /scheduleSource: policy/);

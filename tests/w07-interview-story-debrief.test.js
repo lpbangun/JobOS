@@ -12,6 +12,7 @@ import { getArtifact } from '../src/artifacts.js';
 import * as interview from '../src/interview.js';
 import { retireProof, supersedeProof } from '../src/profiles.js';
 import { id as deterministicId } from '../src/utils.js';
+import { rescheduleApplicationNextAction } from '../src/lifecycle.js';
 
 const require = createRequire(import.meta.url);
 const fixturePath = path.resolve('tests/fixtures/w07-schema13.sqlite');
@@ -1877,6 +1878,8 @@ test('W07-PREP-COMPAT-01 positional legacy prep keeps contracts and pack persist
     questionMirror: existsSync(packQuestionMirrorPath(root))
       ? readFileSync(packQuestionMirrorPath(root))
       : null,
+    jobMirror: optionalBytes(jobMirrorPath(root)),
+    applicationMirror: optionalBytes(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml')),
   });
   store.db.run(`CREATE TRIGGER fail_interview_pack_insert
     BEFORE INSERT ON interview_pack_items
@@ -1888,6 +1891,11 @@ test('W07-PREP-COMPAT-01 positional legacy prep keeps contracts and pack persist
     /induced pack mutation failure/,
   );
   assert.deepEqual(state(), beforeFailure);
+  assert.deepEqual(optionalBytes(jobMirrorPath(root)), beforeFailure.jobMirror);
+  assert.deepEqual(
+    optionalBytes(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml')),
+    beforeFailure.applicationMirror,
+  );
 });
 
 test('W07-PREP-COMPAT-02 omitted stage and options preserve interview defaults', async t => {
@@ -1919,4 +1927,723 @@ test('W07-PREP-COMPAT-02 omitted stage and options preserve interview defaults',
   );
   assert.ok(packRows.every(row => row.interview_stage === 'interview'));
   assert.ok(packRows.every(row => row.audience === 'unknown'));
+});
+
+test('W07-PREP-MIRROR-01 prep-only persistence refreshes links/counts mirrors after pack commit', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  assert.equal(all(store, 'SELECT id FROM interview_debriefs').length, 0);
+
+  const prep = await interview.prepInterview(
+    store,
+    'application_w07_alpha',
+    'hiring-manager',
+    { audience: 'hiring_manager' },
+  );
+  const expectedKeys = [
+    'coveredCount',
+    'currentW06Action',
+    'gapCount',
+    'latestDebriefId',
+    'latestDebriefRevision',
+    'latestPrepArtifactId',
+  ];
+  const jobMirror = YAML.parse(readFileSync(jobMirrorPath(root), 'utf8'));
+  const applicationMirror = YAML.parse(readFileSync(
+    jobMirrorPath(root, 'job_w07_alpha', 'application.yaml'),
+    'utf8',
+  ));
+  for (const mirror of [jobMirror, applicationMirror]) {
+    assert.deepEqual(Object.keys(mirror.interview).sort(), expectedKeys);
+    assert.equal(mirror.interview.latestPrepArtifactId, prep.id);
+    assert.equal(mirror.interview.coveredCount, prep.pack.coveredCount);
+    assert.equal(mirror.interview.gapCount, prep.pack.gapCount);
+    assert.equal(mirror.interview.latestDebriefId, null);
+    assert.equal(mirror.interview.latestDebriefRevision, null);
+    assert.doesNotMatch(JSON.stringify(mirror.interview), /STAR story|Private debrief|evidence|warnings/i);
+  }
+});
+
+const DEBRIEF_TABLES = Object.freeze([
+  'interview_debriefs',
+  'interview_debrief_revisions',
+]);
+const DEBRIEF_PROVENANCE_FIELDS = Object.freeze([
+  'observedQuestions',
+  'observedOutcome',
+  'proofGaps',
+  'storyUses',
+  'notes',
+]);
+
+function debriefMirrorPath(root, jobId = 'job_w07_alpha') {
+  return path.join(root, 'jobos-workspace', 'jobs', jobId, 'interviews', 'debriefs.yaml');
+}
+
+function observationMirrorPath(root, profileId = 'profile_w07_alpha') {
+  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'interviews', 'observations.yaml');
+}
+
+function jobMirrorPath(root, jobId = 'job_w07_alpha', file = 'job.yaml') {
+  return path.join(root, 'jobos-workspace', 'jobs', jobId, file);
+}
+
+function optionalBytes(file) {
+  return existsSync(file) ? readFileSync(file) : null;
+}
+
+function debriefState(store, root) {
+  return {
+    debriefs: all(store, 'SELECT * FROM interview_debriefs ORDER BY id'),
+    revisions: all(store, 'SELECT * FROM interview_debrief_revisions ORDER BY debrief_id,revision,id'),
+    tasks: all(store, 'SELECT * FROM tasks ORDER BY id'),
+    audit: all(store, 'SELECT * FROM audit_log ORDER BY id'),
+    debriefMirror: optionalBytes(debriefMirrorPath(root)),
+    observationMirror: optionalBytes(observationMirrorPath(root)),
+    jobMirror: optionalBytes(jobMirrorPath(root)),
+    applicationMirror: optionalBytes(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml')),
+  };
+}
+
+function debriefFieldProvenance(source = 'cli') {
+  return Object.fromEntries(DEBRIEF_PROVENANCE_FIELDS.map(field => [
+    field,
+    {
+      origin: 'user',
+      actor: 'candidate',
+      source,
+      sourceRef: null,
+    },
+  ]));
+}
+
+function debriefInput(story, overrides = {}) {
+  const profileId = overrides.profileId || 'profile_w07_alpha';
+  const referenceId = overrides.referenceId === undefined
+    ? 'interview-debrief-alpha-01'
+    : overrides.referenceId;
+  const debriefId = deterministicId('interview_debrief', `${profileId}:${referenceId}`);
+  const questionId = `debrief.${debriefId}.1.0`;
+  return {
+    profileId,
+    jobId: 'job_w07_alpha',
+    applicationId: 'application_w07_alpha',
+    interviewStage: 'hiring-manager',
+    audience: 'hiring_manager',
+    referenceId,
+    occurredAt: '2026-07-22T16:30:00Z',
+    actor: 'candidate',
+    source: 'cli',
+    observedQuestions: [{
+      text: 'How did you align fragmented owners around the launch deadline?',
+      askedByAudience: 'hiring_manager',
+      source: 'user_observed',
+    }],
+    observedOutcome: {
+      type: 'advanced',
+      note: 'The interviewer described the next panel stage.',
+    },
+    proofGaps: [{
+      id: 'gap.metric-specificity',
+      type: 'weak_metric',
+      text: 'The adoption metric needed a clearer measurement window.',
+      questionId,
+      storyId: story.id,
+      proofPointId: 'proof_w07_active',
+    }],
+    storyUses: [{
+      storyId: story.id,
+      storyRevisionId: story.activeVerifiedRevision.id,
+      questionId,
+      adaptationNote: 'Shortened the situation and expanded the dependency tradeoff.',
+    }],
+    notes: 'Private debrief note: revisit the measurement window before the panel.',
+    fieldProvenance: debriefFieldProvenance(),
+    ...overrides,
+  };
+}
+
+function correctionInput(story, recorded, overrides = {}) {
+  const revision = Number(overrides.targetRevision || recorded.currentRevision.revision);
+  const questionId = `debrief.${recorded.id}.${revision + 1}.0`;
+  const input = debriefInput(story, {
+    debriefId: recorded.id,
+    referenceId: recorded.referenceId,
+    targetRevision: revision,
+    reason: 'Corrected the observed outcome after reviewing contemporaneous notes.',
+    occurredAt: '2026-07-22T16:45:00Z',
+    observedQuestions: [{
+      text: 'How did you align fragmented owners around the launch deadline?',
+      askedByAudience: 'hiring_manager',
+      source: 'user_observed',
+    }],
+    observedOutcome: {
+      type: 'no_change',
+      note: 'The interviewer said the team would finish the remaining interviews first.',
+    },
+    proofGaps: [{
+      id: 'gap.metric-specificity',
+      type: 'weak_metric',
+      text: 'The adoption metric needed a clearer measurement window.',
+      questionId,
+      storyId: story.id,
+      proofPointId: 'proof_w07_active',
+    }],
+    storyUses: [{
+      storyId: story.id,
+      storyRevisionId: story.activeVerifiedRevision.id,
+      questionId,
+      adaptationNote: 'Shortened the situation and expanded the dependency tradeoff.',
+    }],
+    notes: 'Private corrected debrief note: no next stage was promised.',
+    ...overrides,
+  });
+  delete input.debriefId;
+  delete input.targetRevision;
+  return {
+    ...input,
+    debriefId: recorded.id,
+    targetRevision: revision,
+    reason: overrides.reason || 'Corrected the observed outcome after reviewing contemporaneous notes.',
+  };
+}
+
+function assertRejectedWithoutDebriefDelta(store, root, action, expectedCode) {
+  const before = debriefState(store, root);
+  assert.throws(
+    action,
+    error => error instanceof interview.InterviewError && error.code === expectedCode,
+  );
+  assert.deepEqual(debriefState(store, root), before);
+}
+
+test('W07-DEBRIEF-01 records one owned attributed revision and emits the exact W06 handoff', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store);
+  const input = debriefInput(story);
+  const expectedDebriefId = deterministicId(
+    'interview_debrief',
+    'profile_w07_alpha:interview-debrief-alpha-01',
+  );
+  const expectedQuestionId = `debrief.${expectedDebriefId}.1.0`;
+  const recorded = interview.recordInterviewDebrief(store, input);
+
+  assert.equal(recorded.schema, interview.INTERVIEW_DEBRIEF_SCHEMA);
+  assert.equal(recorded.version, 1);
+  assert.equal(recorded.id, expectedDebriefId);
+  assert.equal(recorded.profileId, 'profile_w07_alpha');
+  assert.equal(recorded.jobId, 'job_w07_alpha');
+  assert.equal(recorded.applicationId, 'application_w07_alpha');
+  assert.equal(recorded.interviewStage, 'hiring-manager');
+  assert.equal(recorded.audience, 'hiring_manager');
+  assert.equal(recorded.referenceId, input.referenceId);
+  assert.equal(recorded.idempotent, false);
+  assert.equal(recorded.exactReplay, false);
+  assert.equal(recorded.currentRevision.revision, 1);
+  assert.equal(recorded.currentRevision.current, true);
+  assert.deepEqual(recorded.currentRevision.observedQuestions, [{
+    id: expectedQuestionId,
+    text: input.observedQuestions[0].text,
+    askedByAudience: 'hiring_manager',
+    source: 'user_observed',
+  }]);
+  assert.deepEqual(recorded.currentRevision.observedOutcome, input.observedOutcome);
+  assert.deepEqual(recorded.currentRevision.proofGaps, input.proofGaps);
+  assert.deepEqual(recorded.currentRevision.storyUses, input.storyUses);
+  assert.equal(recorded.currentRevision.notes, input.notes);
+  assert.deepEqual(recorded.currentRevision.fieldProvenance, input.fieldProvenance);
+  assert.deepEqual(recorded.lifecycleTrigger, {
+    schema: 'jobos.lifecycle-event-input.v1',
+    profileId: 'profile_w07_alpha',
+    applicationId: 'application_w07_alpha',
+    eventId: expectedDebriefId,
+    eventType: 'interview_debrief_recorded',
+    occurredAt: '2026-07-22T16:30:00.000Z',
+    stage: 'interview',
+  });
+  assert.equal(recorded.action.actionCode, 'follow-up-after-interview');
+  assert.equal(recorded.action.sourceEvent.id, expectedDebriefId);
+  assert.equal(recorded.action.sourceEvent.type, 'interview_debrief_recorded');
+  assert.equal(all(store, `SELECT * FROM tasks
+    WHERE application_id=? AND status='open' AND action_code='follow-up-after-interview'`, [
+    input.applicationId,
+  ]).length, 1);
+
+  const row = one(store, 'SELECT * FROM interview_debrief_revisions WHERE debrief_id=?', [
+    expectedDebriefId,
+  ]);
+  assert.equal(row.revision, 1);
+  assert.equal(row.profile_id, 'profile_w07_alpha');
+  assert.deepEqual(JSON.parse(row.observed_questions_json), recorded.currentRevision.observedQuestions);
+  assert.deepEqual(JSON.parse(row.proof_gaps_json), recorded.currentRevision.proofGaps);
+  assert.deepEqual(JSON.parse(row.story_uses_json), recorded.currentRevision.storyUses);
+});
+
+test('W07-DEBRIEF-02 rejects invalid ownership, provenance, shapes, links, duplicates, and reference conflicts with zero delta', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store, { title: 'Primary debrief story' });
+  const otherStory = createVerifiedStory(store, { title: 'Other debrief story' });
+  const betaStory = createVerifiedStory(store, {
+    profileId: 'profile_w07_beta',
+    proofPointId: 'proof_w07_beta_active',
+    title: 'Cross-profile debrief story',
+  });
+  addSecondAlphaApplication(store);
+  const valid = debriefInput(story);
+  const questionId = valid.proofGaps[0].questionId;
+
+  for (const [input, code] of [
+    [{ ...valid, profileId: 'profile_w07_beta' }, 'interview_job_profile_mismatch'],
+    [{ ...valid, jobId: 'job_w07_beta' }, 'interview_job_profile_mismatch'],
+    [{
+      ...valid,
+      jobId: 'job_w07_alpha_second',
+      applicationId: 'application_w07_alpha',
+    }, 'interview_application_job_mismatch'],
+    [{
+      ...valid,
+      storyUses: [{
+        ...valid.storyUses[0],
+        storyRevisionId: otherStory.activeVerifiedRevision.id,
+      }],
+    }, 'interview_story_revision_mismatch'],
+    [{
+      ...valid,
+      proofGaps: [{
+        ...valid.proofGaps[0],
+        proofPointId: 'proof_w07_beta_active',
+      }],
+    }, 'interview_proof_point_profile_mismatch'],
+    [{ ...valid, occurredAt: '2026-07-22' }, 'interview_occurred_at_invalid'],
+    [{ ...valid, occurredAt: '2999-01-01T00:00:00Z' }, 'interview_debrief_occurred_at_future'],
+    [{ ...valid, source: 'mcp' }, 'interview_debrief_source_untrusted'],
+    [{ ...valid, fieldProvenance: undefined }, 'interview_debrief_field_provenance_invalid'],
+    [{
+      ...valid,
+      fieldProvenance: {
+        ...valid.fieldProvenance,
+        notes: { ...valid.fieldProvenance.notes, origin: 'agent' },
+      },
+    }, 'interview_debrief_field_provenance_invalid'],
+    [{
+      ...valid,
+      observedOutcome: { type: 'maybe', note: '' },
+    }, 'interview_observed_outcome_type_invalid'],
+    [{ ...valid, observedQuestions: {} }, 'interview_observed_questions_shape_invalid'],
+    [{
+      ...valid,
+      observedQuestions: [valid.observedQuestions[0], { ...valid.observedQuestions[0] }],
+    }, 'interview_observed_question_duplicate'],
+    [{
+      ...valid,
+      proofGaps: [valid.proofGaps[0], { ...valid.proofGaps[0] }],
+    }, 'interview_proof_gap_duplicate'],
+    [{
+      ...valid,
+      storyUses: [valid.storyUses[0], { ...valid.storyUses[0] }],
+    }, 'interview_story_use_duplicate'],
+    [{
+      ...valid,
+      storyUses: [{ ...valid.storyUses[0], questionId: `${questionId}.unknown` }],
+    }, 'interview_debrief_question_link_invalid'],
+    [{
+      ...valid,
+      proofGaps: [{
+        ...valid.proofGaps[0],
+        storyId: betaStory.id,
+      }],
+    }, 'interview_story_profile_mismatch'],
+  ]) {
+    assertRejectedWithoutDebriefDelta(
+      store,
+      root,
+      () => interview.recordInterviewDebrief(store, input),
+      code,
+    );
+  }
+
+  const recorded = interview.recordInterviewDebrief(store, valid);
+  assert.equal(recorded.idempotent, false);
+  assertRejectedWithoutDebriefDelta(
+    store,
+    root,
+    () => interview.recordInterviewDebrief(store, {
+      ...valid,
+      notes: 'Conflicting content for the same external reference.',
+    }),
+    'interview_debrief_reference_conflict',
+  );
+});
+
+test('W07-DEBRIEF-03 exact replay is write-free and correction is append-only, branchless, and preserves manual W06 scheduling', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store);
+  addSecondAlphaApplication(store);
+  const input = debriefInput(story);
+  const recorded = interview.recordInterviewDebrief(store, input);
+  const revisionOne = one(store, 'SELECT * FROM interview_debrief_revisions WHERE debrief_id=? AND revision=1', [
+    recorded.id,
+  ]);
+  const beforeReplay = debriefState(store, root);
+  await new Promise(resolve => setTimeout(resolve, 8));
+  const replay = interview.recordInterviewDebrief(store, input);
+  assert.equal(replay.id, recorded.id);
+  assert.equal(replay.currentRevision.id, recorded.currentRevision.id);
+  assert.equal(replay.action.id, recorded.action.id);
+  assert.equal(replay.idempotent, true);
+  assert.equal(replay.exactReplay, true);
+  assert.deepEqual(debriefState(store, root), beforeReplay);
+
+  const manual = rescheduleApplicationNextAction(store, {
+    taskId: recorded.action.id,
+    profileId: recorded.profileId,
+    dueAt: '2026-08-05T09:30:00Z',
+    reason: 'The interviewer requested a later follow-up.',
+    actor: 'candidate',
+    source: 'cli',
+    nowDate: new Date('2026-07-23T09:00:00.000Z'),
+  });
+  assert.equal(manual.scheduleSource, 'manual');
+  await new Promise(resolve => setTimeout(resolve, 8));
+  const correction = correctionInput(story, recorded);
+  const corrected = interview.correctInterviewDebrief(store, correction);
+  assert.equal(corrected.id, recorded.id);
+  assert.equal(corrected.currentRevision.revision, 2);
+  assert.equal(corrected.currentRevision.supersedesRevisionId, recorded.currentRevision.id);
+  assert.equal(corrected.currentRevision.correctionReason, correction.reason);
+  assert.equal(corrected.currentRevision.current, true);
+  assert.equal(corrected.history[0].current, false);
+  assert.equal(corrected.action.id, recorded.action.id);
+  assert.equal(corrected.action.scheduleSource, 'manual');
+  assert.equal(corrected.action.dueAt, '2026-08-05T09:30:00.000Z');
+  assert.equal(corrected.action.manualRescheduleReason, 'The interviewer requested a later follow-up.');
+  assert.deepEqual(
+    one(store, 'SELECT * FROM interview_debrief_revisions WHERE debrief_id=? AND revision=1', [
+      recorded.id,
+    ]),
+    revisionOne,
+  );
+  assert.equal(all(store, `SELECT * FROM tasks
+    WHERE application_id=? AND status='open' AND action_code='follow-up-after-interview'`, [
+    recorded.applicationId,
+  ]).length, 1);
+
+  const beforeCorrectionReplay = debriefState(store, root);
+  await new Promise(resolve => setTimeout(resolve, 8));
+  const correctionReplay = interview.correctInterviewDebrief(store, correction);
+  assert.equal(correctionReplay.idempotent, true);
+  assert.equal(correctionReplay.exactReplay, true);
+  assert.equal(correctionReplay.currentRevision.id, corrected.currentRevision.id);
+  assert.deepEqual(debriefState(store, root), beforeCorrectionReplay);
+
+  assertRejectedWithoutDebriefDelta(
+    store,
+    root,
+    () => interview.correctInterviewDebrief(store, {
+      ...correction,
+      notes: 'A branched correction must not be accepted.',
+    }),
+    'interview_debrief_revision_not_current',
+  );
+  assertRejectedWithoutDebriefDelta(
+    store,
+    root,
+    () => interview.correctInterviewDebrief(store, {
+      ...correction,
+      proofGaps: [{
+        ...correction.proofGaps[0],
+        proofPointId: 'proof_w07_beta_active',
+      }],
+    }),
+    'interview_proof_point_profile_mismatch',
+  );
+  assertRejectedWithoutDebriefDelta(
+    store,
+    root,
+    () => interview.correctInterviewDebrief(store, {
+      ...correction,
+      profileId: 'profile_w07_beta',
+    }),
+    'interview_debrief_profile_mismatch',
+  );
+  for (const override of [
+    { interviewStage: 'onsite' },
+    { audience: 'peer_panel' },
+    {
+      jobId: 'job_w07_alpha_second',
+      applicationId: 'application_w07_alpha_second',
+    },
+  ]) {
+    assertRejectedWithoutDebriefDelta(
+      store,
+      root,
+      () => interview.correctInterviewDebrief(store, { ...correction, ...override }),
+      'interview_debrief_ownership_mismatch',
+    );
+  }
+  const thirdInput = correctionInput(story, corrected, {
+    targetRevision: 2,
+    reason: 'Added the final panel scheduling detail from the same notes.',
+    occurredAt: '2026-07-22T16:50:00Z',
+    observedOutcome: {
+      type: 'advanced',
+      note: 'The coordinator later confirmed the panel scheduling step.',
+    },
+    notes: 'Private revision three note: panel scheduling was later confirmed.',
+  });
+  const revisionThree = interview.correctInterviewDebrief(store, thirdInput);
+  assert.equal(revisionThree.currentRevision.revision, 3);
+  assert.equal(revisionThree.currentRevision.supersedesRevisionId, corrected.currentRevision.id);
+  const beforeIntermediateReplay = debriefState(store, root);
+  await new Promise(resolve => setTimeout(resolve, 8));
+  const intermediateReplay = interview.correctInterviewDebrief(store, correction);
+  assert.equal(intermediateReplay.idempotent, true);
+  assert.equal(intermediateReplay.exactReplay, true);
+  assert.equal(intermediateReplay.currentRevision.id, revisionThree.currentRevision.id);
+  assert.equal(intermediateReplay.currentRevision.revision, 3);
+  assert.deepEqual(debriefState(store, root), beforeIntermediateReplay);
+  assertRejectedWithoutDebriefDelta(
+    store,
+    root,
+    () => interview.correctInterviewDebrief(store, {
+      ...correction,
+      notes: 'A stale conflicting branch after revision three.',
+    }),
+    'interview_debrief_revision_not_current',
+  );
+});
+
+test('W07-DEBRIEF-04 exposes deterministic current/history W08-safe projections and links/counts-only mirrors', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store);
+  const prep = await interview.prepInterview(
+    store,
+    'application_w07_alpha',
+    'hiring-manager',
+    { audience: 'hiring_manager' },
+  );
+  const recorded = interview.recordInterviewDebrief(store, debriefInput(story));
+  const corrected = interview.correctInterviewDebrief(
+    store,
+    correctionInput(story, recorded),
+  );
+
+  const shown = interview.getInterviewDebrief(store, {
+    profileId: recorded.profileId,
+    debriefId: recorded.id,
+    includeHistory: true,
+  });
+  const { idempotent: correctedIdempotent, exactReplay: correctedReplay, ...correctedProjection } = corrected;
+  assert.equal(correctedIdempotent, false);
+  assert.equal(correctedReplay, false);
+  assert.deepEqual(shown, correctedProjection);
+  const listed = interview.listInterviewDebriefs(store, {
+    profileId: recorded.profileId,
+    applicationId: recorded.applicationId,
+    includeHistory: true,
+  });
+  assert.equal(listed.schema, interview.INTERVIEW_DEBRIEF_LIST_SCHEMA);
+  assert.equal(listed.version, 1);
+  assert.equal(listed.profileId, recorded.profileId);
+  assert.equal(listed.applicationId, recorded.applicationId);
+  assert.deepEqual(listed.debriefs, [shown]);
+  assert.equal(listed.debriefs[0].history.length, 2);
+  assert.equal(listed.debriefs[0].history[0].current, false);
+  assert.equal(listed.debriefs[0].history[1].current, true);
+
+  const nowDate = new Date('2026-07-24T12:00:00.000Z');
+  const observations = interview.listInterviewObservations(store, {
+    profileId: recorded.profileId,
+    sinceDays: 30,
+    nowDate,
+  });
+  assert.equal(observations.schema, interview.INTERVIEW_OBSERVATION_LIST_SCHEMA);
+  assert.equal(observations.observationSchema, interview.INTERVIEW_OBSERVATION_SCHEMA);
+  assert.equal(observations.profileId, recorded.profileId);
+  assert.deepEqual(observations.period, {
+    start: '2026-06-24T12:00:00.000Z',
+    end: '2026-07-24T12:00:00.000Z',
+  });
+  assert.deepEqual(observations.observations.map(item => item.id), [
+    `${recorded.id}:1`,
+    `${recorded.id}:2`,
+  ]);
+  assert.deepEqual(observations.observations.map(item => item.current), [false, true]);
+  assert.ok(observations.observations.every(item => item.interpretation
+    === 'attributed_observation_only_no_preference_or_causal_claim'));
+  assert.ok(observations.observations.every(item => item.externalSideEffects === 'none'));
+  assert.deepEqual(observations.observations[1].sourceEntity, {
+    type: 'interview_debrief',
+    id: recorded.id,
+    versionId: corrected.currentRevision.id,
+    revision: 2,
+    supersedesVersionId: recorded.currentRevision.id,
+  });
+  const forbiddenObservationKeys = new Set([
+    'preference',
+    'recommendation',
+    'confidence',
+    'causality',
+    'guidance',
+    'activation',
+    'inferredReason',
+    'notes',
+  ]);
+  for (const observation of observations.observations) {
+    for (const key of Object.keys(observation)) {
+      assert.equal(forbiddenObservationKeys.has(key), false, `W08-safe observation leaked ${key}`);
+    }
+  }
+  const excluded = interview.listInterviewObservations(store, {
+    profileId: recorded.profileId,
+    sinceDays: 1,
+    nowDate,
+  });
+  assert.deepEqual(excluded.period, {
+    start: '2026-07-23T12:00:00.000Z',
+    end: '2026-07-24T12:00:00.000Z',
+  });
+  assert.deepEqual(excluded.observations, []);
+  for (const sinceDays of [0, -1, 0.5, Number.POSITIVE_INFINITY, Number.NaN]) {
+    assert.throws(
+      () => interview.listInterviewObservations(store, {
+        profileId: recorded.profileId,
+        sinceDays,
+        nowDate,
+      }),
+      error => error instanceof interview.InterviewError
+        && error.code === 'interview_observation_since_invalid',
+    );
+  }
+  assert.throws(
+    () => interview.listInterviewObservations(store, {
+      profileId: recorded.profileId,
+      sinceDays: 1,
+      nowDate: new Date('invalid'),
+    }),
+    error => error instanceof interview.InterviewError
+      && error.code === 'interview_observation_now_invalid',
+  );
+  assert.throws(
+    () => interview.getInterviewDebrief(store, {
+      profileId: 'profile_w07_beta',
+      debriefId: recorded.id,
+    }),
+    error => error instanceof interview.InterviewError
+      && error.code === 'interview_debrief_profile_mismatch',
+  );
+  assert.throws(
+    () => interview.listInterviewDebriefs(store, {
+      profileId: 'profile_w07_beta',
+      applicationId: recorded.applicationId,
+    }),
+    error => error instanceof interview.InterviewError
+      && error.code === 'interview_job_profile_mismatch',
+  );
+
+  const debriefMirror = YAML.parse(readFileSync(debriefMirrorPath(root), 'utf8'));
+  assert.equal(debriefMirror.schema, interview.INTERVIEW_DEBRIEF_LIST_SCHEMA);
+  assert.equal(debriefMirror.policy.canonicalStore, 'sqlite');
+  assert.equal(debriefMirror.policy.appendOnlyRevisions, true);
+  assert.deepEqual(debriefMirror.debriefs, listed.debriefs);
+  const observationMirror = YAML.parse(readFileSync(observationMirrorPath(root), 'utf8'));
+  assert.equal(observationMirror.schema, interview.INTERVIEW_OBSERVATION_LIST_SCHEMA);
+  assert.equal(observationMirror.policy.interpretation, 'attributed_observations_only');
+  assert.deepEqual(observationMirror.observations, observations.observations);
+
+  const jobMirror = YAML.parse(readFileSync(jobMirrorPath(root), 'utf8'));
+  const applicationMirror = YAML.parse(readFileSync(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml'), 'utf8'));
+  for (const mirror of [jobMirror, applicationMirror]) {
+    assert.equal(mirror.interview.latestPrepArtifactId, prep.id);
+    assert.equal(mirror.interview.coveredCount, prep.pack.coveredCount);
+    assert.equal(mirror.interview.gapCount, prep.pack.gapCount);
+    assert.equal(mirror.interview.latestDebriefId, recorded.id);
+    assert.equal(mirror.interview.latestDebriefRevision, 2);
+    assert.equal(mirror.interview.currentW06Action.id, recorded.action.id);
+    assert.doesNotMatch(JSON.stringify(mirror.interview), /Private (?:corrected )?debrief note/);
+  }
+
+  const debriefBytes = readFileSync(debriefMirrorPath(root));
+  const observationBytes = readFileSync(observationMirrorPath(root));
+  const jobBytes = readFileSync(jobMirrorPath(root));
+  const applicationBytes = readFileSync(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml'));
+  const replay = interview.correctInterviewDebrief(store, correctionInput(story, recorded));
+  assert.equal(replay.exactReplay, true);
+  assert.deepEqual(readFileSync(debriefMirrorPath(root)), debriefBytes);
+  assert.deepEqual(readFileSync(observationMirrorPath(root)), observationBytes);
+  assert.deepEqual(readFileSync(jobMirrorPath(root)), jobBytes);
+  assert.deepEqual(
+    readFileSync(jobMirrorPath(root, 'job_w07_alpha', 'application.yaml')),
+    applicationBytes,
+  );
+  const beforeReopen = {
+    shown,
+    listed,
+    observations,
+    debriefBytes,
+    observationBytes,
+  };
+  save(store);
+  store.db.close();
+  const reopened = await openStore({ workspace: root });
+  assert.deepEqual(interview.getInterviewDebrief(reopened, {
+    profileId: recorded.profileId,
+    debriefId: recorded.id,
+    includeHistory: true,
+  }), beforeReopen.shown);
+  assert.deepEqual(interview.listInterviewDebriefs(reopened, {
+    profileId: recorded.profileId,
+    applicationId: recorded.applicationId,
+    includeHistory: true,
+  }), beforeReopen.listed);
+  assert.deepEqual(interview.listInterviewObservations(reopened, {
+    profileId: recorded.profileId,
+    sinceDays: 30,
+    nowDate,
+  }), beforeReopen.observations);
+  assert.deepEqual(readFileSync(debriefMirrorPath(root)), beforeReopen.debriefBytes);
+  assert.deepEqual(readFileSync(observationMirrorPath(root)), beforeReopen.observationBytes);
+});
+
+test('W07-DEBRIEF-05 empty references never imply replay identity', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store);
+  const input = debriefInput(story, {
+    referenceId: '',
+    proofGaps: [{
+      id: 'gap.metric-specificity',
+      type: 'weak_metric',
+      text: 'The adoption metric needed a clearer measurement window.',
+      questionId: null,
+      storyId: story.id,
+      proofPointId: 'proof_w07_active',
+    }],
+    storyUses: [{
+      storyId: story.id,
+      storyRevisionId: story.activeVerifiedRevision.id,
+      questionId: null,
+      adaptationNote: 'Shortened the situation and expanded the dependency tradeoff.',
+    }],
+  });
+  const first = interview.recordInterviewDebrief(store, input);
+  await new Promise(resolve => setTimeout(resolve, 8));
+  const second = interview.recordInterviewDebrief(store, input);
+  assert.notEqual(second.id, first.id);
+  assert.equal(first.referenceId, '');
+  assert.equal(second.referenceId, '');
+  assert.equal(first.idempotent, false);
+  assert.equal(second.idempotent, false);
+  assert.deepEqual(
+    all(store, `SELECT id,reference_id FROM interview_debriefs
+      WHERE profile_id=? ORDER BY created_at,id`, [first.profileId]),
+    [
+      { id: first.id, reference_id: '' },
+      { id: second.id, reference_id: '' },
+    ],
+  );
 });

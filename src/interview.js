@@ -4,6 +4,12 @@ import { hash, id, now, parseJson, tokenize } from './utils.js';
 import { createArtifact } from './artifacts.js';
 import { inventoryForJob } from './requirements.js';
 import { writeYaml } from './workspace.js';
+import {
+  LIFECYCLE_EVENT_INPUT_SCHEMA,
+  lifecycleTaskView,
+  reconcileApplicationNextAction,
+} from './lifecycle.js';
+import { syncJob } from './jobs.js';
 
 export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
 export const INTERVIEW_STORY_LIST_SCHEMA = 'jobos.interview-story-list.v1';
@@ -2270,6 +2276,7 @@ export async function prepInterview(
     },
     mutate(store, createdArtifact) {
       insertInterviewPackItems(store, createdArtifact, pack);
+      queuePostCommit(store, () => syncJob(store, ownership.job.id));
     },
   });
   return {
@@ -2285,5 +2292,867 @@ export async function prepInterview(
       artifactRevision: artifact.revision,
     },
     note: 'Interview prep packet created for human review.',
+  };
+}
+
+const TRUSTED_INTERVIEW_DEBRIEF_SOURCES = Object.freeze(['cli', 'tui']);
+const DEBRIEF_PROVENANCE_FIELDS = Object.freeze([
+  'observedQuestions',
+  'observedOutcome',
+  'proofGaps',
+  'storyUses',
+  'notes',
+]);
+
+function debriefObject(value, field, code) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new InterviewError(code, `${field} must be an object.`);
+  }
+  return value;
+}
+
+function debriefExactKeys(value, allowed, field, code) {
+  const object = debriefObject(value, field, code);
+  const keys = Object.keys(object).sort();
+  const expected = [...allowed].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new InterviewError(code, `${field} must contain exactly: ${allowed.join(', ')}.`);
+  }
+  return object;
+}
+
+function debriefArray(value, field, code) {
+  if (!Array.isArray(value)) {
+    throw new InterviewError(code, `${field} must be an array.`);
+  }
+  return value;
+}
+
+function debriefNullableText(value, field) {
+  if (value == null) return null;
+  return requireInterviewText(value, field);
+}
+
+function normalizeDebriefQuestions(value, debriefId, revision) {
+  const seen = new Set();
+  return debriefArray(
+    value,
+    'observedQuestions',
+    'interview_observed_questions_shape_invalid',
+  ).map((entry, index) => {
+    const allowed = Object.hasOwn(entry || {}, 'id')
+      ? ['id', 'text', 'askedByAudience', 'source']
+      : ['text', 'askedByAudience', 'source'];
+    const question = debriefExactKeys(
+      entry,
+      allowed,
+      `observedQuestions[${index}]`,
+      'interview_observed_question_shape_invalid',
+    );
+    const idValue = `debrief.${debriefId}.${revision}.${index}`;
+    if (question.id !== undefined && question.id !== idValue) {
+      throw new InterviewError(
+        'interview_observed_question_id_invalid',
+        `observedQuestions[${index}].id must equal ${idValue}.`,
+      );
+    }
+    const text = requireInterviewText(question.text, `observedQuestions[${index}].text`);
+    const askedByAudience = normalizeInterviewEnum(
+      question.askedByAudience,
+      `observedQuestions[${index}].askedByAudience`,
+      INTERVIEW_AUDIENCES,
+    );
+    const source = normalizeInterviewEnum(
+      question.source,
+      `observedQuestions[${index}].source`,
+      ['user_observed'],
+    );
+    const duplicateKey = `${text.toLowerCase()}|${askedByAudience}`;
+    if (seen.has(duplicateKey)) {
+      throw new InterviewError(
+        'interview_observed_question_duplicate',
+        'Observed questions must not contain duplicate text/audience pairs.',
+      );
+    }
+    seen.add(duplicateKey);
+    return { id: idValue, text, askedByAudience, source };
+  });
+}
+
+function normalizeDebriefOutcome(value) {
+  const outcome = debriefExactKeys(
+    value,
+    ['type', 'note'],
+    'observedOutcome',
+    'interview_observed_outcome_shape_invalid',
+  );
+  let type;
+  try {
+    type = normalizeInterviewEnum(outcome.type, 'observedOutcome.type', INTERVIEW_OUTCOME_TYPES);
+  } catch (error) {
+    if (error instanceof InterviewError) {
+      throw new InterviewError(
+        'interview_observed_outcome_type_invalid',
+        error.message,
+        error.details,
+      );
+    }
+    throw error;
+  }
+  if (typeof outcome.note !== 'string') {
+    throw new InterviewError(
+      'interview_observed_outcome_shape_invalid',
+      'observedOutcome.note must be a string.',
+    );
+  }
+  return { type, note: outcome.note };
+}
+
+function normalizeDebriefProofGaps(value, questionIds) {
+  const seen = new Set();
+  return debriefArray(value, 'proofGaps', 'interview_proof_gaps_shape_invalid')
+    .map((entry, index) => {
+      const gap = debriefExactKeys(
+        entry,
+        ['id', 'type', 'text', 'questionId', 'storyId', 'proofPointId'],
+        `proofGaps[${index}]`,
+        'interview_proof_gap_shape_invalid',
+      );
+      const gapId = requireInterviewText(gap.id, `proofGaps[${index}].id`);
+      if (seen.has(gapId)) {
+        throw new InterviewError(
+          'interview_proof_gap_duplicate',
+          `Duplicate proof gap id: ${gapId}.`,
+        );
+      }
+      seen.add(gapId);
+      let type;
+      try {
+        type = normalizeInterviewEnum(
+          gap.type,
+          `proofGaps[${index}].type`,
+          INTERVIEW_PROOF_GAP_TYPES,
+        );
+      } catch (error) {
+        if (error instanceof InterviewError) {
+          throw new InterviewError('interview_proof_gap_type_invalid', error.message, error.details);
+        }
+        throw error;
+      }
+      const questionId = debriefNullableText(gap.questionId, `proofGaps[${index}].questionId`);
+      if (questionId && !questionIds.has(questionId)) {
+        throw new InterviewError(
+          'interview_debrief_question_link_invalid',
+          `Proof gap ${gapId} links an unknown observed question: ${questionId}.`,
+        );
+      }
+      return {
+        id: gapId,
+        type,
+        text: requireInterviewText(gap.text, `proofGaps[${index}].text`),
+        questionId,
+        storyId: debriefNullableText(gap.storyId, `proofGaps[${index}].storyId`),
+        proofPointId: debriefNullableText(
+          gap.proofPointId,
+          `proofGaps[${index}].proofPointId`,
+        ),
+      };
+    });
+}
+
+function normalizeDebriefStoryUses(value, questionIds) {
+  const seen = new Set();
+  return debriefArray(value, 'storyUses', 'interview_story_uses_shape_invalid')
+    .map((entry, index) => {
+      const storyUse = debriefExactKeys(
+        entry,
+        ['storyId', 'storyRevisionId', 'questionId', 'adaptationNote'],
+        `storyUses[${index}]`,
+        'interview_story_use_shape_invalid',
+      );
+      const storyId = requireInterviewText(storyUse.storyId, `storyUses[${index}].storyId`);
+      const storyRevisionId = requireInterviewText(
+        storyUse.storyRevisionId,
+        `storyUses[${index}].storyRevisionId`,
+      );
+      const questionId = debriefNullableText(
+        storyUse.questionId,
+        `storyUses[${index}].questionId`,
+      );
+      if (questionId && !questionIds.has(questionId)) {
+        throw new InterviewError(
+          'interview_debrief_question_link_invalid',
+          `Story use ${storyId} links an unknown observed question: ${questionId}.`,
+        );
+      }
+      const duplicateKey = `${storyId}|${storyRevisionId}|${questionId || ''}`;
+      if (seen.has(duplicateKey)) {
+        throw new InterviewError(
+          'interview_story_use_duplicate',
+          'Story uses must not duplicate a story revision/question link.',
+        );
+      }
+      seen.add(duplicateKey);
+      if (typeof storyUse.adaptationNote !== 'string') {
+        throw new InterviewError(
+          'interview_story_use_shape_invalid',
+          `storyUses[${index}].adaptationNote must be a string.`,
+        );
+      }
+      return { storyId, storyRevisionId, questionId, adaptationNote: storyUse.adaptationNote };
+    });
+}
+
+function normalizeDebriefFieldProvenance(value, actor, source) {
+  const provenance = debriefExactKeys(
+    value,
+    DEBRIEF_PROVENANCE_FIELDS,
+    'fieldProvenance',
+    'interview_debrief_field_provenance_invalid',
+  );
+  return Object.fromEntries(DEBRIEF_PROVENANCE_FIELDS.map(field => {
+    const entry = debriefExactKeys(
+      provenance[field],
+      ['origin', 'actor', 'source', 'sourceRef'],
+      `fieldProvenance.${field}`,
+      'interview_debrief_field_provenance_invalid',
+    );
+    if (entry.origin !== 'user') {
+      throw new InterviewError(
+        'interview_debrief_field_provenance_invalid',
+        `fieldProvenance.${field}.origin must equal user.`,
+      );
+    }
+    const entryActor = requireInterviewText(entry.actor, `fieldProvenance.${field}.actor`);
+    const entrySource = String(entry.source || '').trim().toLowerCase();
+    if (entryActor !== actor || entrySource !== source) {
+      throw new InterviewError(
+        'interview_debrief_field_provenance_invalid',
+        `fieldProvenance.${field} must retain the debrief actor and trusted source.`,
+      );
+    }
+    const sourceRef = entry.sourceRef == null
+      ? null
+      : requireInterviewText(entry.sourceRef, `fieldProvenance.${field}.sourceRef`);
+    return [field, { origin: 'user', actor: entryActor, source: entrySource, sourceRef }];
+  }));
+}
+
+function debriefPayloadHash(payload) {
+  return hash(JSON.stringify({
+    occurredAt: payload.occurredAt,
+    actor: payload.actor,
+    source: payload.source,
+    observedQuestions: payload.observedQuestions,
+    observedOutcome: payload.observedOutcome,
+    proofGaps: payload.proofGaps,
+    storyUses: payload.storyUses,
+    notes: payload.notes,
+    fieldProvenance: payload.fieldProvenance,
+  }));
+}
+
+function normalizeDebriefPayload(s, input, ownership, debriefId, revision, recordedAt) {
+  const occurredAt = normalizeInterviewTimestamp(input.occurredAt, 'occurredAt');
+  if (Date.parse(occurredAt) > Date.parse(recordedAt)) {
+    throw new InterviewError(
+      'interview_debrief_occurred_at_future',
+      'occurredAt cannot be in the future relative to recordedAt.',
+    );
+  }
+  const actor = requireInterviewText(input.actor, 'actor');
+  const source = String(input.source || '').trim().toLowerCase();
+  if (!TRUSTED_INTERVIEW_DEBRIEF_SOURCES.includes(source)) {
+    throw new InterviewError(
+      'interview_debrief_source_untrusted',
+      'Interview debriefs require source=cli or source=tui.',
+      { allowed: TRUSTED_INTERVIEW_DEBRIEF_SOURCES },
+    );
+  }
+  const observedQuestions = normalizeDebriefQuestions(
+    input.observedQuestions,
+    debriefId,
+    revision,
+  );
+  const questionIds = new Set(observedQuestions.map(question => question.id));
+  const observedOutcome = normalizeDebriefOutcome(input.observedOutcome);
+  const proofGaps = normalizeDebriefProofGaps(input.proofGaps, questionIds);
+  const storyUses = normalizeDebriefStoryUses(input.storyUses, questionIds);
+  if (typeof input.notes !== 'string') {
+    throw new InterviewError('interview_debrief_notes_invalid', 'notes must be a string.');
+  }
+  const fieldProvenance = normalizeDebriefFieldProvenance(
+    input.fieldProvenance,
+    actor,
+    source,
+  );
+
+  const proofPointIds = [...new Set(
+    proofGaps.map(gap => gap.proofPointId).filter(Boolean),
+  )];
+  resolveInterviewOwnership(s, {
+    profileId: ownership.profile.id,
+    jobId: ownership.job.id,
+    applicationId: ownership.application.id,
+    proofPointIds,
+  });
+  const storyLinks = new Map();
+  for (const gap of proofGaps) {
+    if (gap.storyId) storyLinks.set(`${gap.storyId}|`, { storyId: gap.storyId });
+  }
+  for (const storyUse of storyUses) {
+    storyLinks.set(
+      `${storyUse.storyId}|${storyUse.storyRevisionId}`,
+      {
+        storyId: storyUse.storyId,
+        storyRevisionId: storyUse.storyRevisionId,
+      },
+    );
+  }
+  for (const link of storyLinks.values()) {
+    resolveInterviewOwnership(s, {
+      profileId: ownership.profile.id,
+      jobId: ownership.job.id,
+      applicationId: ownership.application.id,
+      ...link,
+    });
+  }
+
+  const payload = {
+    occurredAt,
+    recordedAt,
+    actor,
+    source,
+    observedQuestions,
+    observedOutcome,
+    proofGaps,
+    storyUses,
+    notes: input.notes,
+    fieldProvenance,
+  };
+  return { ...payload, contentHash: debriefPayloadHash(payload) };
+}
+
+function debriefLifecycleTrigger(debrief, revision) {
+  return {
+    schema: LIFECYCLE_EVENT_INPUT_SCHEMA,
+    profileId: debrief.profile_id,
+    applicationId: debrief.application_id,
+    eventId: debrief.id,
+    eventType: 'interview_debrief_recorded',
+    occurredAt: revision.occurred_at,
+    stage: 'interview',
+  };
+}
+
+function debriefRevisionRows(s, debriefId) {
+  return all(s, `SELECT * FROM interview_debrief_revisions
+    WHERE debrief_id=? ORDER BY revision,id`, [debriefId]);
+}
+
+function debriefRevisionProjection(row, currentRevision) {
+  return {
+    id: row.id,
+    debriefId: row.debrief_id,
+    profileId: row.profile_id,
+    revision: Number(row.revision),
+    occurredAt: row.occurred_at,
+    recordedAt: row.recorded_at,
+    actor: row.actor,
+    source: row.source,
+    observedQuestions: parseJson(row.observed_questions_json, []),
+    observedOutcome: parseJson(row.observed_outcome_json, {}),
+    proofGaps: parseJson(row.proof_gaps_json, []),
+    storyUses: parseJson(row.story_uses_json, []),
+    notes: row.notes,
+    fieldProvenance: parseJson(row.field_provenance_json, {}),
+    contentHash: row.content_hash,
+    supersedesRevisionId: row.supersedes_revision_id || null,
+    correctionReason: row.correction_reason || '',
+    current: Number(row.revision) === Number(currentRevision),
+  };
+}
+
+function debriefActionRow(s, debrief) {
+  return one(s, `SELECT * FROM tasks
+    WHERE application_id=? AND action_kind='application_next_action'
+      AND action_code='follow-up-after-interview' AND source_event_id=?
+    ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,updated_at DESC,id LIMIT 1`, [
+    debrief.application_id,
+    debrief.id,
+  ]);
+}
+
+function debriefProjection(s, row, { includeHistory = true } = {}) {
+  const rows = debriefRevisionRows(s, row.id);
+  if (!rows.length) {
+    throw new InterviewError(
+      'interview_debrief_revision_missing',
+      `Interview debrief ${row.id} has no revisions.`,
+    );
+  }
+  const currentRow = rows.at(-1);
+  const currentRevision = debriefRevisionProjection(currentRow, currentRow.revision);
+  const actionRow = debriefActionRow(s, row);
+  const result = {
+    schema: INTERVIEW_DEBRIEF_SCHEMA,
+    version: 1,
+    id: row.id,
+    profileId: row.profile_id,
+    jobId: row.job_id,
+    applicationId: row.application_id,
+    interviewStage: row.interview_stage,
+    audience: row.audience,
+    referenceId: row.reference_id,
+    createdAt: row.created_at,
+    currentRevision,
+    lifecycleTrigger: debriefLifecycleTrigger(row, currentRow),
+    action: actionRow
+      ? lifecycleTaskView(actionRow, { nowDate: new Date(currentRow.recorded_at) })
+      : null,
+  };
+  if (includeHistory) {
+    result.history = rows.map(revision => debriefRevisionProjection(revision, currentRow.revision));
+  }
+  return result;
+}
+
+function debriefResult(s, row, { idempotent = false, includeHistory = true } = {}) {
+  return {
+    ...debriefProjection(s, row, { includeHistory }),
+    idempotent,
+    exactReplay: idempotent,
+  };
+}
+
+function insertDebriefRevision(s, debrief, revision, payload, {
+  supersedesRevisionId = null,
+  correctionReason = '',
+} = {}) {
+  const revisionId = id(
+    'interview_debrief_revision',
+    `${debrief.id}:${revision}:${payload.contentHash}:${supersedesRevisionId || ''}:${correctionReason}`,
+  );
+  run(s, `INSERT INTO interview_debrief_revisions
+    (id,debrief_id,profile_id,revision,occurred_at,recorded_at,actor,source,
+     observed_questions_json,observed_outcome_json,proof_gaps_json,story_uses_json,
+     notes,field_provenance_json,content_hash,supersedes_revision_id,correction_reason)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    revisionId,
+    debrief.id,
+    debrief.profile_id,
+    revision,
+    payload.occurredAt,
+    payload.recordedAt,
+    payload.actor,
+    payload.source,
+    JSON.stringify(payload.observedQuestions),
+    JSON.stringify(payload.observedOutcome),
+    JSON.stringify(payload.proofGaps),
+    JSON.stringify(payload.storyUses),
+    payload.notes,
+    JSON.stringify(payload.fieldProvenance),
+    payload.contentHash,
+    supersedesRevisionId,
+    correctionReason,
+  ]);
+  return one(s, 'SELECT * FROM interview_debrief_revisions WHERE id=?', [revisionId]);
+}
+
+function sameDebriefIdentity(row, normalized) {
+  return row.profile_id === normalized.profileId
+    && row.job_id === normalized.jobId
+    && row.application_id === normalized.applicationId
+    && row.interview_stage === normalized.interviewStage
+    && row.audience === normalized.audience
+    && row.reference_id === normalized.referenceId;
+}
+
+function recordDebriefAudit(s, action, debrief, revision) {
+  return recordAudit(s, action, 'interview_debrief', debrief.id, {
+    schema: INTERVIEW_DEBRIEF_SCHEMA,
+    profileId: debrief.profile_id,
+    jobId: debrief.job_id,
+    applicationId: debrief.application_id,
+    debriefId: debrief.id,
+    revisionId: revision.id,
+    revision: Number(revision.revision),
+    supersedesRevisionId: revision.supersedes_revision_id || null,
+    interviewStage: debrief.interview_stage,
+    audience: debrief.audience,
+    externalSideEffects: 'none',
+  });
+}
+
+function debriefRowsForJob(s, jobId) {
+  return all(s, `SELECT * FROM interview_debriefs
+    WHERE job_id=? ORDER BY application_id,created_at,id`, [jobId]);
+}
+
+function syncInterviewDebriefsForJob(s, jobId) {
+  const job = one(s, 'SELECT id,profile_id FROM jobs WHERE id=?', [jobId]);
+  if (!job) return;
+  writeYaml(path.join(s.p.jobs, job.id, 'interviews', 'debriefs.yaml'), {
+    schema: INTERVIEW_DEBRIEF_LIST_SCHEMA,
+    version: 1,
+    jobId: job.id,
+    profileId: job.profile_id,
+    policy: {
+      canonicalStore: 'sqlite',
+      appendOnlyRevisions: true,
+      currentResolution: 'highest_revision',
+      stableKey: 'id',
+    },
+    debriefs: debriefRowsForJob(s, job.id)
+      .map(row => debriefProjection(s, row, { includeHistory: true })),
+  });
+}
+
+function observationProjection(row, debrief, currentRevision) {
+  return {
+    schema: INTERVIEW_OBSERVATION_SCHEMA,
+    version: 1,
+    id: `${debrief.id}:${row.revision}`,
+    debriefId: debrief.id,
+    profileId: debrief.profile_id,
+    jobId: debrief.job_id,
+    applicationId: debrief.application_id,
+    interviewStage: debrief.interview_stage,
+    audience: debrief.audience,
+    sourceEntity: {
+      type: 'interview_debrief',
+      id: debrief.id,
+      versionId: row.id,
+      revision: Number(row.revision),
+      supersedesVersionId: row.supersedes_revision_id || null,
+    },
+    occurredAt: row.occurred_at,
+    recordedAt: row.recorded_at,
+    actor: row.actor,
+    source: row.source,
+    current: Number(row.revision) === Number(currentRevision),
+    observedQuestions: parseJson(row.observed_questions_json, []),
+    observedOutcome: parseJson(row.observed_outcome_json, {}),
+    proofGaps: parseJson(row.proof_gaps_json, []),
+    storyUses: parseJson(row.story_uses_json, []),
+    interpretation: 'attributed_observation_only_no_preference_or_causal_claim',
+    externalSideEffects: 'none',
+  };
+}
+
+function observationRows(s, profileId, start = null, end = null) {
+  const where = ['d.profile_id=?'];
+  const params = [profileId];
+  if (start) {
+    where.push('r.occurred_at>=?');
+    params.push(start);
+  }
+  if (end) {
+    where.push('r.occurred_at<=?');
+    params.push(end);
+  }
+  return all(s, `SELECT
+      r.*,d.job_id,d.application_id,d.interview_stage,d.audience,d.reference_id,d.created_at,
+      (SELECT MAX(r2.revision) FROM interview_debrief_revisions r2
+        WHERE r2.debrief_id=r.debrief_id) AS current_revision
+    FROM interview_debrief_revisions r
+    JOIN interview_debriefs d ON d.id=r.debrief_id
+    WHERE ${where.join(' AND ')}
+    ORDER BY r.occurred_at,r.debrief_id,r.revision,r.id`, params);
+}
+
+function syncInterviewObservations(s, profileId) {
+  const latest = one(s, `SELECT MAX(r.recorded_at) AS recorded_at
+    FROM interview_debrief_revisions r
+    JOIN interview_debriefs d ON d.id=r.debrief_id
+    WHERE d.profile_id=?`, [profileId]);
+  const nowDate = new Date(latest?.recorded_at || 0);
+  const projection = listInterviewObservations(s, { profileId, nowDate });
+  writeYaml(path.join(s.p.profiles, profileId, 'interviews', 'observations.yaml'), {
+    ...projection,
+    policy: {
+      canonicalStore: 'sqlite',
+      appendOnlyRevisions: true,
+      currentResolution: 'highest_revision',
+      interpretation: 'attributed_observations_only',
+      externalSideEffects: 'none',
+    },
+  });
+}
+
+function queueDebriefProjections(s, debrief, event) {
+  queuePostCommit(s, () => syncInterviewDebriefsForJob(s, debrief.job_id));
+  queuePostCommit(s, () => syncInterviewObservations(s, debrief.profile_id));
+  queuePostCommit(s, () => syncJob(s, debrief.job_id));
+  queuePostCommit(s, () => projectAudit(s, event));
+}
+
+function normalizedDebriefIdentity(s, input) {
+  const ownership = resolveInterviewOwnership(s, {
+    profileId: input.profileId,
+    jobId: input.jobId,
+    applicationId: input.applicationId,
+  });
+  if (!ownership.job || !ownership.application) {
+    throw new InterviewError(
+      'interview_debrief_ownership_required',
+      'Interview debriefs require an owned job and application.',
+    );
+  }
+  return {
+    ownership,
+    profileId: ownership.profile.id,
+    jobId: ownership.job.id,
+    applicationId: ownership.application.id,
+    interviewStage: normalizeInterviewEnum(
+      input.interviewStage,
+      'interviewStage',
+      INTERVIEW_STAGES,
+    ),
+    audience: normalizeInterviewEnum(input.audience, 'audience', INTERVIEW_AUDIENCES),
+    referenceId: String(input.referenceId || '').trim(),
+  };
+}
+
+export function recordInterviewDebrief(s, input = {}) {
+  return guardedWrite(s, () => {
+    const normalized = normalizedDebriefIdentity(s, input);
+    const recordedAt = now();
+    const identitySeed = normalized.referenceId
+      ? `${normalized.profileId}:${normalized.referenceId}`
+      : `${normalized.profileId}:${normalized.applicationId}:${input.occurredAt || ''}:${recordedAt}`;
+    const debriefId = id('interview_debrief', identitySeed);
+    const payload = normalizeDebriefPayload(
+      s,
+      input,
+      normalized.ownership,
+      debriefId,
+      1,
+      recordedAt,
+    );
+    const existing = normalized.referenceId
+      ? one(s, `SELECT * FROM interview_debriefs
+        WHERE profile_id=? AND reference_id=?`, [
+        normalized.profileId,
+        normalized.referenceId,
+      ])
+      : one(s, 'SELECT * FROM interview_debriefs WHERE id=?', [debriefId]);
+    if (existing) {
+      const original = one(s, `SELECT * FROM interview_debrief_revisions
+        WHERE debrief_id=? AND revision=1`, [existing.id]);
+      if (
+        !sameDebriefIdentity(existing, normalized)
+        || !original
+        || original.content_hash !== payload.contentHash
+      ) {
+        throw new InterviewError(
+          'interview_debrief_reference_conflict',
+          `Reference ${normalized.referenceId} already identifies a different interview debrief.`,
+        );
+      }
+      return debriefResult(s, existing, { idempotent: true });
+    }
+
+    run(s, `INSERT INTO interview_debriefs
+      (id,profile_id,job_id,application_id,interview_stage,audience,reference_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`, [
+      debriefId,
+      normalized.profileId,
+      normalized.jobId,
+      normalized.applicationId,
+      normalized.interviewStage,
+      normalized.audience,
+      normalized.referenceId,
+      recordedAt,
+    ]);
+    const debrief = one(s, 'SELECT * FROM interview_debriefs WHERE id=?', [debriefId]);
+    const revision = insertDebriefRevision(s, debrief, 1, payload);
+    const trigger = debriefLifecycleTrigger(debrief, revision);
+    reconcileApplicationNextAction(s, {
+      applicationId: debrief.application_id,
+      trigger,
+      nowDate: new Date(revision.occurred_at),
+    });
+    const event = recordDebriefAudit(s, 'interview.debrief.recorded', debrief, revision);
+    queueDebriefProjections(s, debrief, event);
+    return debriefResult(s, debrief);
+  });
+}
+
+export function correctInterviewDebrief(s, input = {}) {
+  return guardedWrite(s, () => {
+    const profileId = requireInterviewText(input.profileId, 'profileId');
+    const debriefId = requireInterviewText(input.debriefId, 'debriefId');
+    const debrief = one(s, 'SELECT * FROM interview_debriefs WHERE id=?', [debriefId]);
+    if (!debrief) {
+      throw new InterviewError(
+        'interview_debrief_unknown',
+        `Unknown interview debrief: ${debriefId}.`,
+      );
+    }
+    if (debrief.profile_id !== profileId) {
+      throw new InterviewError(
+        'interview_debrief_profile_mismatch',
+        `Interview debrief ${debriefId} belongs to profile ${debrief.profile_id}, not ${profileId}.`,
+      );
+    }
+    const targetRevision = Number(input.targetRevision);
+    if (!Number.isInteger(targetRevision) || targetRevision < 1) {
+      throw new InterviewError(
+        'interview_debrief_target_revision_invalid',
+        'targetRevision must be a positive integer.',
+      );
+    }
+    const reason = requireInterviewText(input.reason, 'reason');
+    const normalized = normalizedDebriefIdentity(s, input);
+    if (!sameDebriefIdentity(debrief, normalized)) {
+      throw new InterviewError(
+        'interview_debrief_ownership_mismatch',
+        'Corrections must preserve profile, job, application, stage, audience, and reference.',
+      );
+    }
+    const target = one(s, `SELECT * FROM interview_debrief_revisions
+      WHERE debrief_id=? AND revision=?`, [debrief.id, targetRevision]);
+    if (!target) {
+      throw new InterviewError(
+        'interview_debrief_revision_unknown',
+        `Unknown interview debrief revision: ${targetRevision}.`,
+      );
+    }
+    const current = one(s, `SELECT * FROM interview_debrief_revisions
+      WHERE debrief_id=? ORDER BY revision DESC,id DESC LIMIT 1`, [debrief.id]);
+    const recordedAt = now();
+    const payload = normalizeDebriefPayload(
+      s,
+      input,
+      normalized.ownership,
+      debrief.id,
+      targetRevision + 1,
+      recordedAt,
+    );
+    if (Number(current.revision) !== targetRevision) {
+      const successor = one(s, `SELECT * FROM interview_debrief_revisions
+        WHERE debrief_id=? AND revision=?`, [debrief.id, targetRevision + 1]);
+      if (
+        successor
+        && successor.supersedes_revision_id === target.id
+        && successor.correction_reason === reason
+        && successor.content_hash === payload.contentHash
+      ) {
+        return debriefResult(s, debrief, { idempotent: true });
+      }
+      throw new InterviewError(
+        'interview_debrief_revision_not_current',
+        `Interview debrief revision ${targetRevision} is not the latest revision.`,
+      );
+    }
+
+    const revision = insertDebriefRevision(s, debrief, targetRevision + 1, payload, {
+      supersedesRevisionId: target.id,
+      correctionReason: reason,
+    });
+    const trigger = debriefLifecycleTrigger(debrief, revision);
+    reconcileApplicationNextAction(s, {
+      applicationId: debrief.application_id,
+      trigger,
+      nowDate: new Date(revision.occurred_at),
+    });
+    const event = recordDebriefAudit(s, 'interview.debrief.corrected', debrief, revision);
+    queueDebriefProjections(s, debrief, event);
+    return debriefResult(s, debrief);
+  });
+}
+
+export function getInterviewDebrief(s, input = {}) {
+  const profileId = requireInterviewText(input.profileId, 'profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+    throw new InterviewError('interview_profile_unknown', `Unknown profile: ${profileId}.`);
+  }
+  const debriefId = requireInterviewText(input.debriefId, 'debriefId');
+  const row = one(s, 'SELECT * FROM interview_debriefs WHERE id=?', [debriefId]);
+  if (!row) {
+    throw new InterviewError('interview_debrief_unknown', `Unknown interview debrief: ${debriefId}.`);
+  }
+  if (row.profile_id !== profileId) {
+    throw new InterviewError(
+      'interview_debrief_profile_mismatch',
+      `Interview debrief ${debriefId} belongs to another profile.`,
+    );
+  }
+  return debriefProjection(s, row, { includeHistory: input.includeHistory !== false });
+}
+
+export function listInterviewDebriefs(s, input = {}) {
+  const profileId = requireInterviewText(input.profileId, 'profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+    throw new InterviewError('interview_profile_unknown', `Unknown profile: ${profileId}.`);
+  }
+  const applicationId = input.applicationId
+    ? requireInterviewText(input.applicationId, 'applicationId')
+    : null;
+  if (applicationId) {
+    resolveInterviewOwnership(s, { profileId, applicationId });
+  }
+  const rows = applicationId
+    ? all(s, `SELECT * FROM interview_debriefs
+      WHERE profile_id=? AND application_id=? ORDER BY created_at,id`, [profileId, applicationId])
+    : all(s, `SELECT * FROM interview_debriefs
+      WHERE profile_id=? ORDER BY created_at,id`, [profileId]);
+  return {
+    schema: INTERVIEW_DEBRIEF_LIST_SCHEMA,
+    version: 1,
+    profileId,
+    applicationId,
+    debriefs: rows.map(row => debriefProjection(
+      s,
+      row,
+      { includeHistory: Boolean(input.includeHistory) },
+    )),
+  };
+}
+
+export function listInterviewObservations(s, {
+  profileId,
+  sinceDays = null,
+  nowDate = new Date(),
+} = {}) {
+  const owner = requireInterviewText(profileId, 'profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [owner])) {
+    throw new InterviewError('interview_profile_unknown', `Unknown profile: ${owner}.`);
+  }
+  if (!(nowDate instanceof Date) || Number.isNaN(nowDate.getTime())) {
+    throw new InterviewError('interview_observation_now_invalid', 'nowDate must be a valid Date.');
+  }
+  let start = null;
+  if (sinceDays != null) {
+    const days = Number(sinceDays);
+    if (!Number.isInteger(days) || days <= 0) {
+      throw new InterviewError(
+        'interview_observation_since_invalid',
+        'sinceDays must be a positive integer.',
+      );
+    }
+    start = new Date(nowDate.getTime() - days * 86_400_000).toISOString();
+  }
+  const end = nowDate.toISOString();
+  const rows = observationRows(s, owner, start, end);
+  return {
+    schema: INTERVIEW_OBSERVATION_LIST_SCHEMA,
+    version: 1,
+    observationSchema: INTERVIEW_OBSERVATION_SCHEMA,
+    profileId: owner,
+    period: { start, end },
+    observations: rows.map(row => observationProjection(
+      row,
+      {
+        id: row.debrief_id,
+        profile_id: row.profile_id,
+        job_id: row.job_id,
+        application_id: row.application_id,
+        interview_stage: row.interview_stage,
+        audience: row.audience,
+      },
+      row.current_revision,
+    )),
   };
 }
