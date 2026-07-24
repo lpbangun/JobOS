@@ -2729,6 +2729,219 @@ test('W07-DEBRIEF-05 empty references never imply replay identity', async t => {
   );
 });
 
+test('W07-DEBRIEF-PACK-01 current same-profile observations feed later compatible packs deterministically', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  addSecondAlphaApplication(store);
+  const story = createVerifiedStory(store, { title: 'Debrief feedback pack story' });
+  const explicitText = 'How did you align fragmented owners around the launch deadline?';
+  const explicit = interview.createInterviewQuestionSource(store, questionInput({
+    jobId: 'job_w07_alpha_second',
+    applicationId: 'application_w07_alpha_second',
+    questionText: explicitText,
+    sourceRef: 'later-application-explicit-question',
+  }));
+
+  const original = interview.recordInterviewDebrief(store, debriefInput(story, {
+    referenceId: 'debrief-pack-primary',
+    observedQuestions: [
+      {
+        text: explicitText,
+        askedByAudience: 'hiring_manager',
+        source: 'user_observed',
+      },
+      {
+        text: 'Which launch tradeoff did you choose and why?',
+        askedByAudience: 'hiring_manager',
+        source: 'user_observed',
+      },
+    ],
+  }));
+  const corrected = interview.correctInterviewDebrief(store, correctionInput(story, original, {
+    observedQuestions: [
+      {
+        text: explicitText,
+        askedByAudience: 'hiring_manager',
+        source: 'user_observed',
+      },
+      {
+        text: 'How did you recover when the launch dependency failed?',
+        askedByAudience: 'hiring_manager',
+        source: 'user_observed',
+      },
+    ],
+    proofGaps: [],
+    storyUses: [],
+  }));
+
+  const wildcardSpecs = [
+    {
+      referenceId: 'debrief-pack-wildcard-a',
+      text: 'What context would help an interviewer understand the result?',
+    },
+    {
+      referenceId: 'debrief-pack-wildcard-b',
+      text: 'What follow-up detail should be ready for any interviewer?',
+    },
+  ].map(spec => ({
+    ...spec,
+    debriefId: deterministicId(
+      'interview_debrief',
+      `profile_w07_alpha:${spec.referenceId}`,
+    ),
+  }));
+  const wildcardDebriefs = new Map();
+  for (const spec of [...wildcardSpecs].sort((left, right) => (
+    right.debriefId.localeCompare(left.debriefId)
+  ))) {
+    const recorded = interview.recordInterviewDebrief(store, debriefInput(story, {
+      referenceId: spec.referenceId,
+      occurredAt: '2026-07-21T12:00:00Z',
+      observedQuestions: [{
+        text: spec.text,
+        askedByAudience: 'unknown',
+        source: 'user_observed',
+      }],
+      proofGaps: [],
+      storyUses: [],
+    }));
+    wildcardDebriefs.set(recorded.id, recorded);
+  }
+  const recruiterDebrief = interview.recordInterviewDebrief(store, debriefInput(story, {
+    referenceId: 'debrief-pack-recruiter',
+    occurredAt: '2026-07-20T12:00:00Z',
+    audience: 'recruiter',
+    observedQuestions: [{
+      text: 'Why are you interested in this role now?',
+      askedByAudience: 'recruiter',
+      source: 'user_observed',
+    }],
+    proofGaps: [],
+    storyUses: [],
+  }));
+  const betaStory = createVerifiedStory(store, {
+    profileId: 'profile_w07_beta',
+    proofPointId: 'proof_w07_beta_active',
+    title: 'Unrelated profile pack story',
+  });
+  const betaDebrief = interview.recordInterviewDebrief(store, debriefInput(betaStory, {
+    profileId: 'profile_w07_beta',
+    jobId: 'job_w07_beta',
+    applicationId: 'application_w07_beta',
+    referenceId: 'debrief-pack-beta',
+    occurredAt: '2026-07-19T12:00:00Z',
+    observedQuestions: [{
+      text: 'This other profile question must never leak.',
+      askedByAudience: 'hiring_manager',
+      source: 'user_observed',
+    }],
+    proofGaps: [],
+    storyUses: [],
+  }));
+
+  const beforeAssembly = debriefState(store, root);
+  const hiringPack = interview.buildInterviewPack(store, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+  });
+  const unknownPack = interview.buildInterviewPack(store, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'interview',
+    audience: 'unknown',
+  });
+  const executivePack = interview.buildInterviewPack(store, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'final',
+    audience: 'executive',
+  });
+  assert.deepEqual(debriefState(store, root), beforeAssembly);
+
+  assert.equal(hiringPack.questions[0].id, explicit.id);
+  assert.equal(hiringPack.questions[0].origin, 'sourced');
+  const hiringDebriefQuestions = hiringPack.questions.filter(question => (
+    question.source?.sourceKind === 'debrief_observed'
+  ));
+  const orderedWildcardIds = [...wildcardDebriefs.keys()].sort();
+  assert.deepEqual(hiringDebriefQuestions.map(question => question.id), [
+    ...orderedWildcardIds.map(debriefId => `debrief.${debriefId}.1.0`),
+    `debrief.${original.id}.2.1`,
+  ]);
+  assert.ok(hiringDebriefQuestions.every(question => (
+    question.origin === 'sourced'
+    && question.stage === 'hiring-manager'
+    && question.audience === 'hiring_manager'
+  )));
+  const correctedQuestion = hiringDebriefQuestions.at(-1);
+  assert.deepEqual(correctedQuestion.source, {
+    sourceKind: 'debrief_observed',
+    debriefId: original.id,
+    debriefRevisionId: corrected.currentRevision.id,
+    debriefRevision: 2,
+    questionIndex: 1,
+    profileId: original.profileId,
+    jobId: original.jobId,
+    applicationId: original.applicationId,
+    interviewStage: original.interviewStage,
+    debriefAudience: original.audience,
+    askedByAudience: 'hiring_manager',
+    occurredAt: corrected.currentRevision.occurredAt,
+    recordedAt: corrected.currentRevision.recordedAt,
+    actor: corrected.currentRevision.actor,
+    source: corrected.currentRevision.source,
+  });
+  const hiringIds = new Set(hiringPack.questions.map(question => question.id));
+  assert.equal(hiringIds.has(`debrief.${original.id}.1.0`), false);
+  assert.equal(hiringIds.has(`debrief.${original.id}.1.1`), false);
+  assert.equal(hiringIds.has(`debrief.${original.id}.2.0`), false);
+  assert.equal(hiringIds.has(`debrief.${recruiterDebrief.id}.1.0`), false);
+  assert.equal(hiringIds.has(`debrief.${betaDebrief.id}.1.0`), false);
+  const firstInferredIndex = hiringPack.questions.findIndex(question => question.origin === 'inferred');
+  assert.ok(firstInferredIndex > hiringDebriefQuestions.length);
+  assert.ok(hiringPack.questions.slice(0, firstInferredIndex)
+    .every(question => question.origin === 'sourced'));
+
+  const unknownDebriefQuestions = unknownPack.questions.filter(question => (
+    question.source?.sourceKind === 'debrief_observed'
+  ));
+  assert.deepEqual(unknownDebriefQuestions.map(question => question.id), [
+    `debrief.${recruiterDebrief.id}.1.0`,
+    ...orderedWildcardIds.map(debriefId => `debrief.${debriefId}.1.0`),
+    `debrief.${original.id}.2.0`,
+    `debrief.${original.id}.2.1`,
+  ]);
+  assert.equal(unknownDebriefQuestions.some(question => (
+    question.source.debriefId === betaDebrief.id
+  )), false);
+
+  const executiveDebriefQuestions = executivePack.questions.filter(question => (
+    question.source?.sourceKind === 'debrief_observed'
+  ));
+  assert.deepEqual(
+    executiveDebriefQuestions.map(question => question.id),
+    orderedWildcardIds.map(debriefId => `debrief.${debriefId}.1.0`),
+  );
+
+  save(store);
+  store.db.close();
+  const reopened = await openStore({ workspace: root });
+  assert.deepEqual(interview.buildInterviewPack(reopened, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+  }), hiringPack);
+  assert.deepEqual(interview.buildInterviewPack(reopened, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'interview',
+    audience: 'unknown',
+  }), unknownPack);
+  assert.deepEqual(interview.buildInterviewPack(reopened, {
+    applicationId: 'application_w07_alpha_second',
+    stage: 'final',
+    audience: 'executive',
+  }), executivePack);
+});
+
 test('W07-CLI-01 exact registry and subprocess routes preserve usage, ownership, provenance, and history contracts', async t => {
   assert.deepEqual(
     commandRegistry.filter(command => command.name.startsWith('interview ')).map(command => command.name),

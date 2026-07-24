@@ -1788,6 +1788,65 @@ function sourcedPackQuestions(s, ownership, stage, audience) {
   }));
 }
 
+function debriefAudienceCompatible(askedByAudience, packAudience) {
+  return askedByAudience === packAudience
+    || askedByAudience === 'unknown'
+    || packAudience === 'unknown';
+}
+
+function debriefObservedPackQuestions(s, ownership, stage, audience) {
+  const revisions = all(s, `SELECT
+      d.id AS debrief_id,d.profile_id,d.job_id,d.application_id,
+      d.interview_stage,d.audience AS debrief_audience,
+      r.id AS revision_id,r.revision,r.occurred_at,r.recorded_at,r.actor,r.source,
+      r.observed_questions_json
+    FROM interview_debriefs d
+    JOIN interview_debrief_revisions r ON r.debrief_id=d.id
+    WHERE d.profile_id=?
+      AND r.revision=(
+        SELECT MAX(current.revision)
+        FROM interview_debrief_revisions current
+        WHERE current.debrief_id=d.id
+      )
+    ORDER BY r.occurred_at,d.id,r.revision,r.id`, [ownership.profile.id]);
+  const questions = [];
+  for (const revision of revisions) {
+    const observed = parseJson(revision.observed_questions_json, []);
+    if (!Array.isArray(observed)) continue;
+    observed.forEach((question, questionIndex) => {
+      if (!debriefAudienceCompatible(question.askedByAudience, audience)) return;
+      questions.push({
+        schema: INTERVIEW_QUESTION_SCHEMA,
+        version: 1,
+        id: question.id,
+        origin: 'sourced',
+        text: question.text,
+        normalizedText: normalizeQuestionText(question.text),
+        stage,
+        audience,
+        source: {
+          sourceKind: 'debrief_observed',
+          debriefId: revision.debrief_id,
+          debriefRevisionId: revision.revision_id,
+          debriefRevision: Number(revision.revision),
+          questionIndex,
+          profileId: revision.profile_id,
+          jobId: revision.job_id,
+          applicationId: revision.application_id,
+          interviewStage: revision.interview_stage,
+          debriefAudience: revision.debrief_audience,
+          askedByAudience: question.askedByAudience,
+          occurredAt: revision.occurred_at,
+          recordedAt: revision.recorded_at,
+          actor: revision.actor,
+          source: revision.source,
+        },
+      });
+    });
+  }
+  return questions;
+}
+
 function inferredPackQuestions(job, stage, audience) {
   const templates = INTERVIEW_QUESTION_TEMPLATES[audience].map(template => ({
     schema: INTERVIEW_QUESTION_SCHEMA,
@@ -1836,6 +1895,7 @@ export function questionsForInterview(s, input = {}) {
   const audience = audienceForInterviewStage(stage, input.audience);
   const ordered = [
     ...sourcedPackQuestions(s, ownership, stage, audience),
+    ...debriefObservedPackQuestions(s, ownership, stage, audience),
     ...inferredPackQuestions(ownership.job, stage, audience),
   ];
   const normalizedTexts = new Set();
