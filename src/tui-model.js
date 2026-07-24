@@ -6,8 +6,7 @@ import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
-import { due } from './tracking.js';
-import { outreachDue } from './outreach.js';
+import { due, taskView } from './tracking.js';
 import { requirementTextsForJob } from './requirements.js';
 import { compareFitDecisions } from './scoring.js';
 
@@ -28,9 +27,11 @@ function statusStage(item) {
   };
 }
 
-function firstTask(s, jobId) {
-  const row = one(s, "SELECT id,title,type,due_at,priority FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 1", [jobId]);
-  return row ? { id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority } : null;
+function firstTask(s, jobId, profileId, at) {
+  const row = one(s, `SELECT * FROM tasks WHERE job_id=? AND profile_id=? AND status='open'
+    ORDER BY CASE action_kind WHEN 'application_next_action' THEN 0 ELSE 1 END,
+      due_at IS NULL,due_at,created_at,id LIMIT 1`, [jobId, profileId]);
+  return row ? taskView(row, { nowDate: new Date(at) }) : null;
 }
 
 function signals(s, jobId) {
@@ -82,17 +83,29 @@ function stageState(s, context) {
   ];
 }
 
-function priorityStrip(s, jobs, at) {
-  const due = one(s, "SELECT tasks.title,tasks.due_at,jobs.id AS job_id,jobs.company FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id WHERE tasks.status='open' AND tasks.due_at IS NOT NULL AND tasks.due_at<=? ORDER BY tasks.due_at LIMIT 1", [at]);
-  const interview = one(s, "SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at FROM applications JOIN jobs ON jobs.id=applications.job_id LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.status='open' WHERE applications.status='interview' ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1");
+function priorityStrip(s, jobs, profileId, at) {
+  const actionRow = profileId ? one(s, `SELECT tasks.*,jobs.company
+    FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id
+    WHERE tasks.profile_id=? AND tasks.status='open' AND tasks.action_kind='application_next_action'
+    ORDER BY CASE WHEN tasks.urgent_at<=? THEN 0 WHEN tasks.due_at<=? THEN 1 ELSE 2 END,
+      tasks.due_at,tasks.id LIMIT 1`, [profileId, at, at]) : null;
+  const action = actionRow ? taskView(actionRow, { nowDate: new Date(at) }) : null;
+  const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
+    FROM applications JOIN jobs ON jobs.id=applications.job_id
+    LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.profile_id=applications.profile_id AND tasks.status='open'
+    WHERE applications.profile_id=? AND applications.status='interview'
+    ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1`, [profileId]) : null;
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
   const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
   return [
     {
-      kind: 'due',
-      jobId: due?.job_id || null,
-      text: due ? `${due.title}${due.company ? ` · ${due.company}` : ''}${due.due_at ? ` · ${due.due_at.slice(0, 16)}` : ''}` : 'No due tasks'
+      kind: action?.state || 'action',
+      jobId: action?.jobId || null,
+      taskId: action?.id || null,
+      text: action
+        ? `${action.title}${actionRow.company ? ` · ${actionRow.company}` : ''} · ${action.dueAt.slice(0, 16)}`
+        : 'No current application actions'
     },
     {
       kind: 'interview',
@@ -187,11 +200,11 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   const jobs = listJobSummaries(s, { profileId: selectedProfile }).map(job => ({
     ...job,
     ...statusStage(job),
-    next: firstTask(s, job.id),
+    next: firstTask(s, job.id, selectedProfile, at),
     signals: signals(s, job.id)
   }));
   const selectedId = jobs.some(job => job.id === selectedJobId) ? selectedJobId : (jobs[0]?.id || null);
-  const selected = selectedId ? selectedJobContext(s, selectedId) : null;
+  const selected = selectedId ? selectedJobContext(s, selectedId, selectedProfile) : null;
   const selectedRow = selectedId ? one(s, 'SELECT description,requirements_json,compensation,work_model FROM jobs WHERE id=?', [selectedId]) : null;
   const readiness = selected?.job.profileId
     ? compileApplicationReadiness(s, { jobId: selectedId, profileId: selected.job.profileId })
@@ -232,7 +245,8 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
   const openJobs = jobs.filter(job => job.discoveryStatus !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
-  const dueCount = Number(one(s, "SELECT COUNT(*) AS count FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=?", [at])?.count || 0);
+  const dueRows = selectedProfile ? due(s, { profileId: selectedProfile, at }) : [];
+  const dueCount = dueRows.length;
   const interviewCount = jobs.filter(job => job.applicationStatus === 'interview').length;
   const logs = all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 80')
     .map(row => ({
@@ -311,20 +325,18 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
       drafts: reviews.length,
       interviews: interviewCount
     },
-    priority: priorityStrip(s, jobs, at),
+    priority: priorityStrip(s, jobs, selectedProfile, at),
     jobs,
     selectedJobId: selectedId,
     selected: details,
     review: reviews,
     log: logs,
-    dueTasks: due(s, { at }).slice(0, 20).map(row => ({
-      id: row.id,
-      jobId: row.job_id || null,
-      title: row.title,
+    dueTasks: dueRows.slice(0, 20).map(row => ({
+      ...taskView(row, { nowDate: new Date(at) }),
       type: row.type,
       source: row.created_by,
-      dueAt: row.due_at,
-      priority: row.priority
+      priority: row.priority,
+      actionKind: row.action_kind,
     })),
     answers: {
       ...answerCounts,

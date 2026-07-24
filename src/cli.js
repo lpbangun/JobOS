@@ -9,7 +9,8 @@ import { getResume, importResume, replaceResume, validateResumeDocument } from '
 import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
-import { appCreate, appUpdate, due, openTasks, recommendResearch } from './tracking.js';
+import { appCreate, appUpdate, due, openTasks, recommendResearch, taskView } from './tracking.js';
+import { rescheduleApplicationNextAction } from './lifecycle.js';
 import { addStakeholder, researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
@@ -134,8 +135,9 @@ export const commandRegistry = [
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
-  cmd(['tasks', 'list'], 'jobos tasks list [--type <type>] [--created-by <source>] [--json]', 'List the open task inbox, including future and undated tasks.', { flags: ['--type <type>', '--created-by <source>'] }),
-  cmd(['tasks', 'due'], 'jobos tasks due [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical filtered query for open tasks with a non-null due time that has passed, optionally watching on an interval.', { output: 'array-or-jsonl', flags: ['--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
+  cmd(['tasks', 'list'], 'jobos tasks list (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--json]', 'List one profile task inbox or global operational tasks.', { flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>'] }),
+  cmd(['tasks', 'due'], 'jobos tasks due (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical scoped query for open tasks with an elapsed non-null due time.', { output: 'array-or-jsonl', flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
+  cmd(['tasks', 'reschedule'], 'jobos tasks reschedule <task-id> --profile <profile-id> --due <rfc3339> --reason <text> [--json]', 'Manually reschedule one open lifecycle action while preserving its policy schedule.', { flags: ['--profile <profile-id>', '--due <rfc3339>', '--reason <text>'] }),
   cmd(['review', 'weekly'], 'jobos review weekly --profile <profile> [--output markdown] [--json]', 'Generate a weekly review export.', { output: 'object-or-markdown' }),
   cmd(['automation', 'create'], 'jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled] [--json]', 'Create or update a scheduler automation.'),
   cmd(['automation', 'list'], 'jobos automation list [--json]', 'List configured automations.'),
@@ -395,21 +397,17 @@ function parseConfig(flags) {
 }
 
 function publicTasks(rows) {
-  return rows.map(t => ({
-    id: t.id,
-    title: t.title,
-    type: t.type,
-    createdBy: t.created_by,
-    dueAt: t.due_at,
-    priority: t.priority,
-    status: t.status,
-    jobId: t.job_id,
-    applicationId: t.application_id
-  }));
+  const nowDate = new Date();
+  return rows.map(row => taskView(row, { nowDate }));
 }
 
 function taskFilters(flags) {
+  const profileId = flags.profile && flags.profile !== true ? String(flags.profile) : null;
+  const global = flags.global === true;
+  if (Boolean(profileId) === global) usage('Task commands require exactly one scope: --profile <profile-id> or --global');
   return {
+    profileId,
+    global,
     type: flags.type ? String(flags.type) : null,
     createdBy: flags['created-by'] ? String(flags['created-by']) : null
   };
@@ -1161,6 +1159,19 @@ export async function main(argv = process.argv.slice(2)) {
     } else {
       out(dueTasks(s, flags));
     }
+    return;
+  }
+  if (group === 'tasks' && action === 'reschedule') {
+    if (!subaction) usage('Missing task ID');
+    if (flags.global) usage('tasks reschedule requires --profile <profile-id>; --global is not supported');
+    out(rescheduleApplicationNextAction(s, {
+      taskId: String(subaction),
+      profileId: needProfile(flags),
+      dueAt: String(requireFlag(flags, 'due', '--due <rfc3339>')),
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+      actor: 'user',
+      source: 'cli',
+    }));
     return;
   }
   if (group === 'review' && action === 'weekly') {

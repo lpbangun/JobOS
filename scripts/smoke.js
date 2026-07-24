@@ -200,7 +200,7 @@ try {
   const scoreAudit = JSON.parse(one(w04Store, "SELECT payload_json FROM audit_log WHERE action='job.scored' AND entity_id=? ORDER BY created_at DESC,id DESC LIMIT 1", [job.id]).payload_json);
   const w04Workspace = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml'), 'utf8');
   const w04Readiness = compileApplicationReadiness(w04Store, { jobId: job.id, profileId: profile.id });
-  const w04Domain = selectedJobContext(w04Store, job.id);
+  const w04Domain = selectedJobContext(w04Store, job.id, profile.id);
   if (networkFit.dimensions.networkAccess.score !== 90 || networkFit.overall === uncertainFit.overall || networkFit.overall !== expectedOverall
     || networkRow.fit_score !== expectedOverall || storedNetworkFit.overall !== expectedOverall || scoreAudit.overall !== expectedOverall
     || w04Readiness.materials.score.overall !== expectedOverall || w04Domain.fit.overall !== expectedOverall

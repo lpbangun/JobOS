@@ -220,9 +220,56 @@ export function appUpdate(s, aid, status, notes = null, {
   return applicationMutationResult(s, one(s, 'SELECT * FROM applications WHERE id=?', [aid]), occurredAt);
 }
 
-function taskQueryFilters({ type = null, createdBy = null } = {}) {
+export function generalTaskView(row) {
+  if (!row) return null;
+  if (row.action_kind !== 'general') throw Object.assign(new Error('Expected a general task.'), { code: 'not_general_task', type: 'validation' });
+  return {
+    id: row.id,
+    profileId: row.profile_id || null,
+    jobId: row.job_id || null,
+    applicationId: row.application_id || null,
+    title: row.title,
+    description: row.description || '',
+    type: row.type,
+    createdBy: row.created_by,
+    dueAt: row.due_at || null,
+    priority: row.priority,
+    status: row.status,
+    actionKind: 'general',
+  };
+}
+
+export function taskView(row, options = {}) {
+  return row?.action_kind === 'application_next_action'
+    ? lifecycleTaskView(row, options)
+    : generalTaskView(row);
+}
+
+export function taskQueryFilters(s, {
+  profileId = null,
+  global = false,
+  type = null,
+  createdBy = null,
+  actionKind = null,
+} = {}) {
+  const hasProfile = typeof profileId === 'string' && profileId.trim().length > 0;
+  if (hasProfile === (global === true)) {
+    throw Object.assign(new Error('Task queries require exactly one scope: profileId or global:true.'), {
+      code: 'task_scope_required',
+      type: 'validation',
+    });
+  }
   const clauses = ['status="open"'];
   const params = [];
+  if (hasProfile) {
+    if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+      throw Object.assign(new Error(`Unknown profile: ${profileId}`), { code: 'unknown_profile', type: 'validation' });
+    }
+    clauses.push('profile_id=?');
+    params.push(profileId);
+  } else {
+    clauses.push('profile_id IS NULL');
+  }
   if (type) {
     clauses.push('type=?');
     params.push(type);
@@ -231,19 +278,23 @@ function taskQueryFilters({ type = null, createdBy = null } = {}) {
     clauses.push('created_by=?');
     params.push(createdBy);
   }
+  if (actionKind) {
+    clauses.push('action_kind=?');
+    params.push(actionKind);
+  }
   return { clauses, params };
 }
 
 /** All open tasks, including future and undated inbox items. */
 export function openTasks(s, filters = {}) {
-  const { clauses, params } = taskQueryFilters(filters);
+  const { clauses, params } = taskQueryFilters(s, filters);
   return all(s, `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY due_at IS NULL,due_at,created_at`, params);
 }
 
 /** Open tasks whose non-null due time has passed. */
 export function due(s, { at = now(), ...filters } = {}) {
   const dueAt = at instanceof Date ? at.toISOString() : String(at);
-  const { clauses, params } = taskQueryFilters(filters);
+  const { clauses, params } = taskQueryFilters(s, filters);
   clauses.push('due_at IS NOT NULL', 'due_at<=?');
   params.push(dueAt);
   return all(s, `SELECT * FROM tasks WHERE ${clauses.join(' AND ')} ORDER BY due_at,created_at`, params);

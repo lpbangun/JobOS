@@ -63,7 +63,7 @@ function createReviewTaskForFailure(s, automation, error, at) {
     'automation',
     at,
     at,
-    automation.profileId || null
+    null
   ]);
   return tid;
 }
