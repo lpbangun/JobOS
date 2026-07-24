@@ -726,9 +726,9 @@ export function appendMemoryObservation(s, value) {
   return operationResult(rowPublicProjection(created, true), false);
 }
 
-function queueObservationProjections(s, profileId, event) {
+export function queueMemorySync(s, profileId, auditEvent) {
   queuePostCommit(s, () => syncMemoryObservations(s, profileId));
-  queuePostCommit(s, () => projectAudit(s, event));
+  queuePostCommit(s, () => projectAudit(s, auditEvent));
 }
 
 function observationAudit(s, action, observation) {
@@ -792,7 +792,7 @@ export function recordJobFeedback(s, { profileId, jobId, input, actor, source })
     );
     if (observation.idempotent) return observation;
     const event = observationAudit(s, 'career_memory.observation_recorded', observation);
-    queueObservationProjections(s, owner, event);
+    queueMemorySync(s, owner, event);
     return observation;
   });
 }
@@ -901,7 +901,7 @@ export function correctMemoryObservation(s, {
     const observation = appendMemoryObservation(s, correctionObservationInput(target, replacement, options));
     if (observation.idempotent) return observation;
     const event = observationAudit(s, 'career_memory.observation_corrected', observation);
-    queueObservationProjections(s, owner, event);
+    queueMemorySync(s, owner, event);
     return observation;
   });
 }
@@ -977,7 +977,7 @@ export function undoMemoryObservation(s, {
     const observation = appendMemoryObservation(s, undoObservationInput(current.target, current.previous, options));
     if (observation.idempotent) return observation;
     const event = observationAudit(s, 'career_memory.observation_undone', observation);
-    queueObservationProjections(s, owner, event);
+    queueMemorySync(s, owner, event);
     return observation;
   });
 }
@@ -1017,6 +1017,7 @@ function adaptOutreach(s, profileId) {
       channel: outcome.channel,
       outcomeType: outcome.outcomeType,
       occurredAt: outcome.occurredAt,
+      windowEndAt: outcome.windowEndAt,
       recordedAt: outcome.recordedAt,
       actor: outcome.actor,
       source: outcome.source,
@@ -1273,7 +1274,7 @@ export function syncMemoryObservations(s, profileId) {
       externalSideEffects: 'none',
     },
   };
-  const file = path.join(s.p.profiles, owner, 'career', 'memory.yaml');
+  const file = path.join(s.p.profiles, owner, 'memory', 'observations.yaml');
   writePlainYaml(file, document);
   return { file, document };
 }

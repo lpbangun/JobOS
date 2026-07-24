@@ -546,7 +546,7 @@ function protectedRows(store) {
 }
 
 function memoryMirror(root, profileId = 'alpha') {
-  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'career', 'memory.yaml');
+  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'memory', 'observations.yaml');
 }
 
 function approvedArtifactSource(store) {
@@ -559,6 +559,7 @@ function approvedArtifactSource(store) {
 
 test('W08-OBS-01 records attributable current job feedback without mutating canonical state', async t => {
   const api = await observationApi();
+  assert.equal(typeof api.queueMemorySync, 'function');
   const { root } = fixtureWorkspace(t);
   const store = await openStore({ workspace: root });
   const job = alphaSavedJob(store);
@@ -632,6 +633,7 @@ test('W08-OBS-01 records attributable current job feedback without mutating cano
   assert.deepEqual(protectedRows(store), protectedBefore);
   assert.equal(one(store, `SELECT action FROM audit_log ORDER BY rowid DESC LIMIT 1`).action, 'career_memory.observation_recorded');
   assert.ok(existsSync(memoryMirror(root)));
+  assert.equal(existsSync(path.join(root, 'jobos-workspace', 'profiles', 'alpha', 'career', 'memory.yaml')), false);
   store.db.close();
 });
 
@@ -1084,6 +1086,28 @@ test('W08-ADAPTER-01 W05 adapter preserves source versions and current/history w
   assert.equal(historyW05.every(item => item.sourceEntity.type === 'outreach_thread'), true);
   assert.equal(historyW05.every(item => /^[a-f0-9]{64}$/.test(item.sourceEntity.contentHash)), true);
   assert.equal(historyW05.some(item => JSON.stringify(item).includes('private')), false);
+  const beforeWindowChange = historyW05[0];
+  const changedWindowEndAt = '2026-08-31T12:00:00.000Z';
+  run(store, 'UPDATE outreach_outcomes SET window_end_at=? WHERE id=?', [changedWindowEndAt, beforeWindowChange.id]);
+  const afterWindowChange = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    sinceDays: null,
+    includeHistory: true,
+    nowDate: PHASE2_NOW,
+  }).observations.find(item => item.id === beforeWindowChange.id);
+  assert.equal(afterWindowChange.payload.windowEndAt, changedWindowEndAt);
+  assert.notEqual(afterWindowChange.sourceEntity.contentHash, beforeWindowChange.sourceEntity.contentHash);
+  assert.deepEqual({
+    ...afterWindowChange,
+    sourceEntity: {
+      ...afterWindowChange.sourceEntity,
+      contentHash: beforeWindowChange.sourceEntity.contentHash,
+    },
+    payload: {
+      ...afterWindowChange.payload,
+      windowEndAt: beforeWindowChange.payload.windowEndAt,
+    },
+  }, beforeWindowChange);
   assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count, 0);
   store.db.close();
 });
