@@ -594,7 +594,7 @@ test('W05-CONTACT-04 genuine schema-9 contact migrates without fabricated compon
   db.close();
 
   const s = await openStore({ workspace: root });
-  assert.equal(one(s, "SELECT value FROM meta WHERE key='schema_version'").value, '12');
+  assert.equal(one(s, "SELECT value FROM meta WHERE key='schema_version'").value, '13');
   const raw = one(s, "SELECT * FROM contact_points WHERE id='legacy_contact'");
   const projection = projectContactConfidenceV2(s, {
     id: raw.id,
@@ -633,7 +633,7 @@ test('W05 schema 12 composes over a persisted W02 schema-10 workspace', async ()
   w02.db.close();
 
   const composed = await openStore({ workspace: root });
-  assert.equal(one(composed, "SELECT value FROM meta WHERE key='schema_version'").value, '12');
+  assert.equal(one(composed, "SELECT value FROM meta WHERE key='schema_version'").value, '13');
   assert.ok(one(composed, "SELECT name FROM sqlite_master WHERE type='table' AND name='form_submission_attempts'"));
   assert.ok(one(composed, "SELECT name FROM sqlite_master WHERE type='table' AND name='outreach_outcomes'"));
   assert.deepEqual(all(composed, 'PRAGMA foreign_key_check'), []);

@@ -121,7 +121,7 @@ test('schema 11 digest-less snapshots migrate readably but require exact-target 
 
   const migrated = await openStore({ workspace: f.root });
   t.after(() => { try { migrated.db.close(); } catch {} });
-  assert.equal(one(migrated, "SELECT value FROM meta WHERE key='schema_version'").value, '12');
+  assert.equal(one(migrated, "SELECT value FROM meta WHERE key='schema_version'").value, '13');
   assert.equal(getFormSnapshot(migrated, snapshot.snapshotId).snapshotId, created.snapshotId);
   assert.throws(
     () => forms.getPrivateFormTarget(migrated, snapshot.snapshotId),

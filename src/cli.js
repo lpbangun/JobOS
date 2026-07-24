@@ -17,6 +17,7 @@ import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
 import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
+import { lifecycleAnalytics, renderLifecycleAnalyticsMarkdown } from './lifecycle-analytics.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
 import { prepInterview } from './interview.js';
 import { startMcp } from './mcp.js';
@@ -134,6 +135,7 @@ export const commandRegistry = [
   cmd(['outreach', 'outcomes'], 'jobos outreach outcomes --profile <profile-id> [--since <days>] [--json]', 'List profile-scoped outreach outcome observations and correction history.', { flags: ['--profile <profile-id>', '--since <days>'] }),
   cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
+  cmd(['analytics', 'lifecycle'], 'jobos analytics lifecycle --profile <profile> [--since 30] [--output markdown] [--json]', 'Report observed lifecycle analytics for one profile.', { output: 'object-or-markdown', flags: ['--profile <profile-id>', '--since <days>', '--output markdown'] }),
   cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
   cmd(['tasks', 'list'], 'jobos tasks list (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--json]', 'List one profile task inbox or global operational tasks.', { flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>'] }),
   cmd(['tasks', 'due'], 'jobos tasks due (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical scoped query for open tasks with an elapsed non-null due time.', { output: 'array-or-jsonl', flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
@@ -1140,6 +1142,15 @@ export async function main(argv = process.argv.slice(2)) {
     const r = funnel(s, needProfile(flags), flags.since ? Number(flags.since) : 30);
     if (flags.output === 'markdown' && !flags.json) text(renderFunnelMarkdown(r));
     else out(r);
+    return;
+  }
+  if (group === 'analytics' && action === 'lifecycle') {
+    const result = lifecycleAnalytics(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? 30 : Number(flags.since),
+    });
+    if (flags.output === 'markdown' && !flags.json) text(renderLifecycleAnalyticsMarkdown(result));
+    else out(result);
     return;
   }
   if (group === 'analytics' && action === 'resume-feedback') {

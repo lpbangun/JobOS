@@ -542,7 +542,7 @@ test('W03-COMPAT-01 opens legacy jobs as unchecked uncertain without network mig
 
   // Verify W02 and W05 migrations compose without mutating legacy job identity.
   const versionRow = one(s, "SELECT value FROM meta WHERE key='schema_version'");
-  assert.equal(versionRow.value, '12', 'schema version migrated through protected form targets and W05');
+  assert.equal(versionRow.value, '13', 'schema version migrated through W06 lifecycle persistence');
 
   // Legacy liveness must project through the posting-liveness handoff without network.
   const [summary] = listJobSummaries(s, { profileId: 'profile-test' });
@@ -770,7 +770,7 @@ test('W03-HANDOFF-01 exposes posting-liveness v1 separately from candidate fit',
   save(s);
 
   // Domain-tool projections must expose posting liveness separately from fit.
-  const ctx = selectedJobContext(s, imported.id);
+  const ctx = selectedJobContext(s, imported.id, 'profile-test');
   assert.ok(ctx.postingLiveness, 'selectedJobContext exposes posting liveness');
   assert.equal(ctx.postingLiveness.contract, 'jobos.posting-liveness.v1', 'handoff contract identifier present');
   assert.equal(ctx.postingLiveness.status, 'active', 'handoff status present');

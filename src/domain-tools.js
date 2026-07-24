@@ -8,6 +8,8 @@ import { mapReachableNetwork } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
 import { appCreate, appUpdate, openTasks, recommendResearch, taskView } from './tracking.js';
 import { weekly } from './analytics.js';
+import { lifecycleAnalytics } from './lifecycle-analytics.js';
+import { listLifecycleObservations } from './lifecycle.js';
 import { prepInterview } from './interview.js';
 import { getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
@@ -105,6 +107,8 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
   { name: 'list_tasks', description: 'List one profile task inbox ordered by due date, including future and undated tasks.', inputSchema: required({ profileId: text, type: text, createdBy: text }, ['profileId']) },
+  { name: 'lifecycle_analytics', description: 'Report profile-owned observed lifecycle analytics with explicit denominators, cautions, and no causal claims.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
+  { name: 'list_lifecycle_observations', description: 'List attributed profile-owned lifecycle status and immutable submission observations.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
@@ -442,6 +446,14 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     type: args.type || null,
     createdBy: args.createdBy || null,
   }).map(row => taskView(row));
+  if (name === 'lifecycle_analytics') return lifecycleAnalytics(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays ?? 30,
+  });
+  if (name === 'list_lifecycle_observations') return listLifecycleObservations(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays ?? 30,
+  });
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');
   if (name === 'weekly_review') {
     const result = weekly(s, args.profileId);

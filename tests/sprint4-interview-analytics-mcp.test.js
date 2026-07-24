@@ -73,9 +73,41 @@ test('analytics funnel reports conversion by source, stage, and role family', ()
   assert.doesNotMatch(review, /## Recommended experiments/);
 });
 
+test('analytics lifecycle requires a profile and exposes observed analytics as JSON and Markdown', () => {
+  const { root, env, run } = makeRunner();
+  const { profile } = seed(run, root);
+  const lifecycle = JSON.parse(run(['analytics', 'lifecycle', '--profile', profile.id, '--since', '7', '--json']));
+  assert.equal(lifecycle.schema, 'jobos.lifecycle-analytics.v1');
+  assert.equal(lifecycle.profileId, profile.id);
+  assert.equal(lifecycle.period.sinceDays, 7);
+  assert.equal(lifecycle.period.basis, 'observed_status_events_and_immutable_submission_events');
+  assert.ok('denominators' in lifecycle);
+  assert.ok(Array.isArray(lifecycle.warnings));
+
+  const defaultOutput = JSON.parse(run(['analytics', 'lifecycle', '--profile', profile.id, '--since', '7']));
+  assert.equal(defaultOutput.schema, lifecycle.schema);
+  assert.equal(defaultOutput.profileId, lifecycle.profileId);
+  assert.equal(defaultOutput.period.sinceDays, lifecycle.period.sinceDays);
+  assert.equal(defaultOutput.period.basis, lifecycle.period.basis);
+
+  const markdown = run(['analytics', 'lifecycle', '--profile', profile.id, '--since', '7', '--output', 'markdown']);
+  assert.match(markdown, /Lifecycle analytics/);
+  assert.match(markdown, /Observed funnel/);
+  assert.match(markdown, /Denominators/);
+  assert.match(markdown, /Warnings/);
+
+  const missingProfile = spawnSync(process.execPath, ['src/cli.js', 'analytics', 'lifecycle', '--json'], {
+    cwd: process.cwd(),
+    env,
+    encoding: 'utf8',
+  });
+  assert.equal(missingProfile.status, 2);
+  assert.match(missingProfile.stderr, /Missing --profile <profile-id>/);
+});
+
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const names = mcpToolNames();
-  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','interview_prep','weekly_review']) {
+  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','lifecycle_analytics','list_lifecycle_observations','interview_prep','weekly_review']) {
     assert.ok(names.includes(name), `${name} missing from MCP tools`);
   }
   const { env } = makeRunner();

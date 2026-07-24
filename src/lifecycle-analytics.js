@@ -694,3 +694,51 @@ export function lifecycleAnalytics(s, {
     handoffs,
   };
 }
+
+export function renderLifecycleAnalyticsMarkdown(result) {
+  const denominatorLines = Object.entries(result.denominators)
+    .map(([name, value]) => `- ${name}: ${value}`)
+    .join('\n');
+  const warningLines = result.warnings.length
+    ? result.warnings.map(warning => `- ${warning.code}: ${warning.message}`).join('\n')
+    : '- None.';
+  const recommendationLines = result.recommendations.length
+    ? result.recommendations.map(recommendation => `- ${recommendation.category}: ${recommendation.action}\n  Caution: ${recommendation.caution}`).join('\n')
+    : '- None.';
+  return `# Lifecycle analytics
+
+- Profile: ${result.profileId}
+- Period: ${result.period.start} to ${result.period.end} (${result.period.sinceDays} days)
+- Basis: ${result.period.basis}
+
+## Current inventory
+
+- Basis: ${result.currentInventory.basis}
+- Jobs: ${result.currentInventory.jobs}
+- Applications: ${result.currentInventory.applications}
+- Active applications: ${result.currentInventory.activeApplications}
+- Terminal applications: ${result.currentInventory.terminalApplications}
+- Stale active applications: ${result.currentInventory.staleActive}
+
+## Observed funnel
+
+- Basis: ${result.observedFunnel.basis}
+- Applications with observed events: ${result.observedFunnel.applicationsWithObservedEvents}
+- Applied: ${result.observedFunnel.applied}
+- Responses: ${result.observedFunnel.responses}
+- Interviews: ${result.observedFunnel.interviews}
+- Offers: ${result.observedFunnel.offers}
+
+## Denominators
+
+${denominatorLines}
+
+## Recommendations
+
+${recommendationLines}
+
+## Warnings
+
+${warningLines}
+`;
+}

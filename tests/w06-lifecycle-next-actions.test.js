@@ -17,6 +17,7 @@ import {
   LIFECYCLE_ANALYTICS_SCHEMA,
   lifecycleAnalytics,
 } from '../src/lifecycle-analytics.js';
+import { callDomainTool, DOMAIN_TOOLS, selectedJobContext } from '../src/domain-tools.js';
 import {
   LIFECYCLE_EVENT_INPUT_SCHEMA,
   LIFECYCLE_NEXT_ACTION_SCHEMA,
@@ -817,4 +818,58 @@ test('W06-HANDOFF-01 publishes exact W04/W07/W08 contracts and one compatibility
   assert.match(review.content, /Current application actions/);
   assert.match(review.content, /Generated recommendations/);
   assert.doesNotMatch(review.content, /## Recommended experiments/);
+});
+
+test('W06-SEAM-01 lifecycle domain tools require ownership and preserve observation attribution', async t => {
+  const fixture = await actionStore(t);
+  const owned = actionApplication(fixture, 'saved', '2026-07-20T12:00:00.000Z', 'domain-owned');
+  const otherProfile = createProfile(fixture.store, 'W06 Other Domain Profile').profile;
+  const other = actionApplication(
+    { ...fixture, profile: otherProfile },
+    'applied',
+    '2026-07-21T12:00:00.000Z',
+    'domain-other',
+  );
+
+  for (const name of ['lifecycle_analytics', 'list_lifecycle_observations']) {
+    const definition = DOMAIN_TOOLS.find(tool => tool.name === name);
+    assert.ok(definition, `${name} is registered`);
+    assert.deepEqual(definition.inputSchema.required, ['profileId']);
+    assert.deepEqual(definition.inputSchema.properties.profileId, { type: 'string' });
+    assert.deepEqual(definition.inputSchema.properties.sinceDays, { type: 'number' });
+  }
+
+  const analytics = await callDomainTool(fixture.store, 'lifecycle_analytics', {
+    profileId: fixture.profile.id,
+    sinceDays: 3650,
+  });
+  assert.equal(analytics.schema, LIFECYCLE_ANALYTICS_SCHEMA);
+  assert.equal(analytics.profileId, fixture.profile.id);
+  assert.doesNotMatch(JSON.stringify(analytics), new RegExp(`${other.application.id}|${other.job.id}`));
+
+  const list = await callDomainTool(fixture.store, 'list_lifecycle_observations', {
+    profileId: fixture.profile.id,
+    sinceDays: 3650,
+  });
+  assert.equal(list.schema, 'jobos.lifecycle-observation-list.v1');
+  assert.equal(list.profileId, fixture.profile.id);
+  assert.ok(list.observations.length > 0);
+  assert.ok(list.observations.every(observation => observation.profileId === fixture.profile.id));
+  assert.ok(list.observations.every(observation => observation.applicationId === owned.application.id));
+  assert.ok(list.observations.every(observation => observation.jobId === owned.job.id));
+  assert.ok(list.observations.some(observation => observation.actor === 'user' && observation.source === 'test'));
+  assert.doesNotMatch(JSON.stringify(list), new RegExp(`${other.application.id}|${other.job.id}`));
+
+  await assert.rejects(
+    callDomainTool(fixture.store, 'lifecycle_analytics', { sinceDays: 30 }),
+    error => error.code === 'lifecycle_analytics_profile_required',
+  );
+  await assert.rejects(
+    callDomainTool(fixture.store, 'list_lifecycle_observations', { profileId: 'missing-profile' }),
+    error => error.code === 'unknown_profile',
+  );
+  assert.throws(
+    () => selectedJobContext(fixture.store, owned.job.id, otherProfile.id),
+    error => error.code === 'unknown_job',
+  );
 });

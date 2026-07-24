@@ -646,7 +646,7 @@ test('W04-PERSIST-01 keeps fit score JSON database audit workspace readiness pac
   const audit = JSON.parse(one(f.s, "SELECT payload_json FROM audit_log WHERE action='job.scored' AND entity_id=? ORDER BY created_at DESC LIMIT 1", [f.job.id]).payload_json);
   const workspace = readFileSync(path.join(f.s.p.jobs, f.job.id, 'job.yaml'), 'utf8');
   const readiness = compileApplicationReadiness(f.s, { jobId: f.job.id, profileId: 'profile-test' });
-  const domain = selectedJobContext(f.s, f.job.id);
+  const domain = selectedJobContext(f.s, f.job.id, 'profile-test');
   const packet = await createPacketFor(f);
   assert.equal(result.contract, FIT_CONTRACT);
   assert.equal(stored.contract, FIT_CONTRACT);
@@ -809,7 +809,7 @@ test('W04-LIVE-03 presents expired as unavailable without rewriting a prior fit 
   await assert.rejects(() => score(f.s, f.job.id, 'profile-test', scoreOpts), error => error.code === 'job_expired');
   const after = one(f.s, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [f.job.id]);
   assert.deepEqual(after, before);
-  assert.equal(selectedJobContext(f.s, f.job.id).postingLiveness.status, 'expired');
+  assert.equal(selectedJobContext(f.s, f.job.id, 'profile-test').postingLiveness.status, 'expired');
 });
 
 test('W04-LIVE-04 renders fit and posting status separately in CLI domain TUI and workspace views', async t => {
@@ -818,7 +818,7 @@ test('W04-LIVE-04 renders fit and posting status separately in CLI domain TUI an
   save(f.s);
   const result = await score(f.s, f.job.id, 'profile-test', scoreOpts);
   const cli = cliScore(f.root, f.job.id);
-  const context = selectedJobContext(f.s, f.job.id);
+  const context = selectedJobContext(f.s, f.job.id, 'profile-test');
   assert.equal(cli.contract, FIT_CONTRACT);
   assert.equal(cli.postingLiveness.contract, 'jobos.posting-liveness.v1');
   assert.equal(context.fit.contract, FIT_CONTRACT);
