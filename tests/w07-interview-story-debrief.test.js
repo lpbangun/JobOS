@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
+import YAML from 'yaml';
 
-import { all, one, openStore } from '../src/db.js';
+import { all, one, openStore, save } from '../src/db.js';
 import * as interview from '../src/interview.js';
+import { retireProof, supersedeProof } from '../src/profiles.js';
 
 const require = createRequire(import.meta.url);
 const fixturePath = path.resolve('tests/fixtures/w07-schema13.sqlite');
@@ -207,4 +209,583 @@ test('W07-ISO-01 migration does not infer stories and ownership resolution is re
     error => error instanceof interview.InterviewError && error.code === 'interview_payload_shape_invalid',
   );
   assert.deepEqual(counts(store, [...PROTECTED_TABLES, ...W07_TABLES, 'audit_log']), before);
+});
+
+const STORY_TABLES = Object.freeze([
+  'interview_stories',
+  'interview_story_revisions',
+  'interview_story_field_evidence',
+]);
+
+function storyRows(store, table) {
+  return table === 'interview_story_field_evidence'
+    ? all(store, `SELECT * FROM interview_story_field_evidence
+      ORDER BY revision_id,field_name,position,proof_point_id`)
+    : stableRows(store, table);
+}
+
+function storyMirrorPath(root, profileId = 'profile_w07_alpha') {
+  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'interviews', 'stories.yaml');
+}
+
+function storyCounts(store) {
+  return counts(store, [...STORY_TABLES, 'audit_log']);
+}
+
+function userFieldProvenance(source = 'cli') {
+  return Object.fromEntries(interview.INTERVIEW_STORY_CONTENT_FIELDS.map(field => [
+    field,
+    { origin: 'user', actor: 'user', source, sourceRef: null },
+  ]));
+}
+
+function storyInput(overrides = {}) {
+  const proofPointId = overrides.proofPointId || 'proof_w07_active';
+  const input = {
+    profileId: 'profile_w07_alpha',
+    title: 'Leading a platform launch',
+    situation: 'The platform launch had a fixed deadline and fragmented ownership.',
+    task: 'I owned delivery alignment and the adoption target.',
+    action: 'I established milestones, resolved dependencies, and led weekly risk reviews.',
+    result: 'The platform launched on schedule and adoption grew by 30%.',
+    reflection: 'I learned to surface dependency risk before committing to dates.',
+    competencyTags: ['leadership', 'delivery'],
+    audienceTags: ['hiring_manager'],
+    fieldProvenance: userFieldProvenance(),
+    confirmedFields: [],
+    fieldEvidence: Object.fromEntries(interview.INTERVIEW_STORY_FACTUAL_FIELDS.map(field => [
+      field,
+      [proofPointId],
+    ])),
+    actor: 'user',
+    source: 'cli',
+    ...overrides,
+  };
+  delete input.proofPointId;
+  return input;
+}
+
+function assertRejectedWithoutStoryDelta(store, root, action, expectedCode, blockerCode = null) {
+  const beforeCounts = storyCounts(store);
+  const mirror = storyMirrorPath(root);
+  const beforeMirror = existsSync(mirror) ? readFileSync(mirror) : null;
+  assert.throws(
+    action,
+    error => error instanceof interview.InterviewError
+      && error.code === expectedCode
+      && (!blockerCode || error.details.blockers.some(blocker => blocker.code === blockerCode)),
+  );
+  assert.deepEqual(storyCounts(store), beforeCounts);
+  assert.deepEqual(existsSync(mirror) ? readFileSync(mirror) : null, beforeMirror);
+}
+
+test('W07-STORY-01 creates one canonical draft with field snapshots and rejects ownership mismatches without side effects', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const created = interview.createInterviewStory(store, storyInput());
+
+  assert.equal(created.schema, interview.INTERVIEW_STORY_SCHEMA);
+  assert.match(created.id, /^interview_story_[a-f0-9]{12}$/);
+  assert.equal(created.profileId, 'profile_w07_alpha');
+  assert.equal(created.currentRevision.revision, 1);
+  assert.equal(created.currentRevision.state, 'draft_needs_verification');
+  assert.equal(created.currentRevision.changeKind, 'create');
+  assert.equal(created.activeVerifiedRevision, null);
+  assert.equal(created.eligibility, 'draft_only');
+  assert.deepEqual(created.staleProofPointIds, []);
+  assert.deepEqual(storyCounts(store), {
+    interview_stories: 1,
+    interview_story_revisions: 1,
+    interview_story_field_evidence: 4,
+    audit_log: 1,
+  });
+
+  const evidence = all(store, `SELECT * FROM interview_story_field_evidence
+    WHERE story_id=? ORDER BY field_name,position,proof_point_id`, [created.id]);
+  assert.deepEqual(evidence.map(row => row.field_name), ['action', 'result', 'situation', 'task']);
+  for (const row of evidence) {
+    const snapshot = JSON.parse(row.proof_snapshot_json);
+    assert.deepEqual(snapshot, {
+      id: 'proof_w07_active',
+      summary: 'Led a verified platform launch',
+      evidence: 'Launched on schedule with 30% adoption growth.',
+      skills: ['leadership', 'delivery'],
+      metrics: ['30% adoption growth'],
+      source: 'manual',
+      status: 'active',
+      verificationStatus: 'verified',
+      sourceResumeEntryId: null,
+      supersedesProofPointId: null,
+      updatedAt: '2026-07-20T12:00:00.000Z',
+    });
+  }
+
+  const mirror = YAML.parse(readFileSync(storyMirrorPath(root), 'utf8'));
+  assert.equal(mirror.schema, interview.INTERVIEW_STORY_LIST_SCHEMA);
+  assert.equal(mirror.version, 1);
+  assert.equal(mirror.policy.appendOnlyRevisions, true);
+  assert.equal(mirror.profileId, 'profile_w07_alpha');
+  assert.equal(mirror.stories[0].id, created.id);
+  assert.equal(mirror.stories[0].currentRevision.id, created.currentRevision.id);
+  assert.equal(mirror.stories[0].history.length, 1);
+  assert.deepEqual(mirror.stories[0].history[0].fieldEvidence.situation.map(item => item.proofPointId), ['proof_w07_active']);
+
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.createInterviewStory(store, storyInput({
+      proofPointId: 'proof_w07_beta_active',
+    })),
+    'interview_proof_point_profile_mismatch',
+  );
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.editInterviewStory(store, {
+      storyId: created.id,
+      ...storyInput({
+        profileId: 'profile_w07_beta',
+        proofPointId: 'proof_w07_beta_active',
+      }),
+    }),
+    'interview_story_profile_mismatch',
+  );
+});
+
+test('W07-STORY-02 blocks unsupported, stale, non-latest, and untrusted verification targets without side effects', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+
+  const verifyBlocked = (draft, blockerCode) => assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: draft.profileId,
+      storyId: draft.id,
+      revision: draft.currentRevision.revision,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_story_verification_blocked',
+    blockerCode,
+  );
+
+  verifyBlocked(interview.createInterviewStory(store, storyInput({
+    title: '',
+  })), 'required_field_empty');
+
+  verifyBlocked(interview.createInterviewStory(store, storyInput({
+    title: 'Missing result evidence',
+    fieldEvidence: {
+      ...storyInput().fieldEvidence,
+      result: [],
+    },
+  })), 'factual_field_evidence_missing');
+
+  const agentProvenance = userFieldProvenance();
+  agentProvenance.action = { origin: 'agent', actor: 'interview-agent', source: 'mcp', sourceRef: null };
+  verifyBlocked(interview.createInterviewStory(store, storyInput({
+    title: 'Agent-authored action',
+    fieldProvenance: agentProvenance,
+  })), 'human_confirmation_missing');
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.createInterviewStory(store, storyInput({
+      title: 'Agent-claimed confirmation',
+      fieldProvenance: agentProvenance,
+      confirmedFields: ['action'],
+      actor: 'interview-agent',
+      source: 'mcp',
+    })),
+    'interview_story_confirmation_source_untrusted',
+  );
+
+  const proofCases = [
+    ['proof_w07_unverified', 'Unverified proof', 'proof_unverified'],
+    ['proof_w07_retired', 'Retired proof', 'proof_retired'],
+    ['proof_w07_superseded_old', 'Superseded proof', 'proof_superseded'],
+  ];
+  for (const [proofPointId, title, blockerCode] of proofCases) {
+    verifyBlocked(interview.createInterviewStory(store, storyInput({
+      proofPointId,
+      title,
+    })), blockerCode);
+  }
+
+  store.db.run("UPDATE proof_points SET verification_status='rejected' WHERE id='proof_w07_unverified'");
+  save(store);
+  verifyBlocked(interview.createInterviewStory(store, storyInput({
+    proofPointId: 'proof_w07_unverified',
+    title: 'Rejected proof',
+  })), 'proof_rejected');
+
+  store.db.run("UPDATE proof_points SET status='needs_verification',verification_status='verified' WHERE id='proof_w07_unverified'");
+  save(store);
+  verifyBlocked(interview.createInterviewStory(store, storyInput({
+    proofPointId: 'proof_w07_unverified',
+    title: 'Non-active proof',
+  })), 'proof_not_active');
+
+  const firstDraft = interview.createInterviewStory(store, storyInput({
+    title: 'Stale draft target',
+  }));
+  const latestDraft = interview.editInterviewStory(store, {
+    storyId: firstDraft.id,
+    ...storyInput({ title: 'Latest draft target' }),
+  });
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: firstDraft.profileId,
+      storyId: firstDraft.id,
+      revision: 1,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_story_revision_not_latest',
+  );
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: latestDraft.profileId,
+      storyId: latestDraft.id,
+      revision: latestDraft.currentRevision.revision,
+      confirmedFields: [],
+      actor: 'agent',
+      source: 'mcp',
+    }),
+    'interview_story_verification_source_untrusted',
+  );
+});
+
+test('W07-STORY-03 verification appends a human-confirmed revision and preserves the draft and snapshots', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const fieldProvenance = userFieldProvenance();
+  fieldProvenance.action = { origin: 'agent', actor: 'draft-agent', source: 'mcp', sourceRef: 'draft-7' };
+  const draft = interview.createInterviewStory(store, storyInput({
+    title: 'Verified platform launch',
+    fieldProvenance,
+  }));
+  const verified = interview.verifyInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    revision: 1,
+    confirmedFields: ['action'],
+    actor: 'user',
+    source: 'cli',
+  });
+
+  assert.equal(verified.currentRevision.revision, 2);
+  assert.equal(verified.currentRevision.state, 'verified');
+  assert.equal(verified.currentRevision.changeKind, 'verify');
+  assert.equal(verified.currentRevision.supersedesRevisionId, draft.currentRevision.id);
+  assert.deepEqual(verified.currentRevision.confirmedFields, ['action']);
+  assert.equal(verified.activeVerifiedRevision.id, verified.currentRevision.id);
+  assert.equal(verified.eligibility, 'eligible');
+  assert.deepEqual(verified.verificationBlockers, []);
+
+  const shown = interview.getInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    includeHistory: true,
+  });
+  assert.deepEqual(shown.history.map(revision => [revision.revision, revision.state]), [
+    [1, 'draft_needs_verification'],
+    [2, 'verified'],
+  ]);
+  assert.equal(shown.history[0].contentHash, shown.history[1].contentHash);
+  assert.deepEqual(shown.history[0].fieldEvidence, shown.history[1].fieldEvidence);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM interview_story_field_evidence WHERE story_id=?', [draft.id]).count, 8);
+
+  const mirror = YAML.parse(readFileSync(storyMirrorPath(root), 'utf8'));
+  assert.equal(mirror.stories[0].activeVerifiedRevision.id, verified.currentRevision.id);
+  assert.equal(mirror.stories[0].eligibility, 'eligible');
+  assert.deepEqual(mirror.stories[0].history.map(revision => revision.state), ['draft_needs_verification', 'verified']);
+});
+
+test('W07-STORY-04 edit appends a new draft while the prior verified revision remains active and eligible', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const draft = interview.createInterviewStory(store, storyInput());
+  const verified = interview.verifyInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    revision: 1,
+    confirmedFields: [],
+    actor: 'user',
+    source: 'tui',
+  });
+  const edited = interview.editInterviewStory(store, {
+    storyId: draft.id,
+    ...storyInput({
+      title: 'Leading a platform launch after reflection',
+      reflection: 'I now surface dependency risk and name decision owners before committing.',
+    }),
+  });
+
+  assert.equal(edited.currentRevision.revision, 3);
+  assert.equal(edited.currentRevision.state, 'draft_needs_verification');
+  assert.equal(edited.currentRevision.changeKind, 'edit');
+  assert.equal(edited.currentRevision.supersedesRevisionId, verified.currentRevision.id);
+  assert.equal(edited.activeVerifiedRevision.id, verified.currentRevision.id);
+  assert.equal(edited.activeVerifiedRevision.revision, 2);
+  assert.equal(edited.eligibility, 'eligible');
+  assert.deepEqual(edited.history.map(revision => revision.state), [
+    'draft_needs_verification',
+    'verified',
+    'draft_needs_verification',
+  ]);
+  assert.equal(interview.listInterviewStories(store, {
+    profileId: draft.profileId,
+  }).stories[0].activeVerifiedRevisionId, verified.currentRevision.id);
+});
+
+test('W07-STORY-05 retirement preserves history and W01 proof retirement or supersession makes verified stories stale without row mutation', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const draft = interview.createInterviewStory(store, storyInput({ title: 'Story to retire' }));
+  interview.verifyInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    revision: 1,
+    confirmedFields: [],
+    actor: 'user',
+    source: 'cli',
+  });
+  const retired = interview.retireInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    reason: 'No longer representative of current scope',
+    actor: 'user',
+    source: 'cli',
+  });
+  assert.equal(retired.currentRevision.revision, 3);
+  assert.equal(retired.currentRevision.state, 'retired');
+  assert.equal(retired.currentRevision.changeKind, 'retire');
+  assert.equal(retired.currentRevision.changeReason, 'No longer representative of current scope');
+  assert.equal(retired.activeVerifiedRevision, null);
+  assert.equal(retired.eligibility, 'retired');
+  assert.deepEqual(retired.history.map(revision => revision.state), [
+    'draft_needs_verification',
+    'verified',
+    'retired',
+  ]);
+
+  const retirementDraft = interview.createInterviewStory(store, storyInput({ title: 'Proof retirement story' }));
+  interview.verifyInterviewStory(store, {
+    profileId: retirementDraft.profileId,
+    storyId: retirementDraft.id,
+    revision: 1,
+    confirmedFields: [],
+    actor: 'user',
+    source: 'cli',
+  });
+  const beforeRetirement = Object.fromEntries(STORY_TABLES.map(table => [table, storyRows(store, table)]));
+  retireProof(store, 'proof_w07_active', 'Evidence no longer current');
+  const proofStale = interview.getInterviewStory(store, {
+    profileId: retirementDraft.profileId,
+    storyId: retirementDraft.id,
+    includeHistory: true,
+  });
+  assert.equal(proofStale.eligibility, 'proof_stale');
+  assert.deepEqual(proofStale.staleProofPointIds, ['proof_w07_active']);
+  assert.ok(proofStale.verificationBlockers.some(blocker => blocker.code === 'proof_retired'));
+  for (const table of STORY_TABLES) assert.deepEqual(storyRows(store, table), beforeRetirement[table]);
+
+  const supersessionDraft = interview.createInterviewStory(store, storyInput({
+    proofPointId: 'proof_w07_superseding',
+    title: 'Proof supersession story',
+  }));
+  interview.verifyInterviewStory(store, {
+    profileId: supersessionDraft.profileId,
+    storyId: supersessionDraft.id,
+    revision: 1,
+    confirmedFields: [],
+    actor: 'user',
+    source: 'cli',
+  });
+  const beforeSupersession = Object.fromEntries(STORY_TABLES.map(table => [table, storyRows(store, table)]));
+  const replacement = supersedeProof(store, 'proof_w07_superseding', {
+    summary: 'Corrected customer migration result',
+    evidence: 'Corrected evidence supports 15 customer migrations.',
+    skills: ['customer migration'],
+    metrics: ['15 customer migrations'],
+  });
+  assert.equal(replacement.supersedes_proof_point_id, 'proof_w07_superseding');
+  const superseded = interview.getInterviewStory(store, {
+    profileId: supersessionDraft.profileId,
+    storyId: supersessionDraft.id,
+    includeHistory: true,
+  });
+  assert.equal(superseded.eligibility, 'proof_stale');
+  assert.deepEqual(superseded.staleProofPointIds, ['proof_w07_superseding']);
+  assert.ok(superseded.verificationBlockers.some(blocker => blocker.code === 'proof_superseded'));
+  for (const table of STORY_TABLES) assert.deepEqual(storyRows(store, table), beforeSupersession[table]);
+});
+
+test('W07-STORY-06 normalizes trusted sources and covers retirement and compact projection branches', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const created = interview.createInterviewStory(store, storyInput({
+    title: 'Source normalization story',
+    source: ' CLI ',
+    fieldProvenance: undefined,
+  }));
+  assert.equal(created.currentRevision.source, 'cli');
+  assert.deepEqual(
+    Object.values(created.currentRevision.fieldProvenance).map(value => value.source),
+    ['cli', 'cli', 'cli', 'cli', 'cli', 'cli'],
+  );
+
+  const edited = interview.editInterviewStory(store, {
+    storyId: created.id,
+    ...storyInput({
+      title: 'Source normalization story',
+      source: 'cli',
+      fieldProvenance: undefined,
+    }),
+  });
+  assert.equal(edited.currentRevision.source, 'cli');
+  assert.deepEqual(
+    Object.values(edited.currentRevision.fieldProvenance).map(value => value.source),
+    ['cli', 'cli', 'cli', 'cli', 'cli', 'cli'],
+  );
+  assert.equal(edited.currentRevision.contentHash, created.currentRevision.contentHash);
+  assert.notEqual(edited.currentRevision.id, created.currentRevision.id);
+
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.retireInterviewStory(store, {
+      profileId: created.profileId,
+      storyId: created.id,
+      reason: 'Agent cannot retire a story',
+      actor: 'agent',
+      source: 'mcp',
+    }),
+    'interview_story_retirement_source_untrusted',
+  );
+  const retired = interview.retireInterviewStory(store, {
+    profileId: created.profileId,
+    storyId: created.id,
+    reason: 'Draft is no longer useful',
+    actor: 'user',
+    source: ' TUI ',
+  });
+  assert.equal(retired.currentRevision.revision, 3);
+  assert.equal(retired.currentRevision.state, 'retired');
+  assert.equal(retired.currentRevision.source, 'tui');
+  assert.equal(retired.activeVerifiedRevision, null);
+  assert.equal(retired.eligibility, 'retired');
+
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.editInterviewStory(store, {
+      storyId: created.id,
+      ...storyInput({ title: 'Cannot revive a retired story' }),
+    }),
+    'interview_story_retired',
+  );
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: created.profileId,
+      storyId: created.id,
+      revision: 2,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_story_revision_not_latest',
+  );
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: created.profileId,
+      storyId: created.id,
+      revision: 3,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_story_revision_not_draft',
+  );
+
+  const withoutHistory = interview.getInterviewStory(store, {
+    profileId: created.profileId,
+    storyId: created.id,
+  });
+  assert.equal(Object.hasOwn(withoutHistory, 'history'), false);
+  const listed = interview.listInterviewStories(store, {
+    profileId: created.profileId,
+    includeHistory: true,
+  });
+  assert.equal(listed.stories[0].history.length, 3);
+  assert.deepEqual(listed.stories[0].history.map(revision => revision.revision), [1, 2, 3]);
+  assert.equal(Object.hasOwn(listed.stories[0].history[0], 'title'), false);
+  assert.equal(Object.hasOwn(listed.stories[0].history[0], 'fieldEvidence'), false);
+  assert.deepEqual(listed.stories[0].history[0].competencyTags, ['leadership', 'delivery']);
+});
+
+test('W07-STORY-07 classifies supersession only from an authoritative successor row', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  store.db.run(`UPDATE proof_points
+    SET retirement_reason='manually superseded wording without replacement'
+    WHERE id='proof_w07_retired'`);
+  save(store);
+  assert.equal(
+    one(store, 'SELECT COUNT(*) AS count FROM proof_points WHERE supersedes_proof_point_id=?', ['proof_w07_retired']).count,
+    0,
+  );
+  const draft = interview.createInterviewStory(store, storyInput({
+    proofPointId: 'proof_w07_retired',
+    title: 'Manually retired proof story',
+  }));
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: draft.profileId,
+      storyId: draft.id,
+      revision: 1,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_story_verification_blocked',
+    'proof_retired',
+  );
+});
+
+test('W07-STORY-08 verification revalidates current proof ownership before blockers or writes', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const draft = interview.createInterviewStory(store, storyInput({
+    title: 'Proof ownership tamper story',
+  }));
+  store.db.run("UPDATE proof_points SET profile_id='profile_w07_beta' WHERE id='proof_w07_active'");
+  save(store);
+  assertRejectedWithoutStoryDelta(
+    store,
+    root,
+    () => interview.verifyInterviewStory(store, {
+      profileId: draft.profileId,
+      storyId: draft.id,
+      revision: 1,
+      confirmedFields: [],
+      actor: 'user',
+      source: 'cli',
+    }),
+    'interview_proof_point_profile_mismatch',
+  );
 });

@@ -1,9 +1,10 @@
 import path from 'node:path';
-import { one, all } from './db.js';
-import { now, parseJson, slug, tokenize } from './utils.js';
+import { all, guardedWrite, one, projectAudit, queuePostCommit, recordAudit, run } from './db.js';
+import { hash, id, now, parseJson, slug, tokenize } from './utils.js';
 import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
+import { writeYaml } from './workspace.js';
 
 export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
 export const INTERVIEW_STORY_LIST_SCHEMA = 'jobos.interview-story-list.v1';
@@ -270,6 +271,745 @@ export function resolveInterviewOwnership(s, input = {}) {
   }
 
   return { profile, job, application, story, storyRevision: revision, proofPoints };
+}
+
+function storyText(value) {
+  return String(value ?? '').trim();
+}
+
+function normalizeStorySource(value, field = 'source') {
+  return requireInterviewText(value, field).toLowerCase();
+}
+
+function normalizeStoryTags(value, field, allowed = null) {
+  if (value === undefined || value === null) return [];
+  const items = normalizeInterviewJson(value, field, 'array');
+  const normalized = items.map(item => allowed
+    ? normalizeInterviewEnum(item, field, allowed)
+    : requireInterviewText(item, field));
+  return [...new Set(normalized)];
+}
+
+function normalizeConfirmedFields(value) {
+  const fields = normalizeStoryTags(value ?? [], 'confirmedFields');
+  for (const field of fields) {
+    if (!INTERVIEW_STORY_CONTENT_FIELDS.includes(field)) {
+      throw new InterviewError(
+        'interview_confirmed_field_invalid',
+        `Unsupported confirmed story field: ${field}.`,
+        { allowed: [...INTERVIEW_STORY_CONTENT_FIELDS] },
+      );
+    }
+  }
+  const selected = new Set(fields);
+  return INTERVIEW_STORY_CONTENT_FIELDS.filter(field => selected.has(field));
+}
+
+function normalizeFieldProvenance(value, actor, source) {
+  const provenance = value === undefined || value === null
+    ? {}
+    : normalizeInterviewJson(value, 'fieldProvenance', 'object');
+  return Object.fromEntries(INTERVIEW_STORY_CONTENT_FIELDS.map(field => {
+    const entry = provenance[field];
+    if (entry !== undefined && (!entry || typeof entry !== 'object' || Array.isArray(entry))) {
+      throw new InterviewError(
+        'interview_field_provenance_invalid',
+        `fieldProvenance.${field} must be an object.`,
+        { field },
+      );
+    }
+    const origin = normalizeInterviewEnum(
+      entry?.origin || (actor === 'user' ? 'user' : 'agent'),
+      `fieldProvenance.${field}.origin`,
+      ['user', 'agent'],
+    );
+    return [field, {
+      origin,
+      actor: requireInterviewText(entry?.actor || actor, `fieldProvenance.${field}.actor`),
+      source: normalizeStorySource(entry?.source || source, `fieldProvenance.${field}.source`),
+      sourceRef: entry?.sourceRef === undefined || entry?.sourceRef === null
+        ? null
+        : storyText(entry.sourceRef) || null,
+    }];
+  }));
+}
+
+function normalizeFieldEvidence(value) {
+  const evidence = value === undefined || value === null
+    ? {}
+    : normalizeInterviewJson(value, 'fieldEvidence', 'object');
+  return Object.fromEntries(INTERVIEW_STORY_FACTUAL_FIELDS.map(field => {
+    const ids = evidence[field] === undefined
+      ? []
+      : normalizeInterviewJson(evidence[field], `fieldEvidence.${field}`, 'array')
+        .map(proofPointId => requireInterviewText(proofPointId, 'proofPointId'));
+    return [field, [...new Set(ids)]];
+  }));
+}
+
+function normalizeStoryDraft(input) {
+  const actor = requireInterviewText(input.actor, 'actor');
+  const source = normalizeStorySource(input.source);
+  const confirmedFields = normalizeConfirmedFields(input.confirmedFields);
+  if (
+    confirmedFields.length
+    && (actor !== 'user' || !['cli', 'tui'].includes(source))
+  ) {
+    throw new InterviewError(
+      'interview_story_confirmation_source_untrusted',
+      'Only an explicit human CLI or TUI action may confirm agent-authored story fields.',
+      { allowed: ['cli', 'tui'] },
+    );
+  }
+  const content = Object.fromEntries(
+    INTERVIEW_STORY_CONTENT_FIELDS.map(field => [field, storyText(input[field])]),
+  );
+  return {
+    ...content,
+    competencyTags: normalizeStoryTags(input.competencyTags, 'competencyTags'),
+    audienceTags: normalizeStoryTags(input.audienceTags, 'audienceTags', INTERVIEW_AUDIENCES),
+    fieldProvenance: normalizeFieldProvenance(input.fieldProvenance, actor, source),
+    confirmedFields,
+    fieldEvidence: normalizeFieldEvidence(input.fieldEvidence),
+    actor,
+    source,
+  };
+}
+
+function evidenceProofPointIds(fieldEvidence) {
+  return [...new Set(INTERVIEW_STORY_FACTUAL_FIELDS.flatMap(field => (
+    fieldEvidence[field].map(evidence => (
+      typeof evidence === 'string' ? evidence : evidence.proofPointId
+    ))
+  )))];
+}
+
+function proofSnapshot(proof) {
+  return {
+    id: proof.id,
+    summary: proof.summary,
+    evidence: proof.evidence,
+    skills: parseJson(proof.skills_json, []),
+    metrics: parseJson(proof.metrics_json, []),
+    source: proof.source,
+    status: proof.status,
+    verificationStatus: proof.verification_status,
+    sourceResumeEntryId: proof.source_resume_entry_id || null,
+    supersedesProofPointId: proof.supersedes_proof_point_id || null,
+    updatedAt: proof.updated_at,
+  };
+}
+
+function snapshotFieldEvidence(fieldEvidence, proofPoints) {
+  const proofs = new Map(proofPoints.map(proof => [proof.id, proof]));
+  return Object.fromEntries(INTERVIEW_STORY_FACTUAL_FIELDS.map(field => [
+    field,
+    fieldEvidence[field].map(proofPointId => ({
+      proofPointId,
+      proofSnapshot: proofSnapshot(proofs.get(proofPointId)),
+    })),
+  ]));
+}
+
+function storyContentHash(payload) {
+  const fieldEvidence = Object.fromEntries(INTERVIEW_STORY_FACTUAL_FIELDS.map(field => [
+    field,
+    payload.fieldEvidence[field].map(evidence => ({
+      proofPointId: evidence.proofPointId,
+      proofSnapshot: evidence.proofSnapshot,
+    })),
+  ]));
+  return hash(JSON.stringify({
+    title: payload.title,
+    situation: payload.situation,
+    task: payload.task,
+    action: payload.action,
+    result: payload.result,
+    reflection: payload.reflection,
+    competencyTags: payload.competencyTags,
+    audienceTags: payload.audienceTags,
+    fieldProvenance: payload.fieldProvenance,
+    fieldEvidence,
+  }));
+}
+
+function fieldEvidenceForRevision(s, revisionId) {
+  const rows = all(s, `SELECT field_name,proof_point_id,position,proof_snapshot_json
+    FROM interview_story_field_evidence
+    WHERE revision_id=?
+    ORDER BY field_name,position,proof_point_id`, [revisionId]);
+  const byField = Object.fromEntries(INTERVIEW_STORY_FACTUAL_FIELDS.map(field => [field, []]));
+  for (const row of rows) {
+    byField[row.field_name].push({
+      proofPointId: row.proof_point_id,
+      position: Number(row.position),
+      proofSnapshot: parseJson(row.proof_snapshot_json, {}),
+    });
+  }
+  return byField;
+}
+
+function revisionPayload(s, row) {
+  return {
+    title: row.title,
+    situation: row.situation,
+    task: row.task,
+    action: row.action,
+    result: row.result,
+    reflection: row.reflection,
+    competencyTags: parseJson(row.competency_tags_json, []),
+    audienceTags: parseJson(row.audience_tags_json, []),
+    fieldProvenance: parseJson(row.field_provenance_json, {}),
+    confirmedFields: parseJson(row.confirmed_fields_json, []),
+    fieldEvidence: fieldEvidenceForRevision(s, row.id),
+    actor: row.actor,
+    source: row.source,
+  };
+}
+
+function insertStoryRevision(s, {
+  storyId,
+  profileId,
+  revision,
+  state,
+  changeKind,
+  payload,
+  supersedesRevisionId = null,
+  changeReason = '',
+  actor,
+  source,
+  createdAt,
+  verifiedAt = null,
+}) {
+  const contentHash = storyContentHash(payload);
+  const revisionId = id(
+    'interview_story_revision',
+    `${storyId}:${revision}:${state}:${contentHash}:${createdAt}`,
+  );
+  run(s, `INSERT INTO interview_story_revisions
+    (id,story_id,profile_id,revision,state,change_kind,title,situation,task,action,result,reflection,
+     competency_tags_json,audience_tags_json,field_provenance_json,confirmed_fields_json,content_hash,
+     supersedes_revision_id,change_reason,actor,source,created_at,verified_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    revisionId,
+    storyId,
+    profileId,
+    revision,
+    state,
+    changeKind,
+    payload.title,
+    payload.situation,
+    payload.task,
+    payload.action,
+    payload.result,
+    payload.reflection,
+    JSON.stringify(payload.competencyTags),
+    JSON.stringify(payload.audienceTags),
+    JSON.stringify(payload.fieldProvenance),
+    JSON.stringify(payload.confirmedFields),
+    contentHash,
+    supersedesRevisionId,
+    changeReason,
+    actor,
+    source,
+    createdAt,
+    verifiedAt,
+  ]);
+  for (const field of INTERVIEW_STORY_FACTUAL_FIELDS) {
+    payload.fieldEvidence[field].forEach((evidence, position) => {
+      run(s, `INSERT INTO interview_story_field_evidence
+        (revision_id,story_id,profile_id,field_name,proof_point_id,position,proof_snapshot_json,linked_at)
+        VALUES (?,?,?,?,?,?,?,?)`, [
+        revisionId,
+        storyId,
+        profileId,
+        field,
+        evidence.proofPointId,
+        position,
+        JSON.stringify(evidence.proofSnapshot),
+        createdAt,
+      ]);
+    });
+  }
+  return one(s, 'SELECT * FROM interview_story_revisions WHERE id=?', [revisionId]);
+}
+
+function proofStates(s, proofPointIds) {
+  if (!proofPointIds.length) return new Map();
+  const rows = all(
+    s,
+    `SELECT * FROM proof_points WHERE id IN (${proofPointIds.map(() => '?').join(',')})`,
+    proofPointIds,
+  );
+  return new Map(rows.map(row => [row.id, row]));
+}
+
+function proofBlocker(s, proof, field, proofPointId) {
+  if (!proof) return { code: 'proof_missing', field, proofPointId };
+  const common = {
+    field,
+    proofPointId,
+    status: proof.status,
+    verificationStatus: proof.verification_status,
+  };
+  if (proof.status === 'retired') {
+    const superseded = Boolean(
+      one(s, 'SELECT id FROM proof_points WHERE supersedes_proof_point_id=?', [proofPointId]),
+    );
+    return { code: superseded ? 'proof_superseded' : 'proof_retired', ...common };
+  }
+  if (proof.status !== 'active') return { code: 'proof_not_active', ...common };
+  if (proof.verification_status === 'rejected') return { code: 'proof_rejected', ...common };
+  if (proof.verification_status !== 'verified') return { code: 'proof_unverified', ...common };
+  return null;
+}
+
+function verificationBlockers(s, row, fieldEvidence, confirmedFields = null) {
+  const blockers = [];
+  const confirmed = new Set(confirmedFields || parseJson(row.confirmed_fields_json, []));
+  const provenance = parseJson(row.field_provenance_json, {});
+  for (const field of INTERVIEW_STORY_CONTENT_FIELDS) {
+    if (!storyText(row[field])) blockers.push({ code: 'required_field_empty', field });
+    if (provenance[field]?.origin === 'agent' && !confirmed.has(field)) {
+      blockers.push({ code: 'human_confirmation_missing', field });
+    }
+  }
+  const proofPointIds = [...new Set(
+    INTERVIEW_STORY_FACTUAL_FIELDS.flatMap(field => fieldEvidence[field].map(item => item.proofPointId)),
+  )];
+  const currentProofs = proofStates(s, proofPointIds);
+  for (const field of INTERVIEW_STORY_FACTUAL_FIELDS) {
+    if (!fieldEvidence[field].length) {
+      blockers.push({ code: 'factual_field_evidence_missing', field });
+      continue;
+    }
+    for (const evidence of fieldEvidence[field]) {
+      const blocker = proofBlocker(s, currentProofs.get(evidence.proofPointId), field, evidence.proofPointId);
+      if (blocker) blockers.push(blocker);
+    }
+  }
+  return blockers;
+}
+
+function staleProofPointIds(blockers) {
+  const stale = new Set(blockers
+    .filter(blocker => blocker.proofPointId)
+    .map(blocker => blocker.proofPointId));
+  return [...stale].sort();
+}
+
+function revisionProjection(s, row, { compact = false } = {}) {
+  const projection = {
+    id: row.id,
+    storyId: row.story_id,
+    profileId: row.profile_id,
+    revision: Number(row.revision),
+    state: row.state,
+    changeKind: row.change_kind,
+    competencyTags: parseJson(row.competency_tags_json, []),
+    audienceTags: parseJson(row.audience_tags_json, []),
+    contentHash: row.content_hash,
+    supersedesRevisionId: row.supersedes_revision_id || null,
+    changeReason: row.change_reason || '',
+    actor: row.actor,
+    source: row.source,
+    createdAt: row.created_at,
+    verifiedAt: row.verified_at || null,
+  };
+  if (!compact) {
+    Object.assign(projection, {
+      title: row.title,
+      situation: row.situation,
+      task: row.task,
+      action: row.action,
+      result: row.result,
+      reflection: row.reflection,
+      fieldProvenance: parseJson(row.field_provenance_json, {}),
+      confirmedFields: parseJson(row.confirmed_fields_json, []),
+      fieldEvidence: fieldEvidenceForRevision(s, row.id),
+    });
+  }
+  return projection;
+}
+
+function storyProjection(s, story, { includeHistory = false, compact = false } = {}) {
+  const revisions = all(
+    s,
+    'SELECT * FROM interview_story_revisions WHERE story_id=? AND profile_id=? ORDER BY revision,id',
+    [story.id, story.profile_id],
+  );
+  const current = revisions.at(-1);
+  const activeVerified = current?.state === 'retired'
+    ? null
+    : revisions.findLast(revision => revision.state === 'verified') || null;
+  const activeVerifiedBlockers = activeVerified
+    ? verificationBlockers(
+      s,
+      activeVerified,
+      fieldEvidenceForRevision(s, activeVerified.id),
+    )
+    : [];
+  const blockers = current?.state === 'draft_needs_verification'
+    ? verificationBlockers(s, current, fieldEvidenceForRevision(s, current.id))
+    : activeVerifiedBlockers;
+  const staleIds = staleProofPointIds(activeVerifiedBlockers);
+  const eligibility = current?.state === 'retired'
+    ? 'retired'
+    : !activeVerified
+      ? 'draft_only'
+      : staleIds.length
+        ? 'proof_stale'
+        : 'eligible';
+  const projection = {
+    schema: INTERVIEW_STORY_SCHEMA,
+    version: 1,
+    id: story.id,
+    profileId: story.profile_id,
+    createdAt: story.created_at,
+    currentRevision: revisionProjection(s, current, { compact }),
+    activeVerifiedRevision: activeVerified
+      ? revisionProjection(s, activeVerified, { compact })
+      : null,
+    eligibility,
+    staleProofPointIds: staleIds,
+    verificationBlockers: blockers,
+  };
+  if (includeHistory) {
+    projection.history = revisions.map(revision => revisionProjection(s, revision, { compact }));
+  }
+  return projection;
+}
+
+function storyListProjection(s, profileId, { includeHistory = false, compact = true } = {}) {
+  const rows = all(
+    s,
+    'SELECT * FROM interview_stories WHERE profile_id=? ORDER BY created_at,id',
+    [profileId],
+  );
+  const stories = rows.map(row => {
+    const projected = storyProjection(s, row, { includeHistory, compact });
+    if (!compact) return projected;
+    return {
+      schema: projected.schema,
+      version: projected.version,
+      id: projected.id,
+      profileId: projected.profileId,
+      createdAt: projected.createdAt,
+      currentRevisionId: projected.currentRevision.id,
+      currentRevision: projected.currentRevision.revision,
+      currentState: projected.currentRevision.state,
+      activeVerifiedRevisionId: projected.activeVerifiedRevision?.id || null,
+      activeVerifiedRevision: projected.activeVerifiedRevision?.revision || null,
+      competencyTags: projected.currentRevision.competencyTags,
+      audienceTags: projected.currentRevision.audienceTags,
+      eligibility: projected.eligibility,
+      staleProofPointIds: projected.staleProofPointIds,
+      verificationBlockers: projected.verificationBlockers,
+      ...(includeHistory ? { history: projected.history } : {}),
+    };
+  });
+  return {
+    schema: INTERVIEW_STORY_LIST_SCHEMA,
+    version: 1,
+    profileId,
+    stories,
+  };
+}
+
+function syncInterviewStories(s, profileId) {
+  writeYaml(
+    path.join(s.p.profiles, profileId, 'interviews', 'stories.yaml'),
+    {
+      ...storyListProjection(s, profileId, { includeHistory: true, compact: false }),
+      policy: {
+        appendOnlyRevisions: true,
+        canonicalStore: 'sqlite',
+        proofEligibility: 'evaluated_at_projection_time',
+      },
+    },
+  );
+}
+
+function queueStoryProjections(s, profileId, event) {
+  queuePostCommit(s, () => syncInterviewStories(s, profileId));
+  queuePostCommit(s, () => projectAudit(s, event));
+}
+
+function latestStoryRevision(s, storyId, profileId) {
+  return one(s, `SELECT * FROM interview_story_revisions
+    WHERE story_id=? AND profile_id=?
+    ORDER BY revision DESC,id DESC LIMIT 1`, [storyId, profileId]);
+}
+
+function recordStoryMutation(s, action, storyId, profileId, revision) {
+  const event = recordAudit(s, action, 'interview_story', storyId, {
+    schema: INTERVIEW_STORY_SCHEMA,
+    profileId,
+    storyId,
+    revisionId: revision.id,
+    revision: Number(revision.revision),
+    state: revision.state,
+    changeKind: revision.change_kind,
+    supersedesRevisionId: revision.supersedes_revision_id || null,
+    externalSideEffects: 'none',
+  });
+  queueStoryProjections(s, profileId, event);
+}
+
+export function createInterviewStory(s, input = {}) {
+  return guardedWrite(s, () => {
+    const draft = normalizeStoryDraft(input);
+    const proofPointIds = evidenceProofPointIds(draft.fieldEvidence);
+    const ownership = resolveInterviewOwnership(s, {
+      profileId: input.profileId,
+      proofPointIds,
+    });
+    const payload = {
+      ...draft,
+      fieldEvidence: snapshotFieldEvidence(draft.fieldEvidence, ownership.proofPoints),
+    };
+    const createdAt = now();
+    const storyId = id(
+      'interview_story',
+      `${ownership.profile.id}:${storyContentHash(payload)}:${createdAt}`,
+    );
+    run(s, 'INSERT INTO interview_stories (id,profile_id,created_at) VALUES (?,?,?)', [
+      storyId,
+      ownership.profile.id,
+      createdAt,
+    ]);
+    const revision = insertStoryRevision(s, {
+      storyId,
+      profileId: ownership.profile.id,
+      revision: 1,
+      state: 'draft_needs_verification',
+      changeKind: 'create',
+      payload,
+      actor: draft.actor,
+      source: draft.source,
+      createdAt,
+    });
+    recordStoryMutation(
+      s,
+      'interview.story.created',
+      storyId,
+      ownership.profile.id,
+      revision,
+    );
+    return storyProjection(
+      s,
+      one(s, 'SELECT * FROM interview_stories WHERE id=?', [storyId]),
+      { includeHistory: true },
+    );
+  });
+}
+
+export function editInterviewStory(s, input = {}) {
+  return guardedWrite(s, () => {
+    const draft = normalizeStoryDraft(input);
+    const proofPointIds = evidenceProofPointIds(draft.fieldEvidence);
+    const ownership = resolveInterviewOwnership(s, {
+      profileId: input.profileId,
+      storyId: input.storyId,
+      proofPointIds,
+    });
+    const latest = latestStoryRevision(s, ownership.story.id, ownership.profile.id);
+    if (latest.state === 'retired') {
+      throw new InterviewError(
+        'interview_story_retired',
+        `Interview story ${ownership.story.id} is retired.`,
+      );
+    }
+    const payload = {
+      ...draft,
+      fieldEvidence: snapshotFieldEvidence(draft.fieldEvidence, ownership.proofPoints),
+    };
+    const createdAt = now();
+    const revision = insertStoryRevision(s, {
+      storyId: ownership.story.id,
+      profileId: ownership.profile.id,
+      revision: Number(latest.revision) + 1,
+      state: 'draft_needs_verification',
+      changeKind: 'edit',
+      payload,
+      supersedesRevisionId: latest.id,
+      actor: draft.actor,
+      source: draft.source,
+      createdAt,
+    });
+    recordStoryMutation(
+      s,
+      'interview.story.edited',
+      ownership.story.id,
+      ownership.profile.id,
+      revision,
+    );
+    return storyProjection(s, ownership.story, { includeHistory: true });
+  });
+}
+
+export function verifyInterviewStory(s, input = {}) {
+  return guardedWrite(s, () => {
+    const source = requireInterviewText(input.source, 'source').toLowerCase();
+    if (!['cli', 'tui'].includes(source)) {
+      throw new InterviewError(
+        'interview_story_verification_source_untrusted',
+        'Interview story verification requires trusted source cli or tui.',
+        { allowed: ['cli', 'tui'] },
+      );
+    }
+    const actor = requireInterviewText(input.actor, 'actor');
+    const ownership = resolveInterviewOwnership(s, {
+      profileId: input.profileId,
+      storyId: input.storyId,
+    });
+    const revisionNumber = Number(input.revision);
+    if (!Number.isInteger(revisionNumber) || revisionNumber < 1) {
+      throw new InterviewError(
+        'interview_story_revision_invalid',
+        'revision must be a positive integer.',
+      );
+    }
+    const selected = one(s, `SELECT * FROM interview_story_revisions
+      WHERE story_id=? AND profile_id=? AND revision=?`, [
+      ownership.story.id,
+      ownership.profile.id,
+      revisionNumber,
+    ]);
+    if (!selected) {
+      throw new InterviewError(
+        'interview_story_revision_unknown',
+        `Unknown revision ${revisionNumber} for interview story ${ownership.story.id}.`,
+      );
+    }
+    const latest = latestStoryRevision(s, ownership.story.id, ownership.profile.id);
+    if (selected.id !== latest.id) {
+      throw new InterviewError(
+        'interview_story_revision_not_latest',
+        `Revision ${revisionNumber} is not the latest revision for interview story ${ownership.story.id}.`,
+        { latestRevision: Number(latest.revision) },
+      );
+    }
+    if (selected.state !== 'draft_needs_verification') {
+      throw new InterviewError(
+        'interview_story_revision_not_draft',
+        `Revision ${revisionNumber} is not a draft needing verification.`,
+        { state: selected.state },
+      );
+    }
+    const selectedPayload = revisionPayload(s, selected);
+    resolveInterviewOwnership(s, {
+      profileId: ownership.profile.id,
+      storyId: ownership.story.id,
+      storyRevisionId: selected.id,
+      proofPointIds: evidenceProofPointIds(selectedPayload.fieldEvidence),
+    });
+    const confirmed = new Set(selectedPayload.confirmedFields);
+    for (const field of normalizeConfirmedFields(input.confirmedFields)) confirmed.add(field);
+    selectedPayload.confirmedFields = INTERVIEW_STORY_CONTENT_FIELDS.filter(field => confirmed.has(field));
+    const blockers = verificationBlockers(
+      s,
+      selected,
+      selectedPayload.fieldEvidence,
+      selectedPayload.confirmedFields,
+    );
+    if (blockers.length) {
+      throw new InterviewError(
+        'interview_story_verification_blocked',
+        'Interview story revision cannot be verified.',
+        { storyId: ownership.story.id, revision: revisionNumber, blockers },
+      );
+    }
+    const createdAt = now();
+    const revision = insertStoryRevision(s, {
+      storyId: ownership.story.id,
+      profileId: ownership.profile.id,
+      revision: Number(latest.revision) + 1,
+      state: 'verified',
+      changeKind: 'verify',
+      payload: selectedPayload,
+      supersedesRevisionId: selected.id,
+      actor,
+      source,
+      createdAt,
+      verifiedAt: createdAt,
+    });
+    recordStoryMutation(
+      s,
+      'interview.story.verified',
+      ownership.story.id,
+      ownership.profile.id,
+      revision,
+    );
+    return storyProjection(s, ownership.story, { includeHistory: true });
+  });
+}
+
+export function retireInterviewStory(s, input = {}) {
+  return guardedWrite(s, () => {
+    const reason = requireInterviewText(input.reason, 'reason');
+    const actor = requireInterviewText(input.actor, 'actor');
+    const source = normalizeStorySource(input.source);
+    if (!['cli', 'tui'].includes(source)) {
+      throw new InterviewError(
+        'interview_story_retirement_source_untrusted',
+        'Interview story retirement requires trusted source cli or tui.',
+        { allowed: ['cli', 'tui'] },
+      );
+    }
+    const ownership = resolveInterviewOwnership(s, {
+      profileId: input.profileId,
+      storyId: input.storyId,
+    });
+    const latest = latestStoryRevision(s, ownership.story.id, ownership.profile.id);
+    if (latest.state === 'retired') {
+      throw new InterviewError(
+        'interview_story_retired',
+        `Interview story ${ownership.story.id} is already retired.`,
+      );
+    }
+    const payload = revisionPayload(s, latest);
+    const createdAt = now();
+    const revision = insertStoryRevision(s, {
+      storyId: ownership.story.id,
+      profileId: ownership.profile.id,
+      revision: Number(latest.revision) + 1,
+      state: 'retired',
+      changeKind: 'retire',
+      payload,
+      supersedesRevisionId: latest.id,
+      changeReason: reason,
+      actor,
+      source,
+      createdAt,
+    });
+    recordStoryMutation(
+      s,
+      'interview.story.retired',
+      ownership.story.id,
+      ownership.profile.id,
+      revision,
+    );
+    return storyProjection(s, ownership.story, { includeHistory: true });
+  });
+}
+
+export function getInterviewStory(s, input = {}) {
+  const ownership = resolveInterviewOwnership(s, {
+    profileId: input.profileId,
+    storyId: input.storyId,
+  });
+  return storyProjection(s, ownership.story, {
+    includeHistory: Boolean(input.includeHistory),
+  });
+}
+
+export function listInterviewStories(s, input = {}) {
+  const ownership = resolveInterviewOwnership(s, { profileId: input.profileId });
+  return storyListProjection(s, ownership.profile.id, {
+    includeHistory: Boolean(input.includeHistory),
+    compact: true,
+  });
 }
 
 const stageLabels = {
