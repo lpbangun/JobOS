@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import initSqlJs from 'sql.js';
 
-import { all, one, openStore, run } from '../src/db.js';
+import { all, guardedWrite, one, openStore, run } from '../src/db.js';
 
 const require = createRequire(import.meta.url);
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'w08-schema14.sqlite');
@@ -486,5 +486,659 @@ test('W08-ISO-03 transition and projection source ownership use composite foreig
   ]), /FOREIGN KEY constraint failed/);
   assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_proposal_transitions')?.count, 0);
   assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_projection_sources')?.count, 0);
+  store.db.close();
+});
+
+const PHASE2_NOW = new Date('2026-07-25T12:00:00.000Z');
+
+async function observationApi() {
+  return import('../src/career-memory-observations.js');
+}
+
+function alphaSavedJob(store) {
+  return one(store, "SELECT * FROM jobs WHERE profile_id='alpha' AND status='saved'");
+}
+
+function alphaArchivedJob(store) {
+  return one(store, "SELECT * FROM jobs WHERE profile_id='alpha' AND status='archived'");
+}
+
+function jobFeedback(overrides = {}) {
+  return {
+    schema: 'jobos.job-feedback-input.v1',
+    decision: 'save',
+    reasonCodes: ['role_fit'],
+    signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+    publicExplanation: '',
+    privateNote: '',
+    referenceId: 'w08-job-feedback-reference',
+    occurredAt: '2026-07-24T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function phase2Counts(store) {
+  return {
+    observations: one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count,
+    audit: one(store, 'SELECT COUNT(*) AS count FROM audit_log').count,
+    jobs: one(store, 'SELECT COUNT(*) AS count FROM jobs').count,
+    applications: one(store, 'SELECT COUNT(*) AS count FROM applications').count,
+    statusChanges: one(store, 'SELECT COUNT(*) AS count FROM status_changes').count,
+    artifacts: one(store, 'SELECT COUNT(*) AS count FROM artifacts').count,
+    tasks: one(store, 'SELECT COUNT(*) AS count FROM tasks').count,
+  };
+}
+
+function protectedRows(store) {
+  return Object.fromEntries([
+    'profiles',
+    'proof_points',
+    'jobs',
+    'applications',
+    'status_changes',
+    'application_receipts',
+    'artifacts',
+    'outreach_outcomes',
+    'interview_debriefs',
+    'interview_debrief_revisions',
+    'tasks',
+  ].map(table => [table, all(store, `SELECT * FROM ${table} ORDER BY rowid`)]));
+}
+
+function memoryMirror(root, profileId = 'alpha') {
+  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'career', 'memory.yaml');
+}
+
+function approvedArtifactSource(store) {
+  const artifact = one(store, `SELECT * FROM artifacts
+    WHERE profile_id='alpha' AND type='interview_prep' AND revision=2 AND approval_status='approved'`);
+  const event = one(store, `SELECT * FROM audit_log
+    WHERE action='artifact.approved' AND entity_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, [artifact.id]);
+  return { artifact, event };
+}
+
+test('W08-OBS-01 records attributable current job feedback without mutating canonical state', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const job = alphaSavedJob(store);
+  const protectedBefore = protectedRows(store);
+  const result = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: job.id,
+    input: jobFeedback(),
+    actor: 'user',
+    source: 'cli',
+  });
+  assert.equal(result.schema, 'jobos.career-memory-observation.v1');
+  assert.equal(result.eventType, 'job_saved');
+  assert.deepEqual(result.reasonCodes, ['role_fit']);
+  assert.deepEqual(result.signals, [{ field: 'role_family', polarity: 'prefer', value: 'product manager', match: 'exact' }]);
+  assert.deepEqual(result.sourceEntity, {
+    type: 'job',
+    id: job.id,
+    versionId: one(store, `SELECT id FROM audit_log WHERE action='job.status_changed' AND entity_id=?
+      ORDER BY created_at DESC,id DESC LIMIT 1`, [job.id]).id,
+    revision: null,
+    contentHash: result.sourceEntity.contentHash,
+  });
+  assert.match(result.sourceEntity.contentHash, /^[a-f0-9]{64}$/);
+  assert.equal(result.current, true);
+  assert.equal(result.interpretation, 'attributed_observation_only_no_preference_or_causal_claim');
+  assert.equal(result.externalSideEffects, 'none');
+  const application = one(store, `SELECT * FROM applications WHERE profile_id='alpha' AND job_id=?`, [job.id]);
+  const receipt = one(store, `SELECT * FROM application_receipts WHERE application_id=?
+    ORDER BY CASE type WHEN 'user_attestation' THEN 0 WHEN 'adapter_receipt' THEN 1 ELSE 2 END,
+    recorded_at DESC,id DESC LIMIT 1`, [application.id]);
+  const applied = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: job.id,
+    input: jobFeedback({
+      decision: 'apply',
+      signals: [],
+      referenceId: 'w08-applied-feedback-reference',
+    }),
+    actor: 'user',
+    source: 'cli',
+  });
+  assert.equal(applied.eventType, 'job_applied');
+  assert.deepEqual(applied.sourceEntity, {
+    type: 'application',
+    id: application.id,
+    versionId: receipt.id,
+    revision: null,
+    contentHash: receipt.receipt_hash,
+  });
+  assert.deepEqual(Object.keys(result), [
+    'schema',
+    'id',
+    'profileId',
+    'eventType',
+    'occurredAt',
+    'recordedAt',
+    'actor',
+    'source',
+    'sourceEntity',
+    'reasonCodes',
+    'signals',
+    'publicExplanation',
+    'hasPrivateNote',
+    'current',
+    'supersedesObservationId',
+    'payload',
+    'interpretation',
+    'externalSideEffects',
+  ]);
+  assert.deepEqual(protectedRows(store), protectedBefore);
+  assert.equal(one(store, `SELECT action FROM audit_log ORDER BY rowid DESC LIMIT 1`).action, 'career_memory.observation_recorded');
+  assert.ok(existsSync(memoryMirror(root)));
+  store.db.close();
+});
+
+test('W08-OBS-02 exact job feedback replay is idempotent and conflicting reuse has zero deltas', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const args = {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback(),
+    actor: 'user',
+    source: 'cli',
+  };
+  const first = api.recordJobFeedback(store, args);
+  const afterFirst = phase2Counts(store);
+  const mirrorAfterFirst = readFileSync(memoryMirror(root));
+  const databaseAfterFirst = readFileSync(path.join(root, '.jobos', 'jobos.sqlite'));
+  const revisionAfterFirst = one(store, "SELECT value FROM meta WHERE key='store_revision'").value;
+  const replay = api.recordJobFeedback(store, args);
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(phase2Counts(store), afterFirst);
+  assert.deepEqual(readFileSync(memoryMirror(root)), mirrorAfterFirst);
+  assert.deepEqual(readFileSync(path.join(root, '.jobos', 'jobos.sqlite')), databaseAfterFirst);
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='store_revision'").value, revisionAfterFirst);
+  assert.throws(() => api.recordJobFeedback(store, {
+    ...args,
+    input: jobFeedback({ privateNote: 'different payload' }),
+  }), error => error?.code === 'memory_reference_conflict');
+  assert.deepEqual(phase2Counts(store), afterFirst);
+  assert.deepEqual(readFileSync(memoryMirror(root)), mirrorAfterFirst);
+  assert.deepEqual(readFileSync(path.join(root, '.jobos', 'jobos.sqlite')), databaseAfterFirst);
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='store_revision'").value, revisionAfterFirst);
+  store.db.close();
+});
+
+test('W08-OBS-03 rejects cross-profile, stale-state, protected, unmatched, sparse, and unattributed job signals', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const before = phase2Counts(store);
+  const saved = alphaSavedJob(store);
+  const archived = alphaArchivedJob(store);
+  const attempts = [
+    () => api.recordJobFeedback(store, { profileId: 'beta', jobId: saved.id, input: jobFeedback(), actor: 'user', source: 'cli' }),
+    () => api.recordJobFeedback(store, { profileId: 'alpha', jobId: archived.id, input: jobFeedback(), actor: 'user', source: 'cli' }),
+    () => api.recordJobFeedback(store, {
+      profileId: 'alpha',
+      jobId: saved.id,
+      input: jobFeedback({ signals: [{ field: 'work_authorization', polarity: 'avoid', value: 'visa' }] }),
+      actor: 'user',
+      source: 'cli',
+    }),
+    () => api.recordJobFeedback(store, {
+      profileId: 'alpha',
+      jobId: saved.id,
+      input: jobFeedback({ signals: [{ field: 'role_family', polarity: 'avoid', value: 'nursing', match: 'exact' }] }),
+      actor: 'user',
+      source: 'cli',
+    }),
+    () => api.recordJobFeedback(store, {
+      profileId: 'alpha',
+      jobId: saved.id,
+      input: jobFeedback({ reasonCodes: Array(1) }),
+      actor: 'user',
+      source: 'cli',
+    }),
+    () => api.recordJobFeedback(store, { profileId: 'alpha', jobId: saved.id, input: jobFeedback(), actor: 'unknown', source: 'cli' }),
+  ];
+  const codes = [
+    'memory_profile_source_mismatch',
+    'memory_source_state_invalid',
+    'memory_enum_invalid',
+    'memory_signal_source_mismatch',
+    'memory_undefined_rejected',
+    'memory_actor_invalid',
+  ];
+  attempts.forEach((attempt, index) => assert.throws(attempt, error => error?.code === codes[index]));
+  assert.deepEqual(phase2Counts(store), before);
+  assert.equal(existsSync(memoryMirror(root)), false);
+  store.db.close();
+});
+
+test('W08-OBS-04 appendMemoryObservation stores exact current artifact feedback source versions', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const { artifact, event } = approvedArtifactSource(store);
+  const result = guardedWrite(store, () => api.appendMemoryObservation(store, {
+    profileId: 'alpha',
+    eventType: 'artifact_approved',
+    sourceSchema: 'jobos.artifact-feedback-input.v1',
+    sourceEntity: {
+      type: 'artifact',
+      id: artifact.id,
+      versionId: event.id,
+      revision: artifact.revision,
+      contentHash: artifact.content_hash,
+    },
+    occurredAt: '2026-07-24T12:10:00.000Z',
+    actor: 'user',
+    source: 'cli',
+    reasonCodes: ['tone'],
+    signals: [{ ruleType: 'tone', value: { value: 'concise' } }],
+    publicExplanation: '',
+    privateNote: '',
+    payload: { decision: 'approve' },
+    referenceId: 'w08-artifact-feedback-reference',
+  }));
+  assert.equal(result.eventType, 'artifact_approved');
+  assert.equal(result.sourceEntity.id, artifact.id);
+  assert.equal(result.sourceEntity.versionId, event.id);
+  assert.equal(result.sourceEntity.revision, 2);
+  assert.equal(result.sourceEntity.contentHash, artifact.content_hash);
+  assert.deepEqual(result.signals, [{ ruleType: 'tone', value: { value: 'concise' } }]);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count, 1);
+  store.db.close();
+});
+
+test('W08-OBS-05 listMemoryObservations applies stable time, type, order, current, and exclusion semantics', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const job = alphaSavedJob(store);
+  api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: job.id,
+    input: jobFeedback({ referenceId: 'older-feedback', occurredAt: '2026-07-20T12:00:00.000Z' }),
+    actor: 'user',
+    source: 'cli',
+  });
+  api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: job.id,
+    input: jobFeedback({ referenceId: 'newer-feedback', occurredAt: '2026-07-25T10:00:00.000Z' }),
+    actor: 'user',
+    source: 'cli',
+  });
+  const listed = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    types: ['job_saved'],
+    sinceDays: 2,
+    includeHistory: false,
+    nowDate: PHASE2_NOW,
+  });
+  assert.equal(listed.schema, 'jobos.career-memory-observation-list.v1');
+  assert.equal(listed.observationSchema, 'jobos.career-memory-observation.v1');
+  assert.deepEqual(listed.period, {
+    start: '2026-07-23T12:00:00.000Z',
+    end: '2026-07-25T12:00:00.000Z',
+    sinceDays: 2,
+  });
+  assert.deepEqual(listed.filters, { types: ['job_saved'], currentOnly: true });
+  assert.equal(listed.observations.length, 1);
+  assert.equal(one(store, 'SELECT reference_id FROM career_memory_observations WHERE id=?', [listed.observations[0].id]).reference_id, 'newer-feedback');
+  assert.deepEqual(Object.keys(listed), [
+    'schema', 'observationSchema', 'profileId', 'period', 'filters', 'observations', 'excluded',
+  ]);
+  assert.deepEqual(Object.keys(listed.observations[0]), [
+    'schema',
+    'id',
+    'profileId',
+    'eventType',
+    'occurredAt',
+    'recordedAt',
+    'actor',
+    'source',
+    'sourceEntity',
+    'reasonCodes',
+    'signals',
+    'publicExplanation',
+    'hasPrivateNote',
+    'current',
+    'supersedesObservationId',
+    'payload',
+    'interpretation',
+    'externalSideEffects',
+  ]);
+  assert.equal(listed.excluded.outsidePeriod >= 1, true);
+  assert.deepEqual([...listed.observations].map(item => item.id), [...listed.observations]
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)
+      || right.recordedAt.localeCompare(left.recordedAt)
+      || left.id.localeCompare(right.id)).map(item => item.id));
+  store.db.close();
+});
+
+test('W08-OBS-06 private notes require trusted get and never leak through normal lists or mirrors', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const secret = 'private note should remain in sqlite';
+  const recorded = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback({ privateNote: secret }),
+    actor: 'user',
+    source: 'cli',
+  });
+  const normal = api.listMemoryObservations(store, { profileId: 'alpha', sinceDays: null, nowDate: PHASE2_NOW });
+  const normalRow = normal.observations.find(item => item.id === recorded.id);
+  assert.equal(Object.hasOwn(normalRow, 'privateNote'), false);
+  assert.equal(normal.excluded.privateNotes >= 1, true);
+  assert.equal(Object.hasOwn(api.getMemoryObservation(store, { profileId: 'alpha', observationId: recorded.id }), 'privateNote'), false);
+  assert.equal(api.getMemoryObservation(store, {
+    profileId: 'alpha',
+    observationId: recorded.id,
+    includePrivateNote: true,
+  }).privateNote, secret);
+  const mirrorText = readFileSync(memoryMirror(root), 'utf8');
+  assert.equal(mirrorText.includes(secret), false);
+  assert.equal(mirrorText.includes('&'), false);
+  assert.equal(mirrorText.includes('*'), false);
+  store.db.close();
+});
+
+test('W08-OBS-07 failed native writes leave observation, audit, mirror, and protected-state deltas at zero', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const { artifact, event } = approvedArtifactSource(store);
+  const beforeCounts = phase2Counts(store);
+  const beforeProtected = protectedRows(store);
+  const appendInput = {
+    profileId: 'alpha',
+    eventType: 'artifact_approved',
+    sourceSchema: 'jobos.artifact-feedback-input.v1',
+    sourceEntity: {
+      type: 'artifact',
+      id: artifact.id,
+      versionId: event.id,
+      revision: 2,
+      contentHash: artifact.content_hash,
+    },
+    occurredAt: '2026-07-24T12:10:00.000Z',
+    actor: 'user',
+    source: 'cli',
+    reasonCodes: ['tone'],
+    signals: [{ ruleType: 'tone', value: { value: 'concise' } }],
+    publicExplanation: '',
+    privateNote: '',
+    payload: { decision: 'approve' },
+    referenceId: 'failed-artifact-feedback',
+  };
+  assert.throws(() => guardedWrite(store, () => api.appendMemoryObservation(store, {
+    ...appendInput,
+    profileId: 'beta',
+  })), error => error?.code === 'memory_profile_source_mismatch');
+  assert.throws(() => guardedWrite(store, () => api.appendMemoryObservation(store, {
+    ...appendInput,
+    sourceEntity: { ...appendInput.sourceEntity, versionId: 'audit_wrong_source_version' },
+  })), error => error?.code === 'memory_source_version_stale');
+  assert.deepEqual(phase2Counts(store), beforeCounts);
+  assert.deepEqual(protectedRows(store), beforeProtected);
+  assert.equal(existsSync(memoryMirror(root, 'alpha')), false);
+  assert.equal(existsSync(memoryMirror(root, 'beta')), false);
+  store.db.close();
+});
+
+test('W08-OBS-08 reopen and exact replay preserve deterministic IDs, mirror bytes, and W01-W07 state', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  let store = await openStore({ workspace: root });
+  const protectedBefore = protectedRows(store);
+  const args = {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback({ referenceId: 'deterministic-reopen' }),
+    actor: 'user',
+    source: 'cli',
+  };
+  const first = api.recordJobFeedback(store, args);
+  const firstMirror = readFileSync(memoryMirror(root));
+  store.db.close();
+  store = await openStore({ workspace: root });
+  const replay = api.recordJobFeedback(store, args);
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(readFileSync(memoryMirror(root)), firstMirror);
+  assert.deepEqual(protectedRows(store), protectedBefore);
+  store.db.close();
+});
+
+test('W08-CORRECT-01 correction appends one successor and resolves current versus history deterministically', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const rootObservation = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback({ privateNote: 'original private note' }),
+    actor: 'user',
+    source: 'cli',
+  });
+  const correctionArgs = {
+    profileId: 'alpha',
+    observationId: rootObservation.id,
+    replacement: {
+      reasonCodes: ['role_fit', 'skills_match'],
+      signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+      publicExplanation: '',
+      privateNote: 'corrected private note',
+    },
+    reason: 'Corrected the recorded reasons.',
+    referenceId: 'w08-correction-reference',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T13:00:00.000Z',
+  };
+  const corrected = api.correctMemoryObservation(store, correctionArgs);
+  assert.equal(corrected.supersedesObservationId, rootObservation.id);
+  assert.equal(one(store, 'SELECT correction_reason FROM career_memory_observations WHERE id=?', [corrected.id]).correction_reason, 'Corrected the recorded reasons.');
+  const databaseAfterCorrection = readFileSync(path.join(root, '.jobos', 'jobos.sqlite'));
+  const revisionAfterCorrection = one(store, "SELECT value FROM meta WHERE key='store_revision'").value;
+  const correctionReplay = api.correctMemoryObservation(store, correctionArgs);
+  assert.equal(correctionReplay.id, corrected.id);
+  assert.equal(correctionReplay.idempotent, true);
+  assert.deepEqual(readFileSync(path.join(root, '.jobos', 'jobos.sqlite')), databaseAfterCorrection);
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='store_revision'").value, revisionAfterCorrection);
+  const current = api.listMemoryObservations(store, { profileId: 'alpha', types: ['job_saved'], sinceDays: null, nowDate: PHASE2_NOW });
+  assert.deepEqual(current.observations.map(item => item.id), [corrected.id]);
+  assert.equal(current.excluded.superseded >= 1, true);
+  const history = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    types: ['job_saved'],
+    sinceDays: null,
+    includeHistory: true,
+    nowDate: PHASE2_NOW,
+  });
+  assert.deepEqual(new Set(history.observations.map(item => item.id)), new Set([rootObservation.id, corrected.id]));
+  assert.equal(api.getMemoryObservation(store, { profileId: 'alpha', observationId: rootObservation.id }).current, false);
+  store.db.close();
+});
+
+test('W08-CORRECT-02 stale and non-current corrections plus conflicting references are zero-write failures', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const rootObservation = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback(),
+    actor: 'user',
+    source: 'cli',
+  });
+  const correctionArgs = {
+    profileId: 'alpha',
+    observationId: rootObservation.id,
+    replacement: {
+      reasonCodes: ['role_fit'],
+      signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+      publicExplanation: '',
+      privateNote: '',
+    },
+    reason: 'First correction.',
+    referenceId: 'first-correction-reference',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T13:00:00.000Z',
+  };
+  const correction = api.correctMemoryObservation(store, correctionArgs);
+  const after = phase2Counts(store);
+  assert.throws(() => api.correctMemoryObservation(store, {
+    ...correctionArgs,
+    referenceId: 'second-correction-reference',
+  }), error => error?.code === 'memory_observation_not_current');
+  assert.throws(() => api.correctMemoryObservation(store, {
+    ...correctionArgs,
+    observationId: correction.id,
+    reason: 'Conflicting replay.',
+  }), error => error?.code === 'memory_reference_conflict');
+  assert.deepEqual(phase2Counts(store), after);
+  store.db.close();
+});
+
+test('W08-CORRECT-03 undo appends a restoration and exact replay is idempotent', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const rootObservation = api.recordJobFeedback(store, {
+    profileId: 'alpha',
+    jobId: alphaSavedJob(store).id,
+    input: jobFeedback(),
+    actor: 'user',
+    source: 'cli',
+  });
+  const correction = api.correctMemoryObservation(store, {
+    profileId: 'alpha',
+    observationId: rootObservation.id,
+    replacement: {
+      reasonCodes: ['skills_match'],
+      signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+      publicExplanation: '',
+      privateNote: 'discard this correction note',
+    },
+    reason: 'Correct reasons.',
+    referenceId: 'correction-before-undo',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T13:00:00.000Z',
+  });
+  const args = {
+    profileId: 'alpha',
+    observationId: correction.id,
+    reason: 'Undo the correction.',
+    referenceId: 'undo-correction-reference',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T14:00:00.000Z',
+  };
+  const restored = api.undoMemoryObservation(store, args);
+  assert.equal(restored.supersedesObservationId, correction.id);
+  assert.equal(one(store, 'SELECT undoes_observation_id FROM career_memory_observations WHERE id=?', [restored.id]).undoes_observation_id, correction.id);
+  assert.deepEqual(restored.reasonCodes, rootObservation.reasonCodes);
+  assert.deepEqual(restored.signals, rootObservation.signals);
+  assert.equal(api.getMemoryObservation(store, {
+    profileId: 'alpha',
+    observationId: restored.id,
+    includePrivateNote: true,
+  }).privateNote, '');
+  const after = phase2Counts(store);
+  const databaseAfterUndo = readFileSync(path.join(root, '.jobos', 'jobos.sqlite'));
+  const revisionAfterUndo = one(store, "SELECT value FROM meta WHERE key='store_revision'").value;
+  const replay = api.undoMemoryObservation(store, args);
+  assert.equal(replay.id, restored.id);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(phase2Counts(store), after);
+  assert.deepEqual(readFileSync(path.join(root, '.jobos', 'jobos.sqlite')), databaseAfterUndo);
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='store_revision'").value, revisionAfterUndo);
+  store.db.close();
+});
+
+test('W08-ADAPTER-01 W05 adapter preserves source versions and current/history without row copies or private notes', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const current = api.listMemoryObservations(store, { profileId: 'alpha', sinceDays: null, nowDate: PHASE2_NOW });
+  const currentW05 = current.observations.filter(item => item.source === 'w05_adapter');
+  const history = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    sinceDays: null,
+    includeHistory: true,
+    nowDate: PHASE2_NOW,
+  });
+  const historyW05 = history.observations.filter(item => item.source === 'w05_adapter');
+  assert.equal(currentW05.length, 1);
+  assert.equal(historyW05.length, 2);
+  assert.equal(currentW05[0].eventType, 'reply_positive');
+  assert.equal(historyW05.some(item => item.eventType === 'reply_neutral' && item.current === false), true);
+  assert.equal(historyW05.every(item => item.sourceEntity.type === 'outreach_thread'), true);
+  assert.equal(historyW05.every(item => /^[a-f0-9]{64}$/.test(item.sourceEntity.contentHash)), true);
+  assert.equal(historyW05.some(item => JSON.stringify(item).includes('private')), false);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count, 0);
+  store.db.close();
+});
+
+test('W08-ADAPTER-02 W06 adapter preserves application status and receipt attribution without duplicating W07 debriefs', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const listed = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    sinceDays: null,
+    includeHistory: true,
+    nowDate: PHASE2_NOW,
+  });
+  const w06 = listed.observations.filter(item => item.source === 'w06_adapter');
+  const w07 = listed.observations.filter(item => item.source === 'w07_adapter');
+  assert.equal(w06.some(item => item.eventType === 'application_status_changed'), true);
+  assert.equal(w06.some(item => ['submission_attested', 'configured_submission_confirmed', 'receipt_confirmed'].includes(item.eventType)), true);
+  assert.equal(w07.filter(item => item.eventType === 'interview_debrief_recorded').length, 2);
+  assert.equal(w06.every(item => item.sourceEntity.type === 'application'), true);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count, 0);
+  store.db.close();
+});
+
+test('W08-ADAPTER-03 W07 adapter keeps exact revision identity, current semantics, bounded payload, and no notes', async t => {
+  const api = await observationApi();
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const current = api.listMemoryObservations(store, { profileId: 'alpha', sinceDays: null, nowDate: PHASE2_NOW });
+  const currentW07 = current.observations.filter(item => item.source === 'w07_adapter');
+  const history = api.listMemoryObservations(store, {
+    profileId: 'alpha',
+    sinceDays: null,
+    includeHistory: true,
+    nowDate: PHASE2_NOW,
+  });
+  const historyW07 = history.observations.filter(item => item.source === 'w07_adapter');
+  assert.equal(currentW07.length, 1);
+  assert.equal(historyW07.length, 2);
+  assert.equal(currentW07[0].sourceEntity.revision, 2);
+  assert.match(currentW07[0].sourceEntity.versionId, /^interview_debrief_revision_/);
+  assert.deepEqual(Object.keys(currentW07[0].payload).sort(), [
+    'applicationId',
+    'audience',
+    'interviewStage',
+    'jobId',
+    'observedQuestions',
+    'outcome',
+    'proofGaps',
+    'storyUses',
+  ]);
+  assert.equal(historyW07.some(item => item.current === false), true);
+  const original = historyW07.find(item => item.sourceEntity.revision === 1);
+  assert.equal(currentW07[0].supersedesObservationId, original.id);
+  assert.equal(historyW07.some(item => JSON.stringify(item).includes('Corrected after reviewing')), false);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM career_memory_observations').count, 0);
   store.db.close();
 });
