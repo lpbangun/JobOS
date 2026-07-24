@@ -200,7 +200,7 @@ Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–
 
 **Acceptance bar:** The same verified story can be reused and adapted across roles without losing provenance; unsupported story content cannot become verified; debrief evidence can affect later preparation through W06 interfaces.
 
-**Integration note:** W07 merged into `cleanup/base` as `e75b168` from verified feature head `22b5192`. Independent lane and holistic reviews passed after closing the debrief-observed-question feedback loop. The final branch gate passed 445/445 tests, standard smoke, and both manual/configured live-form smoke paths; post-integration verification is recorded on the execution board.
+**Integration note:** W07 merged into `cleanup/base` as `e75b168` from verified feature head `22b5192`. Independent lane and holistic reviews passed after closing the debrief-observed-question feedback loop. Final integrated verification passed 446/446 tests, standard smoke, and both manual/configured live-form smoke paths.
 
 ### W08 — Career Memory, preference calibration, and voice/positioning — P1
 
