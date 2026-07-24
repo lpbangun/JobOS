@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { openStore } from '../src/db.js';
+import { openStore, run } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText, updateJobStatus } from '../src/jobs.js';
 import { appCreate } from '../src/tracking.js';
@@ -58,7 +58,7 @@ test('selected context and TUI stage expose status provenance without creating a
   const triageOnly = importJob('Triage Only', 'Triage Co');
   updateJobStatus(store, triageOnly.id, 'saved');
 
-  const context = selectedJobContext(store, triageOnly.id);
+  const context = selectedJobContext(store, triageOnly.id, profile.id);
   assert.equal(context.job.discoveryStatus, 'saved');
   assert.equal('status' in context.job, false);
   assert.equal(context.job.applicationStatus, null);
@@ -79,6 +79,41 @@ test('selected context and TUI stage expose status provenance without creating a
   assert.equal(applicationModel.selected.job.stage, 'recruiter-screen');
   assert.equal(applicationModel.selected.job.stageSource, 'application');
   assert.equal(applicationModel.counts.open, 1);
+});
+
+test('selected context prefers the profile-owned W06 action and task mirrors clear on close', async t => {
+  const { store, profile, importJob } = await fixture(t);
+  const other = createProfile(store, 'Other Status Profile').profile;
+  const job = importJob('Lifecycle Role', 'Lifecycle Co');
+  const application = appCreate(store, job.id, 'materials-ready', '', { at: '2026-07-20T09:00:00.000Z' });
+  run(store, `INSERT INTO tasks
+    (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    'general-first', job.id, application.id, 'Unrelated general task', '', 'review', '2026-07-20T08:00:00.000Z',
+    'normal', 'open', 'test', '2026-07-20T08:00:00.000Z', '2026-07-20T08:00:00.000Z', profile.id
+  ]);
+
+  const context = selectedJobContext(store, job.id, profile.id);
+  assert.equal(context.nextAction.schema, 'jobos.lifecycle-next-action.v1');
+  assert.equal(context.nextAction.actionCode, 'complete-submission');
+  assert.equal(context.nextAction.profileId, profile.id);
+  assert.equal(context.next[0].id, context.nextAction.id);
+  assert.throws(() => selectedJobContext(store, job.id, other.id), /Unknown job|profile/i);
+
+  const dir = path.join(store.p.jobs, job.id);
+  const jobYaml = readFileSync(path.join(dir, 'job.yaml'), 'utf8');
+  const applicationYaml = readFileSync(path.join(dir, 'application.yaml'), 'utf8');
+  const tasksYaml = readFileSync(path.join(dir, 'tasks.yaml'), 'utf8');
+  assert.match(jobYaml, /nextAction:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
+  assert.match(applicationYaml, /nextAction:\n\s+schema: jobos\.lifecycle-next-action\.v1/);
+  assert.match(tasksYaml, /profileId:/);
+  assert.match(tasksYaml, /actionKind: application_next_action/);
+  assert.match(tasksYaml, /scheduleSource: policy/);
+  assert.match(tasksYaml, /sourceEvent:/);
+
+  run(store, "UPDATE tasks SET status='done' WHERE id='general-first'");
+  appCreate(store, job.id, 'rejected', '', { at: '2026-07-21T09:00:00.000Z' });
+  assert.equal(readFileSync(path.join(dir, 'tasks.yaml'), 'utf8').trim(), '[]');
 });
 
 test('TUI open count includes active application stages and excludes terminal stages', async t => {
