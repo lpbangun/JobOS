@@ -7,6 +7,7 @@ import { writeYaml, writeMd } from './workspace.js';
 import { deserializeFitScore, qualifiesForHighFit, scoreMd } from './scoring.js';
 import { extractRequirementInventory } from './requirements.js';
 import { classifyLiveness, deserializeLiveness, isLivenessFresh, livenessGate, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
+import { lifecycleTaskView } from './lifecycle.js';
 
 export function requirementInventory(text){ return extractRequirementInventory(text); }
 export function requirements(text){ return requirementInventory(text).requirements.map(requirement => requirement.sourceText); }
@@ -41,7 +42,7 @@ function canMergeByKey(existing, dbUrl){ const a=publicUrl(existing?.url), b=pub
 function createPossibleDuplicateTask(s, job, candidates, at){
   if(!candidates.length) return null;
   const ids=candidates.map(c=>c.id).sort(), tid=id('task',`possible-duplicate:${job.id}:${ids.join(':')}`);
-  run(s,'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at]);
+  run(s,'INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at,job.profile_id]);
   audit(s,'job.possible_duplicate','job',job.id,{jobId:job.id,candidateJobIds:ids,dedupeKey:job.dedupe_key});
   return tid;
 }
@@ -202,7 +203,11 @@ export function syncJob(s, jid) {
   const storedScore = parseJson(job.score_json, null);
   const fit = deserializeFitScore(storedScore, { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id });
   const app = one(s, 'SELECT * FROM applications WHERE job_id=?', [jid]);
-  const tasks = all(s, 'SELECT * FROM tasks WHERE job_id=? ORDER BY due_at IS NULL,due_at,created_at', [jid]);
+  const tasks = all(s, `SELECT * FROM tasks WHERE job_id=? AND profile_id=? AND status='open'
+    ORDER BY CASE action_kind WHEN 'application_next_action' THEN 0 ELSE 1 END,
+      due_at IS NULL,due_at,created_at,id`, [jid, job.profile_id]);
+  const nextActionRow = tasks.find(task => task.action_kind === 'application_next_action') || null;
+  const nextAction = nextActionRow ? lifecycleTaskView(nextActionRow) : null;
   const liveness = deserializeLiveness(job);
   const dir = path.join(s.p.jobs, jid);
   writeYaml(path.join(dir, 'job.yaml'), {
@@ -237,6 +242,7 @@ export function syncJob(s, jid) {
       status: app.status,
       notes: app.notes,
       confirmationUrl: app.confirmation_url,
+      nextAction,
       updatedAt: app.updated_at
     } : null,
     updatedAt: job.updated_at
@@ -247,17 +253,39 @@ export function syncJob(s, jid) {
     status: app.status,
     notes: app.notes,
     confirmationUrl: app.confirmation_url,
+    nextAction,
     updatedAt: app.updated_at
   });
-  if (tasks.length) writeYaml(path.join(dir, 'tasks.yaml'), tasks.map(task => ({
-    id: task.id,
-    title: task.title,
-    type: task.type,
-    dueAt: task.due_at,
-    priority: task.priority,
-    status: task.status,
-    createdBy: task.created_by
-  })));
+  writeYaml(path.join(dir, 'tasks.yaml'), tasks.map(task => {
+    const lifecycle = task.action_kind === 'application_next_action' ? lifecycleTaskView(task) : null;
+    return {
+      id: task.id,
+      profileId: task.profile_id || null,
+      jobId: task.job_id || null,
+      applicationId: task.application_id || null,
+      title: task.title,
+      type: task.type,
+      dueAt: task.due_at,
+      priority: task.priority,
+      status: task.status,
+      createdBy: task.created_by,
+      actionKind: task.action_kind,
+      actionCode: task.action_code || null,
+      stage: task.stage || null,
+      state: lifecycle?.state || null,
+      waitingSince: task.waiting_since || null,
+      policyDueAt: task.policy_due_at || null,
+      urgentAt: task.urgent_at || null,
+      scheduleSource: task.schedule_source,
+      manualRescheduledAt: task.manual_rescheduled_at || null,
+      manualRescheduleReason: task.manual_reschedule_reason || '',
+      sourceEvent: {
+        type: task.source_event_type || null,
+        id: task.source_event_id || null,
+        occurredAt: task.updated_at,
+      },
+    };
+  }));
   if (storedScore) writeMd(path.join(dir, 'score.md'), scoreMd(job, fit));
 }
 export function importNormalized(s, { profileId, job, source = 'discovery', status = 'new', runId = '' }) {

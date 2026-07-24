@@ -50,7 +50,7 @@ export function dueAutomations(s, { nowDate = new Date() } = {}) {
 
 function createReviewTaskForFailure(s, automation, error, at) {
   const tid = id('task', `automation-failed:${automation.id}:${at}`);
-  run(s, 'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [
+  run(s, 'INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
     tid,
     null,
     null,
@@ -62,7 +62,8 @@ function createReviewTaskForFailure(s, automation, error, at) {
     'open',
     'automation',
     at,
-    at
+    at,
+    null
   ]);
   return tid;
 }

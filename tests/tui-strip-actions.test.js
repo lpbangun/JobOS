@@ -45,8 +45,8 @@ function makeTui(store, profile, job) {
 
 function seedDueTask(store, job) {
   const at = '2026-07-20T09:00:00.000Z';
-  run(store, `INSERT INTO tasks (id, job_id, title, type, due_at, priority, status, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    ['task_followup', job.id, 'Send tailored resume', 'follow_up', at, 'high', 'open', 'test', at, at]);
+  run(store, `INSERT INTO tasks (id, job_id, title, type, due_at, priority, status, created_by, created_at, updated_at, profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ['task_followup', job.id, 'Send tailored resume', 'follow_up', at, 'high', 'open', 'test', at, at, job.profile_id]);
   save(store);
 }
 
@@ -55,10 +55,11 @@ const tick = (ms = 150) => new Promise(resolve => setTimeout(resolve, ms));
 // Gap #7 — strip shape is stable and linked jobs are carried
 test('priority strip carries jobId on actionable cards and null on failure', async t => {
   const { store, profile, job } = await seeded(t);
+  appCreate(store, job.id, 'materials-ready', '', { at: '2026-07-20T09:00:00.000Z' });
   seedDueTask(store, job);
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: '2026-07-21T12:00:00.000Z' });
-  assert.deepEqual(model.priority.map(item => item.kind), ['due', 'interview', 'new', 'failure']);
-  assert.equal(model.priority[0].jobId, job.id, 'due card carries its job');
+  assert.deepEqual(model.priority.map(item => item.kind), ['overdue', 'interview', 'new', 'failure']);
+  assert.equal(model.priority[0].jobId, job.id, 'current action card carries its job');
   assert.equal(model.priority[3].jobId, null, 'failure card never carries a job');
 });
 
@@ -81,14 +82,44 @@ test('Tab cycles strip focus with wrap and paints the focused card', async t => 
 // Gap #7 — Enter jumps to the focused card's job, even from another filter
 test('Enter jumps to the due card job and resets the filter', async t => {
   const { store, profile, job } = await seeded(t);
+  appCreate(store, job.id, 'materials-ready', '', { at: '2026-07-20T09:00:00.000Z' });
   seedDueTask(store, job);
   const tui = makeTui(store, profile, job);
   tui.state.filter = 'interview'; // would otherwise hide the job
   tui.state.selectedJobId = null;
-  tui.onKeypress('', { name: 'return' }); // strip focus is the due card
+  tui.onKeypress('', { name: 'return' }); // strip focus is the current-action card
   assert.equal(tui.state.selectedJobId, job.id, 'main selection follows the strip job');
   assert.equal(tui.state.filter, 'all', 'filter resets so the job is visible');
-  assert.match(tui.state.status, /Strip due · job now selected/);
+  assert.match(tui.state.status, /Strip urgent · job now selected/);
+});
+
+test('selected job exposes its W06 action and :reschedule preserves policy provenance', async t => {
+  const { store, profile, job } = await seeded(t);
+  appCreate(store, job.id, 'interview', '', { at: '2026-07-20T09:00:00.000Z' });
+  seedDueTask(store, job);
+  run(store, `INSERT INTO tasks (id,title,type,due_at,priority,status,created_by,created_at,updated_at,profile_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`, [
+    'global-old', 'Global old task', 'review', '2026-07-01T09:00:00.000Z', 'high', 'open', 'automation',
+    '2026-07-01T09:00:00.000Z', '2026-07-01T09:00:00.000Z', null
+  ]);
+
+  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: '2026-07-21T12:00:00.000Z' });
+  assert.equal(model.priority[0].kind, 'overdue');
+  assert.equal(model.priority[0].jobId, job.id);
+  assert.equal(model.jobs[0].next.actionCode, 'prepare-interview');
+  assert.equal(model.jobs[0].next.scheduleSource, 'policy');
+  assert.equal(model.dueTasks.some(task => task.id === 'global-old'), false);
+  assert.equal(model.dueTasks.find(task => task.actionKind === 'application_next_action').state, 'overdue');
+
+  const tui = makeTui(store, profile, job);
+  const policyDueAt = tui.model.selected.nextAction.policyDueAt;
+  tui.executeCommand('reschedule 2026-08-04T10:30:00Z | Panel moved by recruiter');
+  const refreshed = tui.model.selected.nextAction;
+  assert.equal(refreshed.dueAt, '2026-08-04T10:30:00.000Z');
+  assert.equal(refreshed.policyDueAt, policyDueAt);
+  assert.equal(refreshed.scheduleSource, 'manual');
+  assert.equal(refreshed.manualRescheduleReason, 'Panel moved by recruiter');
+  assert.match(tui.state.status, /Rescheduled Prepare interview/);
 });
 
 // Gap #7 — cards without a job explain themselves instead of no-op silence

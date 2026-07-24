@@ -197,7 +197,7 @@ export async function runPursuit(s, {
       const status = preflight.readyForReview ? 'materials-ready' : 'researching';
       const notes = preflight.readyForReview ? 'Readiness compiler: ready for human review' : `Readiness compiler: blocked by ${preflight.blockers.map(item => item.code).join(', ')}`;
       const application = !existing || shouldAdvanceApplication(existing.status, status)
-        ? appCreate(s, jobId, status, notes)
+        ? appCreate(s, jobId, status, notes, { actor: 'system', source: 'workflow' })
         : existing;
       const applicationStatusChanged = !existing || application.status !== existing.status;
       readiness = planApplication(s, {

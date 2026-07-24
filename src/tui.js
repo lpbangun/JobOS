@@ -10,6 +10,7 @@ import { setNetworkIntent } from './profiles.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
+import { rescheduleApplicationNextAction } from './lifecycle.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
@@ -365,7 +366,7 @@ function detailPanel(model, width, height, color) {
     ...readinessLines(item.readiness, width - 4, color),
     ...policyLines(item.policy, width - 4, color),
     paint('NEXT', 'cyan', color),
-    next ? `${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
+    next ? `${next.state ? `${next.state.toUpperCase()} · ` : ''}${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
     paint('PROOFS', 'cyan', color),
     ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
     paint('PATH', 'cyan', color),
@@ -805,7 +806,7 @@ function footerLines(width) {
   if (width >= 90) {
     return [
       ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
-      ' r review l log · n network o docs q answers · s sources ? system · b build-network : command Q quit'
+      ' r review l log · n network o docs q answers · s sources ? system · :reschedule <due> | <reason> · : command Q quit'
     ];
   }
   return [
@@ -1251,7 +1252,7 @@ export class JobosTui {
       return;
     }
     const jobId = this.state.selectedJobId;
-    const context = jobId ? selectedJobContext(this.store, jobId) : null;
+    const context = jobId ? selectedJobContext(this.store, jobId, this.model.profileId) : null;
     const before = this.artifactSnapshot();
     this.state.busy = 'agent';
     this.state.status = `agent working on ${jobId || 'workspace'} · navigation stays active`;
@@ -1507,6 +1508,7 @@ export class JobosTui {
     if (command === 'answer') return void this.answerAdd(argText);
     if (command === 'prep') return void this.runPrep(argText);
     if (command === 'weekly') return void this.runWeeklyReview();
+    if (command === 'reschedule') return void this.rescheduleSelectedAction(argText);
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1517,7 +1519,7 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${trimmed}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add prep weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
     this.render();
   }
 
@@ -1552,6 +1554,41 @@ export class JobosTui {
     this.state.selectedJobId = jobId;
     this.refresh({ disk: false });
     this.state.status = statusMessage;
+    this.render();
+  }
+
+  rescheduleSelectedAction(argText) {
+    const usage = 'Usage: :reschedule <RFC3339> | <reason>';
+    const separator = String(argText || '').indexOf('|');
+    const dueAt = separator >= 0 ? argText.slice(0, separator).trim() : '';
+    const reason = separator >= 0 ? argText.slice(separator + 1).trim() : '';
+    const action = this.model.selected?.nextAction;
+    if (!dueAt || !reason) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (!action || !this.model.profileId) {
+      this.state.status = 'Selected job has no open W06 action to reschedule.';
+      this.render();
+      return;
+    }
+    try {
+      const result = rescheduleApplicationNextAction(this.store, {
+        taskId: action.id,
+        profileId: this.model.profileId,
+        dueAt,
+        reason,
+        actor: 'user',
+        source: 'tui',
+      });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Rescheduled ${result.title} · ${result.dueAt} · ${result.manualRescheduleReason}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Reschedule failed: ${error.message}`;
+    }
     this.render();
   }
 
@@ -2012,9 +2049,9 @@ export class JobosTui {
       if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
       const application = one(this.store, 'SELECT id FROM applications WHERE job_id=? AND profile_id=?', [this.state.selectedJobId, this.model.profileId]);
       if (application) {
-        appUpdate(this.store, application.id, status, note || undefined);
+        appUpdate(this.store, application.id, status, note || undefined, { actor: 'user', source: 'tui' });
       } else {
-        appCreate(this.store, this.state.selectedJobId, status, note || undefined);
+        appCreate(this.store, this.state.selectedJobId, status, note || undefined, { actor: 'user', source: 'tui' });
       }
       this.state.error = null;
       this.refresh({ disk: false });

@@ -129,8 +129,10 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
   fs.chmodSync(transcriptPath, 0o600);
 
   const store = await openStore({ workspace: root });
-  const context = selectedJobContext(store, jobId);
-  const selectedProfileId = profileId || context.job.profileId;
+  const selectedJob = one(store, 'SELECT profile_id FROM jobs WHERE id=?', [jobId]);
+  if (!selectedJob) throw Error(`Unknown job: ${jobId}`);
+  const selectedProfileId = profileId || selectedJob.profile_id;
+  const context = selectedJobContext(store, jobId, selectedProfileId);
   const before = {
     context,
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [jobId])?.count || 0)
@@ -157,7 +159,7 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
     });
     contextResponse = await client.request('tools/call', {
       name: 'get_job_context',
-      arguments: { jobId }
+      arguments: { jobId, profileId: selectedProfileId }
     });
   } finally {
     exit = await client.stop();
@@ -165,7 +167,7 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
 
   reload(store);
   const after = {
-    context: selectedJobContext(store, jobId),
+    context: selectedJobContext(store, jobId, selectedProfileId),
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [jobId])?.count || 0)
   };
   const score = parseToolResult(scoreResponse);

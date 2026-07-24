@@ -6,8 +6,10 @@ import { approveContact, createOutreachPlan } from './research/contacts.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
 import { mapReachableNetwork } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
-import { appCreate, appUpdate, openTasks, recommendResearch } from './tracking.js';
+import { appCreate, appUpdate, openTasks, recommendResearch, taskView } from './tracking.js';
 import { weekly } from './analytics.js';
+import { lifecycleAnalytics } from './lifecycle-analytics.js';
+import { listLifecycleObservations } from './lifecycle.js';
 import { prepInterview } from './interview.js';
 import { getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
@@ -78,7 +80,7 @@ const peopleResearchRequest = {
 
 export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_jobs', description: 'List local JobOS jobs and their current fit, discovery, and application state. Filter status with discoveryStatus or applicationStatus.', inputSchema: object({ profileId: text, discoveryStatus: text, applicationStatus: text }) },
-  { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one selected job.', inputSchema: required({ jobId: text }, ['jobId']) },
+  { name: 'get_job_context', description: 'Read the secret-safe, evidence-grounded context packet for one profile-owned selected job.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'review_queue', description: 'List local draft artifacts awaiting human review.', inputSchema: object({ profileId: text, jobId: text }) },
   { name: 'diff_artifact', description: 'Inspect a line diff for an exact artifact revision without changing local state.', inputSchema: required({ artifactId: text, againstArtifactId: text }, ['artifactId']) },
   { name: 'approve_artifact', description: 'Record trusted local human approval of an exact current artifact revision; never submit or apply.', inputSchema: required({ artifactId: text, note: text }, ['artifactId']) },
@@ -104,7 +106,9 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'create_application', description: 'Create a local application tracking record; agent mediation cannot attest submission by default.', inputSchema: required({ jobId: text, status: text, notes: text }, ['jobId', 'status']) },
   { name: 'applications_plan', description: 'Compile review readiness from local score, proofs, materials, answers, and identity evidence without applying or sending.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'update_application_status', description: 'Update a local application status; agent mediation cannot attest submission by default.', inputSchema: required({ applicationId: text, status: text, notes: text }, ['applicationId', 'status']) },
-  { name: 'list_tasks', description: 'List open inbox tasks ordered by due date, including future and undated tasks. Use the tasks due CLI command with type and created-by filters for the canonical elapsed-deadline query.', inputSchema: object({ type: text, createdBy: text }) },
+  { name: 'list_tasks', description: 'List one profile task inbox ordered by due date, including future and undated tasks.', inputSchema: required({ profileId: text, type: text, createdBy: text }, ['profileId']) },
+  { name: 'lifecycle_analytics', description: 'Report profile-owned observed lifecycle analytics with explicit denominators, cautions, and no causal claims.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
+  { name: 'list_lifecycle_observations', description: 'List attributed profile-owned lifecycle status and immutable submission observations.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
   { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
@@ -273,13 +277,20 @@ export function discoveryHealth(s, { profileId = null } = {}) {
   return { searches, runs, browser: 'optional', externalSideEffects: 'off_by_default' };
 }
 
-export function selectedJobContext(s, jobId) {
+export function selectedJobContext(s, jobId, profileId) {
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+    throw new DomainToolError('unknown_profile', `Unknown profile: ${profileId}`, { profileId });
+  }
   const job = one(s, `SELECT jobs.*,applications.id AS application_id,applications.status AS application_status
-    FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id WHERE jobs.id=?`, [jobId]);
-  if (!job) throw new DomainToolError('unknown_job', `Unknown job: ${jobId}`, { jobId });
+    FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id
+    WHERE jobs.id=? AND jobs.profile_id=?`, [jobId, profileId]);
+  if (!job) throw new DomainToolError('unknown_job', `Unknown job for profile ${profileId}: ${jobId}`, { jobId, profileId });
   const fitData = fitForRow(job);
-  const tasks = all(s, "SELECT id,title,type,due_at,priority,status FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 8", [jobId])
-    .map(row => ({ id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority }));
+  const taskRows = all(s, `SELECT * FROM tasks WHERE job_id=? AND profile_id=? AND status='open'
+    ORDER BY CASE action_kind WHEN 'application_next_action' THEN 0 ELSE 1 END,
+      due_at IS NULL,due_at,created_at,id LIMIT 8`, [jobId, profileId]);
+  const tasks = taskRows.map(row => taskView(row));
+  const nextAction = tasks.find(task => task.schema === 'jobos.lifecycle-next-action.v1') || null;
   const artifacts = all(s, `SELECT artifacts.*,
       (SELECT MAX(revision) FROM artifacts current WHERE current.series_key=artifacts.series_key) AS current_revision
     FROM artifacts WHERE job_id=? ORDER BY created_at DESC,revision DESC`, [jobId])
@@ -330,6 +341,7 @@ export function selectedJobContext(s, jobId) {
       ...fitData,
       highFit: Boolean(job.high_fit) && qualifiesForHighFit(fitData, 0)
     } : null,
+    nextAction,
     next: tasks,
     proofs,
     path: path ? {
@@ -359,7 +371,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   enforcePolicy(name, args, options);
 
   if (name === 'list_jobs') return listJobSummaries(s, args);
-  if (name === 'get_job_context') return selectedJobContext(s, args.jobId);
+  if (name === 'get_job_context') return selectedJobContext(s, args.jobId, args.profileId);
   if (name === 'review_queue') return reviewQueue(s, args);
   if (name === 'diff_artifact') return diffArtifact(s, args.artifactId, { againstArtifactId: args.againstArtifactId || null });
   if (name === 'approve_artifact') return approveArtifact(s, args.artifactId, { reviewedBy: mediationSource(options), note: args.note || '' });
@@ -419,15 +431,29 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     includeNotes: false
   });
   if (name === 'create_application') {
-    const application = appCreate(s, args.jobId, args.status, args.notes || '');
-    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+    const provenance = mediationSource(options);
+    const application = appCreate(s, args.jobId, args.status, args.notes || '', { actor: provenance, source: 'domain_tool' });
+    return { ...application, nextAction: application.nextAction, researchRecommendation: application.researchRecommendation };
   }
   if (name === 'applications_plan') return planApplication(s, { jobId: args.jobId, profileId: args.profileId });
   if (name === 'update_application_status') {
-    const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null);
-    return { ...application, researchRecommendation: recommendResearch(s, { jobId: application.job_id, profileId: application.profile_id, status: application.status }) };
+    const provenance = mediationSource(options);
+    const application = appUpdate(s, args.applicationId, args.status, args.notes ?? null, { actor: provenance, source: 'domain_tool' });
+    return { ...application, nextAction: application.nextAction, researchRecommendation: application.researchRecommendation };
   }
-  if (name === 'list_tasks') return openTasks(s, { type: args.type || null, createdBy: args.createdBy || null });
+  if (name === 'list_tasks') return openTasks(s, {
+    profileId: args.profileId,
+    type: args.type || null,
+    createdBy: args.createdBy || null,
+  }).map(row => taskView(row));
+  if (name === 'lifecycle_analytics') return lifecycleAnalytics(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays ?? 30,
+  });
+  if (name === 'list_lifecycle_observations') return listLifecycleObservations(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays ?? 30,
+  });
   if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');
   if (name === 'weekly_review') {
     const result = weekly(s, args.profileId);

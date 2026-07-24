@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS saved_searches (id TEXT PRIMARY KEY, name TEXT NOT NU
 CREATE TABLE IF NOT EXISTS company_watchlist (id TEXT PRIMARY KEY, company TEXT NOT NULL, adapter TEXT NOT NULL, handle TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(company,adapter,handle));
 CREATE TABLE IF NOT EXISTS stakeholders (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', links_json TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', outreach_status TEXT NOT NULL DEFAULT 'not_contacted', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, status TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', confirmation_url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(job_id,profile_id));
-CREATE TABLE IF NOT EXISTS status_changes (id TEXT PRIMARY KEY, application_id TEXT NOT NULL, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS status_changes (id TEXT PRIMARY KEY, application_id TEXT NOT NULL, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, actor TEXT NOT NULL DEFAULT 'unknown_legacy', source TEXT NOT NULL DEFAULT 'legacy', source_event_id TEXT);
 CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, type TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', approval_status TEXT NOT NULL DEFAULT 'draft_needs_human_review' CHECK(approval_status IN ('draft_needs_human_review','approved','rejected')), created_at TEXT NOT NULL, series_key TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), supersedes_artifact_id TEXT, content_hash TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT, review_note TEXT NOT NULL DEFAULT '', UNIQUE(series_key,revision), FOREIGN KEY(supersedes_artifact_id) REFERENCES artifacts(id));
 CREATE TABLE IF NOT EXISTS profile_resume_revisions (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), schema_version INTEGER NOT NULL, source_text TEXT NOT NULL DEFAULT '', source_text_hash TEXT NOT NULL, document_json TEXT NOT NULL, verification_status TEXT NOT NULL CHECK(verification_status IN ('verified','needs_verification','rejected')), supersedes_resume_id TEXT, is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0,1)), created_at TEXT NOT NULL, reviewed_at TEXT, UNIQUE(profile_id,revision), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_resume_id) REFERENCES profile_resume_revisions(id));
 CREATE UNIQUE INDEX IF NOT EXISTS profile_resume_current_idx ON profile_resume_revisions(profile_id) WHERE is_current=1;
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS email_patterns (id TEXT PRIMARY KEY, company_id TEXT 
 CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id));
-CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, profile_id TEXT, action_kind TEXT NOT NULL DEFAULT 'general' CHECK(action_kind IN ('general','application_next_action')), action_code TEXT, stage TEXT, source_event_type TEXT, source_event_id TEXT, waiting_since TEXT, policy_due_at TEXT, urgent_at TEXT, schedule_source TEXT NOT NULL DEFAULT 'legacy' CHECK(schedule_source IN ('legacy','policy','manual')), manual_rescheduled_at TEXT, manual_reschedule_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(application_id) REFERENCES applications(id));
 CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, action_id TEXT NOT NULL, schedule TEXT NOT NULL, profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_run', consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, trigger_name TEXT NOT NULL, inputs_json TEXT NOT NULL DEFAULT '{}', outputs_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, external_side_effects TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL, automation_id TEXT, action_id TEXT, trigger_type TEXT NOT NULL DEFAULT 'manual', started_at TEXT, finished_at TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT, counts_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL, primary_profile_url TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]', identity_confidence TEXT NOT NULL DEFAULT 'low', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -303,6 +303,80 @@ function migrateW02Constraints(db) {
   const violations = dbRows(db, 'PRAGMA foreign_key_check');
   if (violations.length) throw new Error('W02 packet/receipt migration left foreign-key violations');
 }
+function migrateW06Tasks(db) {
+  const taskDefinition = tableDefinition(db, 'tasks');
+  if (!taskDefinition) return;
+  if (taskDefinition.includes('action_kind')) {
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_current_application_action_idx ON tasks(application_id) WHERE action_kind='application_next_action' AND status='open'");
+    db.run('CREATE INDEX IF NOT EXISTS tasks_profile_status_due_idx ON tasks(profile_id,status,due_at)');
+    db.run('CREATE INDEX IF NOT EXISTS tasks_application_action_status_idx ON tasks(application_id,action_kind,status)');
+    return;
+  }
+
+  db.run('PRAGMA foreign_keys=OFF');
+  try {
+    db.run('BEGIN');
+    db.run(`CREATE TABLE tasks_w06 (
+      id TEXT PRIMARY KEY,
+      job_id TEXT,
+      application_id TEXT,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'review',
+      due_at TEXT,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_by TEXT NOT NULL DEFAULT 'system',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      profile_id TEXT,
+      action_kind TEXT NOT NULL DEFAULT 'general' CHECK(action_kind IN ('general','application_next_action')),
+      action_code TEXT,
+      stage TEXT,
+      source_event_type TEXT,
+      source_event_id TEXT,
+      waiting_since TEXT,
+      policy_due_at TEXT,
+      urgent_at TEXT,
+      schedule_source TEXT NOT NULL DEFAULT 'legacy' CHECK(schedule_source IN ('legacy','policy','manual')),
+      manual_rescheduled_at TEXT,
+      manual_reschedule_reason TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY(profile_id) REFERENCES profiles(id),
+      FOREIGN KEY(job_id) REFERENCES jobs(id),
+      FOREIGN KEY(application_id) REFERENCES applications(id)
+    )`);
+    db.run(`INSERT INTO tasks_w06 (
+      id,job_id,application_id,title,description,type,due_at,priority,status,created_by,
+      created_at,updated_at,profile_id,action_kind,action_code,stage,source_event_type,
+      source_event_id,waiting_since,policy_due_at,urgent_at,schedule_source,
+      manual_rescheduled_at,manual_reschedule_reason
+    ) SELECT
+      tasks.id,tasks.job_id,tasks.application_id,tasks.title,tasks.description,tasks.type,
+      tasks.due_at,tasks.priority,tasks.status,tasks.created_by,tasks.created_at,tasks.updated_at,
+      COALESCE(
+        (SELECT applications.profile_id FROM applications WHERE applications.id=tasks.application_id),
+        (SELECT jobs.profile_id FROM jobs WHERE jobs.id=tasks.job_id),
+        (SELECT outreach_threads.profile_id FROM outreach_threads
+          WHERE outreach_threads.followup_task_id=tasks.id
+          ORDER BY outreach_threads.id LIMIT 1)
+      ),
+      'general',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'legacy',NULL,''
+    FROM tasks`);
+    db.run('DROP TABLE tasks');
+    db.run('ALTER TABLE tasks_w06 RENAME TO tasks');
+    db.run("CREATE UNIQUE INDEX tasks_one_current_application_action_idx ON tasks(application_id) WHERE action_kind='application_next_action' AND status='open'");
+    db.run('CREATE INDEX tasks_profile_status_due_idx ON tasks(profile_id,status,due_at)');
+    db.run('CREATE INDEX tasks_application_action_status_idx ON tasks(application_id,action_kind,status)');
+    db.run('COMMIT');
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw error;
+  } finally {
+    db.run('PRAGMA foreign_keys=ON');
+  }
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W06 task migration left foreign-key violations');
+}
 
 const outreachOutcomesSchema = `CREATE TABLE IF NOT EXISTS outreach_outcomes (
   id TEXT PRIMARY KEY,
@@ -437,6 +511,9 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)",
     "ALTER TABLE outreach_threads ADD COLUMN contact_point_id TEXT",
+    "ALTER TABLE status_changes ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown_legacy'",
+    "ALTER TABLE status_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",
+    "ALTER TABLE status_changes ADD COLUMN source_event_id TEXT",
     "CREATE TABLE IF NOT EXISTS outreach_outcomes (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, profile_id TEXT NOT NULL, job_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, role_class TEXT NOT NULL, contact_tier TEXT NOT NULL DEFAULT '', contact_path TEXT NOT NULL DEFAULT '', channel TEXT NOT NULL, outcome_type TEXT NOT NULL CHECK(outcome_type IN ('reply_positive','reply_neutral','reply_negative','meeting_booked','no_response','bounced','declined')), occurred_at TEXT NOT NULL, window_end_at TEXT, recorded_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL, source TEXT NOT NULL, reference_id TEXT NOT NULL DEFAULT '', supersedes_outcome_id TEXT, correction_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(thread_id) REFERENCES outreach_threads(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_outcome_id) REFERENCES outreach_outcomes(id))",
     "CREATE UNIQUE INDEX IF NOT EXISTS outreach_outcomes_profile_reference_idx ON outreach_outcomes(profile_id, reference_id) WHERE reference_id != ''",
     "CREATE INDEX IF NOT EXISTS outreach_outcomes_profile_time_idx ON outreach_outcomes(profile_id, occurred_at, id)",
@@ -448,6 +525,7 @@ function migrate(db){
     }
   }
   migrateW02Constraints(db);
+  migrateW06Tasks(db);
   const backfillKey = 'migration_resume_import_backfill';
   const check = db.prepare('SELECT value FROM meta WHERE key=?', [backfillKey]);
   let alreadyBackfilled = false;
@@ -826,10 +904,16 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','12']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','13']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
+  const { backfillLifecycleActions } = await import('./lifecycle.js');
+  const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '12') save(store);
+  if (!existed || previousSchemaVersion !== '13' || affectedJobIds.length) save(store);
+  if (affectedJobIds.length) {
+    const { syncJob } = await import('./jobs.js');
+    for (const jobId of affectedJobIds) syncJob(store, jobId);
+  }
   return store;
 }
 

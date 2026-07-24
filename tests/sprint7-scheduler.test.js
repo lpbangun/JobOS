@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { openStore, run, save } from '../src/db.js';
+import { all, openStore, run, save } from '../src/db.js';
 import { matchesCron, nextRunAfter, isDue } from '../src/scheduler/cron.js';
 import { createAutomation, getAutomation, listAutomations } from '../src/scheduler/store.js';
 import { acquireSchedulerLock, dueAutomations, runAutomationByName, runDueAutomations } from '../src/scheduler/core.js';
@@ -79,10 +79,11 @@ test('scheduler run-once executes due automation, records run row, JSONL, and pr
   assert.equal(jsonl.at(-1).automationName, 'brief_now');
 });
 
-test('manual failing automation records failures, auto-disables after three, and creates review task', async () => {
+test('manual failing automation records global failure after three and auto-disables', async () => {
   const root = makeRoot();
+  const profile = JSON.parse(cli(root, ['profile', 'create', 'Failure Owner', '--json']));
   const s = await openStore({ workspace: root });
-  createAutomation(s, { name: 'bad_action', actionId: 'missing_action', schedule: '* * * * *', enabled: true });
+  createAutomation(s, { name: 'bad_action', actionId: 'missing_action', schedule: '* * * * *', profileId: profile.id, enabled: true });
   for (let i = 0; i < 3; i++) {
     const runRecord = await runAutomationByName(s, 'bad_action', { nowDate: new Date(`2026-07-04T10:0${i}:00.000Z`) });
     assert.equal(runRecord.status, 'failed');
@@ -90,8 +91,10 @@ test('manual failing automation records failures, auto-disables after three, and
   const automation = getAutomation(s, 'bad_action');
   assert.equal(automation.enabled, false);
   assert.equal(automation.consecutiveFailures, 3);
-  const tasks = JSON.parse(cli(root, ['tasks', 'due', '--json']));
+  const tasks = JSON.parse(cli(root, ['tasks', 'due', '--global', '--json']));
   assert.ok(tasks.some(t => t.title.includes('Review disabled automation: bad_action')));
+  assert.equal(tasks.find(t => t.title.includes('bad_action')).profileId, null);
+  assert.deepEqual(JSON.parse(cli(root, ['tasks', 'due', '--profile', profile.id, '--json'])), []);
 });
 
 test('scheduler lock guard prevents concurrent run-once writers', async () => {
@@ -110,15 +113,79 @@ test('followup watch creates review-gated draft artifacts without sending', asyn
   const profile = JSON.parse(cli(root, ['profile', 'create', 'PM EdTech', '--json']));
   const job = JSON.parse(cli(root, ['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
   const s = await openStore({ workspace: root });
-  run(s, 'INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ['task_followup_test', job.id, null, 'Follow up with recruiter', 'Ask whether there is a timeline update.', 'followup', '2026-07-04T09:00:00.000Z', 'normal', 'open', 'test', '2026-07-04T08:00:00.000Z', '2026-07-04T08:00:00.000Z']);
+  run(s, 'INSERT INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', ['task_followup_test', job.id, null, 'Follow up with recruiter', 'Ask whether there is a timeline update.', 'followup', '2026-07-04T09:00:00.000Z', 'normal', 'open', 'test', '2026-07-04T08:00:00.000Z', '2026-07-04T08:00:00.000Z', profile.id]);
+  run(s, 'INSERT INTO tasks (id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)', ['global_followup', 'Follow up globally', 'Must stay hidden', 'followup', '2026-07-04T09:00:00.000Z', 'normal', 'open', 'test', '2026-07-04T08:00:00.000Z', '2026-07-04T08:00:00.000Z', null]);
   save(s);
   createAutomation(s, { name: 'followup_now', actionId: 'followup_watch', schedule: '* * * * *', profileId: profile.id, enabled: true });
   const runRecord = await runAutomationByName(s, 'followup_now', { nowDate: new Date('2026-07-04T09:01:00.000Z') });
   assert.equal(runRecord.status, 'succeeded');
+  assert.equal(runRecord.counts.dueTasks, 1);
   assert.equal(runRecord.counts.drafted, 1);
   const artifacts = JSON.parse(cli(root, ['runs', 'list', '--json']));
   assert.equal(artifacts[0].outputs.followups[0].approvalStatus, 'draft_needs_human_review');
   const draft = readFileSync(path.join(root, 'jobos-workspace', artifacts[0].outputs.followups[0].path), 'utf8');
   assert.match(draft, /Draft only/);
   assert.doesNotMatch(draft, /sent email/i);
+});
+
+test('stale application scheduler reconciles one profile current action including offer', async () => {
+  const root = makeRoot();
+  const profile = JSON.parse(cli(root, ['profile', 'create', 'Stale A', '--json']));
+  const other = JSON.parse(cli(root, ['profile', 'create', 'Stale B', '--json']));
+  const sample = path.join(process.cwd(), 'samples/job-description.md');
+  const job = JSON.parse(cli(root, ['jobs', 'import-text', '--profile', profile.id, '--file', sample, '--json']));
+  const otherJob = JSON.parse(cli(root, ['jobs', 'import-text', '--profile', other.id, '--file', sample, '--json']));
+  JSON.parse(cli(root, ['applications', 'create', '--job', job.id, '--status', 'offer', '--json']));
+  JSON.parse(cli(root, ['applications', 'create', '--job', otherJob.id, '--status', 'applied', '--json']));
+
+  const s = await openStore({ workspace: root });
+  createAutomation(s, {
+    name: 'stale_a',
+    actionId: 'stale_application_check',
+    schedule: '* * * * *',
+    profileId: profile.id,
+    enabled: true,
+    config: { staleDays: 14 }
+  });
+  const runRecord = await runAutomationByName(s, 'stale_a', { nowDate: new Date('2026-09-30T09:00:00.000Z') });
+  assert.equal(runRecord.status, 'succeeded');
+  assert.equal(runRecord.counts.checked, 1);
+  assert.equal(runRecord.counts.reviewTasksCreated, 0);
+  assert.equal(runRecord.counts.reconciled, 1);
+  assert.equal(runRecord.outputs.staleApplications.length, 1);
+  assert.equal(runRecord.outputs.staleApplications[0].applicationId.startsWith('app_'), true);
+
+  const owned = all(s, 'SELECT * FROM tasks WHERE profile_id=? AND status="open"', [profile.id]);
+  assert.equal(owned.length, 1);
+  assert.equal(owned[0].action_kind, 'application_next_action');
+  assert.equal(owned[0].action_code, 'review-offer');
+  assert.equal(all(s, "SELECT id FROM tasks WHERE title LIKE 'Review stale application:%'").length, 0);
+});
+
+test('morning priority brief includes only the selected profile task scope', async () => {
+  const root = makeRoot();
+  const profile = JSON.parse(cli(root, ['profile', 'create', 'Brief A', '--json']));
+  const other = JSON.parse(cli(root, ['profile', 'create', 'Brief B', '--json']));
+  const s = await openStore({ workspace: root });
+  const values = [
+    ['brief-owned', 'Owned brief task', profile.id],
+    ['brief-other', 'Other profile brief task', other.id],
+    ['brief-global', 'Global brief task', null],
+  ];
+  for (const [taskId, title, profileId] of values) {
+    run(s, `INSERT INTO tasks
+      (id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`, [
+      taskId, title, '', 'review', '2026-07-04T08:00:00.000Z', 'normal', 'open', 'test',
+      '2026-07-04T07:00:00.000Z', '2026-07-04T07:00:00.000Z', profileId
+    ]);
+  }
+  save(s);
+  createAutomation(s, { name: 'brief_a', actionId: 'morning_priority_brief', schedule: '* * * * *', profileId: profile.id, enabled: true });
+  const runRecord = await runAutomationByName(s, 'brief_a', { nowDate: new Date('2026-07-04T09:00:00.000Z') });
+  assert.equal(runRecord.counts.briefs, 1);
+  assert.equal(runRecord.outputs.briefs[0].tasks, 1);
+  const brief = readFileSync(path.join(root, 'jobos-workspace', runRecord.outputs.briefs[0].path), 'utf8');
+  assert.match(brief, /Owned brief task/);
+  assert.doesNotMatch(brief, /Other profile brief task|Global brief task/);
 });

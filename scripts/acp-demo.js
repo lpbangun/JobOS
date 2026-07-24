@@ -39,7 +39,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
   if (!hermes?.available) throw Error(`Hermes ACP unavailable: ${hermes?.readiness || 'missing'}`);
 
   const before = {
-    context: selectedJobContext(store, job.id),
+    context: selectedJobContext(store, job.id, selectedProfile),
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [job.id])?.count || 0),
     appliedApplications: Number(one(store, "SELECT COUNT(*) AS count FROM applications WHERE job_id=? AND status='applied'", [job.id])?.count || 0)
   };
@@ -74,7 +74,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
     append(records, 'turn_complete', { turn: 1, sessionId: client.sessionId, result: firstTurn });
 
     reload(store);
-    const between = selectedJobContext(store, job.id);
+    const between = selectedJobContext(store, job.id, selectedProfile);
     append(records, 'host_refresh', { context: between });
     secondTurn = await client.prompt(
       `Follow up in the same session: call get_job_context for ${job.id} and confirm whether the score is persisted in JobOS. Answer in one sentence and cite the job ID.`,
@@ -153,7 +153,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
 
   reload(store);
   const after = {
-    context: selectedJobContext(store, job.id),
+    context: selectedJobContext(store, job.id, selectedProfile),
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [job.id])?.count || 0),
     appliedApplications: Number(one(store, "SELECT COUNT(*) AS count FROM applications WHERE job_id=? AND status='applied'", [job.id])?.count || 0)
   };

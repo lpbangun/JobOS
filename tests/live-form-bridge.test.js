@@ -1412,6 +1412,15 @@ test('W02 confirmed configured submission advances a pre-apply application statu
     assert.equal(result.submissionPerformed, true);
     const afterStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
     assert.equal(afterStatus, 'applied');
+    const action = one(f.store, `SELECT * FROM tasks WHERE application_id=?
+      AND action_kind='application_next_action' AND status='open'`, [f.packet.applicationId]);
+    assert.equal(action.action_code, 'employer-follow-up');
+    assert.equal(action.source_event_type, 'configured_submission_confirmed');
+    assert.equal(action.source_event_id, result.receipt.receiptId);
+    const statusEvent = one(f.store, "SELECT * FROM status_changes WHERE application_id=? AND to_status='applied' ORDER BY created_at DESC,id DESC LIMIT 1", [f.packet.applicationId]);
+    assert.equal(statusEvent.actor, 'configured_adapter');
+    assert.equal(statusEvent.source, 'cli');
+    assert.equal(statusEvent.source_event_id, result.receipt.receiptId);
   } finally {
     if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
     else process.env.JOBOS_FORM_SUBMIT_ENABLED = previousSubmit;
@@ -1459,6 +1468,15 @@ test('W02 confirmed configured submission never regresses recruiter-screen inter
       const afterStatus = one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status;
       assert.equal(afterStatus, postApplyStatus, `${postApplyStatus} must not regress to applied`);
       assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM status_changes WHERE to_status=? AND application_id=?', ['applied', f.packet.applicationId]).count, 0, `${postApplyStatus} must not record an applied status change`);
+      const action = one(f.store, `SELECT * FROM tasks WHERE application_id=?
+        AND action_kind='application_next_action' AND status='open'`, [f.packet.applicationId]);
+      const expectedAction = {
+        'recruiter-screen': 'prepare-recruiter-screen',
+        interview: 'prepare-interview',
+        offer: 'review-offer',
+      }[postApplyStatus];
+      assert.equal(action.action_code, expectedAction);
+      assert.equal(action.stage, postApplyStatus);
     }
   } finally {
     if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
