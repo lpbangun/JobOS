@@ -55,7 +55,7 @@ test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agen
   const screen = renderTui(model, state, { width: 150, height: 46, color: false });
 
   assert.match(screen, /JOBOS · PM EdTech/);
-  assert.match(screen, /DUE/);
+  assert.match(screen, /ACTION/);
   assert.match(screen, /INTERVIEW/);
   assert.match(screen, /NEW/);
   assert.match(screen, /FAILURE/);

@@ -316,7 +316,7 @@ try {
   if (!interviewPacket.includes('STAR story') || !interviewPacket.includes('Questions to ask the interviewer')) throw new Error('Interview prep packet missing useful sections');
   const funnel = JSON.parse(run(['analytics', 'funnel', '--profile', profile.id, '--since', '30', '--json']));
   if (funnel.totals.interviews < 1 || !funnel.byRoleFamily.length) throw new Error('Analytics funnel did not report interview conversion by role family');
-  JSON.parse(run(['tasks', 'due', '--json']));
+  JSON.parse(run(['tasks', 'due', '--profile', profile.id, '--json']));
   const review = run(['review', 'weekly', '--profile', profile.id, '--output', 'markdown'], true);
   if (!review.includes('Weekly JobOS review') || !review.includes('Funnel analytics')) throw new Error('Weekly review missing funnel insights');
   const now = new Date();

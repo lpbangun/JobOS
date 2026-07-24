@@ -109,7 +109,7 @@ test('loop and watch modes emit bounded JSONL events for agents', () => {
   assert.equal(loopLines[0].targetType, 'scheduler');
   assert.equal(loopLines[0].result.ok, true);
 
-  const watch = cli(root, ['tasks', 'due', '--watch', '--max-iterations', '1', '--json']);
+  const watch = cli(root, ['tasks', 'due', '--global', '--watch', '--max-iterations', '1', '--json']);
   assert.equal(watch.status, 0, watch.stderr);
   const watchLines = watch.stdout.trim().split('\n').map(JSON.parse);
   assert.equal(watchLines.length, 1);

@@ -51,8 +51,8 @@ test('CLI initializes, imports, scores, tailors, and tracks an application', () 
   assert.doesNotMatch(resumeDraft, /sent email/i);
   const app = JSON.parse(run(['applications', 'create', '--job', job.id, '--status', 'materials-ready', '--json']));
   assert.equal(app.status, 'materials-ready');
-  const tasks = JSON.parse(run(['tasks', 'due', '--json']));
-  assert.ok(tasks.some(t => t.title.includes('Review next action')));
+  const tasks = JSON.parse(run(['tasks', 'list', '--profile', profile.id, '--json']));
+  assert.ok(tasks.some(task => task.actionCode === 'complete-submission' && task.profileId === profile.id));
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml')));
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.coverage.yaml')));
   assert.ok(existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'resume-tailored.validation.yaml')));
