@@ -118,7 +118,7 @@ Important boundaries:
 
 ## 6. Bundled roadmap
 
-Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–W06 are integrated and runtime-verified; W07 is the active next bundle.
+Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–W07 are integrated and runtime-verified; W08 is the active next bundle.
 
 | ID | Priority | Bundle | Why this belongs together | Depends on | Current status |
 |---|---|---|---|---|---|
@@ -128,7 +128,7 @@ Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–
 | W04 | P0 | Fit consistency, legitimacy boundary, and calibration | One scoring contract must own dimension math, uncertainty, dealbreakers, evidence, golden ordering, and outcome calibration | W03 liveness/legitimacy contract; W06 event aggregates for calibration | **DONE** |
 | W05 | P1 | Contact confidence, outreach relevance, and outcomes | Contact confidence determines whether outreach is appropriate; outreach outcomes are the direct feedback signal for that path | Existing research graph | **DONE** |
 | W06 | P1 | Lifecycle next actions, follow-up, velocity, and analytics | These all fold the same append-only status/task/outcome events into operational guidance | Stable packet/attestation events; interface with W04/W07/W08 | **DONE** |
-| W07 | P1 | Verified interview story bank and debrief loop | Story creation, matching, audience packs, proof gaps, and post-interview learning share the same reusable records | W01 proof contract; W06 event interface; observations feed W08 | **IN PROGRESS** |
+| W07 | P1 | Verified interview story bank and debrief loop | Story creation, matching, audience packs, proof gaps, and post-interview learning share the same reusable records | W01 proof contract; W06 event interface; observations feed W08 | **DONE** |
 | W08 | P1 | Career Memory, preference calibration, and voice/positioning | Job decisions, artifact feedback, revision diffs, and outcomes need one attributed event/proposal/retrieval contract rather than separate learning systems | Stable profile/artifact/job/outcome identifiers from W01, W03, W05, W06, and W07 | PLANNED |
 | W09 | P2 | Guided onboarding and setup recovery | Guided profile, source, proof, memory calibration, and browser setup should expose completed contracts rather than invent parallel setup state | W01, W02, W03, W08 stable | PLANNED |
 | W10 | P2 | Quality, security, release, protocol, and documentation hygiene | Cross-cutting checks belong after behavior stabilizes and should not dictate feature architecture | All behavioral bundles reaching integration | PLANNED |
@@ -199,6 +199,8 @@ Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–
 **Includes:** proof-linked story creation/edit/retire/verify lifecycle, audience-specific packs, sourced-versus-inferred question labels, deterministic question-to-story and gap matching, and a lightweight application/stage debrief that updates proof gaps and next actions.
 
 **Acceptance bar:** The same verified story can be reused and adapted across roles without losing provenance; unsupported story content cannot become verified; debrief evidence can affect later preparation through W06 interfaces.
+
+**Integration note:** W07 merged into `cleanup/base` as `e75b168` from verified feature head `22b5192`. Independent lane and holistic reviews passed after closing the debrief-observed-question feedback loop. The final branch gate passed 445/445 tests, standard smoke, and both manual/configured live-form smoke paths; post-integration verification is recorded on the execution board.
 
 ### W08 — Career Memory, preference calibration, and voice/positioning — P1
 
