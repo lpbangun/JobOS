@@ -118,24 +118,24 @@ Important boundaries:
 
 ## 6. Bundled roadmap
 
-Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. `W01` is currently in progress because a tailored-resume worktree already exists; this plan does not claim its acceptance bars are complete.
+Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. W01–W06 are integrated and runtime-verified; W07 is the active next bundle.
 
 | ID | Priority | Bundle | Why this belongs together | Depends on | Current status |
 |---|---|---|---|---|---|
-| W01 | P0 | Candidate truth and complete document pipeline | Candidate schema, proof lifecycle, tailoring, completeness, coverage, and rendering share one source-of-truth contract | Existing persistence/artifact invariants | **IN PROGRESS** |
-| W02 | P0 | Live form, answer readiness, and packet bridge | Readiness is only truthful when extraction, classification, answer binding, fill verification, packet identity, and receipt form one vertical slice | W01 artifact contract | PLANNED |
-| W03 | P0 | Discovery integrity, liveness, and normalized intake | Retry/partial semantics, field preservation, filters, and liveness all govern whether a role should enter expensive downstream work | None | PLANNED |
-| W04 | P0 | Fit consistency, legitimacy boundary, and calibration | One scoring contract must own dimension math, uncertainty, dealbreakers, evidence, golden ordering, and outcome calibration | W03 liveness/legitimacy contract; W06 event aggregates for calibration | PLANNED |
-| W05 | P1 | Contact confidence, outreach relevance, and outcomes | Contact confidence determines whether outreach is appropriate; outreach outcomes are the direct feedback signal for that path | Existing research graph | PLANNED |
-| W06 | P1 | Lifecycle next actions, follow-up, velocity, and analytics | These all fold the same append-only status/task/outcome events into operational guidance | Stable packet/attestation events; interface with W04/W07/W08 | PLANNED |
-| W07 | P1 | Verified interview story bank and debrief loop | Story creation, matching, audience packs, proof gaps, and post-interview learning share the same reusable records | W01 proof contract; W06 event interface; observations feed W08 | PLANNED |
+| W01 | P0 | Candidate truth and complete document pipeline | Candidate schema, proof lifecycle, tailoring, completeness, coverage, and rendering share one source-of-truth contract | Existing persistence/artifact invariants | **DONE** |
+| W02 | P0 | Live form, answer readiness, and packet bridge | Readiness is only truthful when extraction, classification, answer binding, fill verification, packet identity, and receipt form one vertical slice | W01 artifact contract | **DONE** |
+| W03 | P0 | Discovery integrity, liveness, and normalized intake | Retry/partial semantics, field preservation, filters, and liveness all govern whether a role should enter expensive downstream work | None | **DONE** |
+| W04 | P0 | Fit consistency, legitimacy boundary, and calibration | One scoring contract must own dimension math, uncertainty, dealbreakers, evidence, golden ordering, and outcome calibration | W03 liveness/legitimacy contract; W06 event aggregates for calibration | **DONE** |
+| W05 | P1 | Contact confidence, outreach relevance, and outcomes | Contact confidence determines whether outreach is appropriate; outreach outcomes are the direct feedback signal for that path | Existing research graph | **DONE** |
+| W06 | P1 | Lifecycle next actions, follow-up, velocity, and analytics | These all fold the same append-only status/task/outcome events into operational guidance | Stable packet/attestation events; interface with W04/W07/W08 | **DONE** |
+| W07 | P1 | Verified interview story bank and debrief loop | Story creation, matching, audience packs, proof gaps, and post-interview learning share the same reusable records | W01 proof contract; W06 event interface; observations feed W08 | **IN PROGRESS** |
 | W08 | P1 | Career Memory, preference calibration, and voice/positioning | Job decisions, artifact feedback, revision diffs, and outcomes need one attributed event/proposal/retrieval contract rather than separate learning systems | Stable profile/artifact/job/outcome identifiers from W01, W03, W05, W06, and W07 | PLANNED |
 | W09 | P2 | Guided onboarding and setup recovery | Guided profile, source, proof, memory calibration, and browser setup should expose completed contracts rather than invent parallel setup state | W01, W02, W03, W08 stable | PLANNED |
 | W10 | P2 | Quality, security, release, protocol, and documentation hygiene | Cross-cutting checks belong after behavior stabilizes and should not dictate feature architecture | All behavioral bundles reaching integration | PLANNED |
 
 ## 7. Bundle outcome contracts
 
-### W01 — Candidate truth and complete document pipeline — P0 — IN PROGRESS
+### W01 — Candidate truth and complete document pipeline — P0 — DONE
 
 **Outcome:** One approved artifact is a normal, complete resume or usable cover letter, and every changed factual claim remains traceable to canonical candidate evidence.
 
@@ -150,7 +150,7 @@ Status values are maintained in `docs/JOBOS_WORKTREE_EXECUTION_BOARD.md`. `W01` 
 
 **Acceptance bar:** A one-proof worksheet cannot pass readiness. A complete approved document can be rendered without retyping, retains untailored factual sections, and exposes proof coverage separately from the human-facing document.
 
-**Coordination note:** The existing tailored-resume worktree owns the active tailoring change. No second worktree should edit the same document contract until its branch scope and schema are known. Remaining W01 sub-scope must stay `PLANNED` rather than being silently treated as complete.
+**Integration note:** The proof-grounded tailored-resume work merged through `ceffad3`; canonical resume round-trip, proof lifecycle, semantic completeness, deterministic rendering/preflight, exact artifact revision, and packet compatibility are covered by the integrated suite.
 
 ### W02 — Live form, answer readiness, and packet bridge — P0
 

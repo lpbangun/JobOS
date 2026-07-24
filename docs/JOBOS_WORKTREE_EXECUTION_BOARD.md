@@ -1,6 +1,6 @@
 # JobOS Worktree Execution Board
 
-**Updated:** 2026-07-22  
+**Updated:** 2026-07-24
 **Strategy:** `docs/JOBOS_CAPABILITY_PARITY_MASTER_PLAN.md`  
 **Inputs:** `CAREER_OPS_IMPLEMENTATION_AUDIT.md`, `docs/open_source_benchmark_checkup.md`, `Gap_Analysis_and_Benchmark.md`, `ideal-agent-native-job-application-app.md`, `Feature_Adaptation_Plan.md`
 
@@ -23,13 +23,13 @@ A branch-local passing test does not mean `DONE`. A partial slice does not compl
 
 | ID | Bundle | Priority | Status | Owner / worktree | Dependency gate | Next integration decision |
 |---|---|---:|---|---|---|---|
-| W01 | Candidate truth and complete document pipeline | P0 | **IN_PROGRESS** | Existing user-managed tailored-resume worktree | Preserve artifact/proof/packet contracts | Confirm whether active branch covers only tailoring or the full W01 schema, validation, and renderer scope |
-| W02 | Live form, answer readiness, and packet bridge | P0 | **DONE** | `fix/live-form-packet-bridge` integrated as `06fdb5d` | Reviewed W01 artifact interface and W03 identity/liveness contracts verified | Integrated full 310/310 suite and both smoke paths passed; packet-bound configured submission remains user-configured and explicit |
-| W03 | Discovery integrity, liveness, and normalized intake | P0 | **DONE** | `fix/discovery-integrity` merged as `5af9766` | None; preserves W01 schema/workflow contracts | Integrated focused 34/34, smoke, and full 274/274 pass; W04 may consume `jobos.posting-liveness.v1` without treating it as fit |
-| W04 | Fit consistency, legitimacy boundary, and calibration | P0 | **INTEGRATING** | `fix/fit-consistency` at `4028a20` | W03 legitimacy and W02 packet/readiness contracts verified; W06 calibration remains deferred | Complete combined W04/W05 integration verification, then mark `DONE` |
-| W05 | Contact confidence, outreach relevance, and outcomes | P1 | **DONE** | `fix/contact-outreach` integrated as `eac4e3e` | Existing research/outreach contracts plus W02 schema composition | Integrated 327/327 suite and both smoke paths passed; outreach remains review-only with no automatic sending |
-| W06 | Lifecycle next actions, follow-up, velocity, and analytics | P1 | **IN_PROGRESS** | `fix/lifecycle-next-actions` | Consumes W02 receipt events plus W05 `jobos.outreach-outcome.v1`; publishes `jobos.lifecycle-analytics.v1` to W04, `jobos.lifecycle-event-input.v1` to W07, and `jobos.lifecycle-observation-list.v1` to W08 | Execute approved Phases 1–3: schema-13 migration/isolation, one-current-action policy, and SQLite-only writer reconciliation |
-| W07 | Verified interview story bank and debrief loop | P1 | PLANNED | Unassigned | W01 proof lifecycle; W06 debrief event interface | Decide story/debrief records and publish observations for W08 after upstream identifiers are stable |
+| W01 | Candidate truth and complete document pipeline | P0 | **DONE** | `fix/tailored-resume` integrated through `ceffad3` | Artifact/proof/packet contracts preserved | Canonical resume, proof lifecycle, semantic completeness, deterministic renderer/preflight, exact revisions, and packet compatibility pass in the integrated suite |
+| W02 | Live form, answer readiness, and packet bridge | P0 | **DONE** | `fix/live-form-packet-bridge` integrated as `06fdb5d`, hardened through `bf06878` | W01 artifact and W03 identity/liveness contracts verified | Packet-bound manual/configured paths and iframe confirmation pass the full suite and both smoke paths |
+| W03 | Discovery integrity, liveness, and normalized intake | P0 | **DONE** | `fix/discovery-integrity` merged as `5af9766` | None; preserves W01 schema/workflow contracts | Retry/isolation, normalized fields, liveness, gates, and compatibility pass in the integrated suite |
+| W04 | Fit consistency, legitimacy boundary, and calibration | P0 | **DONE** | `fix/fit-consistency` corrected at `4028a20`, integrated through `67681ef` | W03 legitimacy and W06 aggregate contracts consumed separately | Evidence/math/unknown/dealbreaker/golden/calibration contracts pass in the integrated suite |
+| W05 | Contact confidence, outreach relevance, and outcomes | P1 | **DONE** | `fix/contact-outreach` integrated as `eac4e3e`, consolidated through `67681ef` | Existing research/outreach contracts plus W02 schema composition | Contact provenance, role-aware review-only outreach, append-only outcomes, and weekly review pass |
+| W06 | Lifecycle next actions, follow-up, velocity, and analytics | P1 | **DONE** | Integrated into `cleanup/base` as `16ee93c` | Consumes W02/W05 events; publishes stable W04/W07/W08 handoffs | Fresh reviews passed; post-integration full suite 404/404 and both smoke paths passed |
+| W07 | Verified interview story bank and debrief loop | P1 | **IN_PROGRESS** | `fix/interview-story-debrief` | W01 proof lifecycle and W06 `jobos.lifecycle-event-input.v1` are stable | Define persistent story/debrief contracts, implement strict TDD slices, and publish attributed W08 observations |
 | W08 | Career Memory, preference calibration, and voice/positioning | P1 | PLANNED | Unassigned | Stable profile/artifact/job/outcome identifiers from W01/W03/W05/W06/W07 | Freeze canonical-versus-observational-versus-derived memory boundaries, event taxonomy, proposal lifecycle, and bounded retrieval contract |
 | W09 | Guided onboarding and setup recovery | P2 | PLANNED | Unassigned | W01/W02/W03/W08 user path stable | Guide existing domain flows and optional calibration; do not create alternate setup or preference state |
 | W10 | Quality, security, release, protocol, and docs | P2 | PLANNED | Unassigned | Behavioral bundles integrated | Gate final journey and Career Memory contracts; protocol migration remains conditional |
@@ -315,8 +315,12 @@ During integration:
 
 | Date | Bundle | Integrated change | Runtime proof | Contract tests | Known remaining scope |
 |---|---|---|---|---|---|
-| 2026-07-22 | W03 | Ready-for-merge worktree: discovery retries/isolation, normalized intake, honest run states, persisted liveness, and score/pursuit gates; not yet integrated | `npm run smoke` passed in a clean temporary workspace with active/expired/uncertain fixture-backed discovery, expired score/pursuit rejection, scheduler output, and no external effects | `npm test` 265/265; W03 combined suite 25/25; compatibility suites 62/62; critic iteration 2 `CONVERGED` | Integration-owner merge and merged-runtime verification; W04 consumes the separate liveness handoff |
-| — | — | No parity bundle is yet recorded as integrated | — | — | W01 tailored-resume work is reported in progress |
+| 2026-07-22 | W01 | Proof-grounded complete resume pipeline integrated through `ceffad3` | Canonical resume round-trip, complete deterministic tailoring, renderer/preflight, and exact revision behavior exercised | Included in final integrated 404/404 suite | None in W01 acceptance scope |
+| 2026-07-23 | W02 | Live-form/readiness/packet bridge integrated and hardened through `bf06878` | Standard and real-Chromium live-form smoke paths passed | Included in final integrated 404/404 suite | None in W02 acceptance scope |
+| 2026-07-22 | W03 | Discovery retries/isolation, normalized intake, honest run states, persisted liveness, and score/pursuit gates integrated as `5af9766` | Clean-workspace smoke covers active/expired/uncertain discovery and hard stops | Included in final integrated 404/404 suite | None in W03 acceptance scope |
+| 2026-07-23 | W04 | Fit evidence/math, legitimacy boundary, golden ordering, and calibration integrated through `67681ef` | Focused acceptance and merged smoke paths passed | Included in final integrated 404/404 suite | None in W04 acceptance scope |
+| 2026-07-23 | W05 | Contact confidence, role-aware outreach, and append-only outcomes integrated through `67681ef` | Focused 52/52 and merged smoke paths passed | Included in final integrated 404/404 suite | None in W05 acceptance scope |
+| 2026-07-24 | W06 | Lifecycle actions, scoped tasks, rescheduling, analytics, recommendations, and handoffs integrated as `16ee93c` | Parent and post-integration standard/live-form smokes passed | Fresh reviews PASS; post-integration `npm test` 404/404 | None in W06 acceptance scope; W07/W08 consume published interfaces |
 
 ## 9. Decision ledger
 
