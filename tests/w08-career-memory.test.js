@@ -304,6 +304,11 @@ test('W08-CONTRACT-01 freezes schemas, enums, canonical bytes, IDs, and input no
   assert.equal(contract.memoryTransitionId({ proposalId: 'proposal-1', sequence: 2, toStatus: 'accepted', referenceId: 'ref-2' }), 'memory_transition_ce54cda119cb');
   assert.equal(contract.memoryProjectionId({ profileId: 'alpha', projectionType: 'career_brief', revision: 3, sourceStateHash: 'state-hash' }), 'memory_projection_088cc06b892e');
 
+  const resumeTone = { domain: 'writing', scope: 'resume', ruleType: 'tone', value: { value: 'concise' } };
+  const coverLetterTone = { ...resumeTone, scope: 'cover_letter' };
+  assert.equal(contract.memoryConflictKey(resumeTone), contract.memoryConflictKey(coverLetterTone));
+  assert.notEqual(contract.memoryRuleKey(resumeTone), contract.memoryRuleKey(coverLetterTone));
+
   const jobFeedback = contract.normalizeJobFeedbackInput({
     schema: 'jobos.job-feedback-input.v1',
     decision: 'save',

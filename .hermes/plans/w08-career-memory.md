@@ -154,7 +154,7 @@ Allowed normalized `value` objects:
 
 The first shape is used only by search rules. Tone, length, opening/closing, avoid, positioning, and exemplar shapes are accepted only by their matching rule type. `length` requires integers with `0 <= minWords <= maxWords <= 1200`. `terms` has 1–20 non-empty values. Positioning proof IDs must be active, verified, same-profile proof points at acceptance and retrieval. An exemplar must be an approved same-profile exact artifact revision; line bounds and excerpt hash are recomputed at acceptance and retrieval.
 
-`writing_global` is invalid for `approved_exemplar`. An artifact-type rule never becomes global by resolution. A global rule is a separate proposal and acceptance. Global promotion requires two active accepted artifact-specific rules with the same conflict key across at least two artifact scopes; it cannot be inferred from one artifact type.
+`writing_global` is invalid for `approved_exemplar`. An artifact-type rule never becomes global by resolution. A global rule is a separate proposal and acceptance. Global promotion requires two active accepted artifact-specific rules with the same scope-neutral conflict key across at least two artifact scopes; it cannot be inferred from one artifact type. Those source rules remain independently active in their artifact scopes; creating or accepting the global proposal does not supersede them.
 
 `jobos.memory-proposal-input.v1` is the only proposal-create wire shape:
 
@@ -191,7 +191,7 @@ transition:         id('memory_transition', proposalId|sequence|toStatus|referen
 projection:         id('memory_projection', profileId|projectionType|revision|sourceStateHash)
 ```
 
-`rule_key` hashes domain, scope, rule type, and the complete normalized value including polarity. `conflict_key` hashes domain, scope, rule type, and the normalized target with polarity removed. IDs are identifiers, not integrity hashes; full SHA-256 columns provide integrity.
+`rule_key` hashes domain, scope, rule type, and the complete normalized value including polarity. `conflict_key` is deliberately scope-neutral: it hashes domain, rule type, and the normalized target with polarity removed. This permits equality checks for explicit global promotion across artifact scopes. Every ordinary conflict, contradiction, active-rule replacement, and supersession lookup is nevertheless scope-local and must match the tuple `(profile_id, scope, conflict_key)`; a matching conflict key in another scope never blocks or supersedes that scope. IDs are identifiers, not integrity hashes; full SHA-256 columns provide integrity.
 
 All timestamps are normalized RFC3339 UTC. Stable ordering always adds ID as the final tie-breaker.
 
@@ -524,7 +524,7 @@ resolveActiveMemoryRules(s, { profileId, domain = null, scope = null, asOf = new
 3. Private notes, free-form debrief notes, audit prose, inferred protected/sensitive fields, agent-attested job decisions, legacy unknown-actor events, and non-current corrections have weight 0 and cannot appear in evidence rows.
 4. Ordinary proposals need at least three current support observations across at least two distinct source roots (`sourceEntity.type:id`) and two distinct UTC calendar dates. Support weight must be at least 4.
 5. Confidence is `supportWeight / (supportWeight + conflictWeight)`, rounded half-up to integer milli-units and capped at 950. `low < 670`, `medium 670..849`, `high >= 850`. Insufficient evidence remains visible as low confidence but cannot be accepted.
-6. A contradictory current observation with the same `conflict_key` has conflict polarity. Any conflict makes `conflictState=present` and blocks acceptance; correction, undo, or staleness must resolve it. A note cannot override the gate.
+6. A contradictory current observation for the same proposal scope and `conflict_key` has conflict polarity. Any same-scope conflict makes `conflictState=present` and blocks acceptance; correction, undo, or staleness must resolve it. A matching scope-neutral key in another artifact scope is used only by the explicit global-promotion gate and is not a contradiction. A note cannot override the gate.
 7. Job feedback is fresh for 180 days. Artifact, outreach, lifecycle, and interview observations are fresh for 365 days. `evidence_fresh_until` is the earliest supporting evidence expiry. Stale evidence cannot create or reactivate guidance.
 8. `approved_exemplar` is the only single-source exception: one exact approved artifact plus an explicit direct-human proposal and later direct-human acceptance may activate it at that artifact type with confidence 500 and gate label `explicit_exemplar_exception`. It can never become `writing_global`, support another generalized rule by itself, or be generated automatically.
 9. A proposal built from another profile, a source whose ownership cannot be proven, or a source version/hash mismatch is rejected before any proposal row.
@@ -549,15 +549,15 @@ revoked -> accepted        only by undo of the latest revocation after all gates
 superseded -> accepted     only by atomic undo of the latest supersession
 ```
 
-- accept requires trusted CLI/TUI source, medium/high confidence or the typed exemplar exception, no conflict, current evidence hashes, freshness, same-profile ownership, and protected gate pass;
+- accept requires trusted CLI/TUI source, medium/high confidence or the typed exemplar exception, no conflict, current evidence hashes, freshness, same-profile ownership, and protected gate pass. A `writing_global` proposal additionally requires the explicit cross-scope global-promotion gate defined above;
 - reject requires a reason and has no behavioral effect;
 - revoke requires a reason and immediately removes the rule from active resolution;
-- accepting a proposal atomically appends `superseded` transitions to currently accepted proposals with the same `conflict_key`, then accepts the replacement; `replacement_proposal_id` records the relation;
+- accepting a proposal atomically appends `superseded` transitions only to currently accepted proposals matching `(profile_id, scope, conflict_key)`, then accepts the replacement; `replacement_proposal_id` records the relation. Cross-scope proposals with the same scope-neutral key remain active and may satisfy the separate global-promotion gate;
 - undo names an exact transition ID. Undoing supersession atomically revokes the replacement if it is still the current accepted rule and appends accepted for the prior proposal after revalidating all gates. Otherwise it fails as stale;
 - every operation requires a profile-scoped `referenceId`. Exact transition replay returns the original transition; same reference with different normalized content fails `memory_reference_conflict`;
 - no transition row is updated or deleted.
 
-Active resolution folds transitions by `sequence`, then includes only latest-status `accepted` proposals whose evidence is current, whose `evidence_fresh_until` and acceptance TTL have not elapsed, and whose referenced proofs/artifacts remain eligible. Acceptance TTL is 180 days for search rules and 365 days for writing rules. Resolution order is scope specificity (`resume|cover_letter|outreach|interview_prep` before `writing_global`), rule type enum order, latest accepted time descending, then proposal ID. Acceptance-time supersession should leave at most one active proposal per conflict key; resolution reports any invariant violation and excludes all conflicting candidates rather than guessing.
+Active resolution folds transitions by `sequence`, then includes only latest-status `accepted` proposals whose evidence is current, whose `evidence_fresh_until` and acceptance TTL have not elapsed, and whose referenced proofs/artifacts remain eligible. Acceptance TTL is 180 days for search rules and 365 days for writing rules. Resolution order is scope specificity (`resume|cover_letter|outreach|interview_prep` before `writing_global`), rule type enum order, latest accepted time descending, then proposal ID. Acceptance-time supersession should leave at most one active proposal per `(profile_id, scope, conflict_key)`; resolution reports any same-tuple invariant violation and excludes all conflicting candidates rather than guessing.
 
 ## Career brief and voice/positioning guide
 

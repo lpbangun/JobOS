@@ -588,7 +588,6 @@ export function memoryConflictKey({ domain, scope, ruleType, value }) {
     : normalizedValue;
   return canonicalHash({
     domain: enumValue(domain, MEMORY_DOMAINS, 'domain'),
-    scope: enumValue(scope, MEMORY_SCOPES, 'scope'),
     ruleType: enumValue(ruleType, MEMORY_RULE_TYPES, 'ruleType'),
     value: target,
   });
