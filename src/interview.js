@@ -1,9 +1,8 @@
 import path from 'node:path';
 import { all, guardedWrite, one, projectAudit, queuePostCommit, recordAudit, run } from './db.js';
-import { hash, id, now, parseJson, slug, tokenize } from './utils.js';
+import { hash, id, now, parseJson, tokenize } from './utils.js';
 import { createArtifact } from './artifacts.js';
-import { requirements } from './jobs.js';
-import { generateJson, llmConfig } from './llm.js';
+import { inventoryForJob } from './requirements.js';
 import { writeYaml } from './workspace.js';
 
 export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
@@ -1130,6 +1129,40 @@ function syncInterviewQuestionSources(s, profileId) {
   );
 }
 
+function interviewQuestionsForJobProjection(s, jobId) {
+  const job = one(s, 'SELECT id,profile_id FROM jobs WHERE id=?', [jobId]);
+  if (!job) {
+    throw new InterviewError('interview_job_unknown', `Unknown job: ${jobId}.`);
+  }
+  const rows = all(s, `SELECT * FROM interview_question_sources
+    WHERE profile_id=? AND job_id=?
+    ORDER BY application_id,interview_stage,audience,created_at,id`, [job.profile_id, job.id]);
+  const successors = questionSuccessors(rows);
+  const roots = questionRoots(rows);
+  const questions = rows
+    .filter(row => !successors.has(row.id))
+    .map(row => questionSourceProjection(row, successors, roots));
+  return {
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    jobId: job.id,
+    profileId: job.profile_id,
+    policy: {
+      canonicalStore: 'sqlite',
+      currentOnly: true,
+      stableKey: 'id',
+    },
+    questions,
+  };
+}
+
+function syncInterviewQuestionsForJob(s, jobId) {
+  writeYaml(
+    path.join(s.p.jobs, jobId, 'interviews', 'questions.yaml'),
+    interviewQuestionsForJobProjection(s, jobId),
+  );
+}
+
 function sameQuestionSource(row, input) {
   return row.profile_id === input.profileId
     && row.job_id === input.jobId
@@ -1291,6 +1324,7 @@ export function createInterviewQuestionSource(s, input = {}) {
         },
       );
       queuePostCommit(s, () => syncInterviewQuestionSources(s, normalized.profileId));
+      queuePostCommit(s, () => syncInterviewQuestionsForJob(s, normalized.jobId));
       queuePostCommit(s, () => projectAudit(s, event));
       return projectedQuestionSource(
         s,
@@ -1399,6 +1433,7 @@ export function createInterviewQuestionSource(s, input = {}) {
       },
     );
     queuePostCommit(s, () => syncInterviewQuestionSources(s, normalized.profileId));
+    queuePostCommit(s, () => syncInterviewQuestionsForJob(s, normalized.jobId));
     queuePostCommit(s, () => projectAudit(s, event));
     return projectedQuestionSource(
       s,
@@ -1650,161 +1685,605 @@ export function matchStoriesToQuestions(s, input = {}) {
   };
 }
 
+const INTERVIEW_QUESTION_TEMPLATES = Object.freeze({
+  recruiter: Object.freeze([
+    Object.freeze({
+      id: 'recruiter.motivation',
+      text: 'Why are you interested in this role and company now?',
+    }),
+    Object.freeze({
+      id: 'recruiter.scope',
+      text: 'Walk me through the scope and impact of your most relevant work.',
+    }),
+  ]),
+  hiring_manager: Object.freeze([
+    Object.freeze({
+      id: 'manager.ownership',
+      text: 'Tell me about a time you took ownership of a difficult delivery.',
+    }),
+    Object.freeze({
+      id: 'manager.tradeoff',
+      text: 'Tell me about a time you made a difficult product tradeoff.',
+    }),
+  ]),
+  peer_panel: Object.freeze([
+    Object.freeze({
+      id: 'panel.collaboration',
+      text: 'Tell me about a time you collaborated across functions to deliver a result.',
+    }),
+    Object.freeze({
+      id: 'panel.conflict',
+      text: 'Tell me about a time you resolved conflict with peers.',
+    }),
+  ]),
+  executive: Object.freeze([
+    Object.freeze({
+      id: 'executive.strategy',
+      text: 'Tell me about a time your work shaped strategy and business impact.',
+    }),
+    Object.freeze({
+      id: 'executive.influence',
+      text: 'Tell me about a time you influenced senior stakeholders without authority.',
+    }),
+  ]),
+  unknown: Object.freeze([
+    Object.freeze({
+      id: 'unknown.impact',
+      text: 'Tell me about a time you delivered meaningful impact.',
+    }),
+    Object.freeze({
+      id: 'unknown.learning',
+      text: 'Tell me about a time you learned and adapted after a setback.',
+    }),
+  ]),
+});
+
+function packOwnership(s, input) {
+  const applicationId = requireInterviewText(input.applicationId, 'applicationId');
+  const application = one(s, 'SELECT * FROM applications WHERE id=?', [applicationId]);
+  if (!application) {
+    throw new InterviewError(
+      'interview_application_unknown',
+      `Unknown application: ${applicationId}.`,
+    );
+  }
+  return resolveInterviewOwnership(s, {
+    profileId: input.profileId || application.profile_id,
+    jobId: input.jobId || application.job_id,
+    applicationId,
+  });
+}
+
+function sourcedPackQuestions(s, ownership, stage, audience) {
+  const listed = questionSourceListProjection(s, ownership.profile.id, {
+    jobId: ownership.job.id,
+    applicationId: ownership.application.id,
+    stage,
+    audience,
+  });
+  return listed.currentSources.map(source => ({
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    id: source.id,
+    origin: 'sourced',
+    text: source.questionText,
+    normalizedText: source.normalizedText,
+    stage,
+    audience,
+    source: {
+      questionSourceId: source.id,
+      rootSourceId: source.rootSourceId,
+      sourceKind: source.sourceKind,
+      sourceRef: source.sourceRef,
+      actor: source.actor,
+      source: source.source,
+      createdAt: source.createdAt,
+    },
+  }));
+}
+
+function inferredPackQuestions(job, stage, audience) {
+  const templates = INTERVIEW_QUESTION_TEMPLATES[audience].map(template => ({
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    id: template.id,
+    origin: 'inferred',
+    text: template.text,
+    normalizedText: normalizeQuestionText(template.text),
+    stage,
+    audience,
+    source: null,
+    templateId: template.id,
+  }));
+  const inventory = inventoryForJob(job);
+  const orderedRequirements = [...inventory.requirements].sort((left, right) => (
+    (left.sourceLine ?? Number.MAX_SAFE_INTEGER) - (right.sourceLine ?? Number.MAX_SAFE_INTEGER)
+    || left.id.localeCompare(right.id)
+  ));
+  return [
+    ...templates,
+    ...orderedRequirements.map(requirement => {
+      const text = `Tell me about a specific example that demonstrates: ${requirement.sourceText}`;
+      return {
+        schema: INTERVIEW_QUESTION_SCHEMA,
+        version: 1,
+        id: `requirement.${requirement.id}.example`,
+        origin: 'inferred',
+        text,
+        normalizedText: normalizeQuestionText(text),
+        stage,
+        audience,
+        source: null,
+        requirementId: requirement.id,
+      };
+    }),
+  ];
+}
+
+export function questionsForInterview(s, input = {}) {
+  const ownership = packOwnership(s, input);
+  const stage = normalizeInterviewEnum(
+    input.stage ?? 'interview',
+    'stage',
+    INTERVIEW_STAGES,
+  );
+  const audience = audienceForInterviewStage(stage, input.audience);
+  const ordered = [
+    ...sourcedPackQuestions(s, ownership, stage, audience),
+    ...inferredPackQuestions(ownership.job, stage, audience),
+  ];
+  const normalizedTexts = new Set();
+  const questions = [];
+  for (const question of ordered) {
+    if (normalizedTexts.has(question.normalizedText)) continue;
+    normalizedTexts.add(question.normalizedText);
+    questions.push(question);
+  }
+  return {
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    deterministic: true,
+    profileId: ownership.profile.id,
+    jobId: ownership.job.id,
+    applicationId: ownership.application.id,
+    stage,
+    audience,
+    questions,
+  };
+}
+
+function proofSnapshotsForRevision(revision) {
+  const snapshots = new Map();
+  for (const field of INTERVIEW_STORY_FACTUAL_FIELDS) {
+    for (const evidence of revision.fieldEvidence[field]) {
+      if (!snapshots.has(evidence.proofPointId)) {
+        snapshots.set(evidence.proofPointId, evidence.proofSnapshot);
+      }
+    }
+  }
+  return [...snapshots.values()];
+}
+
+function packStoryMatch(s, match) {
+  const story = one(s, 'SELECT * FROM interview_stories WHERE id=?', [match.storyId]);
+  const revision = one(
+    s,
+    'SELECT * FROM interview_story_revisions WHERE id=? AND story_id=?',
+    [match.storyRevisionId, match.storyId],
+  );
+  if (!story || !revision || revision.state !== 'verified') {
+    throw new InterviewError(
+      'interview_pack_story_invalid',
+      `Interview pack match ${match.storyId}/${match.storyRevisionId} is not a verified story revision.`,
+    );
+  }
+  const revisionSnapshot = revisionProjection(s, revision, { compact: false });
+  return {
+    storySnapshot: {
+      id: story.id,
+      profileId: story.profile_id,
+      createdAt: story.created_at,
+      revision: revisionSnapshot,
+    },
+    proofSnapshots: proofSnapshotsForRevision(revisionSnapshot),
+  };
+}
+
+function alternativePackMatch(s, match) {
+  const snapshots = packStoryMatch(s, match);
+  return {
+    storyId: match.storyId,
+    storyRevisionId: match.storyRevisionId,
+    matchScore: match.score,
+    matchReasons: {
+      codes: match.reasons,
+      gapReason: null,
+      scoreComponents: match.scoreComponents,
+    },
+    ...snapshots,
+  };
+}
+
+function packWarnings(s, profileId, matched) {
+  const warnings = matched.excludedStories.map(story => ({
+    code: 'excluded_story',
+    storyId: story.storyId,
+    reason: story.reason,
+    currentRevisionId: story.currentRevisionId,
+    activeVerifiedRevisionId: story.activeVerifiedRevisionId,
+    staleProofPointIds: story.staleProofPointIds,
+    verificationBlockers: story.verificationBlockers,
+  }));
+  const eligibleProofIds = new Set(
+    matched.eligibleStories.flatMap(story => story.linkedProofPointIds),
+  );
+  const proofs = all(
+    s,
+    'SELECT * FROM proof_points WHERE profile_id=? ORDER BY id',
+    [profileId],
+  );
+  for (const proof of proofs) {
+    if (proof.status !== 'active' || proof.verification_status !== 'verified') {
+      warnings.push({
+        code: 'excluded_proof',
+        proofPointId: proof.id,
+        reason: proof.status !== 'active'
+          ? `status_${proof.status}`
+          : `verification_${proof.verification_status}`,
+        proofSnapshot: proofSnapshot(proof),
+      });
+    } else if (!eligibleProofIds.has(proof.id)) {
+      warnings.push({
+        code: 'proof_not_interview_story',
+        proofPointId: proof.id,
+        reason: 'proof_is_not_a_verified_interview_story_revision',
+        proofSnapshot: proofSnapshot(proof),
+      });
+    }
+  }
+  return warnings;
+}
+
+export function buildInterviewPack(s, input = {}) {
+  const questionSet = questionsForInterview(s, input);
+  const matched = matchStoriesToQuestions(s, {
+    profileId: questionSet.profileId,
+    questions: questionSet.questions,
+    audience: questionSet.audience,
+    maxStories: 3,
+  });
+  const items = matched.questions.map((questionMatch, position) => {
+    const question = questionSet.questions[position];
+    const selected = questionMatch.selectedStory;
+    const snapshots = selected
+      ? packStoryMatch(s, selected)
+      : { storySnapshot: null, proofSnapshots: [] };
+    return {
+      position,
+      questionId: question.id,
+      questionOrigin: question.origin,
+      questionText: question.text,
+      questionSource: question.source,
+      stage: questionSet.stage,
+      audience: questionSet.audience,
+      coverageStatus: questionMatch.coverageStatus,
+      gapReason: questionMatch.gapReason,
+      storyId: selected?.storyId || null,
+      storyRevisionId: selected?.storyRevisionId || null,
+      matchScore: selected?.score || 0,
+      matchReasons: {
+        codes: selected?.reasons || [],
+        gapReason: questionMatch.gapReason,
+        scoreComponents: selected?.scoreComponents || null,
+      },
+      alternativeMatches: questionMatch.alternativeStories.map(match => (
+        alternativePackMatch(s, match)
+      )),
+      ...snapshots,
+    };
+  });
+  const coveredCount = items.filter(item => item.coverageStatus === 'covered').length;
+  return {
+    schema: INTERVIEW_PACK_SCHEMA,
+    version: 1,
+    deterministic: true,
+    profileId: questionSet.profileId,
+    jobId: questionSet.jobId,
+    applicationId: questionSet.applicationId,
+    stage: questionSet.stage,
+    audience: questionSet.audience,
+    questions: questionSet.questions,
+    items,
+    coveredCount,
+    gapCount: items.length - coveredCount,
+    eligibleStories: matched.eligibleStories,
+    excludedStories: matched.excludedStories,
+    warnings: packWarnings(s, questionSet.profileId, matched),
+  };
+}
+
 const stageLabels = {
   'recruiter-screen': 'recruiter screen',
   interview: 'interview',
   'hiring-manager': 'hiring manager interview',
   onsite: 'onsite / panel interview',
   final: 'final interview',
-  offer: 'offer conversation'
+  offer: 'offer conversation',
 };
 
 function parseProof(p) {
   return { ...p, skills: parseJson(p.skills_json, []), metrics: parseJson(p.metrics_json, []) };
 }
 
-function competencies(job, proofs) {
-  const words = new Set(tokenize(`${job.title} ${job.description}`));
-  const reqs = requirements(job.description).slice(0, 8);
-  const useful = new Set(['discovery','analytics','roadmap','stakeholder','communication','launch','learning','education','ai','workflow','product','strategy','experiments','operations','research','cross-functional']);
-  const fromReqs = reqs.map(r => {
-    const tokens = tokenize(r).filter(t => useful.has(t) || /discover|analytic|roadmap|stakeholder|launch|learning|product|experiment|research|cross/.test(t));
-    return tokens.slice(0, 2).join(' ');
-  }).filter(Boolean);
-  const proofSkills = proofs.flatMap(p => p.skills || []).map(String).filter(skill => words.has(skill.toLowerCase()) && (useful.has(skill.toLowerCase()) || skill.length > 5));
-  return [...new Set([...fromReqs, ...proofSkills, 'product judgment', 'cross-functional leadership'].filter(Boolean))].slice(0, 8);
-}
-
-function relevantProofs(job, proofs) {
-  const jobTokens = new Set(tokenize(`${job.title} ${job.description}`));
-  return proofs.map(p => ({
-    ...p,
-    relevance: tokenize(`${p.summary} ${(p.skills || []).join(' ')}`).filter(t => jobTokens.has(t)).length
-  })).sort((a, b) => b.relevance - a.relevance || a.summary.localeCompare(b.summary));
-}
-
-function likelyQuestions(job, stage, comps) {
-  const reqs = requirements(job.description).slice(0, 5);
-  const role = job.title;
-  const company = job.company;
-  const base = [
-    `How would you approach the first 30-60-90 days as ${role} at ${company}?`,
-    `Which signals would you use to decide whether this ${role} work is succeeding?`,
-    `Tell me about a time you had to make tradeoffs similar to: ${reqs[0] || 'this role\'s core responsibilities'}.`,
-    `What would you need to learn about ${company}'s users, team, and constraints before recommending a roadmap?`
-  ];
-  if (/recruiter/.test(stage)) base.unshift(`What is your concise narrative for why ${role} at ${company} fits your search now?`);
-  if (/manager|onsite|final|interview/.test(stage)) base.push(...comps.slice(0, 4).map(c => `Walk me through a specific example that shows ${c} in a high-stakes work context.`));
-  return [...new Set(base)].slice(0, 10);
-}
-
-function storyForProof(proof, competency) {
-  const metric = proof.metrics?.length ? ` Metrics to mention: ${proof.metrics.join(', ')}.` : '';
-  const evidence = proof.evidence ? ` Evidence/source: ${proof.evidence}.` : '';
-  return `- **${competency}:** use proof \`${proof.id}\` — ${proof.summary}${metric}${evidence}\n  - Situation: set the context and constraints behind this proof.\n  - Task: explain what you owned or influenced.\n  - Action: name the decisions, collaboration, analysis, or delivery work you performed.\n  - Result: quantify only with stored metrics/evidence; otherwise state the qualitative result and say what you learned.`;
-}
-
 function askQuestions(job, facts) {
-  const factHooks = facts.slice(0, 3).map(f => `Given ${f.claim}, how is the ${job.title} role expected to contribute over the next two quarters?`);
+  const factHooks = facts.slice(0, 3).map(fact => (
+    `Given ${fact.claim}, how is the ${job.title} role expected to contribute over the next two quarters?`
+  ));
   return [
     ...factHooks,
     `What are the most important problems this ${job.title} hire should solve in the first six months?`,
     'How does the team make tradeoffs between speed, user learning, and operational quality?',
     'What evidence would make you confident that the person in this role is succeeding?',
-    'What should I understand about the team, stakeholders, or constraints that is not visible in the job posting?'
+    'What should I understand about the team, stakeholders, or constraints that is not visible in the job posting?',
   ].slice(0, 8);
 }
 
 function refreshSummary(job, company, facts, stakeholders) {
-  const factLines = facts.length ? facts.slice(0, 5).map(f => `- ${f.claim} (${f.url})`).join('\n') : '- No source-backed company facts are stored yet; run `research company --job '+job.id+'` before the interview.';
-  const people = stakeholders.length ? stakeholders.slice(0, 5).map(s => `- ${s.name} — ${s.role}: ${s.summary}`).join('\n') : '- No stakeholder research stored yet.';
-  return `## Company / role refresh\n- Role: ${job.title}\n- Company: ${job.company}\n- Location: ${job.location || 'not specified'}\n- Application source: ${String(job.url || '').startsWith('jobos:text:') ? 'manual/text import' : job.url || 'not provided'}\n\n### Stored company facts\n${factLines}\n\n### Stakeholder context\n${people}`;
+  const factLines = facts.length
+    ? facts.slice(0, 5).map(fact => `- ${fact.claim} (${fact.url})`).join('\n')
+    : `- No source-backed company facts are stored yet; run \`research company --job ${job.id}\` before the interview.`;
+  const people = stakeholders.length
+    ? stakeholders.slice(0, 5).map(stakeholder => (
+      `- ${stakeholder.name} — ${stakeholder.role}: ${stakeholder.summary}`
+    )).join('\n')
+    : '- No stakeholder research stored yet.';
+  return `## Company / role refresh
+- Role: ${job.title}
+- Company: ${job.company}
+- Location: ${job.location || 'not specified'}
+- Application source: ${String(job.url || '').startsWith('jobos:text:') ? 'manual/text import' : job.url || 'not provided'}
+
+### Stored company facts
+${factLines}
+
+### Stakeholder context
+${people}`;
 }
 
-function fallbackPacket({ job, prof, app, stage, proofs, company, stakeholders }) {
-  const facts = parseJson(company?.facts_json, []);
-  const comps = competencies(job, proofs);
-  const ranked = relevantProofs(job, proofs);
-  const stories = comps.slice(0, 6).map((c, idx) => ranked[idx % Math.max(ranked.length, 1)] ? storyForProof(ranked[idx % ranked.length], c) : `- **${c}:** add a stored proof point before relying on this story.`).join('\n');
-  const qs = likelyQuestions(job, stage, comps).map(q => `- ${q}`).join('\n');
-  const asks = askQuestions(job, facts).map(q => `- ${q}`).join('\n');
-  const proofWarning = proofs.length ? '- Stories below are mapped to stored proof points; verify details before the interview.' : '- No proof points exist for this profile; packet avoids inventing STAR stories.';
-  return `# Interview prep packet — ${stageLabels[stage] || stage} for ${job.title} at ${job.company}\n\nGenerated: ${now()}\n\n**Application:** ${app.id} (${app.status})\n**Profile:** ${prof.name}\n**Approval status:** Draft for human review.\n\n${refreshSummary(job, company, facts, stakeholders)}\n\n## Likely interview questions\n${qs}\n\n## STAR story bank mapped to competencies\n${stories || '- Add proof points to generate story mappings.'}\n\n## Questions to ask the interviewer\n${asks}\n\n## Final prep checklist\n- Prepare a 60-second narrative connecting ${prof.name} to ${job.title}.\n- Choose 3 proof-backed stories above and rehearse them out loud.\n- Confirm compensation, location/work model, and next-step timeline directly with the company.\n- Do not claim unstored accomplishments; add proof points if a story is missing.\n\n## Evidence and safety notes\n${proofWarning}\n- JobOS generated an internal prep packet only. It did not contact the company, schedule interviews, or send messages.\n`;
+function renderPackStory(item) {
+  if (item.coverageStatus === 'gap') {
+    return `### ${item.position + 1}. [${item.questionOrigin}] ${item.questionText}
+- Coverage: gap (${item.gapReason})
+- Story: none; no ineligible or fabricated story was substituted.
+- Match reasons: ${item.matchReasons.gapReason}`;
+  }
+  const revision = item.storySnapshot.revision;
+  const proofIds = item.proofSnapshots.map(snapshot => snapshot.id);
+  return `### ${item.position + 1}. [${item.questionOrigin}] ${item.questionText}
+- Coverage: covered
+- Story ID: \`${item.storyId}\`
+- Revision ID: \`${item.storyRevisionId}\`
+- Proof IDs: ${proofIds.map(proofId => `\`${proofId}\``).join(', ')}
+- Match score: ${item.matchScore}
+- Match reasons: ${item.matchReasons.codes.join(', ')}
+- Alternatives: ${item.alternativeMatches.length
+    ? item.alternativeMatches.map(match => (
+      `\`${match.storyId}\`/\`${match.storyRevisionId}\` (${match.matchScore})`
+    )).join(', ')
+    : 'none'}
+- STAR story:
+  - Situation: ${revision.situation}
+  - Task: ${revision.task}
+  - Action: ${revision.action}
+  - Result: ${revision.result}
+  - Reflection: ${revision.reflection}`;
 }
 
-function llmPrompt({ job, prof, app, stage, proofs, company, stakeholders }) {
-  return `Generate a role-specific interview prep packet as JSON. Do not invent accomplishments. STAR stories must cite supplied proofPointId values only. Return: likelyQuestions array, starStories array ({competency, proofPointId, situation, task, action, result, rehearsalNote}), questionsToAsk array, refreshSummary string, warnings array.\n\nAPPLICATION: ${JSON.stringify(app)}\nPROFILE: ${JSON.stringify({ id: prof.id, name: prof.name, preferences: parseJson(prof.preferences_json, {}) })}\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, location: job.location, description: job.description, requirements: requirements(job.description) })}\nSTAGE: ${stage}\nCOMPANY_FACTS: ${company?.facts_json || '[]'}\nSTAKEHOLDERS: ${JSON.stringify(stakeholders)}\nPROOF_POINTS: ${JSON.stringify(proofs.map(p => ({ id: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })))}\n`;
-}
-
-function renderLlmPacket({ job, prof, app, stage, json, proofs, company, stakeholders }) {
-  const proofIds = new Set(proofs.map(p => p.id));
-  const proofById = new Map(proofs.map(p => [p.id, p]));
-  const warnings = Array.isArray(json.warnings) ? json.warnings.map(String) : [];
-  const questions = (Array.isArray(json.likelyQuestions) ? json.likelyQuestions : []).map(String).filter(Boolean).slice(0, 10);
-  const stories = (Array.isArray(json.starStories) ? json.starStories : []).filter(s => proofIds.has(s.proofPointId)).slice(0, 8);
-  if (stories.length < Math.min(3, proofs.length)) warnings.push('LLM returned fewer than three valid proof-grounded STAR stories; review manually.');
-  const facts = parseJson(company?.facts_json, []);
-  const qs = (questions.length ? questions : likelyQuestions(job, stage, competencies(job, proofs))).map(q => `- ${q}`).join('\n');
-  const storyBlock = stories.length ? stories.map(s => {
-    const proof = proofById.get(s.proofPointId);
-    const metrics = proof.metrics?.length ? ` Stored metrics: ${proof.metrics.join(', ')}.` : '';
-    return `- **${s.competency || 'Role competency'}** _(proof: ${s.proofPointId})_\n  - Proof: ${proof.summary}${metrics}\n  - Situation: set the context using only details you can verify from this proof/evidence.\n  - Task: explain what you personally owned or influenced.\n  - Action: describe decisions, collaboration, analysis, or delivery work that is directly supported by the proof.\n  - Result: quantify only with stored metrics/evidence; otherwise state the qualitative result and learning.\n  - Rehearsal note: ${s.rehearsalNote ? String(s.rehearsalNote).slice(0, 180) : 'Keep it concise and evidence-grounded; do not add unstored details.'}`;
-  }).join('\n') : relevantProofs(job, proofs).slice(0, 4).map((p, idx) => storyForProof(p, competencies(job, proofs)[idx] || job.title)).join('\n');
-  const asks = (Array.isArray(json.questionsToAsk) && json.questionsToAsk.length ? json.questionsToAsk.map(String) : askQuestions(job, facts)).slice(0, 8).map(q => `- ${q}`).join('\n');
-  return `# LLM interview prep packet — ${stageLabels[stage] || stage} for ${job.title} at ${job.company}\n\nGenerated: ${now()}\n\n**Application:** ${app.id} (${app.status})\n**Profile:** ${prof.name}\n**Approval status:** Draft for human review.\n\n${refreshSummary(job, company, facts, stakeholders)}\n\n## Role-specific likely questions\n${qs}\n\n## STAR stories mapped from proof points\n${storyBlock || '- Add proof points to generate story mappings.'}\n\n## Questions to ask the interviewer\n${asks}\n\n## Warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; story claims are rendered from stored proof summaries/metrics only. LLM suggestions are limited to question selection, competencies, and rehearsal notes.'}\n\n## Human gate\nJobOS generated an internal prep packet only. It did not contact the company, schedule interviews, or send messages.\n`;
-}
-
-export async function prepInterview(s, applicationId, stage = 'interview') {
-  const app = one(s, 'SELECT * FROM applications WHERE id=?', [applicationId]);
-  if (!app) throw Error(`Unknown application: ${applicationId}`);
-  const job = one(s, 'SELECT * FROM jobs WHERE id=?', [app.job_id]);
-  const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [app.profile_id]);
-  if (!job || !prof) throw Error('Application is missing linked job or profile');
-  const proofs = all(s, 'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at', [prof.id]).map(parseProof);
-  const company = job.company_id ? one(s, 'SELECT * FROM companies WHERE id=?', [job.company_id]) : null;
-  const stakeholders = all(s, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY updated_at DESC', [job.id]).map(st => ({ ...st, links: parseJson(st.links_json, []) }));
-  // Look up the latest people-research run for this job
-  const researchRun = one(s, `SELECT id,status,finished_at FROM research_runs WHERE job_id=? AND profile_id=? AND scope='job' AND status IN ('succeeded','partial') ORDER BY finished_at DESC LIMIT 1`, [job.id, prof.id]);
-  const researchInfo = researchRun
-    ? { runId: researchRun.id, finishedAt: researchRun.finished_at, stale: !researchRun.finished_at || researchRun.finished_at < new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() }
-    : null;
-  const at = now();
-  let content;
-  const cfg = llmConfig();
-  if (cfg.configured && proofs.length) {
-    try {
-      const result = await generateJson({ schemaName: 'jobos_interview_prep', system: 'You are JobOS interview prep. Create useful, role-specific prep while grounding every accomplishment in supplied proof IDs.', user: llmPrompt({ job, prof, app, stage, proofs, company, stakeholders }) });
-      if (result.ok) content = renderLlmPacket({ job, prof, app, stage, json: result.json, proofs, company, stakeholders });
-
-    } catch (e) {
-      if (e?.type === 'agent_error') throw e;
+function renderPackWarnings(pack) {
+  if (!pack.warnings.length) return '- None.';
+  return pack.warnings.map(warning => {
+    if (warning.code === 'excluded_story') {
+      const stale = warning.staleProofPointIds.length
+        ? `; stale proofs: ${warning.staleProofPointIds.join(', ')}`
+        : '';
+      return `- Excluded story warning: \`${warning.storyId}\` (${warning.reason}${stale}).`;
     }
+    return `- Excluded proof warning: \`${warning.proofPointId}\` (${warning.reason}).`;
+  }).join('\n');
+}
+
+function renderInterviewPack({ job, profile, application, pack, proofs, company, stakeholders }) {
+  const facts = parseJson(company?.facts_json, []);
+  const questionLines = pack.questions.map(question => (
+    `- [${question.origin}] \`${question.id}\` — ${question.text}`
+  )).join('\n');
+  const storyLines = pack.items.map(renderPackStory).join('\n\n');
+  const gapLines = pack.items
+    .filter(item => item.coverageStatus === 'gap')
+    .map(item => `- \`${item.questionId}\`: ${item.gapReason}`)
+    .join('\n');
+  const asks = askQuestions(job, facts).map(question => `- ${question}`).join('\n');
+  const storedProofIds = proofs.length
+    ? proofs.map(proof => `\`${proof.id}\``).join(', ')
+    : 'none';
+  return `# Interview prep packet — ${stageLabels[pack.stage]} for ${job.title} at ${job.company}
+
+Generated: ${now()}
+
+**Application:** ${application.id} (${application.status})
+**Profile:** ${profile.name}
+**Audience:** ${pack.audience}
+**Approval status:** Draft for human review.
+
+${refreshSummary(job, company, facts, stakeholders)}
+
+## Likely interview questions
+${questionLines}
+
+## STAR story bank mapped to competencies
+${storyLines || '- No interview questions were available.'}
+
+- Stored proof IDs retained for compatibility and review, not promoted into stories: ${storedProofIds}
+
+## Coverage gaps
+${gapLines || '- None.'}
+
+## Excluded story and proof warnings
+${renderPackWarnings(pack)}
+
+## Questions to ask the interviewer
+${asks}
+
+## Final prep checklist
+- Rehearse only verified story revisions and their frozen proof snapshots.
+- Review every explicit gap instead of inventing an accomplishment.
+- Confirm compensation, work model, and next-step timing directly.
+- JobOS did not contact the company or any interviewer.
+`;
+}
+
+function insertInterviewPackItems(s, artifact, pack) {
+  for (const item of pack.items) {
+    run(s, `INSERT INTO interview_pack_items
+      (artifact_id,position,profile_id,job_id,application_id,interview_stage,audience,
+       question_id,question_origin,question_text,question_source_json,coverage_status,
+       story_id,story_revision_id,match_score,match_reasons_json,alternative_matches_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      artifact.id,
+      item.position,
+      pack.profileId,
+      pack.jobId,
+      pack.applicationId,
+      pack.stage,
+      pack.audience,
+      item.questionId,
+      item.questionOrigin,
+      item.questionText,
+      JSON.stringify(item.questionSource),
+      item.coverageStatus,
+      item.storyId,
+      item.storyRevisionId,
+      item.matchScore,
+      JSON.stringify(item.matchReasons),
+      JSON.stringify(item.alternativeMatches),
+    ]);
   }
-  if (!content) content = fallbackPacket({ job, prof, app, stage, proofs, company, stakeholders });
-  // Prepend research run context
-  if (researchInfo) {
-    const runRel = path.join('research', 'runs', `${researchInfo.runId}.md`);
-    const runLine = `\n> Research run: [${researchInfo.runId}](${runRel}) completed ${researchInfo.finishedAt}.`;
-    const staleWarning = researchInfo.stale ? ' ⚠️ This research is more than 30 days old. Consider running fresh people research before the interview.' : '';
-    content = content + runLine + staleWarning + '\n';
+}
+
+export async function prepInterview(
+  s,
+  applicationId,
+  stage = 'interview',
+  options = {},
+) {
+  const application = one(s, 'SELECT * FROM applications WHERE id=?', [applicationId]);
+  if (!application) {
+    throw new InterviewError(
+      'interview_application_unknown',
+      `Unknown application: ${applicationId}.`,
+    );
+  }
+  const ownership = resolveInterviewOwnership(s, {
+    profileId: application.profile_id,
+    jobId: application.job_id,
+    applicationId,
+  });
+  const pack = buildInterviewPack(s, {
+    profileId: ownership.profile.id,
+    jobId: ownership.job.id,
+    applicationId,
+    stage,
+    audience: options?.audience,
+  });
+  const proofs = all(
+    s,
+    'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at,id',
+    [ownership.profile.id],
+  ).map(parseProof);
+  const company = ownership.job.company_id
+    ? one(s, 'SELECT * FROM companies WHERE id=?', [ownership.job.company_id])
+    : null;
+  const stakeholders = all(
+    s,
+    'SELECT * FROM stakeholders WHERE job_id=? ORDER BY updated_at DESC,id',
+    [ownership.job.id],
+  ).map(stakeholder => ({
+    ...stakeholder,
+    links: parseJson(stakeholder.links_json, []),
+  }));
+  let content = renderInterviewPack({
+    job: ownership.job,
+    profile: ownership.profile,
+    application: ownership.application,
+    pack,
+    proofs,
+    company,
+    stakeholders,
+  });
+  const researchRun = one(
+    s,
+    `SELECT id,status,finished_at FROM research_runs
+      WHERE job_id=? AND profile_id=? AND scope='job'
+        AND status IN ('succeeded','partial')
+      ORDER BY finished_at DESC,id DESC LIMIT 1`,
+    [ownership.job.id, ownership.profile.id],
+  );
+  if (researchRun) {
+    const runRel = path.join('research', 'runs', `${researchRun.id}.md`);
+    const stale = !researchRun.finished_at
+      || researchRun.finished_at
+        < new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    content += `\n> Research run: [${researchRun.id}](${runRel}) completed ${researchRun.finished_at}.`;
+    if (stale) {
+      content += ' This research is more than 30 days old; consider refreshing it.';
+    }
+    content += '\n';
   } else {
-    content = content + '\n> ⚠️ No people-research run found for this job. Run `jobos research people --scope job --job <job-id> --depth standard` before the interview for network-aware preparation.\n';
+    content += '\n> No people-research run is stored for this job. Run `jobos research people --scope job --job <job-id> --depth standard` before the interview for network-aware preparation.\n';
   }
-  const safeStage = slug(stage);
-  const rel = path.join('jobs', job.id, 'artifacts', `interview-prep-${safeStage}.md`);
-  const evidence = proofs.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, metrics: p.metrics }));
+  const rel = path.join(
+    'jobs',
+    ownership.job.id,
+    'artifacts',
+    `interview-prep-${pack.stage}.md`,
+  );
   const artifact = createArtifact(s, {
-    jobId: job.id,
-    profileId: prof.id,
+    jobId: ownership.job.id,
+    profileId: ownership.profile.id,
     type: 'interview_prep',
     path: rel,
-    title: `Interview prep: ${stage} for ${job.title}`,
+    title: `Interview prep: ${pack.stage} for ${ownership.job.title}`,
     content,
-    evidence,
-    warnings: [],
-    series: { kind: 'interview_prep', applicationId, stage },
+    evidence: pack.items,
+    warnings: pack.warnings,
+    series: {
+      kind: 'interview_prep',
+      applicationId,
+      stage: pack.stage,
+    },
     auditAction: 'interview_prep.created',
-    auditPayload: { applicationId, stage }
+    auditPayload: {
+      applicationId,
+      stage: pack.stage,
+      audience: pack.audience,
+      deterministic: true,
+    },
+    mutate(store, createdArtifact) {
+      insertInterviewPackItems(store, createdArtifact, pack);
+    },
   });
-  return { ...artifact, applicationId, jobId: job.id, profileId: prof.id, stage, note: 'Interview prep packet created for human review.' };
+  return {
+    ...artifact,
+    applicationId,
+    jobId: ownership.job.id,
+    profileId: ownership.profile.id,
+    stage: pack.stage,
+    audience: pack.audience,
+    pack: {
+      ...pack,
+      artifactId: artifact.id,
+      artifactRevision: artifact.revision,
+    },
+    note: 'Interview prep packet created for human review.',
+  };
 }

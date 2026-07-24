@@ -8,6 +8,7 @@ import initSqlJs from 'sql.js';
 import YAML from 'yaml';
 
 import { all, one, openStore, save } from '../src/db.js';
+import { getArtifact } from '../src/artifacts.js';
 import * as interview from '../src/interview.js';
 import { retireProof, supersedeProof } from '../src/profiles.js';
 import { id as deterministicId } from '../src/utils.js';
@@ -802,6 +803,10 @@ function questionRows(store) {
     ORDER BY profile_id,source_ref,created_at,id`);
 }
 
+function packQuestionMirrorPath(root, jobId = 'job_w07_alpha') {
+  return path.join(root, 'jobos-workspace', 'jobs', jobId, 'interviews', 'questions.yaml');
+}
+
 function questionState(store, root, profileId = 'profile_w07_alpha') {
   const mirror = questionMirrorPath(root, profileId);
   const auditMirror = path.join(root, 'jobos-workspace', 'audit.log.jsonl');
@@ -1572,4 +1577,346 @@ test('W07-MATCH-05 invalid limits, no-story gaps, and empty questions are determ
   assert.deepEqual(emptyFirst.eligibleStories, []);
   assert.deepEqual(emptyFirst.excludedStories, []);
   assert.deepEqual(state(), before);
+});
+
+test('W07-PACK-01 deterministic audience questions preserve sources and expose exact coverage provenance', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const sourced = interview.createInterviewQuestionSource(store, questionInput({
+    questionText: 'Tell me about a time you led delivery through a fixed deadline.',
+  }));
+  const eligible = createVerifiedStory(store, {
+    title: 'Eligible pack story',
+  });
+  const draft = interview.createInterviewStory(store, storyInput({
+    title: 'Draft pack story',
+  }));
+  const retired = createVerifiedStory(store, {
+    title: 'Retired pack story',
+  });
+  interview.retireInterviewStory(store, {
+    profileId: retired.profileId,
+    storyId: retired.id,
+    reason: 'Not representative for current interviews.',
+    actor: 'user',
+    source: 'cli',
+  });
+  const stale = createVerifiedStory(store, {
+    proofPointId: 'proof_w07_superseding',
+    title: 'Stale pack story',
+  });
+  supersedeProof(store, 'proof_w07_superseding', {
+    summary: 'Corrected migration evidence for pack matching',
+    evidence: 'Corrected evidence supports 18 migrations.',
+    skills: ['migration'],
+    metrics: ['18 migrations'],
+  });
+
+  const expectedTemplates = {
+    recruiter: ['recruiter.motivation', 'recruiter.scope'],
+    hiring_manager: ['manager.ownership', 'manager.tradeoff'],
+    peer_panel: ['panel.collaboration', 'panel.conflict'],
+    executive: ['executive.strategy', 'executive.influence'],
+    unknown: ['unknown.impact', 'unknown.learning'],
+  };
+  const templateTexts = new Set();
+  for (const [audience, expectedIds] of Object.entries(expectedTemplates)) {
+    const first = interview.questionsForInterview(store, {
+      applicationId: 'application_w07_alpha',
+      stage: 'interview',
+      audience,
+    });
+    const second = interview.questionsForInterview(store, {
+      applicationId: 'application_w07_alpha',
+      stage: 'interview',
+      audience,
+    });
+    assert.equal(JSON.stringify(second), JSON.stringify(first));
+    assert.equal(first.audience, audience);
+    assert.deepEqual(
+      first.questions.filter(question => question.templateId).map(question => question.id),
+      expectedIds,
+    );
+    for (const question of first.questions.filter(question => question.templateId)) {
+      assert.equal(question.origin, 'inferred');
+      assert.equal(question.source, null);
+      assert.equal(question.stage, 'interview');
+      assert.equal(question.audience, audience);
+      templateTexts.add(question.text);
+    }
+  }
+  assert.equal(templateTexts.size, 10);
+
+  const questions = interview.questionsForInterview(store, {
+    applicationId: 'application_w07_alpha',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+  });
+  assert.equal(questions.questions[0].id, sourced.id);
+  assert.equal(questions.questions[0].origin, 'sourced');
+  assert.deepEqual(questions.questions[0].source, {
+    questionSourceId: sourced.id,
+    rootSourceId: sourced.rootSourceId,
+    sourceKind: 'recruiter_provided',
+    sourceRef: 'recruiter-email-42',
+    actor: 'candidate',
+    source: 'cli',
+    createdAt: sourced.createdAt,
+  });
+  assert.ok(questions.questions.slice(1).every(question => question.origin === 'inferred'));
+  assert.ok(questions.questions.slice(1).every(question => question.source === null));
+
+  const firstPack = interview.buildInterviewPack(store, {
+    applicationId: 'application_w07_alpha',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+  });
+  const secondPack = interview.buildInterviewPack(store, {
+    applicationId: 'application_w07_alpha',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+  });
+  assert.equal(JSON.stringify(secondPack), JSON.stringify(firstPack));
+  assert.equal(firstPack.schema, interview.INTERVIEW_PACK_SCHEMA);
+  assert.equal(firstPack.deterministic, true);
+  assert.equal(firstPack.profileId, 'profile_w07_alpha');
+  assert.equal(firstPack.jobId, 'job_w07_alpha');
+  assert.equal(firstPack.applicationId, 'application_w07_alpha');
+  assert.equal(firstPack.stage, 'hiring-manager');
+  assert.equal(firstPack.audience, 'hiring_manager');
+  assert.equal(firstPack.coveredCount + firstPack.gapCount, firstPack.items.length);
+  assert.deepEqual(
+    Object.fromEntries(firstPack.excludedStories.map(item => [item.storyId, item.reason])),
+    {
+      [draft.id]: 'draft_only',
+      [retired.id]: 'retired',
+      [stale.id]: 'proof_stale',
+    },
+  );
+  const covered = firstPack.items.find(item => item.questionId === sourced.id);
+  assert.equal(covered.coverageStatus, 'covered');
+  assert.equal(covered.storyId, eligible.id);
+  assert.equal(covered.storyRevisionId, eligible.activeVerifiedRevision.id);
+  assert.equal(covered.storySnapshot.id, eligible.id);
+  assert.equal(covered.storySnapshot.revision.id, eligible.activeVerifiedRevision.id);
+  assert.equal(covered.storySnapshot.revision.state, 'verified');
+  assert.deepEqual(
+    covered.proofSnapshots.map(snapshot => snapshot.id),
+    ['proof_w07_active'],
+  );
+  assert.ok(covered.matchScore >= 3);
+  assert.ok(covered.matchReasons.codes.length > 0);
+  assert.equal(covered.questionOrigin, 'sourced');
+  assert.deepEqual(covered.questionSource, questions.questions[0].source);
+  assert.ok(firstPack.items.some(item => item.coverageStatus === 'gap'));
+  assert.ok(firstPack.items.filter(item => item.coverageStatus === 'gap')
+    .every(item => item.storyId === null
+      && item.storyRevisionId === null
+      && item.matchReasons.gapReason));
+  assert.ok(firstPack.warnings.some(warning => warning.code === 'excluded_story'
+    && warning.storyId === stale.id
+    && warning.staleProofPointIds.includes('proof_w07_superseding')));
+  assert.ok(firstPack.warnings.some(warning => warning.code === 'excluded_proof'));
+
+  const projected = YAML.parse(readFileSync(packQuestionMirrorPath(root), 'utf8'));
+  assert.equal(projected.schema, interview.INTERVIEW_QUESTION_SCHEMA);
+  assert.equal(projected.version, 1);
+  assert.equal(projected.jobId, 'job_w07_alpha');
+  assert.equal(projected.policy.canonicalStore, 'sqlite');
+  assert.equal(projected.policy.currentOnly, true);
+  assert.equal(projected.policy.stableKey, 'id');
+  assert.deepEqual(projected.questions.map(question => question.id), [sourced.id]);
+  assert.ok(projected.questions.every(question => question.current));
+  assert.ok(projected.questions.every(question => !('origin' in question)));
+  const mirrorBytes = readFileSync(packQuestionMirrorPath(root));
+  const replay = interview.createInterviewQuestionSource(store, questionInput({
+    questionText: 'Tell me about a time you led delivery through a fixed deadline.',
+  }));
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(readFileSync(packQuestionMirrorPath(root)), mirrorBytes);
+  const listedBeforeReopen = interview.listInterviewQuestionSources(store, {
+    profileId: 'profile_w07_alpha',
+    jobId: 'job_w07_alpha',
+  });
+  save(store);
+  store.db.close();
+  const reopened = await openStore({ workspace: root });
+  const listedAfterReopen = interview.listInterviewQuestionSources(reopened, {
+    profileId: 'profile_w07_alpha',
+    jobId: 'job_w07_alpha',
+  });
+  assert.deepEqual(listedAfterReopen, listedBeforeReopen);
+  assert.deepEqual(
+    YAML.parse(readFileSync(packQuestionMirrorPath(root), 'utf8')),
+    projected,
+  );
+  assert.deepEqual(readFileSync(packQuestionMirrorPath(root)), mirrorBytes);
+});
+
+test('W07-REUSE-01 persisted packs reuse one canonical verified revision across applications', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  addSecondAlphaApplication(store);
+  const story = createVerifiedStory(store, {
+    title: 'Reusable delivery story',
+  });
+  const storyCount = one(store, 'SELECT COUNT(*) AS count FROM interview_stories').count;
+  const prior = getArtifact(store, 'artifact_w07_interview_1');
+  const priorContent = prior.content;
+
+  const first = await interview.prepInterview(
+    store,
+    'application_w07_alpha',
+    'hiring-manager',
+    { audience: 'hiring_manager' },
+  );
+  const second = await interview.prepInterview(
+    store,
+    'application_w07_alpha_second',
+    'hiring-manager',
+    { audience: 'hiring_manager' },
+  );
+  for (const result of [first, second]) {
+    assert.equal(result.type, 'interview_prep');
+    assert.equal(result.approvalStatus, 'draft_needs_human_review');
+    assert.equal(result.stage, 'hiring-manager');
+    assert.equal(result.pack.schema, interview.INTERVIEW_PACK_SCHEMA);
+    assert.equal(result.pack.artifactId, result.id);
+    assert.equal(result.pack.artifactRevision, result.revision);
+    assert.equal(result.pack.deterministic, true);
+    assert.ok(result.path.endsWith('/artifacts/interview-prep-hiring-manager.md'));
+    assert.match(result.content, /STAR story/);
+    assert.match(result.content, /Questions to ask the interviewer/);
+    assert.match(result.content, /did not contact the company/);
+    assert.match(result.content, /proof_/);
+    assert.match(result.content, /Role-specific|Likely interview questions/);
+    assert.match(result.content, /\[(?:sourced|inferred)\]/);
+    assert.match(result.content, new RegExp(story.id));
+    assert.match(result.content, new RegExp(story.activeVerifiedRevision.id));
+    assert.match(result.content, /Match reasons:/);
+    assert.match(result.content, /Coverage gaps/);
+    assert.deepEqual(result.evidence, result.pack.items);
+  }
+  assert.equal(first.seriesKey, 'interview_prep:application_w07_alpha:hiring-manager');
+  assert.equal(first.revision, 3);
+  assert.equal(second.seriesKey, 'interview_prep:application_w07_alpha_second:hiring-manager');
+  assert.equal(second.revision, 1);
+  assert.equal(getArtifact(store, 'artifact_w07_interview_1').content, priorContent);
+  assert.equal(one(store, 'SELECT COUNT(*) AS count FROM interview_stories').count, storyCount);
+
+  const firstRows = all(store, `SELECT * FROM interview_pack_items
+    WHERE artifact_id=? ORDER BY position`, [first.id]);
+  const secondRows = all(store, `SELECT * FROM interview_pack_items
+    WHERE artifact_id=? ORDER BY position`, [second.id]);
+  const firstStoryRows = firstRows.filter(row => row.story_id === story.id);
+  const secondStoryRows = secondRows.filter(row => row.story_id === story.id);
+  assert.ok(firstStoryRows.length > 0);
+  assert.ok(secondStoryRows.length > 0);
+  assert.ok([...firstStoryRows, ...secondStoryRows]
+    .every(row => row.story_revision_id === story.activeVerifiedRevision.id));
+  for (const [result, rows] of [[first, firstRows], [second, secondRows]]) {
+    assert.equal(rows.length, result.pack.items.length);
+    assert.deepEqual(rows.map(row => row.question_id), result.pack.items.map(item => item.questionId));
+    assert.deepEqual(
+      rows.map(row => JSON.parse(row.match_reasons_json)),
+      result.pack.items.map(item => item.matchReasons),
+    );
+    assert.deepEqual(
+      rows.map(row => JSON.parse(row.alternative_matches_json)),
+      result.pack.items.map(item => item.alternativeMatches),
+    );
+  }
+});
+
+test('W07-PREP-COMPAT-01 positional legacy prep keeps contracts and pack persistence is atomic', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const result = await interview.prepInterview(
+    store,
+    'application_w07_alpha',
+    'hiring-manager',
+  );
+  assert.equal(result.applicationId, 'application_w07_alpha');
+  assert.equal(result.jobId, 'job_w07_alpha');
+  assert.equal(result.profileId, 'profile_w07_alpha');
+  assert.equal(result.stage, 'hiring-manager');
+  assert.equal(result.pack.audience, 'hiring_manager');
+  assert.equal(result.type, 'interview_prep');
+  assert.equal(result.path, 'jobs/job_w07_alpha/artifacts/interview-prep-hiring-manager.md');
+  assert.equal(result.seriesKey, 'interview_prep:application_w07_alpha:hiring-manager');
+  assert.equal(result.revision, 3);
+  assert.equal(result.approvalStatus, 'draft_needs_human_review');
+  assert.match(result.content, /STAR story/);
+  assert.match(result.content, /Questions to ask the interviewer/);
+  assert.match(result.content, /did not contact the company/);
+  assert.match(result.content, /proof_/);
+  assert.match(result.content, /Role-specific|Likely interview questions/);
+  assert.match(result.content, /\[inferred\]/);
+  assert.match(result.content, /Coverage gaps/);
+  assert.match(result.content, /Excluded proof warning/);
+  assert.ok(result.pack.items.every(item => item.coverageStatus === 'gap'));
+  assert.ok(result.pack.items.every(item => item.storyId === null));
+  assert.ok(result.pack.warnings.some(warning => warning.code === 'proof_not_interview_story'));
+  assert.deepEqual(
+    all(store, `SELECT coverage_status,story_id,story_revision_id FROM interview_pack_items
+      WHERE artifact_id=? ORDER BY position`, [result.id]),
+    result.pack.items.map(item => ({
+      coverage_status: item.coverageStatus,
+      story_id: null,
+      story_revision_id: null,
+    })),
+  );
+  assert.equal(getArtifact(store, 'artifact_w07_interview_2').revision, 2);
+
+  const artifactMirror = path.join(root, 'jobos-workspace', result.path);
+  const state = () => ({
+    artifacts: all(store, 'SELECT * FROM artifacts ORDER BY id'),
+    packItems: all(store, 'SELECT * FROM interview_pack_items ORDER BY artifact_id,position'),
+    audit: all(store, 'SELECT * FROM audit_log ORDER BY id'),
+    artifactMirror: readFileSync(artifactMirror),
+    questionMirror: existsSync(packQuestionMirrorPath(root))
+      ? readFileSync(packQuestionMirrorPath(root))
+      : null,
+  });
+  store.db.run(`CREATE TRIGGER fail_interview_pack_insert
+    BEFORE INSERT ON interview_pack_items
+    BEGIN SELECT RAISE(ABORT, 'induced pack mutation failure'); END`);
+  save(store);
+  const beforeFailure = state();
+  await assert.rejects(
+    () => interview.prepInterview(store, 'application_w07_alpha', 'hiring-manager'),
+    /induced pack mutation failure/,
+  );
+  assert.deepEqual(state(), beforeFailure);
+});
+
+test('W07-PREP-COMPAT-02 omitted stage and options preserve interview defaults', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const result = await interview.prepInterview(store, 'application_w07_alpha');
+
+  assert.equal(result.stage, 'interview');
+  assert.equal(result.audience, 'unknown');
+  assert.equal(result.pack.stage, 'interview');
+  assert.equal(result.pack.audience, 'unknown');
+  assert.equal(result.path, 'jobs/job_w07_alpha/artifacts/interview-prep-interview.md');
+  assert.equal(result.seriesKey, 'interview_prep:application_w07_alpha:interview');
+  assert.equal(result.revision, 1);
+  assert.equal(result.approvalStatus, 'draft_needs_human_review');
+  assert.match(result.content, /STAR story/);
+  assert.match(result.content, /Questions to ask the interviewer/);
+  assert.match(result.content, /did not contact the company/);
+  assert.match(result.content, /proof_/);
+  assert.match(result.content, /Role-specific|Likely interview questions/);
+
+  const packRows = all(store, `SELECT * FROM interview_pack_items
+    WHERE artifact_id=? ORDER BY position`, [result.id]);
+  assert.equal(packRows.length, result.pack.items.length);
+  assert.ok(packRows.length > 0);
+  assert.deepEqual(
+    packRows.map(row => row.question_id),
+    result.pack.items.map(item => item.questionId),
+  );
+  assert.ok(packRows.every(row => row.interview_stage === 'interview'));
+  assert.ok(packRows.every(row => row.audience === 'unknown'));
 });
