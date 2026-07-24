@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { all, guardedWrite, one, openStore, recordAudit, run } from '../src/db.js';
 import { updateJobStatus } from '../src/jobs.js';
+import { recordOutreachOutcome } from '../src/outreach-outcomes.js';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'w08-schema14.sqlite');
 const NOW = new Date('2026-07-25T12:00:00.000Z');
@@ -121,6 +122,58 @@ async function seedSearchObservations(store, {
     }));
   }
   return observations;
+}
+
+async function seedUpstreamOutreachObservations(store, {
+  count = 4,
+  referencePrefix,
+  occurredDates,
+} = {}) {
+  const observations = await observationApi();
+  const baseJob = one(store, "SELECT * FROM jobs WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  const baseThread = one(store, "SELECT * FROM outreach_threads WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  const evidence = [];
+  for (let index = 0; index < count; index += 1) {
+    const suffix = `${referencePrefix}_${index}`.replace(/[^a-zA-Z0-9_]/g, '_');
+    const jobId = `job_phase3_upstream_${suffix}`;
+    const threadId = `thread_phase3_upstream_${suffix}`;
+    const occurredDate = occurredDates[index];
+    guardedWrite(store, () => {
+      cloneRow(store, 'jobs', baseJob, {
+        id: jobId,
+        profile_id: 'alpha',
+        title: 'Product Manager',
+        url: `jobos:test:${jobId}`,
+        created_at: `${occurredDate}T08:00:00.000Z`,
+        updated_at: `${occurredDate}T08:00:00.000Z`,
+      });
+      cloneRow(store, 'outreach_threads', baseThread, {
+        id: threadId,
+        job_id: jobId,
+        profile_id: 'alpha',
+        channel: 'email',
+        sent_at: `${occurredDate}T08:30:00.000Z`,
+        created_at: `${occurredDate}T08:00:00.000Z`,
+        updated_at: `${occurredDate}T08:30:00.000Z`,
+      });
+    });
+    const outcome = recordOutreachOutcome(store, {
+      threadId,
+      profileId: 'alpha',
+      type: 'reply_positive',
+      occurredAt: `${occurredDate}T10:00:00.000Z`,
+      actor: 'user',
+      source: 'cli',
+      referenceId: `${referencePrefix}-${index}`,
+    }, { includeNotes: false });
+    const adapted = observations.listMemoryObservations(store, {
+      profileId: 'alpha',
+      sinceDays: null,
+      nowDate: NOW,
+    }).observations.find(item => item.id === outcome.id);
+    evidence.push({ ...adapted, observationSchema: 'jobos.outreach-outcome.v1' });
+  }
+  return evidence;
 }
 
 function sha256(value) {
@@ -486,6 +539,64 @@ test('W08-GATE-01 exact ordinary boundary accepts three supports across two root
   store.db.close();
 });
 
+test('W08-GATE-01 upstream-only evidence obeys the exact four ordinary thresholds without a direct-support gate', async t => {
+  const api = await proposalApi();
+  const store = await openStore({ workspace: workspace(t) });
+  const oneDate = await seedUpstreamOutreachObservations(store, {
+    referencePrefix: 'upstream-one-date',
+    occurredDates: ['2026-07-20', '2026-07-20', '2026-07-20', '2026-07-20'],
+  });
+  const near = api.createMemoryProposal(store, searchProposal(oneDate, {
+    referenceId: 'proposal-upstream-one-date',
+    rationale: 'Observed association, not cause.',
+  }));
+  assert.deepEqual({
+    supportCount: near.gates.supportCount,
+    directSupportCount: near.gates.directSupportCount,
+    supportWeight: near.gates.supportWeight,
+    sourceRootCount: near.gates.sourceRootCount,
+    distinctDateCount: near.gates.distinctDateCount,
+    ordinaryEvidence: near.gates.ordinaryEvidence,
+  }, {
+    supportCount: 4,
+    directSupportCount: 0,
+    supportWeight: 4,
+    sourceRootCount: 4,
+    distinctDateCount: 1,
+    ordinaryEvidence: false,
+  });
+  assert.throws(
+    () => api.transitionMemoryProposal(store, transitionArgs(near.id, 'accept', 'accept-upstream-one-date')),
+    error => error.code === 'memory_evidence_insufficient',
+  );
+
+  const exact = await seedUpstreamOutreachObservations(store, {
+    referencePrefix: 'upstream-exact',
+    occurredDates: ['2026-07-20', '2026-07-20', '2026-07-21', '2026-07-21'],
+  });
+  const eligible = api.createMemoryProposal(store, searchProposal(exact, {
+    referenceId: 'proposal-upstream-exact',
+    rationale: 'Observed association, not cause.',
+  }));
+  assert.deepEqual({
+    supportCount: eligible.gates.supportCount,
+    directSupportCount: eligible.gates.directSupportCount,
+    supportWeight: eligible.gates.supportWeight,
+    sourceRootCount: eligible.gates.sourceRootCount,
+    distinctDateCount: eligible.gates.distinctDateCount,
+    ordinaryEvidence: eligible.gates.ordinaryEvidence,
+  }, {
+    supportCount: 4,
+    directSupportCount: 0,
+    supportWeight: 4,
+    sourceRootCount: 4,
+    distinctDateCount: 2,
+    ordinaryEvidence: true,
+  });
+  assert.equal(api.transitionMemoryProposal(store, transitionArgs(eligible.id, 'accept', 'accept-upstream-exact')).toStatus, 'accepted');
+  store.db.close();
+});
+
 test('W08-GATE-02 same-scope contradictory current evidence blocks acceptance', async t => {
   const api = await proposalApi();
   const store = await openStore({ workspace: workspace(t) });
@@ -496,16 +607,72 @@ test('W08-GATE-02 same-scope contradictory current evidence blocks acceptance', 
   store.db.close();
 });
 
-test('W08-GATE-02 an uncited later same-scope contradiction blocks acceptance without mutating the proposal', async t => {
+test('W08-GATE-02 uncited ambient conflicts stay out of immutable citations and revalidate live', async t => {
   const api = await proposalApi();
+  const observations = await observationApi();
   const store = await openStore({ workspace: workspace(t) });
   const support = await seedSearchObservations(store, { referencePrefix: 'ambient-support' });
-  const proposal = api.createMemoryProposal(store, searchProposal(support, { referenceId: 'proposal-ambient-conflict' }));
-  await seedSearchObservations(store, { count: 1, polarity: 'avoid', referencePrefix: 'ambient-conflict' });
+  const [conflict] = await seedSearchObservations(store, { count: 1, polarity: 'avoid', referencePrefix: 'ambient-conflict' });
+  const input = searchProposal(support, { referenceId: 'proposal-ambient-conflict' });
+  const proposal = api.createMemoryProposal(store, input);
+  assert.equal(proposal.conflictState, 'present');
+  assert.deepEqual(proposal.evidence.map(item => item.observationId), support.map(item => item.id).sort());
+  assert.deepEqual(
+    all(store, 'SELECT observation_id FROM career_memory_proposal_evidence WHERE proposal_id=? ORDER BY position', [proposal.id])
+      .map(item => item.observation_id),
+    support.map(item => item.id).sort(),
+  );
   const before = countRows(store);
   assert.throws(() => api.transitionMemoryProposal(store, transitionArgs(proposal.id, 'accept', 'accept-ambient-conflict')), error => error.code === 'memory_conflict_present');
   assert.deepEqual(countRows(store), before);
-  assert.equal(api.getMemoryProposal(store, { profileId: 'alpha', proposalId: proposal.id }).status, 'proposed');
+
+  observations.correctMemoryObservation(store, {
+    profileId: 'alpha',
+    observationId: conflict.id,
+    replacement: {
+      reasonCodes: ['role_fit'],
+      signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+      publicExplanation: '',
+      privateNote: '',
+    },
+    reason: 'Correct ambient polarity.',
+    referenceId: 'ambient-conflict-correction',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T13:00:00.000Z',
+  });
+  const afterCorrection = countRows(store);
+  const replay = api.createMemoryProposal(store, input);
+  assert.equal(replay.id, proposal.id);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(countRows(store), afterCorrection);
+  assert.equal(api.transitionMemoryProposal(store, transitionArgs(proposal.id, 'accept', 'accept-ambient-corrected')).toStatus, 'accepted');
+
+  const [laterConflict] = await seedSearchObservations(store, {
+    count: 1,
+    polarity: 'avoid',
+    referencePrefix: 'ambient-later-conflict',
+  });
+  const blocked = api.resolveActiveMemoryRules(store, { profileId: 'alpha', domain: 'search', scope: 'search', asOf: NOW });
+  assert.deepEqual(blocked.rules, []);
+  assert.equal(blocked.excluded.some(item => item.proposalId === proposal.id && item.reason === 'conflict_present'), true);
+  observations.correctMemoryObservation(store, {
+    profileId: 'alpha',
+    observationId: laterConflict.id,
+    replacement: {
+      reasonCodes: ['role_fit'],
+      signals: [{ field: 'role_family', polarity: 'prefer', value: 'Product Manager', match: 'exact' }],
+      publicExplanation: '',
+      privateNote: '',
+    },
+    reason: 'Correct later ambient polarity.',
+    referenceId: 'ambient-later-conflict-correction',
+    actor: 'user',
+    source: 'cli',
+    occurredAt: '2026-07-24T14:00:00.000Z',
+  });
+  const restored = api.resolveActiveMemoryRules(store, { profileId: 'alpha', domain: 'search', scope: 'search', asOf: NOW });
+  assert.deepEqual(restored.rules.map(item => item.id), [proposal.id]);
   store.db.close();
 });
 

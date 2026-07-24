@@ -187,7 +187,7 @@ function proposalProjection(store, row, { includeEvidence = true, includeHistory
   return projection;
 }
 
-function allPublicObservations(store) {
+function allPublicObservations(store, nowDate = new Date()) {
   const observations = [];
   for (const { id: profileId } of all(store, 'SELECT id FROM profiles ORDER BY id')) {
     const listed = listMemoryObservations(store, {
@@ -195,7 +195,7 @@ function allPublicObservations(store) {
       sinceDays: null,
       includeHistory: true,
       includePrivateNotes: false,
-      nowDate: new Date(),
+      nowDate,
     });
     for (const item of listed.observations) observations.push(item);
     for (const item of listed.history || []) observations.push(item);
@@ -342,8 +342,7 @@ function artifactScopeEligible(store, observation, scope) {
 
 function contradictsSearchRule(observation, normalized) {
   if (normalized.domain !== 'search'
-    || citationSchema(observation) !== CAREER_MEMORY_OBSERVATION_SCHEMA
-    || !observation.current) return false;
+    || citationSchema(observation) !== CAREER_MEMORY_OBSERVATION_SCHEMA) return false;
   const expectedRuleKey = memoryRuleKey(normalized);
   const expectedConflictKey = memoryConflictKey(normalized);
   return (observation.signals || []).some(signal => {
@@ -358,25 +357,36 @@ function contradictsSearchRule(observation, normalized) {
   });
 }
 
+function observationCurrentAt(observation, observations, asOf) {
+  const occurredAt = dateValue(observation.occurredAt, 'observation.occurredAt');
+  if (occurredAt > asOf) return false;
+  return !observations.some(candidate => candidate.supersedesObservationId === observation.id
+    && dateValue(candidate.occurredAt, 'observation.occurredAt') <= asOf);
+}
+
+function hasAmbientConflictFor(store, profileId, normalized, asOf) {
+  if (normalized.domain !== 'search') return false;
+  const observations = allPublicObservations(store, asOf);
+  return observations.some(observation => {
+    if (observation.profileId !== profileId || sourceWeight(observation) === 0
+      || !observationCurrentAt(observation, observations, asOf)
+      || !contradictsSearchRule(observation, normalized)) return false;
+    const occurredAt = dateValue(observation.occurredAt, 'evidence.occurredAt');
+    return asOf.getTime() - occurredAt.getTime() <= evidenceFreshnessDays(observation) * DAY_MS;
+  });
+}
+
 function hasAmbientConflict(store, row, asOf) {
-  if (row.domain !== 'search') return false;
-  const normalized = {
+  return hasAmbientConflictFor(store, row.profile_id, {
     domain: row.domain,
     scope: row.scope,
     ruleType: row.rule_type,
     value: parseJson(row.value_json, {}),
-  };
-  return allPublicObservations(store).some(observation => {
-    if (observation.profileId !== row.profile_id || sourceWeight(observation) === 0
-      || !contradictsSearchRule(observation, normalized)) return false;
-    const occurredAt = dateValue(observation.occurredAt, 'evidence.occurredAt');
-    return occurredAt <= asOf
-      && asOf.getTime() - occurredAt.getTime() <= evidenceFreshnessDays(observation) * DAY_MS;
-  });
+  }, asOf);
 }
 
-function resolveProposalEvidence(store, normalized, createdAt, { includeUncitedConflicts = true } = {}) {
-  const observations = allPublicObservations(store);
+function resolveProposalEvidence(store, normalized, createdAt) {
+  const observations = allPublicObservations(store, dateValue(createdAt, 'createdAt'));
   const byIdentity = new Map();
   for (const observation of observations) {
     const key = evidenceIdentity(citationSchema(observation), observation.id);
@@ -435,31 +445,6 @@ function resolveProposalEvidence(store, normalized, createdAt, { includeUncitedC
       evidenceHash: observation.sourceEntity.contentHash,
     });
   }
-  if (includeUncitedConflicts && normalized.domain === 'search') {
-    const identities = new Set(resolved.map(item => evidenceIdentity(item.observationSchema, item.observationId)));
-    const created = dateValue(createdAt, 'createdAt');
-    for (const observation of observations) {
-      const schema = citationSchema(observation);
-      const identity = evidenceIdentity(schema, observation.id);
-      if (observation.profileId !== profileId || identities.has(identity)
-        || sourceWeight(observation) === 0 || !contradictsSearchRule(observation, normalized)) continue;
-      const occurredAt = dateValue(observation.occurredAt, 'evidence.occurredAt');
-      if (occurredAt > created || created.getTime() - occurredAt.getTime() > evidenceFreshnessDays(observation) * DAY_MS) continue;
-      resolved.push({
-        observation,
-        observationSchema: schema,
-        observationId: observation.id,
-        sourceEntityType: observation.sourceEntity.type,
-        sourceEntityId: observation.sourceEntity.id,
-        sourceVersionId: observation.sourceEntity.versionId,
-        occurredAt: observation.occurredAt,
-        polarity: 'conflict',
-        weight: sourceWeight(observation),
-        evidenceHash: observation.sourceEntity.contentHash,
-      });
-      identities.add(identity);
-    }
-  }
   resolved.sort((left, right) => compareText(left.observationSchema, right.observationSchema)
     || compareText(left.observationId, right.observationId)
     || compareText(left.polarity, right.polarity));
@@ -498,11 +483,9 @@ function evidenceMetrics(evidence) {
     confidenceBand: confidenceBand(confidenceMilli),
     conflictState: conflictWeight > 0 ? 'present' : 'none',
     ordinaryEvidence: supports.length >= 3
-      && directSupportCount >= 1
       && supportWeight >= 4
       && sourceRoots.size >= 2
-      && dates.size >= 2
-      && conflictWeight === 0,
+      && dates.size >= 2,
   };
 }
 
@@ -531,16 +514,21 @@ function validateAssetReferences(store, prepared) {
   }
 }
 
-function prepareProposal(store, value, { includeUncitedConflicts = true } = {}) {
+function prepareProposal(store, value, { conflictState = null } = {}) {
   const normalized = normalizeMemoryProposalInput(value);
   const createdAt = normalized.createdAt || new Date().toISOString();
   if (protectedTarget(normalized)) fail('memory_protected_target', 'Protected or sensitive targeting is not allowed in career memory guidance.');
-  const { profileId, resolved } = resolveProposalEvidence(store, normalized, createdAt, { includeUncitedConflicts });
+  const { profileId, resolved } = resolveProposalEvidence(store, normalized, createdAt);
   const hasAssociationEvidence = resolved.some(item => UPSTREAM_SCHEMAS.has(item.observationSchema));
   if (hasAssociationEvidence && !normalized.rationale.toLowerCase().includes('observed association, not cause')) {
     fail('memory_causal_rationale_required', 'Association evidence requires the phrase “observed association, not cause”.');
   }
-  const metrics = evidenceMetrics(resolved);
+  const evidenceOnlyMetrics = evidenceMetrics(resolved);
+  const ambientConflict = hasAmbientConflictFor(store, profileId, normalized, dateValue(createdAt, 'createdAt'));
+  const metrics = {
+    ...evidenceOnlyMetrics,
+    conflictState: conflictState || (evidenceOnlyMetrics.conflictState === 'present' || ambientConflict ? 'present' : 'none'),
+  };
   const exemplarException = normalized.ruleType === 'approved_exemplar'
     && resolved.length === 1
     && resolved[0].polarity === 'support'
@@ -600,6 +588,7 @@ function prepareProposal(store, value, { includeUncitedConflicts = true } = {}) 
     profileId,
     resolved,
     metrics,
+    explicitConflictState: evidenceOnlyMetrics.conflictState,
     exemplarException,
     evidenceHash,
     ruleKey,
@@ -850,7 +839,7 @@ function storedPrepared(store, row) {
     referenceId: transitionRows(store, row.id, row.profile_id)[0].reference_id,
     createdAt: row.created_at,
   };
-  const prepared = prepareProposal(store, normalized, { includeUncitedConflicts: false });
+  const prepared = prepareProposal(store, normalized, { conflictState: row.conflict_state });
   if (prepared.profileId !== row.profile_id || prepared.proposalHash !== row.proposal_hash || prepared.evidenceHash !== row.evidence_hash) {
     fail('memory_proposal_integrity_invalid', `Proposal ${row.id} no longer matches its immutable hashes.`, { proposalId: row.id });
   }
@@ -863,7 +852,7 @@ function validateAcceptance(store, row, nowDate) {
   if (now > dateValue(row.evidence_fresh_until, 'evidenceFreshUntil')) {
     fail('memory_evidence_stale', `Proposal ${row.id} evidence is stale.`, { proposalId: row.id });
   }
-  if (row.conflict_state === 'present' || hasAmbientConflict(store, row, now)) {
+  if (prepared.explicitConflictState === 'present' || hasAmbientConflict(store, row, now)) {
     fail('memory_conflict_present', `Proposal ${row.id} has contradictory evidence.`, { proposalId: row.id });
   }
   if (!prepared.exemplarException && !prepared.metrics.ordinaryEvidence) {
@@ -887,8 +876,9 @@ function acceptedRows(store, profileId) {
 }
 
 function proposalValidity(store, row, asOf) {
+  let prepared;
   try {
-    storedPrepared(store, row);
+    prepared = storedPrepared(store, row);
   } catch (error) {
     const reason = error.code === 'memory_proof_ineligible'
       ? 'proof_ineligible'
@@ -899,7 +889,7 @@ function proposalValidity(store, row, asOf) {
           : 'evidence_invalid';
     return { valid: false, reason };
   }
-  if (row.conflict_state === 'present' || hasAmbientConflict(store, row, asOf)) return { valid: false, reason: 'conflict_present' };
+  if (prepared.explicitConflictState === 'present' || hasAmbientConflict(store, row, asOf)) return { valid: false, reason: 'conflict_present' };
   if (asOf > dateValue(row.evidence_fresh_until, 'evidenceFreshUntil')) return { valid: false, reason: 'evidence_stale' };
   const ttl = ACCEPTANCE_TTL_DAYS[row.domain];
   if (asOf > new Date(dateValue(row.accepted_at, 'acceptedAt').getTime() + ttl * DAY_MS)) return { valid: false, reason: 'acceptance_expired' };
