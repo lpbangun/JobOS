@@ -175,12 +175,12 @@ function foreignKeys(store, table) {
     .sort();
 }
 
-test('W07-MIGRATE-01 schema 13 migrates to schema 14 without rewriting protected truth', async t => {
+test('W07-MIGRATE-01 schema 13 migrates through schema 15 without rewriting protected truth', async t => {
   const before = await rawFixtureSnapshot();
   const root = workspaceFromFixture(t);
   const store = await openStore({ workspace: root });
 
-  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '14');
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '15');
   assert.deepEqual(
     all(store, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'interview_%' ORDER BY name").map(row => row.name),
     W07_TABLES,
@@ -226,7 +226,7 @@ test('W07-MIGRATE-01 schema 13 migrates to schema 14 without rewriting protected
   assert.ok(foreignKeys(store, 'interview_debrief_revisions').includes('interview_debriefs:debrief_id->id'));
 });
 
-test('W07-MIGRATE-02 schema 14 migration is byte and count stable after close and reopen', async t => {
+test('W07-MIGRATE-02 schema 15 is byte and count stable after close and reopen', async t => {
   const root = workspaceFromFixture(t);
   const databasePath = path.join(root, '.jobos', 'jobos.sqlite');
   const first = await openStore({ workspace: root });
@@ -236,13 +236,13 @@ test('W07-MIGRATE-02 schema 14 migration is byte and count stable after close an
   const firstBytes = readFileSync(databasePath);
 
   const reopened = await openStore({ workspace: root });
-  assert.equal(one(reopened, "SELECT value FROM meta WHERE key='schema_version'").value, '14');
+  assert.equal(one(reopened, "SELECT value FROM meta WHERE key='schema_version'").value, '15');
   assert.deepEqual(counts(reopened, [...PROTECTED_TABLES, ...W07_TABLES, 'audit_log']), firstCounts);
   for (const table of PROTECTED_TABLES) {
     assert.deepEqual(stableRows(reopened, table), firstRows[table], `${table} changed on reopen`);
   }
   reopened.db.close();
-  assert.deepEqual(readFileSync(databasePath), firstBytes, 'schema-14 reopen must not rewrite the SQLite file');
+  assert.deepEqual(readFileSync(databasePath), firstBytes, 'schema-15 reopen must not rewrite the SQLite file');
 });
 
 test('W07-ISO-01 migration does not infer stories and ownership resolution is read-only', async t => {
