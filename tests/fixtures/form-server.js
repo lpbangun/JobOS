@@ -62,6 +62,7 @@ const ROUTES = {
   '/application-changed.html': 'application-changed.html',
   '/application-unsupported.html': 'application-unsupported.html',
   '/application-configured.html': 'application-configured.html',
+  '/application-iframe-configured.html': 'application-iframe-configured.html',
   '/application-login-confirmation.html': 'application-login-confirmation.html',
   '/application-uncertain.html': 'application-uncertain.html',
   '/application-preexisting.html': 'application-preexisting.html',

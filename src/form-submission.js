@@ -156,7 +156,13 @@ async function activateSelectedSubmit(page, snapshot, onActivated, {
   }
   if (!readiness.valid) throw submissionError('human_action_required', 'Required human-owned fields were not completed before the submit deadline; no submit control was activated');
   const before = await readConfirmationMarker(frame);
-  const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: evidenceTimeoutMs }).catch(() => null);
+  // Navigation waiting must target the selected submitting browsing context.
+  // For an iframe-hosted form the submit navigates the frame, not the top
+  // page; page.waitForNavigation would never resolve and the caller would read
+  // confirmation evidence from the wrong document. frame.waitForNavigation is
+  // identical to page.waitForNavigation when the selected frame is the main
+  // frame, so main-frame behavior is preserved.
+  const navigation = frame.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: evidenceTimeoutMs }).catch(() => null);
   onActivated();
   const activation = await frame.evaluate(ordinal => {
     const form = [...document.forms][ordinal];
@@ -174,7 +180,7 @@ async function activateSelectedSubmit(page, snapshot, onActivated, {
     };
   }, formOrdinal);
   if (!activation.activated) throw submissionError('submit_control_not_found', 'The selected application form has no bounded submit control');
-  return { response: await navigation, before, ...activation };
+  return { response: await navigation, before, frame, ...activation };
 }
 
 function attemptView(row) {
@@ -302,12 +308,12 @@ export async function submitApplicationForm(s, {
         waitForHumanFields: (packet.form.humanActionFieldKeys || []).length > 0,
         evidenceTimeoutMs: Math.min(Math.max(Number(navigationTimeoutMs) || 5_000, 250), 10_000)
       });
-      const after = await readConfirmationMarker(page);
+      const after = await readConfirmationMarker(activation.frame);
       return validateConfirmationEvidence({
         before: activation.before,
         after,
         initialTarget: frozenSnapshot.target,
-        finalUrl: page.url(),
+        finalUrl: activation.frame.url(),
         responseStatus: activation.response ? activation.response.status() : null,
         activation
       });
