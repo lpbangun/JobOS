@@ -225,6 +225,12 @@ test('TUI refresh observes an agent-side database mutation and shared capabiliti
   const externalTools = new Set(mcpToolNames());
   for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) assert.ok(externalTools.has(tool), `${tool} is missing from external MCP`);
   for (const tool of ['list_jobs', 'get_job_context', 'review_queue', 'discovery_health']) assert.ok(externalTools.has(tool));
+  for (const tool of ['list_interview_stories', 'get_interview_story', 'draft_interview_story', 'interview_prep', 'list_interview_debriefs', 'list_interview_observations']) {
+    assert.ok(externalTools.has(tool), `${tool} must be available to the ACP guest through its MCP catalog`);
+  }
+  for (const tool of ['verify_interview_story', 'retire_interview_story', 'add_interview_question_source', 'record_interview_debrief', 'correct_interview_debrief']) {
+    assert.equal(externalTools.has(tool), false, `${tool} must remain a direct trusted human surface`);
+  }
 });
 
 test('first-run and no-job states are honest, actionable, and do not invent content', async t => {

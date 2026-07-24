@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import initSqlJs from 'sql.js';
 import YAML from 'yaml';
 
@@ -13,6 +14,9 @@ import * as interview from '../src/interview.js';
 import { retireProof, supersedeProof } from '../src/profiles.js';
 import { id as deterministicId } from '../src/utils.js';
 import { rescheduleApplicationNextAction } from '../src/lifecycle.js';
+import { commandRegistry } from '../src/cli.js';
+import { callDomainTool, DOMAIN_TOOLS, DomainToolError } from '../src/domain-tools.js';
+import { mcpToolNames } from '../src/mcp.js';
 
 const require = createRequire(import.meta.url);
 const fixturePath = path.resolve('tests/fixtures/w07-schema13.sqlite');
@@ -50,6 +54,83 @@ function workspaceFromFixture(t) {
   mkdirSync(path.join(root, '.jobos'), { recursive: true });
   copyFileSync(fixturePath, path.join(root, '.jobos', 'jobos.sqlite'));
   return root;
+}
+const INTERVIEW_COMMAND_NAMES = Object.freeze([
+  'interview stories create',
+  'interview stories edit',
+  'interview stories verify',
+  'interview stories retire',
+  'interview stories list',
+  'interview stories show',
+  'interview questions add',
+  'interview questions list',
+  'interview prep',
+  'interview debrief record',
+  'interview debrief correct',
+  'interview debriefs',
+  'interview observations',
+]);
+const INTERVIEW_DOMAIN_TOOL_NAMES = Object.freeze([
+  'list_interview_stories',
+  'get_interview_story',
+  'draft_interview_story',
+  'verify_interview_story',
+  'retire_interview_story',
+  'add_interview_question_source',
+  'interview_prep',
+  'record_interview_debrief',
+  'correct_interview_debrief',
+  'list_interview_debriefs',
+  'list_interview_observations',
+]);
+const MCP_INTERVIEW_TOOL_NAMES = Object.freeze([
+  'list_interview_stories',
+  'get_interview_story',
+  'draft_interview_story',
+  'interview_prep',
+  'list_interview_debriefs',
+  'list_interview_observations',
+]);
+const MCP_DENIED_INTERVIEW_TOOL_NAMES = Object.freeze([
+  'verify_interview_story',
+  'retire_interview_story',
+  'add_interview_question_source',
+  'record_interview_debrief',
+  'correct_interview_debrief',
+]);
+
+function runW07Cli(root, args) {
+  return spawnSync(process.execPath, [
+    'src/cli.js',
+    ...args,
+    '--workspace',
+    root,
+    ...(args.includes('--json') ? [] : ['--json']),
+  ], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      JOBOS_LLM_PROVIDER: '',
+      JOBOS_LLM_MODEL: '',
+      JOBOS_LLM_API_KEY: '',
+      OPENAI_API_KEY: '',
+      ANTHROPIC_API_KEY: '',
+      OLLAMA_API_KEY: '',
+    },
+    encoding: 'utf8',
+  });
+}
+
+function cliJson(root, args) {
+  const result = runW07Cli(root, args);
+  assert.equal(result.status, 0, `${args.join(' ')}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+  return JSON.parse(result.stdout);
+}
+
+function writeJsonFixture(root, name, value) {
+  const file = path.join(root, name);
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+  return file;
 }
 
 async function rawFixtureSnapshot() {
@@ -2646,4 +2727,377 @@ test('W07-DEBRIEF-05 empty references never imply replay identity', async t => {
       { id: second.id, reference_id: '' },
     ],
   );
+});
+
+test('W07-CLI-01 exact registry and subprocess routes preserve usage, ownership, provenance, and history contracts', async t => {
+  assert.deepEqual(
+    commandRegistry.filter(command => command.name.startsWith('interview ')).map(command => command.name),
+    INTERVIEW_COMMAND_NAMES,
+  );
+  const root = workspaceFromFixture(t);
+  const missingFile = runW07Cli(root, [
+    'interview', 'stories', 'create', '--profile', 'profile_w07_alpha',
+  ]);
+  assert.equal(missingFile.status, 2);
+  assert.deepEqual(JSON.parse(missingFile.stderr), {
+    ok: false,
+    error: {
+      code: 'usage_error',
+      type: 'usage',
+      message: 'Missing --file <story.json>',
+    },
+  });
+  const invalidFile = path.join(root, 'invalid-story.json');
+  writeFileSync(invalidFile, '{"title":');
+  const invalidJson = runW07Cli(root, [
+    'interview', 'stories', 'create', '--profile', 'profile_w07_alpha',
+    '--file', invalidFile,
+  ]);
+  assert.equal(invalidJson.status, 2);
+  assert.deepEqual(JSON.parse(invalidJson.stderr), {
+    ok: false,
+    error: {
+      code: 'usage_error',
+      type: 'usage',
+      message: `Invalid JSON file ${invalidFile}: Unexpected end of JSON input`,
+    },
+  });
+
+  const storyFile = writeJsonFixture(root, 'story.json', storyInput({
+    profileId: 'profile_w07_beta',
+    storyId: 'spoofed-story',
+    source: 'acp',
+  }));
+  const created = cliJson(root, [
+    'interview', 'stories', 'create', '--profile', 'profile_w07_alpha',
+    '--file', storyFile,
+  ]);
+  assert.equal(created.profileId, 'profile_w07_alpha');
+  assert.equal(created.currentRevision.actor, 'user');
+  assert.equal(created.currentRevision.source, 'cli');
+  assert.equal(created.currentRevision.revision, 1);
+
+  const shown = cliJson(root, [
+    'interview', 'stories', 'show', created.id, '--profile', 'profile_w07_alpha',
+  ]);
+  const { history: createdHistory, ...createdWithoutHistory } = created;
+  assert.equal(createdHistory.length, 1);
+  assert.deepEqual(shown, createdWithoutHistory);
+  const verified = cliJson(root, [
+    'interview', 'stories', 'verify', created.id, '--profile', 'profile_w07_alpha',
+    '--revision', '1', '--confirm-fields', interview.INTERVIEW_STORY_CONTENT_FIELDS.join(','),
+  ]);
+  assert.equal(verified.currentRevision.revision, 2);
+  assert.equal(verified.currentRevision.state, 'verified');
+  assert.equal(verified.currentRevision.actor, 'user');
+  assert.equal(verified.currentRevision.source, 'cli');
+
+  const editFile = writeJsonFixture(root, 'story-edit.json', storyInput({
+    profileId: 'profile_w07_beta',
+    storyId: 'spoofed-story',
+    title: 'Leading a platform launch under a fixed deadline',
+    source: 'mcp',
+  }));
+  const edited = cliJson(root, [
+    'interview', 'stories', 'edit', created.id, '--profile', 'profile_w07_alpha',
+    '--file', editFile,
+  ]);
+  assert.equal(edited.currentRevision.revision, 3);
+  assert.equal(edited.currentRevision.source, 'cli');
+  assert.equal(edited.activeVerifiedRevision.revision, 2);
+  const historical = cliJson(root, [
+    'interview', 'stories', 'show', created.id, '--profile', 'profile_w07_alpha',
+    '--revision', '2',
+  ]);
+  assert.equal(historical.storyId, created.id);
+  assert.equal(historical.revision, 2);
+  assert.equal(historical.state, 'verified');
+  const stories = cliJson(root, [
+    'interview', 'stories', 'list', '--profile', 'profile_w07_alpha', '--history',
+  ]);
+  assert.deepEqual(stories.stories[0].history.map(revision => revision.revision), [1, 2, 3]);
+
+  const questionFile = writeJsonFixture(root, 'question.json', questionInput({
+    profileId: 'profile_w07_beta',
+    jobId: 'job_w07_beta',
+    applicationId: 'application_w07_beta',
+    source: 'acp',
+  }));
+  const question = cliJson(root, [
+    'interview', 'questions', 'add', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--file', questionFile,
+  ]);
+  assert.equal(question.profileId, 'profile_w07_alpha');
+  assert.equal(question.jobId, 'job_w07_alpha');
+  assert.equal(question.applicationId, 'application_w07_alpha');
+  assert.equal(question.actor, 'candidate');
+  assert.equal(question.source, 'cli');
+  const questions = cliJson(root, [
+    'interview', 'questions', 'list', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--stage', 'hiring-manager',
+    '--audience', 'hiring_manager',
+  ]);
+  assert.deepEqual(questions.currentSources.map(source => source.id), [question.id]);
+
+  const prep = cliJson(root, [
+    'interview', 'prep', '--application', 'application_w07_alpha',
+    '--stage', 'hiring-manager', '--audience', 'executive',
+  ]);
+  assert.equal(prep.pack.audience, 'executive');
+  const recordFile = writeJsonFixture(root, 'debrief.json', {
+    ...debriefInput(verified),
+    profileId: 'profile_w07_beta',
+    jobId: 'job_w07_beta',
+    applicationId: 'application_w07_beta',
+    debriefId: 'spoofed-debrief',
+    source: 'mcp',
+  });
+  const recorded = cliJson(root, [
+    'interview', 'debrief', 'record', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--file', recordFile,
+  ]);
+  assert.equal(recorded.profileId, 'profile_w07_alpha');
+  assert.equal(recorded.jobId, 'job_w07_alpha');
+  assert.equal(recorded.applicationId, 'application_w07_alpha');
+  assert.equal(recorded.currentRevision.actor, 'candidate');
+  assert.equal(recorded.currentRevision.source, 'cli');
+
+  const correctFile = writeJsonFixture(root, 'debrief-correction.json', {
+    ...correctionInput(verified, recorded),
+    profileId: 'profile_w07_beta',
+    jobId: 'job_w07_beta',
+    applicationId: 'application_w07_beta',
+    debriefId: 'spoofed-debrief',
+    targetRevision: 99,
+    reason: 'Spoofed file reason.',
+    source: 'acp',
+  });
+  const corrected = cliJson(root, [
+    'interview', 'debrief', 'correct', recorded.id, '--profile', 'profile_w07_alpha',
+    '--file', correctFile, '--reason', 'Corrected from direct human review.',
+  ]);
+  assert.equal(corrected.currentRevision.revision, 2);
+  assert.equal(corrected.currentRevision.correctionReason, 'Corrected from direct human review.');
+  assert.equal(corrected.currentRevision.source, 'cli');
+  const debriefs = cliJson(root, [
+    'interview', 'debriefs', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--history',
+  ]);
+  assert.equal(debriefs.debriefs[0].history.length, 2);
+  const observations = cliJson(root, [
+    'interview', 'observations', '--profile', 'profile_w07_alpha', '--since', '30',
+  ]);
+  assert.equal(observations.observations.length, 2);
+  assert.ok(observations.observations.every(observation => !Object.hasOwn(observation, 'notes')));
+  assert.doesNotMatch(JSON.stringify(observations), /Private (?:corrected )?debrief note/);
+
+  const retired = cliJson(root, [
+    'interview', 'stories', 'retire', created.id, '--profile', 'profile_w07_alpha',
+    '--reason', 'No longer representative.',
+  ]);
+  assert.equal(retired.currentRevision.state, 'retired');
+  assert.equal(retired.currentRevision.actor, 'user');
+  assert.equal(retired.currentRevision.source, 'cli');
+
+  const mismatch = runW07Cli(root, [
+    'interview', 'stories', 'show', created.id, '--profile', 'profile_w07_beta',
+  ]);
+  assert.equal(mismatch.status, 1);
+  assert.deepEqual(JSON.parse(mismatch.stderr), {
+    ok: false,
+    error: {
+      code: 'interview_story_profile_mismatch',
+      type: 'validation',
+      message: `Interview story ${created.id} belongs to profile profile_w07_alpha, not profile_w07_beta.`,
+      details: {},
+    },
+  });
+  const nonsumericSince = runW07Cli(root, [
+    'interview', 'observations', '--profile', 'profile_w07_alpha', '--since', 'nope',
+  ]);
+  assert.equal(nonsumericSince.status, 2);
+  assert.deepEqual(JSON.parse(nonsumericSince.stderr), {
+    ok: false,
+    error: {
+      code: 'usage_error',
+      type: 'usage',
+      message: 'Invalid --since: nope',
+    },
+  });
+  const zeroSince = runW07Cli(root, [
+    'interview', 'observations', '--profile', 'profile_w07_alpha', '--since', '0',
+  ]);
+  assert.equal(zeroSince.status, 2);
+  assert.deepEqual(JSON.parse(zeroSince.stderr), {
+    ok: false,
+    error: {
+      code: 'usage_error',
+      type: 'usage',
+      message: 'Invalid --since: 0',
+    },
+  });
+});
+
+test('W07-DOMAIN-01 exact tools route through interview APIs with explicit trusted and mediated attribution', async t => {
+  assert.deepEqual(
+    DOMAIN_TOOLS.filter(tool => tool.name.includes('interview')).map(tool => tool.name),
+    INTERVIEW_DOMAIN_TOOL_NAMES,
+  );
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const drafted = await callDomainTool(store, 'draft_interview_story', storyInput({
+    actor: 'user',
+    source: 'cli',
+  }), { source: 'mcp' });
+  assert.equal(drafted.currentRevision.actor, 'mcp');
+  assert.equal(drafted.currentRevision.source, 'mcp');
+  assert.ok(Object.values(drafted.currentRevision.fieldProvenance).every(entry =>
+    entry.origin === 'agent' && entry.actor === 'mcp' && entry.source === 'mcp'));
+  const listedDrafts = await callDomainTool(store, 'list_interview_stories', {
+    profileId: 'profile_w07_alpha',
+    includeHistory: true,
+  }, { source: 'acp' });
+  assert.deepEqual(listedDrafts.stories.map(story => story.id), [drafted.id]);
+  const fetched = await callDomainTool(store, 'get_interview_story', {
+    profileId: 'profile_w07_alpha',
+    storyId: drafted.id,
+    includeHistory: true,
+  }, { source: 'mcp' });
+  assert.equal(fetched.id, drafted.id);
+  const verified = await callDomainTool(store, 'verify_interview_story', {
+    profileId: 'profile_w07_alpha',
+    storyId: drafted.id,
+    revision: 1,
+    confirmedFields: interview.INTERVIEW_STORY_CONTENT_FIELDS,
+    actor: 'user',
+  }, { source: 'cli' });
+  assert.equal(verified.currentRevision.state, 'verified');
+  assert.equal(verified.currentRevision.source, 'cli');
+
+  const question = await callDomainTool(store, 'add_interview_question_source', questionInput({
+    source: 'mcp',
+  }), { source: 'cli' });
+  assert.equal(question.source, 'cli');
+  const prep = await callDomainTool(store, 'interview_prep', {
+    applicationId: 'application_w07_alpha',
+    stage: 'hiring-manager',
+    audience: 'executive',
+  }, { source: 'mcp' });
+  assert.equal(prep.pack.audience, 'executive');
+  const recorded = await callDomainTool(store, 'record_interview_debrief', debriefInput(verified, {
+    source: 'mcp',
+  }), { source: 'cli' });
+  assert.equal(recorded.currentRevision.source, 'cli');
+  const corrected = await callDomainTool(store, 'correct_interview_debrief', correctionInput(
+    verified,
+    recorded,
+    { source: 'acp' },
+  ), { source: 'cli' });
+  assert.equal(corrected.currentRevision.source, 'cli');
+  const debriefs = await callDomainTool(store, 'list_interview_debriefs', {
+    profileId: 'profile_w07_alpha',
+    applicationId: 'application_w07_alpha',
+    includeHistory: true,
+  }, { source: 'acp' });
+  assert.equal(debriefs.debriefs[0].history.length, 2);
+  const observations = await callDomainTool(store, 'list_interview_observations', {
+    profileId: 'profile_w07_alpha',
+    sinceDays: 30,
+  }, { source: 'mcp' });
+  assert.equal(observations.observations.length, 2);
+  assert.ok(observations.observations.every(observation => !Object.hasOwn(observation, 'notes')));
+  const retired = await callDomainTool(store, 'retire_interview_story', {
+    profileId: 'profile_w07_alpha',
+    storyId: drafted.id,
+    reason: 'Replaced by a stronger example.',
+    actor: 'user',
+  }, { source: 'tui' });
+  assert.equal(retired.currentRevision.state, 'retired');
+  assert.equal(retired.currentRevision.source, 'tui');
+});
+
+test('W07-POLICY-01 MCP and ACP catalogs and runtime independently enforce direct human interview input', async t => {
+  assert.deepEqual(
+    mcpToolNames().filter(name => name.includes('interview')),
+    MCP_INTERVIEW_TOOL_NAMES,
+  );
+  for (const name of MCP_DENIED_INTERVIEW_TOOL_NAMES) {
+    assert.equal(mcpToolNames().includes(name), false, `${name} must not be advertised`);
+  }
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const before = counts(store, [...W07_TABLES, 'audit_log']);
+  const message = 'Interview verification, retirement, sourced questions, and debrief recording or correction require trusted CLI or TUI human input.';
+  for (const source of ['mcp', 'acp']) {
+    for (const name of MCP_DENIED_INTERVIEW_TOOL_NAMES) {
+      await assert.rejects(
+        callDomainTool(store, name, {}, { source }),
+        error => error instanceof DomainToolError
+          && error.code === 'human_interview_input_required'
+          && error.message === message
+          && error.details.tool === name
+          && error.details.source === source
+          && error.details.status === null
+          && error.details.externalSideEffect === 'none',
+      );
+    }
+  }
+  assert.deepEqual(counts(store, [...W07_TABLES, 'audit_log']), before);
+});
+
+test('W07-MIRROR-01 routed writes regenerate stable mirrors and routed failures have zero persistent delta', async t => {
+  const root = workspaceFromFixture(t);
+  const storyFile = writeJsonFixture(root, 'mirror-story.json', storyInput());
+  const created = cliJson(root, [
+    'interview', 'stories', 'create', '--profile', 'profile_w07_alpha',
+    '--file', storyFile,
+  ]);
+  const verified = cliJson(root, [
+    'interview', 'stories', 'verify', created.id, '--profile', 'profile_w07_alpha',
+    '--revision', '1', '--confirm-fields', interview.INTERVIEW_STORY_CONTENT_FIELDS.join(','),
+  ]);
+  const questionFile = writeJsonFixture(root, 'mirror-question.json', questionInput());
+  cliJson(root, [
+    'interview', 'questions', 'add', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--file', questionFile,
+  ]);
+  const recordFile = writeJsonFixture(root, 'mirror-debrief.json', debriefInput(verified));
+  const recorded = cliJson(root, [
+    'interview', 'debrief', 'record', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--file', recordFile,
+  ]);
+  const correctionFile = writeJsonFixture(root, 'mirror-correction.json', correctionInput(verified, recorded));
+  cliJson(root, [
+    'interview', 'debrief', 'correct', recorded.id, '--profile', 'profile_w07_alpha',
+    '--file', correctionFile, '--reason', correctionInput(verified, recorded).reason,
+  ]);
+  const mirrors = [
+    storyMirrorPath(root),
+    questionMirrorPath(root),
+    debriefMirrorPath(root),
+    observationMirrorPath(root),
+  ];
+  const beforeBytes = new Map(mirrors.map(file => [file, readFileSync(file)]));
+  const beforeStore = await openStore({ workspace: root });
+  const beforeCounts = counts(beforeStore, [...W07_TABLES, 'audit_log']);
+  beforeStore.db.close();
+
+  const rejected = runW07Cli(root, [
+    'interview', 'debrief', 'correct', recorded.id, '--profile', 'profile_w07_beta',
+    '--file', correctionFile, '--reason', 'Cross-profile write must fail.',
+  ]);
+  assert.equal(rejected.status, 1);
+  assert.equal(JSON.parse(rejected.stderr).error.code, 'interview_debrief_profile_mismatch');
+  cliJson(root, [
+    'interview', 'stories', 'list', '--profile', 'profile_w07_alpha', '--history',
+  ]);
+  cliJson(root, [
+    'interview', 'debriefs', '--profile', 'profile_w07_alpha',
+    '--application', 'application_w07_alpha', '--history',
+  ]);
+
+  const reopened = await openStore({ workspace: root });
+  assert.deepEqual(counts(reopened, [...W07_TABLES, 'audit_log']), beforeCounts);
+  reopened.db.close();
+  for (const [file, bytes] of beforeBytes) assert.deepEqual(readFileSync(file), bytes);
 });

@@ -107,7 +107,7 @@ test('analytics lifecycle requires a profile and exposes observed analytics as J
 
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const names = mcpToolNames();
-  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','lifecycle_analytics','list_lifecycle_observations','interview_prep','weekly_review']) {
+  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','lifecycle_analytics','list_lifecycle_observations','list_interview_stories','get_interview_story','draft_interview_story','interview_prep','list_interview_debriefs','list_interview_observations','weekly_review']) {
     assert.ok(names.includes(name), `${name} missing from MCP tools`);
   }
   const { env } = makeRunner();
@@ -119,7 +119,7 @@ test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const response = JSON.parse(json);
   assert.ok(response.result.tools.some(t => t.name === 'interview_prep'));
   assert.equal(response.result.tools.length, names.length, 'stdio tools/list matches the policy-filtered MCP registry');
-  for (const name of ['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form']) {
+  for (const name of ['approve_artifact', 'reject_artifact', 'approve_contact', 'answers_add', 'create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form', 'verify_interview_story', 'retire_interview_story', 'add_interview_question_source', 'record_interview_debrief', 'correct_interview_debrief']) {
     assert.equal(response.result.tools.some(tool => tool.name === name), false, `${name} must not be advertised to MCP agents`);
   }
   const listJobs = response.result.tools.find(tool => tool.name === 'list_jobs');

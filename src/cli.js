@@ -19,7 +19,7 @@ import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRu
 import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
 import { lifecycleAnalytics, renderLifecycleAnalyticsMarkdown } from './lifecycle-analytics.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
-import { prepInterview } from './interview.js';
+import { createInterviewQuestionSource, createInterviewStory, correctInterviewDebrief, editInterviewStory, getInterviewDebrief, getInterviewStory, InterviewError, listInterviewDebriefs, listInterviewObservations, listInterviewQuestionSources, listInterviewStories, prepInterview, recordInterviewDebrief, retireInterviewStory, verifyInterviewStory } from './interview.js';
 import { startMcp } from './mcp.js';
 import { configFromFlags, createCompanySearch, createSearch, listSearches, listWatchlist, migrateLegacyWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
 import { createAutomation, listAutomations, setAutomationEnabled } from './scheduler/store.js';
@@ -133,7 +133,19 @@ export const commandRegistry = [
   cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'Show the outreach-thread context for due follow-up tasks; use tasks due --type followup --created-by outreach as the canonical filtered query.'),
   cmd(['outreach', 'outcome', 'record'], 'jobos outreach outcome record --thread <id> --profile <profile-id> --type <type> --occurred-at <rfc3339> [--window-end <rfc3339>] [--channel <channel>] [--note <text>] [--reference <id>] [--supersedes <outcome-id>] [--correction-reason <text>] [--json]', 'Record an explicit local append-only outreach outcome observation; does not infer or cause an external action.', { flags: ['--thread <thread-id>', '--profile <profile-id>', '--type <outcome-type>', '--occurred-at <rfc3339>', '--window-end <rfc3339>', '--channel <channel>', '--note <text>', '--reference <id>', '--supersedes <outcome-id>', '--correction-reason <text>'] }),
   cmd(['outreach', 'outcomes'], 'jobos outreach outcomes --profile <profile-id> [--since <days>] [--json]', 'List profile-scoped outreach outcome observations and correction history.', { flags: ['--profile <profile-id>', '--since <days>'] }),
-  cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
+  cmd(['interview', 'stories', 'create'], 'jobos interview stories create --profile <id> --file <story.json> --json', 'Create an attributed interview story draft.', { flags: ['--profile <id>', '--file <story.json>'] }),
+  cmd(['interview', 'stories', 'edit'], 'jobos interview stories edit <story-id> --profile <id> --file <story.json> --json', 'Append an attributed interview story draft revision.', { flags: ['--profile <id>', '--file <story.json>'] }),
+  cmd(['interview', 'stories', 'verify'], 'jobos interview stories verify <story-id> --profile <id> --revision <n> --confirm-fields <csv> --json', 'Verify an exact interview story revision with direct human confirmation.', { flags: ['--profile <id>', '--revision <n>', '--confirm-fields <csv>'] }),
+  cmd(['interview', 'stories', 'retire'], 'jobos interview stories retire <story-id> --profile <id> --reason <text> --json', 'Retire an interview story while preserving its revision history.', { flags: ['--profile <id>', '--reason <text>'] }),
+  cmd(['interview', 'stories', 'list'], 'jobos interview stories list --profile <id> [--history] --json', 'List profile-owned interview stories.', { flags: ['--profile <id>', '--history'] }),
+  cmd(['interview', 'stories', 'show'], 'jobos interview stories show <story-id> --profile <id> [--revision <n>] --json', 'Show a profile-owned interview story or exact revision.', { flags: ['--profile <id>', '--revision <n>'] }),
+  cmd(['interview', 'questions', 'add'], 'jobos interview questions add --profile <id> --application <id> --file <question.json> --json', 'Record a directly sourced interview question.', { flags: ['--profile <id>', '--application <id>', '--file <question.json>'] }),
+  cmd(['interview', 'questions', 'list'], 'jobos interview questions list --profile <id> --application <id> [--stage <stage>] [--audience <audience>] --json', 'List profile- and application-owned sourced interview questions.', { flags: ['--profile <id>', '--application <id>', '--stage <stage>', '--audience <audience>'] }),
+  cmd(['interview', 'prep'], 'jobos interview prep --application <id> --stage <stage> [--audience <audience>] [--output markdown] --json', 'Create an interview prep packet.', { output: 'object-or-markdown', flags: ['--application <id>', '--stage <stage>', '--audience <audience>', '--output markdown'] }),
+  cmd(['interview', 'debrief', 'record'], 'jobos interview debrief record --profile <id> --application <id> --file <debrief.json> --json', 'Record an attributed interview debrief observation.', { flags: ['--profile <id>', '--application <id>', '--file <debrief.json>'] }),
+  cmd(['interview', 'debrief', 'correct'], 'jobos interview debrief correct <debrief-id> --profile <id> --file <debrief.json> --reason <text> --json', 'Append a correction to an interview debrief.', { flags: ['--profile <id>', '--file <debrief.json>', '--reason <text>'] }),
+  cmd(['interview', 'debriefs'], 'jobos interview debriefs --profile <id> [--application <id>] [--history] --json', 'List full local interview debriefs.', { flags: ['--profile <id>', '--application <id>', '--history'] }),
+  cmd(['interview', 'observations'], 'jobos interview observations --profile <id> [--since <positive integer>] --json', 'List private-note-free attributed interview observations.', { flags: ['--profile <id>', '--since <positive integer>'] }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
   cmd(['analytics', 'lifecycle'], 'jobos analytics lifecycle --profile <profile> [--since 30] [--output markdown] [--json]', 'Report observed lifecycle analytics for one profile.', { output: 'object-or-markdown', flags: ['--profile <profile-id>', '--since <days>', '--output markdown'] }),
   cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
@@ -387,6 +399,39 @@ function numberFlag(flags, name, fallback, { min = 0 } = {}) {
   const n = Number(raw ?? fallback);
   if (!Number.isFinite(n) || n < min) usage(`Invalid --${name}: ${raw ?? fallback}`);
   return n;
+}
+
+function positiveIntegerFlag(flags, name) {
+  const raw = requireFlag(flags, name);
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) usage(`Invalid --${name}: ${raw}`);
+  return value;
+}
+
+function structuredJsonFile(flags, label) {
+  const file = String(requireFlag(flags, 'file', `--file <${label}>`));
+  let value;
+  try {
+    value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    usage(`Invalid JSON file ${file}: ${error.message}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    usage(`Invalid JSON file ${file}: expected an object`);
+  }
+  return value;
+}
+
+function cliDebriefPayload(value) {
+  const fieldProvenance = value.fieldProvenance && typeof value.fieldProvenance === 'object'
+    ? Object.fromEntries(Object.entries(value.fieldProvenance).map(([field, entry]) => [
+      field,
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? { ...entry, source: 'cli' }
+        : entry,
+    ]))
+    : value.fieldProvenance;
+  return { ...value, source: 'cli', fieldProvenance };
 }
 
 function parseConfig(flags) {
@@ -1131,11 +1176,165 @@ export async function main(argv = process.argv.slice(2)) {
     out(outreachDue(s));
     return;
   }
+  if (group === 'interview' && action === 'stories' && subaction === 'create') {
+    const payload = structuredJsonFile(flags, 'story.json');
+    out(createInterviewStory(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      storyId: undefined,
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'edit') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    const payload = structuredJsonFile(flags, 'story.json');
+    out(editInterviewStory(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'verify') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    out(verifyInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      revision: positiveIntegerFlag(flags, 'revision'),
+      confirmedFields: splitCsv(String(requireFlag(flags, 'confirm-fields', '--confirm-fields <csv>'))),
+      actor: 'user',
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'retire') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    out(retireInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+      actor: 'user',
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'list') {
+    out(listInterviewStories(s, {
+      profileId: needProfile(flags),
+      includeHistory: Boolean(flags.history),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'show') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    const revisionNumber = flags.revision == null ? null : positiveIntegerFlag(flags, 'revision');
+    const story = getInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      includeHistory: revisionNumber != null,
+    });
+    if (revisionNumber == null) {
+      out(story);
+      return;
+    }
+    const revision = story.history.find(item => item.revision === revisionNumber);
+    if (!revision) {
+      throw new InterviewError(
+        'interview_story_revision_unknown',
+        `Unknown revision ${revisionNumber} for interview story ${story.id}.`,
+      );
+    }
+    out(revision);
+    return;
+  }
+  if (group === 'interview' && action === 'questions' && subaction === 'add') {
+    const payload = structuredJsonFile(flags, 'question.json');
+    out(createInterviewQuestionSource(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      jobId: undefined,
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'questions' && subaction === 'list') {
+    out(listInterviewQuestionSources(s, {
+      profileId: needProfile(flags),
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      stage: flags.stage ? String(flags.stage) : null,
+      audience: flags.audience ? String(flags.audience) : null,
+    }));
+    return;
+  }
   if (group === 'interview' && action === 'prep') {
     const applicationId = requireFlag(flags, 'application');
-    const r = await prepInterview(s, String(applicationId), flags.stage ? String(flags.stage) : 'interview');
+    const r = await prepInterview(
+      s,
+      String(applicationId),
+      flags.stage ? String(flags.stage) : 'interview',
+      { audience: flags.audience ? String(flags.audience) : undefined },
+    );
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
+    return;
+  }
+  if (group === 'interview' && action === 'debrief' && subaction === 'record') {
+    const payload = cliDebriefPayload(structuredJsonFile(flags, 'debrief.json'));
+    out(recordInterviewDebrief(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      jobId: undefined,
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      debriefId: undefined,
+      targetRevision: undefined,
+      reason: undefined,
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'debrief' && subaction === 'correct') {
+    const debriefId = rest[0];
+    if (!debriefId) usage('Missing <debrief-id>');
+    const profileId = needProfile(flags);
+    const current = getInterviewDebrief(s, {
+      profileId,
+      debriefId: String(debriefId),
+      includeHistory: false,
+    });
+    const payload = cliDebriefPayload(structuredJsonFile(flags, 'debrief.json'));
+    out(correctInterviewDebrief(s, {
+      ...payload,
+      profileId,
+      debriefId: current.id,
+      jobId: current.jobId,
+      applicationId: current.applicationId,
+      interviewStage: current.interviewStage,
+      audience: current.audience,
+      referenceId: current.referenceId,
+      targetRevision: current.currentRevision.revision,
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'debriefs') {
+    out(listInterviewDebriefs(s, {
+      profileId: needProfile(flags),
+      applicationId: flags.application ? String(flags.application) : null,
+      includeHistory: Boolean(flags.history),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'observations') {
+    out(listInterviewObservations(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? null : positiveIntegerFlag(flags, 'since'),
+    }));
     return;
   }
   if (group === 'analytics' && action === 'funnel') {

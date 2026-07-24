@@ -10,7 +10,7 @@ import { appCreate, appUpdate, openTasks, recommendResearch, taskView } from './
 import { weekly } from './analytics.js';
 import { lifecycleAnalytics } from './lifecycle-analytics.js';
 import { listLifecycleObservations } from './lifecycle.js';
-import { prepInterview } from './interview.js';
+import { INTERVIEW_AUDIENCES, INTERVIEW_STAGES, INTERVIEW_STORY_CONTENT_FIELDS, createInterviewQuestionSource, createInterviewStory, correctInterviewDebrief, getInterviewDebrief, getInterviewStory, listInterviewDebriefs, listInterviewObservations, listInterviewStories, prepInterview, recordInterviewDebrief, retireInterviewStory, verifyInterviewStory } from './interview.js';
 import { getPostingLiveness, importUrl, listJobs } from './jobs.js';
 import { listSearches, runSavedSearch } from './discovery.js';
 import { listAutomations } from './scheduler/store.js';
@@ -51,6 +51,54 @@ export class DomainToolError extends Error {
 const object = properties => ({ type: 'object', properties });
 const required = (properties, names) => ({ ...object(properties), required: names });
 const text = { type: 'string' };
+const boolean = { type: 'boolean' };
+const stringArray = { type: 'array', items: text };
+const interviewStoryProperties = {
+  profileId: text,
+  storyId: text,
+  title: text,
+  situation: text,
+  task: text,
+  action: text,
+  result: text,
+  reflection: text,
+  competencyTags: stringArray,
+  audienceTags: { type: 'array', items: { type: 'string', enum: INTERVIEW_AUDIENCES } },
+  fieldProvenance: { type: 'object' },
+  confirmedFields: { type: 'array', items: { type: 'string', enum: INTERVIEW_STORY_CONTENT_FIELDS } },
+  fieldEvidence: { type: 'object' },
+  actor: text,
+};
+const interviewQuestionProperties = {
+  profileId: text,
+  applicationId: text,
+  stage: { type: 'string', enum: INTERVIEW_STAGES },
+  audience: { type: 'string', enum: INTERVIEW_AUDIENCES },
+  questionText: text,
+  sourceKind: { type: 'string', enum: ['user_provided', 'recruiter_provided', 'interviewer_provided'] },
+  sourceRef: text,
+  actor: text,
+  supersedesSourceId: text,
+  correctionReason: text,
+};
+const interviewDebriefProperties = {
+  profileId: text,
+  debriefId: text,
+  applicationId: text,
+  interviewStage: { type: 'string', enum: INTERVIEW_STAGES },
+  audience: { type: 'string', enum: INTERVIEW_AUDIENCES },
+  referenceId: text,
+  targetRevision: { type: 'number' },
+  reason: text,
+  occurredAt: text,
+  actor: text,
+  observedQuestions: { type: 'array', items: { type: 'object' } },
+  observedOutcome: { type: 'object' },
+  proofGaps: { type: 'array', items: { type: 'object' } },
+  storyUses: { type: 'array', items: { type: 'object' } },
+  notes: text,
+  fieldProvenance: { type: 'object' },
+};
 const researchSources = {
   type: 'array',
   items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'github', 'gdelt', 'wayback', 'xai'] }
@@ -109,7 +157,17 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_tasks', description: 'List one profile task inbox ordered by due date, including future and undated tasks.', inputSchema: required({ profileId: text, type: text, createdBy: text }, ['profileId']) },
   { name: 'lifecycle_analytics', description: 'Report profile-owned observed lifecycle analytics with explicit denominators, cautions, and no causal claims.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
   { name: 'list_lifecycle_observations', description: 'List attributed profile-owned lifecycle status and immutable submission observations.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
-  { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application and stage.', inputSchema: required({ applicationId: text, stage: text }, ['applicationId']) },
+  { name: 'list_interview_stories', description: 'List profile-owned interview stories with optional append-only revision history.', inputSchema: required({ profileId: text, includeHistory: boolean }, ['profileId']) },
+  { name: 'get_interview_story', description: 'Read one profile-owned interview story with optional append-only revision history.', inputSchema: required({ profileId: text, storyId: text, includeHistory: boolean }, ['profileId', 'storyId']) },
+  { name: 'draft_interview_story', description: 'Create an attributed proof-linked interview story draft that still requires direct human verification.', inputSchema: required(interviewStoryProperties, ['profileId']) },
+  { name: 'verify_interview_story', description: 'Direct trusted human verification of an exact interview story draft revision.', inputSchema: required({ profileId: text, storyId: text, revision: { type: 'number' }, confirmedFields: stringArray, actor: text }, ['profileId', 'storyId', 'revision', 'confirmedFields', 'actor']) },
+  { name: 'retire_interview_story', description: 'Direct trusted human retirement of an interview story with a required reason.', inputSchema: required({ profileId: text, storyId: text, reason: text, actor: text }, ['profileId', 'storyId', 'reason', 'actor']) },
+  { name: 'add_interview_question_source', description: 'Record a directly sourced profile- and application-owned interview question.', inputSchema: required(interviewQuestionProperties, ['profileId', 'applicationId', 'stage', 'questionText', 'sourceKind', 'actor']) },
+  { name: 'interview_prep', description: 'Create an evidence-grounded interview prep packet for an application, stage, and optional audience.', inputSchema: required({ applicationId: text, stage: text, audience: { type: 'string', enum: INTERVIEW_AUDIENCES } }, ['applicationId']) },
+  { name: 'record_interview_debrief', description: 'Record a directly observed attributed interview debrief; no external action or causal inference.', inputSchema: required(interviewDebriefProperties, ['profileId', 'applicationId', 'interviewStage', 'audience', 'occurredAt', 'actor', 'observedQuestions', 'observedOutcome', 'proofGaps', 'storyUses', 'notes', 'fieldProvenance']) },
+  { name: 'correct_interview_debrief', description: 'Append a direct human correction to the exact current interview debrief revision.', inputSchema: required(interviewDebriefProperties, ['profileId', 'debriefId', 'targetRevision', 'reason', 'occurredAt', 'actor', 'observedQuestions', 'observedOutcome', 'proofGaps', 'storyUses', 'notes', 'fieldProvenance']) },
+  { name: 'list_interview_debriefs', description: 'List full local profile-owned interview debrief data with optional revision history.', inputSchema: required({ profileId: text, applicationId: text, includeHistory: boolean }, ['profileId']) },
+  { name: 'list_interview_observations', description: 'List attributed interview observations without private debrief notes.', inputSchema: required({ profileId: text, sinceDays: { type: 'number' } }, ['profileId']) },
   { name: 'weekly_review', description: 'Generate a local weekly review and funnel insights.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'answers_match', description: 'Match verified non-sensitive local answers to application questions.', inputSchema: required({ profileId: text, employer: text, questions: { type: 'array', items: { type: ['string', 'object'] } } }, ['profileId', 'questions']) },
   { name: 'answers_add', description: 'Save a human-provided answer for an application question. Restricted categories are stored redacted and never auto-filled. Agent mediation is denied.', inputSchema: required({ profileId: text, category: text, question: text, answer: text, sensitivity: text, reuseScope: text, verificationStatus: text, sourceRef: text, employer: text }, ['profileId', 'question', 'answer']) },
@@ -144,9 +202,77 @@ function allowAgentAttestation(options) {
   if (options.allowExternalAttestation === true) return true;
   return process.env.JOBOS_ALLOW_AGENT_ATTESTATION === '1';
 }
+const HUMAN_INTERVIEW_MUTATIONS = new Set([
+  'verify_interview_story',
+  'retire_interview_story',
+  'add_interview_question_source',
+  'record_interview_debrief',
+  'correct_interview_debrief',
+]);
+const HUMAN_INTERVIEW_INPUT_MESSAGE = 'Interview verification, retirement, sourced questions, and debrief recording or correction require trusted CLI or TUI human input.';
+
+function trustedInterviewSource(options) {
+  const source = mediationSource(options);
+  if (source === 'cli' || source === 'tui') return source;
+  throw new DomainToolError(
+    'human_interview_input_required',
+    HUMAN_INTERVIEW_INPUT_MESSAGE,
+    { tool: null, source, status: null, externalSideEffect: 'none' },
+  );
+}
+
+function attributedInterviewDraft(args, options) {
+  const source = mediationSource(options);
+  if (!['mcp', 'acp'].includes(source)) {
+    return {
+      ...args,
+      actor: args.actor || source,
+      source,
+    };
+  }
+  const supplied = args.fieldProvenance && typeof args.fieldProvenance === 'object'
+    ? args.fieldProvenance
+    : {};
+  const fieldProvenance = Object.fromEntries(INTERVIEW_STORY_CONTENT_FIELDS.map(field => [
+    field,
+    {
+      origin: 'agent',
+      actor: source,
+      source,
+      sourceRef: supplied[field]?.sourceRef ?? null,
+    },
+  ]));
+  return {
+    ...args,
+    actor: source,
+    source,
+    confirmedFields: [],
+    fieldProvenance,
+  };
+}
+
+function attributedInterviewDebrief(args, source) {
+  const fieldProvenance = args.fieldProvenance && typeof args.fieldProvenance === 'object'
+    ? Object.fromEntries(Object.entries(args.fieldProvenance).map(([field, entry]) => [
+      field,
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? { ...entry, source }
+        : entry,
+    ]))
+    : args.fieldProvenance;
+  return { ...args, source, fieldProvenance };
+}
+
 function enforcePolicy(name, args, options) {
   const source = mediationSource(options);
   if (!['acp', 'mcp'].includes(source)) return;
+  if (HUMAN_INTERVIEW_MUTATIONS.has(name)) {
+    throw new DomainToolError(
+      'human_interview_input_required',
+      HUMAN_INTERVIEW_INPUT_MESSAGE,
+      { tool: name, source, status: null, externalSideEffect: 'none' },
+    );
+  }
 
   // approve_contact is always denied for agent mediation regardless of attestation override
   if (name === 'approve_contact') {
@@ -454,7 +580,93 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
     profileId: args.profileId,
     sinceDays: args.sinceDays ?? 30,
   });
-  if (name === 'interview_prep') return await prepInterview(s, args.applicationId, args.stage || 'interview');
+  if (name === 'list_interview_stories') return listInterviewStories(s, {
+    profileId: args.profileId,
+    includeHistory: Boolean(args.includeHistory),
+  });
+  if (name === 'get_interview_story') return getInterviewStory(s, {
+    profileId: args.profileId,
+    storyId: args.storyId,
+    includeHistory: Boolean(args.includeHistory),
+  });
+  if (name === 'draft_interview_story') return createInterviewStory(
+    s,
+    attributedInterviewDraft(args, options),
+  );
+  if (name === 'verify_interview_story') {
+    const source = trustedInterviewSource(options);
+    return verifyInterviewStory(s, {
+      profileId: args.profileId,
+      storyId: args.storyId,
+      revision: args.revision,
+      confirmedFields: args.confirmedFields,
+      actor: args.actor,
+      source,
+    });
+  }
+  if (name === 'retire_interview_story') {
+    const source = trustedInterviewSource(options);
+    return retireInterviewStory(s, {
+      profileId: args.profileId,
+      storyId: args.storyId,
+      reason: args.reason,
+      actor: args.actor,
+      source,
+    });
+  }
+  if (name === 'add_interview_question_source') {
+    const source = trustedInterviewSource(options);
+    return createInterviewQuestionSource(s, {
+      ...args,
+      jobId: undefined,
+      source,
+    });
+  }
+  if (name === 'interview_prep') return await prepInterview(
+    s,
+    args.applicationId,
+    args.stage || 'interview',
+    { audience: args.audience || undefined },
+  );
+  if (name === 'record_interview_debrief') {
+    const source = trustedInterviewSource(options);
+    return recordInterviewDebrief(s, {
+      ...attributedInterviewDebrief(args, source),
+      jobId: undefined,
+      debriefId: undefined,
+      targetRevision: undefined,
+      reason: undefined,
+    });
+  }
+  if (name === 'correct_interview_debrief') {
+    const source = trustedInterviewSource(options);
+    const current = getInterviewDebrief(s, {
+      profileId: args.profileId,
+      debriefId: args.debriefId,
+      includeHistory: false,
+    });
+    return correctInterviewDebrief(s, {
+      ...attributedInterviewDebrief(args, source),
+      profileId: current.profileId,
+      debriefId: current.id,
+      jobId: current.jobId,
+      applicationId: current.applicationId,
+      interviewStage: current.interviewStage,
+      audience: current.audience,
+      referenceId: current.referenceId,
+      targetRevision: args.targetRevision,
+      reason: args.reason,
+    });
+  }
+  if (name === 'list_interview_debriefs') return listInterviewDebriefs(s, {
+    profileId: args.profileId,
+    applicationId: args.applicationId || null,
+    includeHistory: Boolean(args.includeHistory),
+  });
+  if (name === 'list_interview_observations') return listInterviewObservations(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays ?? null,
+  });
   if (name === 'weekly_review') {
     const result = weekly(s, args.profileId);
     return { runId: result.runId, path: result.path, metrics: result.metrics };
