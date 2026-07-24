@@ -2,6 +2,7 @@ import stripAnsiText from 'strip-ansi';
 import stringWidth from 'string-width';
 import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
+import { readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
@@ -14,6 +15,7 @@ import { rescheduleApplicationNextAction } from './lifecycle.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
+import { getInterviewDebrief } from './interview.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -122,6 +124,19 @@ function redraftCliHint(artifact, profileId) {
 function stripAnsi(value) {
   return stripAnsiText(String(value ?? ''));
 }
+function readStructuredJsonFile(file) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`Invalid JSON file ${file}: ${error.message}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid JSON file ${file}: expected an object`);
+  }
+  return value;
+}
+
 
 function crop(value, width) {
   const text = String(value ?? '').replace(/[\r\n]+/g, ' ');
@@ -645,6 +660,62 @@ function overlayPanel(model, state, width, height, color) {
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.approvalStatus} · ${item.jobId || 'no job'}`);
     } else body = ['Review queue empty.', 'Drafts stay human-gated.'];
     body.push('', keyHints('review'));
+  } else if (state.overlay === 'interviews') {
+    const interviews = model.interviews || {};
+    const counts = interviews.counts || {};
+    const application = interviews.selectedApplication;
+    const pack = application?.pack;
+    const debriefs = application?.debriefs?.items || [];
+    const stories = interviews.stories || [];
+    title = `INTERVIEWS · ${(model.profile?.name || 'NO PROFILE').toUpperCase()}`;
+    body = [
+      `stories ${counts.stories || 0} · verified ${counts.verified || 0} · stale ${counts.stale || 0} · draft/ineligible ${counts.draftIneligible || 0}`,
+      `debriefs ${counts.debriefs || 0} · current revisions ${counts.currentDebriefRevisions || 0}`,
+      application
+        ? `selected application ${application.applicationId} · job ${application.jobId}`
+        : 'selected application none',
+      pack
+        ? `pack ${pack.stage}/${pack.audience} · covered ${pack.coveredCount} · gaps ${pack.gapCount} · items ${pack.itemCount}`
+        : 'pack none · run :prep <stage> [audience]',
+      '',
+      `STORIES (${stories.length})`
+    ];
+    body.push(...stories.map(story => {
+      const revision = story.currentRevision;
+      return `${revision.title} · ${story.id} · r${revision.revision} · ${revision.state}/${story.eligibility}`;
+    }));
+    const story = stories[0]?.currentRevision;
+    if (story) {
+      body.push(
+        '',
+        `STORY DETAIL · ${story.title}`,
+        `S ${story.situation}`,
+        `T ${story.task}`,
+        `A ${story.action}`,
+        `R ${story.result}`,
+        `Reflection ${story.reflection}`
+      );
+    }
+    body.push('', `SELECTED APPLICATION DEBRIEFS (${debriefs.length})`);
+    if (debriefs.length) {
+      body.push(...debriefs.map(debrief => (
+        `${debrief.id} · r${debrief.currentRevision.revision} · ${debrief.interviewStage}/${debrief.audience} · outcome ${debrief.currentRevision.observedOutcome.type}`
+      )));
+      const debrief = debriefs[0].currentRevision;
+      body.push(`DEBRIEF DETAIL · ${debrief.notes || 'no private notes'} · ${debrief.observedQuestions.length} observed questions`);
+    } else {
+      body.push('No debrief recorded for the selected application.');
+    }
+    body.push(
+      '',
+      ':interviews',
+      ':prep <stage> [audience]',
+      ':story-verify <story-id> <revision> | <confirmed-fields-csv>',
+      ':story-retire <story-id> | <reason>',
+      ':debrief <json-file>',
+      ':debrief-correct <debrief-id> | <json-file> | <reason>',
+      'Esc closes'
+    );
   } else if (state.overlay === 'log') {
     if (model.log.length) {
       const visible = visibleWindow(model.log, state.overlayIndex, Math.max(3, height - 9));
@@ -1496,6 +1567,7 @@ export class JobosTui {
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
+    if (command === 'interviews') return this.openOverlay('interviews');
     if (command === 'build-network') return this.openOverlay('build-network');
     if (command === 'packet') {
       const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
@@ -1507,6 +1579,10 @@ export class JobosTui {
     if (command === 'receipt') return void this.packetMutate('receipt', argText);
     if (command === 'answer') return void this.answerAdd(argText);
     if (command === 'prep') return void this.runPrep(argText);
+    if (command === 'story-verify') return void this.verifyInterviewStory(argText);
+    if (command === 'story-retire') return void this.retireInterviewStory(argText);
+    if (command === 'debrief') return void this.recordInterviewDebrief(argText);
+    if (command === 'debrief-correct') return void this.correctInterviewDebrief(argText);
     if (command === 'weekly') return void this.runWeeklyReview();
     if (command === 'reschedule') return void this.rescheduleSelectedAction(argText);
     if (command === 'agent') {
@@ -1519,7 +1595,7 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${trimmed}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add prep weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add interviews prep story-verify story-retire debrief debrief-correct weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
     this.render();
   }
 
@@ -1592,28 +1668,212 @@ export class JobosTui {
     this.render();
   }
 
-  async runPrep(argText) {
-    const jobId = this.state.selectedJobId;
-    if (!jobId) {
-      this.state.status = 'Select a job before running interview prep.';
+  selectedInterviewApplication() {
+    const application = this.model.interviews?.selectedApplication;
+    if (!application
+      || application.profileId !== this.model.profileId
+      || application.jobId !== this.state.selectedJobId) {
+      return null;
+    }
+    return application;
+  }
+
+  async verifyInterviewStory(argText) {
+    const usage = 'Usage: :story-verify <story-id> <revision> | <confirmed-fields-csv>';
+    const separator = String(argText || '').indexOf('|');
+    const target = separator >= 0 ? argText.slice(0, separator).trim().split(/\s+/) : [];
+    const confirmedFields = separator >= 0
+      ? argText.slice(separator + 1).split(',').map(field => field.trim()).filter(Boolean)
+      : [];
+    const revision = Number(target[1]);
+    if (target.length !== 2 || !Number.isInteger(revision) || revision < 1) {
+      this.state.status = usage;
       this.render();
       return;
     }
-    const app = one(this.store, 'SELECT id FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1', [jobId]);
-    if (!app) {
-      this.state.status = 'No application record for this job — create one first (pursue or jobos apply create).';
+    if (!this.model.profileId || this.state.busy) return;
+    this.state.busy = 'story-verify';
+    try {
+      const result = await callDomainTool(this.store, 'verify_interview_story', {
+        profileId: this.model.profileId,
+        storyId: target[0],
+        revision,
+        confirmedFields,
+        actor: 'user'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Story verified · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Story verification failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async retireInterviewStory(argText) {
+    const usage = 'Usage: :story-retire <story-id> | <reason>';
+    const separator = String(argText || '').indexOf('|');
+    const storyId = separator >= 0 ? argText.slice(0, separator).trim() : '';
+    const reason = separator >= 0 ? argText.slice(separator + 1).trim() : '';
+    if (!storyId || storyId.includes(' ') || !reason) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (!this.model.profileId || this.state.busy) return;
+    this.state.busy = 'story-retire';
+    try {
+      const result = await callDomainTool(this.store, 'retire_interview_story', {
+        profileId: this.model.profileId,
+        storyId,
+        reason,
+        actor: 'user'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Story retired · ${result.id} · ${reason}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Story retirement failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async recordInterviewDebrief(argText) {
+    const usage = 'Usage: :debrief <json-file>';
+    const file = String(argText || '').trim();
+    if (!file) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = 'Select a profile-owned application before recording a debrief.';
       this.render();
       return;
     }
     if (this.state.busy) return;
+    this.state.busy = 'debrief-record';
+    try {
+      const payload = readStructuredJsonFile(file);
+      const result = await callDomainTool(this.store, 'record_interview_debrief', {
+        ...payload,
+        profileId: application.profileId,
+        jobId: undefined,
+        applicationId: application.applicationId,
+        debriefId: undefined,
+        targetRevision: undefined,
+        reason: undefined
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Debrief recorded · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message.startsWith('Invalid JSON file')
+        ? error.message
+        : `Debrief failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async correctInterviewDebrief(argText) {
+    const usage = 'Usage: :debrief-correct <debrief-id> | <json-file> | <reason>';
+    const parts = String(argText || '').split('|').map(part => part.trim());
+    if (parts.length !== 3 || parts.some(part => !part)) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = 'Select a profile-owned application before correcting a debrief.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'debrief-correct';
+    try {
+      const [debriefId, file, reason] = parts;
+      const payload = readStructuredJsonFile(file);
+      let current;
+      try {
+        current = getInterviewDebrief(this.store, {
+          profileId: application.profileId,
+          debriefId,
+          includeHistory: false
+        });
+      } catch {
+        throw new Error('Interview debrief does not belong to the selected profile/application.');
+      }
+      if (current.applicationId !== application.applicationId || current.jobId !== application.jobId) {
+        throw new Error('Interview debrief does not belong to the selected profile/application.');
+      }
+      const result = await callDomainTool(this.store, 'correct_interview_debrief', {
+        ...payload,
+        profileId: application.profileId,
+        debriefId: current.id,
+        jobId: current.jobId,
+        applicationId: current.applicationId,
+        interviewStage: current.interviewStage,
+        audience: current.audience,
+        referenceId: current.referenceId,
+        targetRevision: current.currentRevision.revision,
+        reason
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Debrief corrected · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message.startsWith('Invalid JSON file')
+        ? error.message
+        : `Debrief correction failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async runPrep(argText) {
+    const args = String(argText || '').trim().split(/\s+/).filter(Boolean);
+    const usage = 'Usage: :prep <stage> [audience]';
+    if (args.length > 2) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = this.state.selectedJobId
+        ? 'No application record for this job — create one first (pursue or jobos apply create).'
+        : 'Select a job before running interview prep.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    const stage = args[0] || 'interview';
+    const audience = args[1] || undefined;
     this.state.busy = 'interview-prep';
     this.state.status = 'Interview prep running…';
     this.render();
     try {
-      const result = await callDomainTool(this.store, 'interview_prep', { applicationId: app.id, stage: argText || 'interview' }, { source: 'tui' });
+      const result = await callDomainTool(this.store, 'interview_prep', {
+        applicationId: application.applicationId,
+        stage,
+        audience
+      }, { source: 'tui' });
       this.state.error = null;
       this.refresh({ disk: false });
-      this.state.status = `Interview prep draft created (${result.stage || 'interview'}) · review with r`;
+      this.state.status = `Interview prep draft created (${result.stage} · ${result.audience}) · review with r`;
     } catch (error) {
       this.state.error = error.message;
       this.state.status = `Interview prep failed: ${error.message}`;

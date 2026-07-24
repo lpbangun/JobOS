@@ -312,8 +312,182 @@ try {
   if (!packetYaml.includes('receiptState: confirmed') || /^\s+answer(?:Text)?:/m.test(packetYaml)) throw new Error('Packet mirror is stale or contains answer plaintext fields');
 
   JSON.parse(run(['applications', 'update', app.id, '--status', 'interview', '--json']));
-  const interviewPacket = run(['interview', 'prep', '--application', app.id, '--stage', 'hiring-manager', '--output', 'markdown'], true);
+  const interviewStoryFile = path.join(root, 'interview-story.json');
+  const interviewStoryFields = ['title', 'situation', 'task', 'action', 'result', 'reflection'];
+  const interviewStoryFactualFields = ['situation', 'task', 'action', 'result'];
+  writeFileSync(interviewStoryFile, JSON.stringify({
+    title: 'Owning an evidence-grounded product launch',
+    situation: 'A learning workflow launch had fragmented ownership and a fixed deadline.',
+    task: 'I took ownership of delivery scope and the measurable impact target.',
+    action: 'I aligned stakeholders, resolved dependencies, and led weekly delivery risk reviews.',
+    result: 'The workflow shipped on schedule and reduced manual review time by 30%.',
+    reflection: 'I learned to surface dependency risk before committing to launch dates.',
+    competencyTags: ['ownership', 'impact', 'delivery'],
+    audienceTags: ['recruiter'],
+    fieldProvenance: Object.fromEntries(interviewStoryFields.map(field => [
+      field,
+      { origin: 'user', actor: 'user', source: 'cli', sourceRef: 'smoke-story' }
+    ])),
+    confirmedFields: [],
+    fieldEvidence: Object.fromEntries(interviewStoryFactualFields.map(field => [field, [proof.id]])),
+    actor: 'user'
+  }, null, 2));
+  const interviewStoryDraft = JSON.parse(run([
+    'interview', 'stories', 'create',
+    '--profile', profile.id,
+    '--file', interviewStoryFile,
+    '--json'
+  ]));
+  const interviewStory = JSON.parse(run([
+    'interview', 'stories', 'verify', interviewStoryDraft.id,
+    '--profile', profile.id,
+    '--revision', String(interviewStoryDraft.currentRevision.revision),
+    '--confirm-fields', interviewStoryFields.join(','),
+    '--json'
+  ]));
+  if (interviewStory.eligibility !== 'eligible' || interviewStory.activeVerifiedRevision?.state !== 'verified') {
+    throw new Error('W07 smoke story did not become proof-grounded and eligible');
+  }
+
+  const interviewPacket = run([
+    'interview', 'prep',
+    '--application', app.id,
+    '--stage', 'hiring-manager',
+    '--audience', 'hiring_manager',
+    '--output', 'markdown'
+  ], true);
   if (!interviewPacket.includes('STAR story') || !interviewPacket.includes('Questions to ask the interviewer')) throw new Error('Interview prep packet missing useful sections');
+  const secondInterviewApp = JSON.parse(run([
+    'applications', 'create',
+    '--job', richJobId,
+    '--status', 'interview',
+    '--json'
+  ]));
+  const recruiterPacket = run([
+    'interview', 'prep',
+    '--application', secondInterviewApp.id,
+    '--stage', 'recruiter-screen',
+    '--audience', 'recruiter',
+    '--output', 'markdown'
+  ], true);
+  if (interviewPacket === recruiterPacket
+    || !interviewPacket.includes('[inferred]')
+    || !recruiterPacket.includes('[inferred]')
+    || !interviewPacket.includes('Coverage: gap')
+    || !recruiterPacket.includes('Coverage: gap')) {
+    throw new Error('W07 audience packs did not differ with explicit question labels and honest gaps');
+  }
+
+  const debriefFields = ['observedQuestions', 'observedOutcome', 'proofGaps', 'storyUses', 'notes'];
+  const debriefFile = path.join(root, 'interview-debrief.json');
+  const debriefBase = {
+    interviewStage: 'interview',
+    audience: 'hiring_manager',
+    referenceId: 'jobos-smoke-interview-debrief',
+    occurredAt: '2026-07-22T16:30:00Z',
+    actor: 'candidate',
+    observedQuestions: [],
+    observedOutcome: { type: 'no_change', note: 'The team will finish the remaining interviews.' },
+    proofGaps: [],
+    storyUses: [],
+    notes: 'Private local smoke debrief note.',
+    fieldProvenance: Object.fromEntries(debriefFields.map(field => [
+      field,
+      { origin: 'user', actor: 'candidate', source: 'cli', sourceRef: 'smoke-debrief' }
+    ]))
+  };
+  writeFileSync(debriefFile, JSON.stringify(debriefBase, null, 2));
+  const recordedDebrief = JSON.parse(run([
+    'interview', 'debrief', 'record',
+    '--profile', profile.id,
+    '--application', app.id,
+    '--file', debriefFile,
+    '--json'
+  ]));
+  const correctionFile = path.join(root, 'interview-debrief-correction.json');
+  writeFileSync(correctionFile, JSON.stringify({
+    ...debriefBase,
+    observedOutcome: { type: 'advanced', note: 'A follow-up conversation was scheduled.' },
+    notes: 'Corrected private local smoke debrief note.'
+  }, null, 2));
+  const correctedDebrief = JSON.parse(run([
+    'interview', 'debrief', 'correct', recordedDebrief.id,
+    '--profile', profile.id,
+    '--file', correctionFile,
+    '--reason', 'Reviewed contemporaneous smoke notes.',
+    '--json'
+  ]));
+  if (recordedDebrief.currentRevision.revision !== 1 || correctedDebrief.currentRevision.revision !== 2) {
+    throw new Error('W07 smoke debrief did not record and correct append-only revisions');
+  }
+
+  const interviewObservations = JSON.parse(run([
+    'interview', 'observations',
+    '--profile', profile.id,
+    '--json'
+  ]));
+  const currentDebriefObservations = interviewObservations.observations.filter(observation => (
+    observation.debriefId === recordedDebrief.id && observation.current
+  ));
+  if (currentDebriefObservations.length !== 1
+    || currentDebriefObservations[0].sourceEntity.revision !== 2
+    || currentDebriefObservations[0].actor !== 'candidate'
+    || currentDebriefObservations[0].source !== 'cli'
+    || currentDebriefObservations[0].externalSideEffects !== 'none') {
+    throw new Error('W07 current W08 observation is missing exact attribution or no-side-effect semantics');
+  }
+
+  const w07Store = await openStore({ workspace: root });
+  const packRows = all(w07Store, `SELECT artifact_id,application_id,interview_stage,audience,coverage_status,story_id,story_revision_id
+    FROM interview_pack_items
+    WHERE profile_id=? AND application_id IN (?,?)
+    ORDER BY application_id,artifact_id,position`, [profile.id, app.id, secondInterviewApp.id]);
+  const storyApplications = new Set(packRows
+    .filter(item => item.story_id === interviewStory.id && item.story_revision_id === interviewStory.activeVerifiedRevision.id)
+    .map(item => item.application_id));
+  const firstPackRows = packRows.filter(item => item.application_id === app.id);
+  const secondPackRows = packRows.filter(item => item.application_id === secondInterviewApp.id);
+  if (storyApplications.size !== 2
+    || !firstPackRows.some(item => item.audience === 'hiring_manager' && item.coverage_status === 'gap')
+    || !secondPackRows.some(item => item.audience === 'recruiter' && item.coverage_status === 'gap')) {
+    throw new Error('W07 canonical story was not reused across both audience packs with explicit gaps');
+  }
+  const followupActions = all(w07Store, `SELECT * FROM tasks
+    WHERE application_id=? AND action_kind='application_next_action'
+      AND action_code='follow-up-after-interview' AND status='open'
+    ORDER BY id`, [app.id]);
+  if (followupActions.length !== 1 || followupActions[0].source_event_id !== recordedDebrief.id) {
+    throw new Error('W07 debrief did not leave exactly one current W06 follow-up action');
+  }
+  const interviewAudits = all(w07Store, `SELECT action,external_side_effect,payload_json FROM audit_log
+    WHERE action LIKE 'interview.%' OR action LIKE 'interview_prep.%'
+    ORDER BY created_at,id`);
+  const mutationAuditActions = new Set([
+    'interview.story.created',
+    'interview.story.verified',
+    'interview.debrief.recorded',
+    'interview.debrief.corrected'
+  ]);
+  if (interviewAudits.some(event => event.external_side_effect !== 'none')
+    || interviewAudits.filter(event => mutationAuditActions.has(event.action)).some(event => (
+      JSON.parse(event.payload_json).externalSideEffects !== 'none'
+    ))) {
+    throw new Error('W07 audit spine claimed an external side effect');
+  }
+  w07Store.db.close();
+
+  const requiredInterviewMirrors = [
+    path.join(root, 'jobos-workspace', 'profiles', profile.id, 'interviews', 'stories.yaml'),
+    path.join(root, 'jobos-workspace', 'profiles', profile.id, 'interviews', 'observations.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'interview-prep-hiring-manager.md'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'interviews', 'debriefs.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'application.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', richJobId, 'artifacts', 'interview-prep-recruiter-screen.md')
+  ];
+  if (requiredInterviewMirrors.some(file => readFileSync(file).byteLength === 0)) {
+    throw new Error('W07 required interview workspace mirror was not byte-readable');
+  }
   const funnel = JSON.parse(run(['analytics', 'funnel', '--profile', profile.id, '--since', '30', '--json']));
   if (funnel.totals.interviews < 1 || !funnel.byRoleFamily.length) throw new Error('Analytics funnel did not report interview conversion by role family');
   JSON.parse(run(['tasks', 'due', '--profile', profile.id, '--json']));
@@ -387,6 +561,20 @@ try {
       expiredPriorFitPreserved: true,
       postingLivenessSeparated: true,
       submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    w07: {
+      storyId: interviewStory.id,
+      storyRevisionId: interviewStory.activeVerifiedRevision.id,
+      applicationIds: [app.id, secondInterviewApp.id],
+      canonicalStoryReuse: storyApplications.size,
+      hiringManagerGapCount: firstPackRows.filter(item => item.coverage_status === 'gap').length,
+      recruiterGapCount: secondPackRows.filter(item => item.coverage_status === 'gap').length,
+      debriefId: recordedDebrief.id,
+      currentDebriefRevision: correctedDebrief.currentRevision.revision,
+      currentFollowupActions: followupActions.length,
+      currentAttributedObservations: currentDebriefObservations.length,
+      readableMirrors: requiredInterviewMirrors.length,
       externalSideEffects: 'none'
     },
     schedulerRun: schedulerRun.runs[0].id,
