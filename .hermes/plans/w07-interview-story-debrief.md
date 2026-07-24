@@ -98,6 +98,7 @@ Immutable canonical identity:
 - `id TEXT PRIMARY KEY`
 - `profile_id TEXT NOT NULL REFERENCES profiles(id)`
 - `created_at TEXT NOT NULL`
+- `UNIQUE(id, profile_id)` as the exact parent key required by profile-scoped composite foreign keys from revisions, evidence, and pack items
 
 Do not store a mutable current pointer. Current/latest verified state is derived from ordered revisions.
 

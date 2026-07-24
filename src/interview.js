@@ -5,6 +5,273 @@ import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 
+export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
+export const INTERVIEW_STORY_LIST_SCHEMA = 'jobos.interview-story-list.v1';
+export const INTERVIEW_QUESTION_SCHEMA = 'jobos.interview-question.v1';
+export const INTERVIEW_PACK_SCHEMA = 'jobos.interview-pack.v1';
+export const INTERVIEW_DEBRIEF_SCHEMA = 'jobos.interview-debrief.v1';
+export const INTERVIEW_DEBRIEF_LIST_SCHEMA = 'jobos.interview-debrief-list.v1';
+export const INTERVIEW_OBSERVATION_SCHEMA = 'jobos.interview-observation.v1';
+export const INTERVIEW_OBSERVATION_LIST_SCHEMA = 'jobos.interview-observation-list.v1';
+
+export const INTERVIEW_AUDIENCES = Object.freeze([
+  'recruiter',
+  'hiring_manager',
+  'peer_panel',
+  'executive',
+  'unknown',
+]);
+export const INTERVIEW_STAGES = Object.freeze([
+  'recruiter-screen',
+  'interview',
+  'hiring-manager',
+  'onsite',
+  'final',
+  'offer',
+]);
+export const INTERVIEW_STORY_STATES = Object.freeze([
+  'draft_needs_verification',
+  'verified',
+  'retired',
+]);
+export const INTERVIEW_STORY_CHANGE_KINDS = Object.freeze(['create', 'edit', 'verify', 'retire']);
+export const INTERVIEW_STORY_CONTENT_FIELDS = Object.freeze([
+  'title',
+  'situation',
+  'task',
+  'action',
+  'result',
+  'reflection',
+]);
+export const INTERVIEW_STORY_FACTUAL_FIELDS = Object.freeze(['situation', 'task', 'action', 'result']);
+export const INTERVIEW_QUESTION_SOURCE_KINDS = Object.freeze([
+  'user_provided',
+  'recruiter_provided',
+  'interviewer_provided',
+]);
+export const INTERVIEW_QUESTION_ORIGINS = Object.freeze(['sourced', 'inferred']);
+export const INTERVIEW_COVERAGE_STATUSES = Object.freeze(['covered', 'gap']);
+export const INTERVIEW_OUTCOME_TYPES = Object.freeze([
+  'advanced',
+  'no_change',
+  'rejected',
+  'withdrawn',
+  'unknown',
+]);
+export const INTERVIEW_PROOF_GAP_TYPES = Object.freeze([
+  'missing_proof',
+  'weak_metric',
+  'unsupported_detail',
+  'needs_verification',
+  'other',
+]);
+export const INTERVIEW_DEFAULT_AUDIENCE_BY_STAGE = Object.freeze({
+  'recruiter-screen': 'recruiter',
+  interview: 'unknown',
+  'hiring-manager': 'hiring_manager',
+  onsite: 'peer_panel',
+  final: 'executive',
+  offer: 'unknown',
+});
+
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function interviewFieldCode(field) {
+  return String(field || 'value')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase() || 'value';
+}
+
+export class InterviewError extends Error {
+  constructor(code, message, details = {}) {
+    super(message);
+    this.name = 'InterviewError';
+    this.type = 'validation';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function requireInterviewText(value, field) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    const name = interviewFieldCode(field);
+    throw new InterviewError(`interview_${name}_required`, `${field} is required.`);
+  }
+  return text;
+}
+
+export function normalizeInterviewTimestamp(value, field) {
+  const text = requireInterviewText(value, field);
+  const milliseconds = Date.parse(text);
+  if (!RFC3339.test(text) || !Number.isFinite(milliseconds)) {
+    const name = interviewFieldCode(field);
+    throw new InterviewError(
+      `interview_${name}_invalid`,
+      `${field} must be an RFC3339 timestamp.`,
+      { value: text },
+    );
+  }
+  return new Date(milliseconds).toISOString();
+}
+
+export function normalizeInterviewEnum(value, field, allowed) {
+  const text = requireInterviewText(value, field).toLowerCase();
+  if (!Array.isArray(allowed) || !allowed.includes(text)) {
+    const name = interviewFieldCode(field);
+    throw new InterviewError(
+      `interview_${name}_invalid`,
+      `Unsupported ${field}: ${text}.`,
+      { allowed: Array.isArray(allowed) ? [...allowed] : [] },
+    );
+  }
+  return text;
+}
+
+export function normalizeInterviewJson(value, field, shape) {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      const name = interviewFieldCode(field);
+      throw new InterviewError(`interview_${name}_json_invalid`, `${field} must be valid JSON.`);
+    }
+  }
+  const valid = shape === 'array'
+    ? Array.isArray(parsed)
+    : shape === 'object'
+      ? Boolean(parsed) && typeof parsed === 'object' && !Array.isArray(parsed)
+      : false;
+  if (!valid) {
+    const name = interviewFieldCode(field);
+    throw new InterviewError(
+      `interview_${name}_shape_invalid`,
+      `${field} must be a JSON ${shape}.`,
+      { expected: shape },
+    );
+  }
+  return parsed;
+}
+
+export function audienceForInterviewStage(stage, audience = null) {
+  const normalizedStage = normalizeInterviewEnum(stage, 'stage', INTERVIEW_STAGES);
+  return audience === null || audience === undefined || String(audience).trim() === ''
+    ? INTERVIEW_DEFAULT_AUDIENCE_BY_STAGE[normalizedStage]
+    : normalizeInterviewEnum(audience, 'audience', INTERVIEW_AUDIENCES);
+}
+
+export function resolveInterviewOwnership(s, input = {}) {
+  const profileId = requireInterviewText(input.profileId, 'profileId');
+  const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
+  if (!profile) {
+    throw new InterviewError('interview_profile_unknown', `Unknown profile: ${profileId}.`);
+  }
+
+  const applicationId = input.applicationId
+    ? requireInterviewText(input.applicationId, 'applicationId')
+    : null;
+  const application = applicationId
+    ? one(s, 'SELECT * FROM applications WHERE id=?', [applicationId])
+    : null;
+  if (applicationId && !application) {
+    throw new InterviewError(
+      'interview_application_unknown',
+      `Unknown application: ${applicationId}.`,
+    );
+  }
+
+  const jobId = input.jobId
+    ? requireInterviewText(input.jobId, 'jobId')
+    : application?.job_id || null;
+  const job = jobId ? one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]) : null;
+  if (jobId && !job) {
+    throw new InterviewError('interview_job_unknown', `Unknown job: ${jobId}.`);
+  }
+  if (job && job.profile_id !== profileId) {
+    throw new InterviewError(
+      'interview_job_profile_mismatch',
+      `Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}.`,
+    );
+  }
+  if (application && application.profile_id !== profileId) {
+    throw new InterviewError(
+      'interview_application_profile_mismatch',
+      `Application ${applicationId} belongs to profile ${application.profile_id}, not ${profileId}.`,
+    );
+  }
+  if (application && application.job_id !== jobId) {
+    throw new InterviewError(
+      'interview_application_job_mismatch',
+      `Application ${applicationId} belongs to job ${application.job_id}, not ${jobId}.`,
+    );
+  }
+
+  const revisionId = input.storyRevisionId
+    ? requireInterviewText(input.storyRevisionId, 'storyRevisionId')
+    : null;
+  const revision = revisionId
+    ? one(s, 'SELECT * FROM interview_story_revisions WHERE id=?', [revisionId])
+    : null;
+  if (revisionId && !revision) {
+    throw new InterviewError(
+      'interview_story_revision_unknown',
+      `Unknown interview story revision: ${revisionId}.`,
+    );
+  }
+  const storyId = input.storyId
+    ? requireInterviewText(input.storyId, 'storyId')
+    : revision?.story_id || null;
+  const story = storyId ? one(s, 'SELECT * FROM interview_stories WHERE id=?', [storyId]) : null;
+  if (storyId && !story) {
+    throw new InterviewError('interview_story_unknown', `Unknown interview story: ${storyId}.`);
+  }
+  if (story && story.profile_id !== profileId) {
+    throw new InterviewError(
+      'interview_story_profile_mismatch',
+      `Interview story ${storyId} belongs to profile ${story.profile_id}, not ${profileId}.`,
+    );
+  }
+  if (revision && (revision.story_id !== storyId || revision.profile_id !== profileId)) {
+    throw new InterviewError(
+      'interview_story_revision_mismatch',
+      `Interview story revision ${revisionId} does not belong to story ${storyId} and profile ${profileId}.`,
+    );
+  }
+
+  const proofPointIds = input.proofPointIds ?? [];
+  if (!Array.isArray(proofPointIds)) {
+    throw new InterviewError(
+      'interview_proof_point_ids_shape_invalid',
+      'proofPointIds must be an array.',
+      { expected: 'array' },
+    );
+  }
+  const proofPoints = [];
+  for (const value of proofPointIds) {
+    const proofPointId = requireInterviewText(value, 'proofPointId');
+    const proofPoint = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofPointId]);
+    if (!proofPoint) {
+      throw new InterviewError(
+        'interview_proof_point_unknown',
+        `Unknown proof point: ${proofPointId}.`,
+      );
+    }
+    if (proofPoint.profile_id !== profileId) {
+      throw new InterviewError(
+        'interview_proof_point_profile_mismatch',
+        `Proof point ${proofPointId} belongs to profile ${proofPoint.profile_id}, not ${profileId}.`,
+      );
+    }
+    proofPoints.push(proofPoint);
+  }
+
+  return { profile, job, application, story, storyRevision: revision, proofPoints };
+}
+
 const stageLabels = {
   'recruiter-screen': 'recruiter screen',
   interview: 'interview',

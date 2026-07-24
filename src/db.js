@@ -11,6 +11,161 @@ const require = createRequire(import.meta.url);
 let SQL;
 const lockSleep = new Int32Array(new SharedArrayBuffer(4));
 
+const interviewSchema = `CREATE TABLE IF NOT EXISTS interview_stories (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE TABLE IF NOT EXISTS interview_story_revisions (
+  id TEXT PRIMARY KEY,
+  story_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  state TEXT NOT NULL CHECK(state IN ('draft_needs_verification','verified','retired')),
+  change_kind TEXT NOT NULL CHECK(change_kind IN ('create','edit','verify','retire')),
+  title TEXT NOT NULL,
+  situation TEXT NOT NULL,
+  task TEXT NOT NULL,
+  action TEXT NOT NULL,
+  result TEXT NOT NULL,
+  reflection TEXT NOT NULL,
+  competency_tags_json TEXT NOT NULL,
+  audience_tags_json TEXT NOT NULL,
+  field_provenance_json TEXT NOT NULL,
+  confirmed_fields_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  supersedes_revision_id TEXT,
+  change_reason TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  verified_at TEXT,
+  UNIQUE(story_id, revision),
+  UNIQUE(id, story_id, profile_id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_revision_id) REFERENCES interview_story_revisions(id)
+);
+CREATE TABLE IF NOT EXISTS interview_story_field_evidence (
+  revision_id TEXT NOT NULL,
+  story_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  field_name TEXT NOT NULL CHECK(field_name IN ('situation','task','action','result')),
+  proof_point_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  proof_snapshot_json TEXT NOT NULL,
+  linked_at TEXT NOT NULL,
+  PRIMARY KEY(revision_id, field_name, proof_point_id),
+  FOREIGN KEY(revision_id, story_id, profile_id) REFERENCES interview_story_revisions(id, story_id, profile_id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(proof_point_id) REFERENCES proof_points(id)
+);
+CREATE TABLE IF NOT EXISTS interview_question_sources (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  question_text TEXT NOT NULL,
+  normalized_text TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('user_provided','recruiter_provided','interviewer_provided')),
+  source_ref TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  supersedes_source_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(supersedes_source_id) REFERENCES interview_question_sources(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS interview_question_sources_root_reference_idx
+  ON interview_question_sources(profile_id, source_ref)
+  WHERE source_ref != '' AND supersedes_source_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS interview_question_sources_one_correction_idx
+  ON interview_question_sources(supersedes_source_id)
+  WHERE supersedes_source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS interview_question_sources_reference_chain_idx
+  ON interview_question_sources(profile_id, source_ref, created_at, id)
+  WHERE source_ref != '';
+CREATE TABLE IF NOT EXISTS interview_pack_items (
+  artifact_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  question_id TEXT NOT NULL,
+  question_origin TEXT NOT NULL CHECK(question_origin IN ('sourced','inferred')),
+  question_text TEXT NOT NULL,
+  question_source_json TEXT NOT NULL,
+  coverage_status TEXT NOT NULL CHECK(coverage_status IN ('covered','gap')),
+  story_id TEXT,
+  story_revision_id TEXT,
+  match_score INTEGER NOT NULL,
+  match_reasons_json TEXT NOT NULL,
+  alternative_matches_json TEXT NOT NULL,
+  PRIMARY KEY(artifact_id, position),
+  UNIQUE(artifact_id, question_id),
+  CHECK(
+    (coverage_status='covered' AND story_id IS NOT NULL AND story_revision_id IS NOT NULL)
+    OR (coverage_status='gap' AND story_id IS NULL AND story_revision_id IS NULL)
+  ),
+  FOREIGN KEY(artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(story_revision_id, story_id, profile_id) REFERENCES interview_story_revisions(id, story_id, profile_id)
+);
+CREATE TABLE IF NOT EXISTS interview_debriefs (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  reference_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS interview_debriefs_profile_reference_idx
+  ON interview_debriefs(profile_id, reference_id)
+  WHERE reference_id != '';
+CREATE TABLE IF NOT EXISTS interview_debrief_revisions (
+  id TEXT PRIMARY KEY,
+  debrief_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  observed_questions_json TEXT NOT NULL,
+  observed_outcome_json TEXT NOT NULL,
+  proof_gaps_json TEXT NOT NULL,
+  story_uses_json TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  field_provenance_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  supersedes_revision_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  UNIQUE(debrief_id, revision),
+  UNIQUE(id, debrief_id, profile_id),
+  FOREIGN KEY(debrief_id, profile_id) REFERENCES interview_debriefs(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_revision_id) REFERENCES interview_debrief_revisions(id)
+);`;
+
 const schema = `PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, preferences_json TEXT NOT NULL, resume_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -176,7 +331,7 @@ CREATE TABLE IF NOT EXISTS form_submission_attempts (
   external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')),
   FOREIGN KEY(packet_id) REFERENCES application_packets(id),
   FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id)
-);`;
+);${interviewSchema}`;
 
 function tableDefinition(db, name) {
   return String(dbRows(db, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [name])[0]?.sql || '');
@@ -411,6 +566,7 @@ CREATE INDEX IF NOT EXISTS outreach_outcomes_thread_idx
   ON outreach_outcomes(thread_id, recorded_at, id);`;
 
 function migrate(db){
+  db.run(interviewSchema);
   for (const sql of [
     "ALTER TABLE proof_points ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE proof_points ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
@@ -904,12 +1060,12 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','13']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','14']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   const { backfillLifecycleActions } = await import('./lifecycle.js');
   const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '13' || affectedJobIds.length) save(store);
+  if (!existed || previousSchemaVersion !== '14' || affectedJobIds.length) save(store);
   if (affectedJobIds.length) {
     const { syncJob } = await import('./jobs.js');
     for (const jobId of affectedJobIds) syncJob(store, jobId);
