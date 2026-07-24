@@ -1267,6 +1267,8 @@ test('W05-REVIEW-01 weekly review reports observed counts, denominators, period,
 
   const review = weekly(f.s, f.profile.id, { recordRun: false, nowDate: new Date(FIXED_NOW) });
   assert.equal(review.metrics.outreachOutcomes.schema, 'jobos.outreach-outcome-summary.v1');
+  assert.deepEqual(review.metrics.outreachOutcomes, summary);
+  assert.deepEqual(review.metrics.lifecycle.outreachOutcomes, summary);
   assert.match(review.content, /Observed outreach outcomes/);
   assert.match(review.content, /denominator/i);
   assert.match(review.content, /insufficient data|small sample/i);

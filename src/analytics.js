@@ -8,18 +8,21 @@ import { listSearches, listWatchlist, discoveryRuns, reviewQueue } from './disco
 import { listOutreachThreads, outreachDue } from './outreach.js';
 import { listContactPoints } from './research/contacts.js';
 import { listAutomations, listRuns } from './scheduler/store.js';
-import { renderOutreachOutcomeSummaryMarkdown, summarizeOutreachOutcomes } from './outreach-outcomes.js';
+import { renderOutreachOutcomeSummaryMarkdown } from './outreach-outcomes.js';
 import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit } from './scoring.js';
 import { getPostingLiveness } from './jobs.js';
+import { lifecycleTaskView } from './lifecycle.js';
+import { lifecycleAnalytics } from './lifecycle-analytics.js';
 
-export function state(s) {
+export function state(s, { profileId = null } = {}) {
+  const taskScope = profileId ? { profileId } : { global: true };
   return {
     profiles: all(s, 'SELECT id,name,preferences_json,created_at,updated_at FROM profiles ORDER BY created_at'),
     jobs: all(s, 'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(x => ({ ...x, url: String(x.url || '').startsWith('jobos:text:') ? '' : x.url, score: deserializeFitScore(parseJson(x.score_json, null), { persistedOverall: x.fit_score, jobId: x.id, profileId: x.profile_id }), requirements: parseJson(x.requirements_json, []), liveness: deserializeLiveness(x), postingLiveness: getPostingLiveness(x) })),
     applications: all(s, 'SELECT applications.*, jobs.title, jobs.company FROM applications JOIN jobs ON jobs.id=applications.job_id ORDER BY applications.updated_at DESC'),
     statusChanges: all(s, 'SELECT * FROM status_changes ORDER BY created_at DESC LIMIT 100'),
     artifacts: all(s, 'SELECT id,job_id,profile_id,type,path,title,warnings_json,approval_status,created_at FROM artifacts ORDER BY created_at DESC').map(a => ({ ...a, warnings: parseJson(a.warnings_json, []) })),
-    tasks: openTasks(s),
+    tasks: openTasks(s, taskScope).filter(task => profileId ? task.profile_id === profileId : task.profile_id == null),
     companies: all(s, 'SELECT * FROM companies ORDER BY name'),
     stakeholders: all(s, 'SELECT * FROM stakeholders ORDER BY updated_at DESC'),
     sourceObservations: all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC LIMIT 100').map(x => ({ ...x, metadata: parseJson(x.metadata_json, {}) })),
@@ -47,98 +50,68 @@ function fitSummary(fit) {
   return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' (review required)' : ''}`;
 }
 
-function sinceCutoff(days) {
-  const n = Number(days || 30);
-  const d = new Date(Date.now() - Math.max(1, n) * 24 * 60 * 60 * 1000);
-  return d.toISOString();
-}
-
-function roleFamily(title = '') {
-  const t = title.toLowerCase();
-  if (/product|pm\b/.test(t)) return 'product';
-  if (/talent|recruit|people|hr/.test(t)) return 'people-talent';
-  if (/learning|education|curriculum|instruction/.test(t)) return 'learning-education';
-  if (/engineer|developer|software|data/.test(t)) return 'technical';
-  if (/design|ux|research/.test(t)) return 'design-research';
-  return 'other';
-}
-
-function groupCount(rows, keyFn) {
-  const out = new Map();
-  for (const row of rows) {
-    const key = keyFn(row) || 'unknown';
-    out.set(key, (out.get(key) || 0) + 1);
-  }
-  return [...out.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([key, count]) => ({ key, count }));
-}
 
 function pct(n, d) {
   return d ? Math.round((n / d) * 1000) / 10 : 0;
 }
 
-export function funnel(s, profileId, days = 30) {
+export function funnel(s, profileId, days = 30, { nowDate = new Date(), minimumSampleSize = 5 } = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!prof) throw Error(`Unknown profile: ${profileId}`);
-  const cutoff = sinceCutoff(days);
-  const apps = all(s, `SELECT applications.*, jobs.title, jobs.company, jobs.source, jobs.fit_score, jobs.created_at AS job_created_at
-    FROM applications JOIN jobs ON jobs.id=applications.job_id
-    WHERE applications.profile_id=? AND (applications.created_at>=? OR applications.id IN (SELECT application_id FROM status_changes WHERE profile_id=? AND created_at>=?))
-    ORDER BY applications.updated_at DESC`, [profileId, cutoff, profileId, cutoff]);
-  const changes = all(s, `SELECT status_changes.*, jobs.title, jobs.company, jobs.source
-    FROM status_changes JOIN jobs ON jobs.id=status_changes.job_id
-    WHERE status_changes.profile_id=? AND status_changes.created_at>=?
-    ORDER BY status_changes.created_at`, [profileId, cutoff]);
-  const jobs = all(s, `SELECT DISTINCT jobs.* FROM jobs
-    LEFT JOIN applications ON applications.job_id=jobs.id
-    WHERE jobs.profile_id=? AND (jobs.created_at>=? OR applications.id IN (SELECT application_id FROM status_changes WHERE profile_id=? AND created_at>=?))
-    ORDER BY jobs.created_at DESC`, [profileId, cutoff, profileId, cutoff]);
-  const stageOrder = ['saved', 'researching', 'materials-ready', 'applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'];
-  const byStage = stageOrder.map(stage => ({ stage, count: apps.filter(a => a.status === stage).length })).filter(x => x.count || stageOrder.includes(x.stage));
-  const reached = (stages) => new Set(changes.filter(c => stages.includes(c.to_status)).map(c => c.application_id));
-  const appliedIds = reached(['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
-  const interviewIds = reached(['interview', 'offer']);
-  const offerIds = reached(['offer']);
-  const responseIds = reached(['recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
-  for (const app of apps) {
-    if (['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'].includes(app.status)) appliedIds.add(app.id);
-    if (['interview', 'offer'].includes(app.status)) interviewIds.add(app.id);
-    if (app.status === 'offer') offerIds.add(app.id);
-    if (['recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted'].includes(app.status)) responseIds.add(app.id);
-  }
-  const applied = appliedIds.size;
-  const interviews = interviewIds.size;
-  const responses = responseIds.size;
-  const bySource = groupCount(apps, a => a.source || 'manual').map(x => ({ source: x.key, applications: x.count, interviews: apps.filter(a => (a.source || 'manual') === x.key && interviewIds.has(a.id)).length }));
-  const byRoleFamily = groupCount(apps, a => roleFamily(a.title)).map(x => ({ roleFamily: x.key, applications: x.count, interviews: apps.filter(a => roleFamily(a.title) === x.key && interviewIds.has(a.id)).length }));
-  const byStageAndSource = bySource.map(src => ({ source: src.source, stages: stageOrder.reduce((acc, st) => ({ ...acc, [st]: apps.filter(a => (a.source || 'manual') === src.source && a.status === st).length }), {}) }));
-  const stageReached = stageOrder.map(stage => ({ stage, count: reached([stage]).size })).filter(x => x.count);
-  const staleCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-  const stale = all(s, `SELECT COUNT(*) AS count FROM applications
-    WHERE profile_id=? AND status IN ('saved','researching','materials-ready','applied','recruiter-screen','interview') AND updated_at<?`, [profileId, staleCutoff])[0]?.count || 0;
-  const insights = [];
-  if (!apps.length) insights.push('No applications in this window yet; import jobs and create application records to build a funnel.');
-  else {
-    const topSource = bySource[0];
-    if (topSource) insights.push(`${topSource.source} is the largest source in this window with ${topSource.applications} application(s).`);
-    if (applied && interviews === 0) insights.push('Applications are not yet converting to interviews; review fit scoring, company targeting, and outreach before increasing volume.');
-    if (interviews > 0) insights.push(`Interview conversion is ${pct(interviews, applied || apps.length)}%; inspect the role families and sources that produced those interviews.`);
-    const stuck = byStage.find(x => ['saved', 'researching', 'materials-ready'].includes(x.stage) && x.count > 0);
-    if (stuck) insights.push(`${stuck.count} application(s) are still in ${stuck.stage}; choose the next action and use an explicitly configured external tool if one is needed.`);
-    if (stale) insights.push(`${stale} active application(s) have not moved in 14+ days; schedule follow-up, prep for the next touchpoint, or mark them withdrawn/ghosted.`);
-  }
+  const lifecycle = lifecycleAnalytics(s, {
+    profileId,
+    sinceDays: days,
+    nowDate,
+    minimumSampleSize,
+  });
+  const observed = lifecycle.observedFunnel;
+  const inventory = lifecycle.currentInventory;
+  const insights = [
+    ...lifecycle.recommendations.map(item => item.action),
+    ...lifecycle.warnings.map(warning => warning.message),
+  ];
   return {
     profileId,
     profileName: prof.name,
-    sinceDays: Number(days || 30),
-    cutoff,
-    totals: { jobs: jobs.length, applications: apps.length, applied, responses, interviews, offers: offerIds.size || apps.filter(a => a.status === 'offer').length, staleActive: stale },
-    conversion: { applyRateFromImportedJobs: pct(applied, jobs.length), responseRateFromApplied: pct(responses, applied), interviewRateFromApplied: pct(interviews, applied), offerRateFromInterview: pct((offerIds.size || apps.filter(a => a.status === 'offer').length), interviews) },
-    byStage,
-    stageReached,
-    bySource,
-    byRoleFamily,
-    byStageAndSource,
-    insights
+    sinceDays: lifecycle.period.sinceDays,
+    cutoff: lifecycle.period.start,
+    totals: {
+      jobs: inventory.jobs,
+      applications: inventory.applications,
+      applied: observed.applied,
+      responses: observed.responses,
+      interviews: observed.interviews,
+      offers: observed.offers,
+      staleActive: inventory.staleActive,
+    },
+    conversion: (() => {
+      const applyRateAmongApplicationsWithObservedEvents = pct(observed.applied, observed.applicationsWithObservedEvents);
+      return {
+        applyRateAmongApplicationsWithObservedEvents,
+        applyRateFromImportedJobs: applyRateAmongApplicationsWithObservedEvents,
+        responseRateFromApplied: pct(observed.responses, observed.applied),
+        interviewRateFromApplied: pct(observed.interviews, observed.applied),
+        offerRateFromInterview: pct(observed.offers, observed.interviews),
+      };
+    })(),
+    conversionAliases: {
+      applyRateFromImportedJobs: 'applyRateAmongApplicationsWithObservedEvents',
+    },
+    byStage: inventory.byStage,
+    stageReached: observed.stageReached,
+    bySource: lifecycle.bySource,
+    byRoleFamily: lifecycle.byRoleFamily,
+    byStageAndSource: inventory.byStageAndSource,
+    insights,
+    basis: {
+      totals: 'mixed_labeled_inventory_and_observed_events',
+      conversion: 'observed_events_only',
+      byStage: 'current_snapshot',
+      stageReached: 'observed_status_events',
+      bySource: 'observed_applied_cohort',
+      byRoleFamily: 'observed_applied_cohort',
+    },
+    lifecycle,
   };
 }
 
@@ -148,15 +121,72 @@ function table(rows, columns) {
 }
 
 export function renderFunnelMarkdown(metrics) {
-  const reached = metrics.stageReached?.length ? metrics.stageReached.map(x => `- ${x.stage}: ${x.count}`).join('\n') : '- No stage history recorded in this window.';
-  return `# Funnel analytics — ${metrics.profileName}\n\nWindow: last ${metrics.sinceDays} days (since ${metrics.cutoff})\n\n## Totals\n- Imported jobs: ${metrics.totals.jobs}\n- Applications tracked: ${metrics.totals.applications}\n- Applied / submitted manually: ${metrics.totals.applied}\n- Responses or terminal outcomes: ${metrics.totals.responses}\n- Interviews reached: ${metrics.totals.interviews}\n- Offers reached: ${metrics.totals.offers}\n- Stale active applications: ${metrics.totals.staleActive}\n\n## Conversion\n- Apply rate from imported jobs: ${metrics.conversion.applyRateFromImportedJobs}%\n- Response rate from applied: ${metrics.conversion.responseRateFromApplied}%\n- Interview rate from applied: ${metrics.conversion.interviewRateFromApplied}%\n- Offer rate from interviews: ${metrics.conversion.offerRateFromInterview}%\n\n## Current stage counts\n${metrics.byStage.map(x => `- ${x.stage}: ${x.count}`).join('\n')}\n\n## Stages reached from status history\n${reached}\n\n## By source\n${table(metrics.bySource, [['source', 'source'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## By role family\n${table(metrics.byRoleFamily, [['role family', 'roleFamily'], ['applications', 'applications'], ['interviews', 'interviews']])}\n\n## Insights\n${metrics.insights.map(x => `- ${x}`).join('\n')}\n\n## Human gate\nAnalytics summarize internal state only. JobOS did not submit applications, send outreach, or modify external accounts.\n`;
+  const lifecycle = metrics.lifecycle;
+  const reached = metrics.stageReached?.length
+    ? metrics.stageReached.map(item => `- ${item.stage}: ${item.count}`).join('\n')
+    : '- No observed stage entries in this period.';
+  const warnings = lifecycle.warnings.length
+    ? lifecycle.warnings.map(warning => `- ${warning.code}: ${warning.message}`).join('\n')
+    : '- None.';
+  const dwell = lifecycle.stageDwell.byStage.length
+    ? lifecycle.stageDwell.byStage.map(stage => `- ${stage.stage}: ${stage.sampleCount} completed, ${stage.openCount} open/censored; median ${stage.medianHours ?? 'insufficient sample'} hours; p75 ${stage.p75Hours ?? 'insufficient sample'} hours`).join('\n')
+    : '- No observed dwell segments.';
+  return `# Funnel analytics — ${metrics.profileName}
+
+Period: ${lifecycle.period.start} through ${lifecycle.period.end}
+Basis: observed status events and immutable submission events. Current inventory is labeled separately and is not treated as velocity.
+
+## Current inventory
+- Imported jobs: ${metrics.totals.jobs}
+- Applications tracked: ${metrics.totals.applications}
+- Stale active applications: ${metrics.totals.staleActive}
+
+### Current stage snapshot
+${table(metrics.byStage, [['Stage', 'stage'], ['Applications', 'count']])}
+
+## Observed funnel
+- Applied cohort: ${metrics.totals.applied}
+- Employer responses: ${metrics.totals.responses}
+- Interviews observed: ${metrics.totals.interviews}
+- Offers observed: ${metrics.totals.offers}
+
+### Observed conversion
+- Apply rate among applications with observed events: ${metrics.conversion.applyRateAmongApplicationsWithObservedEvents ?? 'n/a'}%
+- Response rate from observed applied cohort: ${metrics.conversion.responseRateFromApplied ?? 'n/a'}%
+- Interview rate from observed applied cohort: ${metrics.conversion.interviewRateFromApplied ?? 'n/a'}%
+- Offer rate from observed interviews: ${metrics.conversion.offerRateFromInterview ?? 'n/a'}%
+
+## Denominators
+- Applications with observed events: ${lifecycle.denominators.applicationsWithObservedEvents}
+- Applied cohort: ${lifecycle.denominators.appliedCohort}
+- Observed responses: ${lifecycle.denominators.observedResponses}
+- Completed dwell segments: ${lifecycle.denominators.completedDwellSegments}
+- Open/censored dwell segments: ${lifecycle.denominators.openDwellSegments}
+- Terminal outcomes: ${lifecycle.denominators.terminalOutcomes}
+- Sent outreach threads: ${lifecycle.denominators.sentOutreachThreads}
+- Observed outreach threads: ${lifecycle.denominators.observedOutreachThreads}
+
+## Stage dwell
+${dwell}
+
+## Observed stages reached
+${reached}
+
+## Source groups — descriptive observed applied cohort
+${table(metrics.bySource, [['Source', 'source'], ['Applications', 'applications'], ['Responses', 'responses'], ['Interviews', 'interviews'], ['Offers', 'offers']])}
+
+## Role-family groups — descriptive observed applied cohort
+${table(metrics.byRoleFamily, [['Role family', 'roleFamily'], ['Applications', 'applications'], ['Responses', 'responses'], ['Interviews', 'interviews'], ['Offers', 'offers']])}
+
+## Warnings
+${warnings}`;
 }
 
 export function weekly(s, pid, { recordRun = true, nowDate = new Date() } = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
-  const metrics = funnel(s, pid, 30);
-  const outreachOutcomes = summarizeOutreachOutcomes(s, { profileId: pid, sinceDays: 30, nowDate });
+  const metrics = funnel(s, pid, 30, { nowDate });
+  const outreachOutcomes = metrics.lifecycle.outreachOutcomes;
   metrics.outreachOutcomes = outreachOutcomes;
   const jobs = all(s, 'SELECT * FROM jobs WHERE profile_id=?', [pid]).map(job => ({
     ...job,
@@ -164,9 +194,21 @@ export function weekly(s, pid, { recordRun = true, nowDate = new Date() } = {}) 
     fit: deserializeFitScore(parseJson(job.score_json, null), { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id }),
     postingLiveness: getPostingLiveness(job)
   })).sort(compareFitDecisions);
-  const tasks = openTasks(s);
+  const tasks = openTasks(s, { profileId: pid }).filter(task => task.profile_id === pid);
   const top = jobs.slice(0, 5).map(job => `- ${job.title} at ${job.company}: ${fitSummary(job.fit)} (${job.id})`).join('\n') || '- No jobs imported.';
-  const taskLines = tasks.slice(0, 10).map(t => `- ${t.title} (${t.priority}, ${t.due_at || 'no due date'})`).join('\n') || '- No open tasks.';
+  const taskLines = tasks.slice(0, 10).map(task => {
+    if (task.action_kind !== 'application_next_action') return `- ${task.title} (${task.priority}, ${task.due_at || 'no due date'})`;
+    const action = lifecycleTaskView(task, { nowDate });
+    return `- ${action.title} (${action.state}, due ${action.dueAt}; ${action.actionCode}; ${action.scheduleSource})`;
+  }).join('\n') || '- No open tasks.';
+  const currentActionLines = tasks
+    .filter(task => task.action_kind === 'application_next_action')
+    .map(task => lifecycleTaskView(task, { nowDate }))
+    .map(action => `- ${action.actionCode}: ${action.title} (${action.state}, due ${action.dueAt}; ${action.scheduleSource})`)
+    .join('\n') || '- No current application actions.';
+  const recommendationLines = metrics.lifecycle.recommendations
+    .map(item => `- ${item.category}: ${item.action} Caution: ${item.caution}`)
+    .join('\n') || '- None.';
   const cutoff = new Date(nowDate.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const staleRuns = all(s, `SELECT id,job_id,scope,finished_at FROM research_runs WHERE profile_id=? AND status IN ('succeeded','partial') AND finished_at<? ORDER BY finished_at ASC LIMIT 3`, [pid, cutoff]);
   const staleRunLines = staleRuns.map(r => `- Run ${r.id} (${r.scope}) finished ${r.finished_at}. Run \`jobos research runs resume ${r.id}\` to refresh.`).join('\n') || '';
@@ -184,7 +226,9 @@ export function weekly(s, pid, { recordRun = true, nowDate = new Date() } = {}) 
   const networkIntent = parseJson(prof.preferences_json, {}).networkIntent;
   const networkSetupStatus = networkIntent?.completedAt ? 'complete' : 'not started or incomplete';
   const networkSetupLine = networkSetupStatus === 'complete' ? '' : '- Network setup is unfinished. Run \`jobos profile network-intent --profile <id> --file <json>\` to configure intent and import connections.';
-  const followupDue = all(s, `SELECT id,title,due_at FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=? LIMIT 5`, [nowDate.toISOString()]);
+  const followupDue = all(s, `SELECT id,title,due_at FROM tasks
+    WHERE profile_id=? AND status='open' AND due_at IS NOT NULL AND due_at<=?
+    ORDER BY due_at,id LIMIT 5`, [pid, nowDate.toISOString()]);
   const followupLines = followupDue.map(t => `- Task "${t.title}" (${t.id}) is overdue as of ${t.due_at}.`).join('\n') || '';
   const researchRecs = [staleRunLines, highFitLines, networkSetupLine, followupLines].filter(Boolean).join('\n') || '- None.';
   const generatedAt = nowDate.toISOString();
@@ -203,16 +247,17 @@ ${top}
 ## Due / open tasks
 ${taskLines}
 
+## Current application actions
+${currentActionLines}
+
 ## Research recommendations (next actions, not auto-launched)
 ${researchRecs}
 
-## Recommended experiments
-- Double down on sources or role families that generate interviews, not just imports.
-- Move stalled saved/researching roles either to materials-ready or withdrawn to keep the board honest.
-- Add proof points for recurring requirements that appear in high-fit jobs but not in tailored artifacts.
+## Generated recommendations
+${recommendationLines}
 
 ## Automation policy
-This review is an internal summary. It did not submit applications, run research, send outreach, or mutate W06 next-action policy.`;
+This review is an internal descriptive summary. It did not submit applications, run research, send outreach, or mutate W06 next-action policy.`;
   const rel = path.join('exports', `weekly-review-${pid}-${generatedAt.slice(0, 10)}.md`);
   writeMd(path.join(s.p.ws, rel), content);
   const rid = id('run', `weekly-review:${pid}:${generatedAt}`);
@@ -225,68 +270,5 @@ This review is an internal summary. It did not submit applications, run research
   return { runId: rid, path: rel, content, metrics };
 }
 
-export function resumeFeedback(s, profileId, { minimumSampleSize = 10, minimumBandSize = 3 } = {}) {
-  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
-  const rows = all(s, `SELECT a.id AS artifact_id,a.job_id,ard.coverage_json,app.status AS application_status
-    FROM artifacts a
-    JOIN artifact_resume_documents ard ON ard.artifact_id=a.id
-    LEFT JOIN applications app ON app.job_id=a.job_id AND app.profile_id=a.profile_id
-    WHERE a.profile_id=? AND a.type='resume'
-      AND a.revision=(SELECT MAX(a2.revision) FROM artifacts a2 WHERE a2.series_key=a.series_key)
-    ORDER BY a.job_id,a.id`, [profileId]);
-  const unsupported = new Map();
-  const observedStatuses = new Set(['recruiter-screen', 'interview', 'offer', 'rejected', 'ghosted', 'withdrawn']);
-  const positiveStatuses = new Set(['recruiter-screen', 'interview', 'offer']);
-  const bands = new Map([['low', []], ['medium', []], ['high', []]]);
-  for (const row of rows) {
-    const coverage = parseJson(row.coverage_json, {});
-    for (const item of coverage.unsupported || []) {
-      const requirement = item.requirement || {};
-      const key = String(requirement.sourceText || item.requirementId || '').trim().toLowerCase();
-      if (!key) continue;
-      if (!unsupported.has(key)) unsupported.set(key, { sourceText: requirement.sourceText, category: requirement.category || 'unknown', priority: requirement.priority || 'must_have', occurrences: [] });
-      unsupported.get(key).occurrences.push({ jobId: row.job_id, artifactId: row.artifact_id, requirementId: item.requirementId, proofPointIds: [], sourceEntryIds: [] });
-    }
-    const ratio = Number(coverage.summary?.coverageRatio || 0);
-    const band = ratio < 0.34 ? 'low' : ratio < 0.67 ? 'medium' : 'high';
-    if (observedStatuses.has(row.application_status)) bands.get(band).push({ jobId: row.job_id, artifactId: row.artifact_id, applicationStatus: row.application_status, positiveOutcome: positiveStatuses.has(row.application_status), coverageRatio: ratio });
-  }
-  const recurringUnsupported = [...unsupported.values()]
-    .map(item => ({ ...item, count: item.occurrences.length }))
-    .sort((left, right) => right.count - left.count || left.sourceText.localeCompare(right.sourceText));
-  const bandSummaries = [...bands.entries()].map(([band, samples]) => ({ band, sampleSize: samples.length, positiveOutcomes: samples.filter(sample => sample.positiveOutcome).length, positiveOutcomeRate: samples.length ? samples.filter(sample => sample.positiveOutcome).length / samples.length : null, samples }));
-  const observedSampleSize = bandSummaries.reduce((total, band) => total + band.sampleSize, 0);
-  const comparableBands = bandSummaries.filter(band => band.sampleSize >= minimumBandSize);
-  const comparisonAvailable = observedSampleSize >= minimumSampleSize && comparableBands.length >= 2;
-  const recommendations = recurringUnsupported.slice(0, 10).map(item => ({
-    type: 'proof_or_targeting_improvement',
-    requirement: item.sourceText,
-    count: item.count,
-    action: `If this experience is true, add or verify a proof point for "${item.sourceText}". Otherwise, preserve it as a gap and reconsider roles where it is required.`,
-    sources: item.occurrences
-  }));
-  return {
-    schemaVersion: 1,
-    profileId,
-    artifactSampleSize: rows.length,
-    observedOutcomeSampleSize: observedSampleSize,
-    recurringUnsupported,
-    outcomeComparison: {
-      available: comparisonAvailable,
-      minimumSampleSize,
-      minimumBandSize,
-      bands: bandSummaries,
-      uncertainty: comparisonAvailable
-        ? 'Observed association only; coverage does not establish causation.'
-        : `Insufficient data: need at least ${minimumSampleSize} observed outcomes and two coverage bands with at least ${minimumBandSize} samples each.`,
-      causalClaim: false
-    },
-    recommendations,
-    generatedClaims: [],
-    policy: {
-      createsResumeClaims: false,
-      modifiesProofs: false,
-      externalSideEffects: 'none'
-    }
-  };
-}
+
+export { resumeFeedback } from './lifecycle-analytics.js';

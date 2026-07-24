@@ -9,8 +9,14 @@ import initSqlJs from 'sql.js';
 import { all, one, openStore, run, save } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
-import { appCreate, appUpdate } from '../src/tracking.js';
+import { appCreate, appUpdate, recordStatusChange } from '../src/tracking.js';
 import { id } from '../src/utils.js';
+import { funnel, renderFunnelMarkdown, weekly } from '../src/analytics.js';
+import { summarizeOutreachOutcomes } from '../src/outreach-outcomes.js';
+import {
+  LIFECYCLE_ANALYTICS_SCHEMA,
+  lifecycleAnalytics,
+} from '../src/lifecycle-analytics.js';
 import {
   LIFECYCLE_EVENT_INPUT_SCHEMA,
   LIFECYCLE_NEXT_ACTION_SCHEMA,
@@ -89,6 +95,209 @@ function lifecycleTrigger(profileId, applicationId, eventId, eventType, occurred
     occurredAt,
     ...extra,
   };
+}
+
+function seedObservedApplication(fixture, {
+  suffix,
+  title,
+  source,
+  events,
+  score = null,
+}) {
+  const filePath = path.join(fixture.root, `analytics-${suffix}.md`);
+  writeFileSync(filePath, `Title: ${title}\nCompany: ${suffix} Analytics\nLocation: Remote\n\nAnalytics fixture.\n`);
+  const job = importText(fixture.store, { profileId: fixture.profile.id, filePath }).job;
+  run(fixture.store, 'UPDATE jobs SET title=?,source=? WHERE id=?', [
+    title,
+    source,
+    job.id,
+  ]);
+  const application = appCreate(fixture.store, job.id, events[0].status, '', {
+    at: events[0].at,
+    actor: 'user',
+    source: 'test',
+  });
+  if (score) {
+    run(fixture.store, 'UPDATE jobs SET fit_score=?,score_json=? WHERE id=?', [
+      score.overall,
+      JSON.stringify(score),
+      job.id,
+    ]);
+  }
+  for (let index = events.length - 1; index >= 1; index -= 1) {
+    recordStatusChange(fixture.store, {
+      applicationId: application.id,
+      jobId: job.id,
+      profileId: fixture.profile.id,
+      fromStatus: events[index - 1].status,
+      toStatus: events[index].status,
+      note: '',
+      at: events[index].at,
+      actor: 'user',
+      source: 'test',
+      sourceEventId: null,
+    });
+  }
+  const latest = events.at(-1);
+  run(fixture.store, 'UPDATE applications SET status=?,updated_at=? WHERE id=?', [
+    latest.status,
+    latest.at,
+    application.id,
+  ]);
+  const latestEvent = one(fixture.store, `SELECT * FROM status_changes
+    WHERE application_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, [application.id]);
+  reconcileApplicationNextAction(fixture.store, {
+    applicationId: application.id,
+    trigger: lifecycleTrigger(
+      fixture.profile.id,
+      application.id,
+      latestEvent.id,
+      'application_status_changed',
+      latestEvent.created_at,
+    ),
+    nowDate: new Date(latestEvent.created_at),
+  });
+  save(fixture.store);
+  return {
+    job: one(fixture.store, 'SELECT * FROM jobs WHERE id=?', [job.id]),
+    application: one(fixture.store, 'SELECT * FROM applications WHERE id=?', [application.id]),
+  };
+}
+
+function insertImmutableSubmission(s, { application, job, submittedAt, recordedAt, type = 'user_attestation' }) {
+  const artifactId = `artifact_analytics_${application.id}`;
+  const packetId = `packet_analytics_${application.id}`;
+  const receiptId = `receipt_analytics_${application.id}`;
+  run(s, `INSERT INTO artifacts
+    (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    artifactId, job.id, application.profile_id, 'resume', `fixtures/${artifactId}.md`, 'Analytics resume', 'fixture',
+    '[]', '[]', 'approved', submittedAt, `analytics:${application.id}`, 1, null, `hash_${application.id}`,
+    submittedAt, 'test', '',
+  ]);
+  run(s, `INSERT INTO application_packets
+    (id,job_id,profile_id,application_id,attempt_number,revision,content_hash,readiness_status_at_create,readiness_version,packet_version,resume_artifact_id,resume_content_hash,answers_json,identity_json,materials_json,blockers_json,warnings_json,created_at,created_by_source)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    packetId, job.id, application.profile_id, application.id, 1, 1, `packet_hash_${application.id}`,
+    'approved', 3, 1, artifactId, `hash_${application.id}`, '[]', '{}', '{}', '[]', '[]', submittedAt, 'cli',
+  ]);
+  run(s, `INSERT INTO application_receipts
+    (id,packet_id,application_id,type,submitted_at,recorded_at,receipt_hash,source,submission_actor)
+    VALUES (?,?,?,?,?,?,?,?,?)`, [
+    receiptId, packetId, application.id, type, submittedAt, recordedAt, `receipt_hash_${application.id}`, 'cli',
+    type === 'adapter_receipt' ? 'configured_adapter' : 'human',
+  ]);
+  save(s);
+  return receiptId;
+}
+
+function insertProofGap(s, { profileId, jobId, applicationId, suffix }) {
+  const revisionId = `resume_revision_${profileId}`;
+  run(s, `INSERT OR IGNORE INTO profile_resume_revisions
+    (id,profile_id,revision,schema_version,source_text,source_text_hash,document_json,verification_status,is_current,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`, [
+    revisionId, profileId, 1, 1, 'analytics fixture', `resume_hash_${profileId}`, '{}', 'verified', 1,
+    '2026-07-01T00:00:00.000Z',
+  ]);
+  const artifactId = `artifact_gap_${suffix}`;
+  run(s, `INSERT INTO artifacts
+    (id,job_id,profile_id,type,path,title,content,evidence_json,warnings_json,approval_status,created_at,series_key,revision,supersedes_artifact_id,content_hash,reviewed_at,reviewed_by,review_note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    artifactId, jobId, profileId, 'resume', `fixtures/${artifactId}.md`, 'Gap resume', 'fixture', '[]', '[]',
+    'approved', '2026-07-12T00:00:00.000Z', `gap:${applicationId}`, 1, null, `gap_hash_${suffix}`,
+    '2026-07-12T00:00:00.000Z', 'test', '',
+  ]);
+  run(s, `INSERT INTO artifact_resume_documents
+    (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json)
+    VALUES (?,?,?,?,?,?,?,?)`, [
+    artifactId, 1, revisionId, '{}', JSON.stringify({
+      summary: { coverageRatio: 0.5 },
+      unsupported: [{
+        requirementId: 'requirement_analytics',
+        requirement: {
+          sourceText: 'Enterprise procurement leadership',
+          category: 'experience',
+          priority: 'must_have',
+        },
+      }],
+    }), '{}', '{}', '{}',
+  ]);
+}
+
+async function analyticsFixture(t) {
+  const fixture = await actionStore(t);
+  const scored = {
+    contract: 'jobos.fit-score.v1',
+    scoreStatus: 'scored',
+    overall: 82,
+    evidenceCoverage: 100,
+    constraints: [],
+  };
+  const applications = [];
+  for (let index = 0; index < 10; index += 1) {
+    const strongGroup = index < 5;
+    const events = [
+      { status: 'materials-ready', at: `2026-07-${String(8 + index).padStart(2, '0')}T12:00:00.000Z` },
+      { status: 'applied', at: `2026-07-${String(9 + index).padStart(2, '0')}T12:00:00.000Z` },
+    ];
+    if ((strongGroup && index < 4) || index === 5) {
+      events.push({ status: 'interview', at: `2026-07-${String(10 + index).padStart(2, '0')}T12:00:00.000Z` });
+    }
+    if (index === 1) {
+      events.push({ status: 'interview', at: '2026-07-11T18:00:00.000Z' });
+    }
+    if (index === 0) events.push({ status: 'rejected', at: '2026-07-12T12:00:00.000Z' });
+    if (index === 4) events.push({ status: 'withdrawn', at: '2026-07-14T12:00:00.000Z' });
+    if (index === 9) events.push({ status: 'ghosted', at: '2026-07-20T12:00:00.000Z' });
+    const seeded = seedObservedApplication(fixture, {
+      suffix: `cohort-${index}`,
+      title: strongGroup ? `Product Manager ${index}` : `Software Engineer ${index}`,
+      source: strongGroup ? 'referral' : 'text_file',
+      events,
+      score: index < 5 ? scored : null,
+    });
+    applications.push(seeded);
+  }
+  insertImmutableSubmission(fixture.store, {
+    ...applications[0],
+    submittedAt: '2026-07-08T00:00:00.000Z',
+    recordedAt: '2026-07-20T00:00:00.000Z',
+  });
+  const manualTask = one(fixture.store, `SELECT * FROM tasks
+    WHERE application_id=? AND action_kind='application_next_action' AND status='open'`, [
+    applications[5].application.id,
+  ]);
+  rescheduleApplicationNextAction(fixture.store, {
+    taskId: manualTask.id,
+    profileId: fixture.profile.id,
+    dueAt: '2026-07-20T12:00:00.000Z',
+    reason: 'Analytics manual schedule fixture',
+    source: 'cli',
+    nowDate: new Date('2026-07-19T12:00:00.000Z'),
+  });
+  insertProofGap(fixture.store, {
+    profileId: fixture.profile.id,
+    jobId: applications[1].job.id,
+    applicationId: applications[1].application.id,
+    suffix: 'one',
+  });
+  insertProofGap(fixture.store, {
+    profileId: fixture.profile.id,
+    jobId: applications[2].job.id,
+    applicationId: applications[2].application.id,
+    suffix: 'two',
+  });
+  const legacyFile = path.join(fixture.root, 'legacy-current.md');
+  writeFileSync(legacyFile, 'Title: Legacy Role\nCompany: Legacy Analytics\n\nLegacy snapshot.');
+  const legacyJob = importText(fixture.store, { profileId: fixture.profile.id, filePath: legacyFile }).job;
+  run(fixture.store, `INSERT INTO applications
+    (id,job_id,profile_id,status,notes,confirmation_url,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`, [
+    'app_analytics_legacy', legacyJob.id, fixture.profile.id, 'applied', '', '',
+    '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z',
+  ]);
+  save(fixture.store);
+  return { ...fixture, applications, manuallyRescheduledTaskId: manualTask.id };
 }
 
 test('W06-MIGRATE-01 schema 12 migrates without rewriting W02/W05/application event truth', async t => {
@@ -429,4 +638,183 @@ test('W06-ACTION-07 lifecycle observations read attributed status and immutable 
   assert.equal(countRows(store, 'status_changes'), before.statuses);
   assert.equal(countRows(store, 'application_receipts'), before.receipts);
   assert.equal(countRows(store, 'outreach_outcomes'), before.outcomes);
+});
+
+test('W06-ANALYTICS-01 folds ordered observed events, immutable clocks, censoring, and explicit denominators', async t => {
+  const fixture = await analyticsFixture(t);
+  const nowDate = new Date('2026-07-24T12:00:00.000Z');
+  const before = {
+    statuses: stableRows(fixture.store, 'status_changes'),
+    receipts: stableRows(fixture.store, 'application_receipts'),
+  };
+  const result = lifecycleAnalytics(fixture.store, {
+    profileId: fixture.profile.id,
+    sinceDays: 30,
+    nowDate,
+  });
+
+  assert.equal(result.schema, LIFECYCLE_ANALYTICS_SCHEMA);
+  assert.deepEqual(result.period, {
+    start: '2026-06-24T12:00:00.000Z',
+    end: '2026-07-24T12:00:00.000Z',
+    sinceDays: 30,
+    basis: 'observed_status_events_and_immutable_submission_events',
+  });
+  assert.equal(result.currentInventory.basis, 'current_snapshot');
+  assert.equal(result.denominators.applicationsWithObservedEvents, 10);
+  assert.equal(result.denominators.appliedCohort, 10);
+  assert.equal(result.denominators.observedResponses, 5);
+  assert.equal(result.denominators.terminalOutcomes, 3);
+  assert.equal(result.denominators.completedDwellSegments, 19);
+  assert.equal(result.denominators.openDwellSegments, 7);
+  assert.equal(result.timeToResponse.sampleCount, 5);
+  assert.equal(result.timeToResponse.medianHours, 24);
+  assert.equal(result.timeToResponse.p75Hours, 24);
+  assert.ok(result.timeToResponse.durationsHours.includes(60), 'immutable submitted_at, not applied status time, anchors response');
+  assert.equal(result.stageDwell.byStage.find(stage => stage.stage === 'materials-ready').sampleCount, 10);
+  assert.equal(result.stageDwell.byStage.find(stage => stage.stage === 'materials-ready').medianHours, 24);
+  assert.deepEqual(result.outcomes.rejected.applicationIds, [fixture.applications[0].application.id]);
+  assert.equal(result.outcomes.withdrawn.count, 1);
+  assert.equal(result.outcomes.ghosted.count, 1);
+  assert.equal(result.stageDwell.byStage.find(stage => stage.stage === 'interview').sampleCount, 2, 'repeated observed stage entries remain distinct dwell segments');
+  assert.ok(result.warnings.some(warning => warning.code === 'open_dwell_censored'));
+  assert.ok(result.warnings.some(warning => warning.code === 'legacy_unobserved_stage'));
+  assert.ok(result.warnings.some(warning => warning.code === 'current_score_not_event_snapshot'));
+  assert.equal(result.outreachOutcomes.schema, 'jobos.outreach-outcome-summary.v1');
+  assert.deepEqual(result.outreachOutcomes, summarizeOutreachOutcomes(fixture.store, {
+    profileId: fixture.profile.id,
+    sinceDays: 30,
+    nowDate,
+  }));
+  assert.deepEqual(stableRows(fixture.store, 'status_changes'), before.statuses);
+  assert.deepEqual(stableRows(fixture.store, 'application_receipts'), before.receipts);
+});
+
+test('W06-RECOMMEND-01 enforces 0/4/5+ descriptive thresholds and deterministic non-causal actions', async t => {
+  const fixture = await analyticsFixture(t);
+  const nowDate = new Date('2026-07-24T12:00:00.000Z');
+  const large = lifecycleAnalytics(fixture.store, {
+    profileId: fixture.profile.id,
+    sinceDays: 30,
+    nowDate,
+  });
+  const source = large.recommendations.find(item => item.category === 'source');
+  const targeting = large.recommendations.find(item => item.category === 'targeting');
+  const score = large.recommendations.find(item => item.category === 'score');
+  const proof = large.recommendations.find(item => item.category === 'proof');
+  const followUp = large.recommendations.find(item => item.category === 'follow_up');
+  assert.match(source.action, /next five-role review batch/i);
+  assert.match(source.evidence.summary, /referral/i);
+  assert.match(source.caution, /descriptive|caus/i);
+  assert.match(targeting.action, /next five-role review batch/i);
+  assert.match(score.action, /W04.*calibrat/i);
+  assert.equal(score.sample.numerator, 5);
+  assert.match(proof.action, /Enterprise procurement leadership/);
+  assert.match(proof.caution, /only if true.*preserve the gap|preserve it as a gap/i);
+  assert.match(followUp.action, /resolve|manually reschedule/i);
+  for (const recommendation of large.recommendations) {
+    assert.deepEqual(Object.keys(recommendation).sort(), ['action', 'category', 'caution', 'evidence', 'sample']);
+    assert.equal(recommendation.sample.period.start, large.period.start);
+  }
+
+  const smallProfile = createProfile(fixture.store, 'W06 four sample profile').profile;
+  const smallFixture = { ...fixture, profile: smallProfile };
+  for (let index = 0; index < 4; index += 1) {
+    seedObservedApplication(smallFixture, {
+      suffix: `small-${index}`,
+      title: index < 2 ? `Product ${index}` : `Engineer ${index}`,
+      source: index < 2 ? 'referral' : 'text_file',
+      events: [
+        { status: 'materials-ready', at: `2026-07-${10 + index}T00:00:00.000Z` },
+        { status: 'applied', at: `2026-07-${11 + index}T00:00:00.000Z` },
+      ],
+    });
+  }
+  assert.deepEqual(followUp.evidence.manuallyRescheduledActionIds, [fixture.manuallyRescheduledTaskId]);
+  const small = lifecycleAnalytics(fixture.store, {
+    profileId: smallProfile.id,
+    sinceDays: 30,
+    nowDate,
+  });
+  assert.equal(small.denominators.appliedCohort, 4);
+  assert.equal(small.timeToResponse.medianHours, null);
+  assert.match(small.recommendations.find(item => item.category === 'source').caution, /insufficient/i);
+  assert.ok(small.warnings.some(warning => warning.code === 'insufficient_sample'));
+
+  const emptyProfile = createProfile(fixture.store, 'W06 zero sample profile').profile;
+  const empty = lifecycleAnalytics(fixture.store, {
+    profileId: emptyProfile.id,
+    sinceDays: 30,
+    nowDate,
+  });
+  assert.equal(empty.denominators.appliedCohort, 0);
+  assert.deepEqual(empty.bySource, []);
+  assert.match(empty.recommendations.find(item => item.category === 'targeting').caution, /insufficient/i);
+});
+
+test('W06-HANDOFF-01 publishes exact W04/W07/W08 contracts and one compatibility projection', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const profileId = one(store, "SELECT profile_id FROM applications WHERE status='applied'").profile_id;
+  const nowDate = new Date('2030-01-01T00:00:00.000Z');
+  const lifecycle = lifecycleAnalytics(store, { profileId, sinceDays: 3650, nowDate });
+  assert.deepEqual(lifecycle.handoffs, {
+    w04: {
+      schema: 'jobos.lifecycle-analytics.v1',
+      policy: 'descriptive_observed_aggregates_only_no_score_formula',
+      fields: ['period', 'denominators', 'observedFunnel', 'stageDwell', 'timeToResponse', 'outcomes', 'scoreObservations'],
+    },
+    w07: {
+      inputSchema: 'jobos.lifecycle-event-input.v1',
+      acceptedEventTypes: ['interview_debrief_recorded'],
+      required: ['profileId', 'applicationId', 'eventId', 'occurredAt', 'stage'],
+      policy: 'debrief_content_remains_w07_owned',
+    },
+    w08: {
+      schema: 'jobos.lifecycle-observation-list.v1',
+      observationSchema: 'jobos.lifecycle-observation.v1',
+      policy: 'attributed_observations_only_no_preference_interpretation',
+    },
+  });
+  assert.deepEqual(lifecycle.outreachOutcomes, summarizeOutreachOutcomes(store, {
+    profileId,
+    sinceDays: 3650,
+    nowDate,
+  }));
+
+  const projection = funnel(store, profileId, 3650, { nowDate });
+  assert.equal(projection.lifecycle.schema, LIFECYCLE_ANALYTICS_SCHEMA);
+  assert.deepEqual(projection.basis, {
+    totals: 'mixed_labeled_inventory_and_observed_events',
+    conversion: 'observed_events_only',
+    byStage: 'current_snapshot',
+    stageReached: 'observed_status_events',
+    bySource: 'observed_applied_cohort',
+    byRoleFamily: 'observed_applied_cohort',
+  });
+  // MEDIUM-1: conversion must expose an honestly named canonical key with a backward-compatible alias.
+  assert.equal(
+    projection.conversion.applyRateAmongApplicationsWithObservedEvents,
+    projection.conversion.applyRateFromImportedJobs,
+    'canonical conversion key must equal the deprecated alias value',
+  );
+  assert.deepEqual(projection.conversionAliases, {
+    applyRateFromImportedJobs: 'applyRateAmongApplicationsWithObservedEvents',
+  }, 'machine-readable alias/deprecation semantics must map the deprecated key to the canonical key');
+  assert.equal(projection.totals.applied, projection.lifecycle.observedFunnel.applied);
+  assert.equal(projection.totals.responses, projection.lifecycle.observedFunnel.responses);
+  assert.equal(projection.totals.interviews, projection.lifecycle.observedFunnel.interviews);
+  assert.equal(projection.totals.offers, projection.lifecycle.observedFunnel.offers);
+  const markdown = renderFunnelMarkdown(projection);
+  assert.match(markdown, /Current inventory/);
+  assert.match(markdown, /Observed funnel/);
+  assert.match(markdown, /Denominators/);
+  assert.match(markdown, /censored/i);
+  assert.match(markdown, /Warnings/);
+
+  const review = weekly(store, profileId, { recordRun: false, nowDate });
+  assert.deepEqual(review.metrics.outreachOutcomes, review.metrics.lifecycle.outreachOutcomes);
+  assert.match(review.content, /Current application actions/);
+  assert.match(review.content, /Generated recommendations/);
+  assert.doesNotMatch(review.content, /## Recommended experiments/);
 });
