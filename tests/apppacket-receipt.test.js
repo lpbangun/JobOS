@@ -531,11 +531,26 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
   const api = await packetApi();
   const fixture = await baseFixture(t);
   const packet = api.createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
+  const deniedMcp = [
+    'approve_artifact',
+    'reject_artifact',
+    'approve_contact',
+    'answers_add',
+    'create_application_packet',
+    'attest_application_submitted',
+    'confirm_application_receipt',
+    'checkpoint_application_form',
+    'verify_interview_story',
+    'retire_interview_story',
+    'add_interview_question_source',
+    'record_interview_debrief',
+    'correct_interview_debrief',
+  ];
   const advertised = mcpToolNames();
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
-  for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt', 'checkpoint_application_form']) assert.equal(advertised.includes(name), false);
+  for (const name of deniedMcp) assert.equal(advertised.includes(name), false);
   assert.ok(DOMAIN_TOOLS.some(tool => tool.name === 'create_application_packet'));
-  assert.equal(advertised.length, DOMAIN_TOOLS.length - 8, 'MCP excludes all eight always-denied human-gated mutations');
+  assert.equal(advertised.length, DOMAIN_TOOLS.length - deniedMcp.length, 'MCP excludes every always-denied human-gated mutation');
 
   const oldMediation = process.env.JOBOS_MEDIATION;
   const oldOverride = process.env.JOBOS_ALLOW_AGENT_ATTESTATION;

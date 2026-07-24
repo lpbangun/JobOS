@@ -1,5 +1,6 @@
 import { all, one } from './db.js';
 import { discoveryHealth, listJobSummaries, reviewQueue, selectedJobContext } from './domain-tools.js';
+import { getInterviewStory, listInterviewDebriefs, listInterviewStories } from './interview.js';
 import { reviewQueue as discoveryReviewQueue } from './discovery.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
@@ -187,6 +188,111 @@ export function artifactDocs(s, jobId) {
   });
 }
 
+function interviewProjection(s, { profileId, selected }) {
+  if (!profileId) {
+    return {
+      profileId: null,
+      counts: {
+        stories: 0,
+        verified: 0,
+        stale: 0,
+        draftIneligible: 0,
+        debriefs: 0,
+        currentDebriefRevisions: 0
+      },
+      stories: [],
+      selectedApplication: null
+    };
+  }
+
+  const listedStories = listInterviewStories(s, { profileId, includeHistory: false });
+  const stories = listedStories.stories.map(story => getInterviewStory(s, {
+    profileId,
+    storyId: story.id,
+    includeHistory: true
+  }));
+  const listedDebriefs = listInterviewDebriefs(s, {
+    profileId,
+    includeHistory: false
+  });
+  const verified = stories.filter(story => story.eligibility === 'eligible').length;
+  const stale = stories.filter(story => story.eligibility === 'proof_stale').length;
+  const applicationId = selected?.job.applicationId || null;
+  const jobId = selected?.job.id || null;
+  let selectedApplication = null;
+
+  if (applicationId && jobId) {
+    const packArtifact = one(s, `SELECT a.id,a.title,a.revision,a.created_at
+      FROM artifacts a
+      WHERE a.profile_id=? AND a.job_id=? AND a.type='interview_prep'
+        AND EXISTS (
+          SELECT 1 FROM interview_pack_items i
+          WHERE i.artifact_id=a.id AND i.profile_id=? AND i.job_id=? AND i.application_id=?
+        )
+      ORDER BY a.created_at DESC,a.revision DESC,a.id DESC LIMIT 1`, [
+      profileId,
+      jobId,
+      profileId,
+      jobId,
+      applicationId
+    ]);
+    const packCounts = packArtifact
+      ? one(s, `SELECT COUNT(*) AS item_count,
+          SUM(CASE WHEN coverage_status='covered' THEN 1 ELSE 0 END) AS covered_count,
+          SUM(CASE WHEN coverage_status='gap' THEN 1 ELSE 0 END) AS gap_count,
+          MIN(interview_stage) AS interview_stage,
+          MIN(audience) AS audience
+        FROM interview_pack_items
+        WHERE artifact_id=? AND profile_id=? AND job_id=? AND application_id=?`, [
+        packArtifact.id,
+        profileId,
+        jobId,
+        applicationId
+      ])
+      : null;
+    const applicationDebriefs = listInterviewDebriefs(s, {
+      profileId,
+      applicationId,
+      includeHistory: true
+    }).debriefs;
+    selectedApplication = {
+      profileId,
+      jobId,
+      applicationId,
+      pack: packArtifact ? {
+        artifactId: packArtifact.id,
+        title: packArtifact.title,
+        revision: Number(packArtifact.revision),
+        stage: packCounts.interview_stage,
+        audience: packCounts.audience,
+        itemCount: Number(packCounts.item_count || 0),
+        coveredCount: Number(packCounts.covered_count || 0),
+        gapCount: Number(packCounts.gap_count || 0),
+        createdAt: packArtifact.created_at
+      } : null,
+      debriefs: {
+        count: applicationDebriefs.length,
+        currentRevisions: applicationDebriefs.filter(debrief => debrief.currentRevision).length,
+        items: applicationDebriefs
+      }
+    };
+  }
+
+  return {
+    profileId,
+    counts: {
+      stories: stories.length,
+      verified,
+      stale,
+      draftIneligible: stories.length - verified - stale,
+      debriefs: listedDebriefs.debriefs.length,
+      currentDebriefRevisions: listedDebriefs.debriefs.filter(debrief => debrief.currentRevision).length
+    },
+    stories,
+    selectedApplication
+  };
+}
+
 export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = new Date().toISOString() } = {}) {
   const profiles = all(s, 'SELECT id,name,created_at,updated_at FROM profiles ORDER BY created_at').map(row => ({
     id: row.id,
@@ -311,6 +417,11 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     return 'available';
   })();
 
+  const interviews = interviewProjection(s, {
+    profileId: selectedProfile,
+    selected: details
+  });
+
   return {
     version: 2,
     generatedAt: at,
@@ -329,6 +440,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     jobs,
     selectedJobId: selectedId,
     selected: details,
+    interviews,
     review: reviews,
     log: logs,
     dueTasks: dueRows.slice(0, 20).map(row => ({
