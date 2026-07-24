@@ -1465,3 +1465,55 @@ test('W02 confirmed configured submission never regresses recruiter-screen inter
     else process.env.JOBOS_FORM_SUBMIT_ENABLED = previousSubmit;
   }
 });
+
+test('WF24 iframe-hosted selected form confirms from the selected frame with one submit boundary and idempotent replay', async t => {
+  const f = await configuredSubmissionFixture(t, '/application-iframe-configured.html');
+  // The selected form must be the iframe form, not the host-page search form.
+  const inspectedSnapshot = getFormSnapshot(f.store, f.packet.form.snapshotId);
+  assert.notEqual(inspectedSnapshot.selection.frameKey, '');
+  assert.equal(inspectedSnapshot.target.requestedPath, '/application-iframe-configured.html');
+  const previousSubmit = process.env.JOBOS_FORM_SUBMIT_ENABLED;
+  process.env.JOBOS_FORM_SUBMIT_ENABLED = '1';
+  try {
+    const result = await submitApplicationForm(f.store, {
+      packetId: f.packet.id,
+      checkpointId: f.checkpoint.checkpointId,
+      workspace: f.root,
+      browserProfile: f.browserProfile,
+      allowSubmit: true,
+      protectRequests: false
+    });
+    // Exactly one external submit boundary crossed.
+    assert.equal(result.status, 'confirmed');
+    assert.equal(result.submissionPerformed, true);
+    assert.equal(f.server.state.submits, 1);
+    assert.equal(f.server.state.submitBoundaryCrossed, true);
+    // Confirmation origin/path/reference read from the selected frame, not the
+    // host page. The top page stays on the host document; only the iframe
+    // reached /confirmation.html.
+    assert.equal(result.outcome.confirmationOrigin, f.server.baseUrl);
+    assert.equal(result.outcome.confirmationPath, '/confirmation.html');
+    assert.equal(result.outcome.confirmation.reference, 'APP-CONF-0001');
+    assert.equal(result.receipt.externalReference, 'APP-CONF-0001');
+    assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM application_receipts').count, 1);
+    assert.equal(one(f.store, 'SELECT status FROM applications WHERE id=?', [f.packet.applicationId]).status, 'applied');
+
+    // Idempotent replay returns confirmed evidence without a second submit.
+    const replay = await submitApplicationForm(f.store, {
+      packetId: f.packet.id,
+      checkpointId: f.checkpoint.checkpointId,
+      workspace: f.root,
+      browserProfile: f.browserProfile,
+      allowSubmit: true,
+      protectRequests: false
+    });
+    assert.equal(replay.status, 'confirmed');
+    assert.equal(replay.idempotent, true);
+    assert.equal(replay.attemptId, result.attemptId);
+    assert.equal(f.server.state.submits, 1);
+    assert.equal(one(f.store, 'SELECT COUNT(*) AS count FROM application_receipts').count, 1);
+  } finally {
+    if (previousSubmit === undefined) delete process.env.JOBOS_FORM_SUBMIT_ENABLED;
+    else process.env.JOBOS_FORM_SUBMIT_ENABLED = previousSubmit;
+  }
+});
