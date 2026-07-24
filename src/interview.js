@@ -1012,6 +1012,644 @@ export function listInterviewStories(s, input = {}) {
   });
 }
 
+const TRUSTED_INTERVIEW_QUESTION_SOURCES = Object.freeze(['cli', 'tui']);
+
+function normalizeQuestionText(value) {
+  return requireInterviewText(value, 'questionText')
+    .toLowerCase()
+    .replace(/[^a-z0-9+#]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function questionSuccessors(rows) {
+  const successors = new Map();
+  for (const row of rows) {
+    if (row.supersedes_source_id) successors.set(row.supersedes_source_id, row.id);
+  }
+  return successors;
+}
+
+function questionRoots(rows) {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  const roots = new Map();
+  function rootId(row) {
+    if (roots.has(row.id)) return roots.get(row.id);
+    const visited = new Set([row.id]);
+    let current = row;
+    while (current.supersedes_source_id) {
+      if (visited.has(current.supersedes_source_id)) {
+        throw new InterviewError(
+          'interview_question_lineage_invalid',
+          `Interview question source ${row.id} has cyclic correction lineage.`,
+        );
+      }
+      visited.add(current.supersedes_source_id);
+      const parent = byId.get(current.supersedes_source_id);
+      if (!parent) {
+        throw new InterviewError(
+          'interview_question_lineage_invalid',
+          `Interview question source ${row.id} has a missing correction parent.`,
+        );
+      }
+      current = parent;
+    }
+    for (const sourceId of visited) roots.set(sourceId, current.id);
+    return current.id;
+  }
+  for (const row of rows) rootId(row);
+  return roots;
+}
+
+function questionSourceProjection(row, successors, roots) {
+  return {
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    id: row.id,
+    rootSourceId: roots.get(row.id),
+    profileId: row.profile_id,
+    jobId: row.job_id,
+    applicationId: row.application_id,
+    stage: row.interview_stage,
+    audience: row.audience,
+    questionText: row.question_text,
+    normalizedText: row.normalized_text,
+    sourceKind: row.source_kind,
+    sourceRef: row.source_ref,
+    actor: row.actor,
+    source: row.source,
+    createdAt: row.created_at,
+    supersedesSourceId: row.supersedes_source_id || null,
+    supersededBySourceId: successors.get(row.id) || null,
+    correctionReason: row.correction_reason || '',
+    current: !successors.has(row.id),
+  };
+}
+
+function questionSourceRows(s, profileId) {
+  return all(s, `SELECT * FROM interview_question_sources
+    WHERE profile_id=?
+    ORDER BY created_at,id`, [profileId]);
+}
+
+function questionSourceListProjection(s, profileId, filters = {}) {
+  const rows = questionSourceRows(s, profileId);
+  const successors = questionSuccessors(rows);
+  const roots = questionRoots(rows);
+  const selected = rows.filter(row => (
+    (!filters.jobId || row.job_id === filters.jobId)
+    && (!filters.applicationId || row.application_id === filters.applicationId)
+    && (!filters.stage || row.interview_stage === filters.stage)
+    && (!filters.audience || row.audience === filters.audience)
+  ));
+  const sources = selected.map(row => questionSourceProjection(row, successors, roots));
+  return {
+    schema: INTERVIEW_QUESTION_SCHEMA,
+    version: 1,
+    profileId,
+    sources,
+    currentSources: sources.filter(source => source.current),
+  };
+}
+
+function syncInterviewQuestionSources(s, profileId) {
+  writeYaml(
+    path.join(s.p.profiles, profileId, 'interviews', 'question-sources.yaml'),
+    {
+      schema: INTERVIEW_QUESTION_SCHEMA,
+      version: 1,
+      profileId,
+      policy: {
+        appendOnly: true,
+        corrections: 'reasoned_latest_only_branchless_chain',
+        currentResolution: 'unique_chain_tip',
+        canonicalStore: 'sqlite',
+      },
+      ...questionSourceListProjection(s, profileId),
+    },
+  );
+}
+
+function sameQuestionSource(row, input) {
+  return row.profile_id === input.profileId
+    && row.job_id === input.jobId
+    && row.application_id === input.applicationId
+    && row.interview_stage === input.stage
+    && row.audience === input.audience
+    && row.question_text === input.questionText
+    && row.normalized_text === input.normalizedText
+    && row.source_kind === input.sourceKind
+    && row.source_ref === input.sourceRef
+    && row.actor === input.actor
+    && row.source === input.source
+    && (row.supersedes_source_id || null) === (input.supersedesSourceId || null)
+    && (row.correction_reason || '') === (input.correctionReason || '');
+}
+
+function normalizedQuestionSourceInput(s, input) {
+  const source = requireInterviewText(input.source, 'source').toLowerCase();
+  if (!TRUSTED_INTERVIEW_QUESTION_SOURCES.includes(source)) {
+    throw new InterviewError(
+      'interview_question_source_untrusted',
+      'Interview question sources can be written only by trusted CLI or TUI input.',
+      { allowed: [...TRUSTED_INTERVIEW_QUESTION_SOURCES], source },
+    );
+  }
+  const stage = normalizeInterviewEnum(input.stage, 'stage', INTERVIEW_STAGES);
+  const audience = audienceForInterviewStage(stage, input.audience);
+  const sourceKind = normalizeInterviewEnum(
+    input.sourceKind,
+    'sourceKind',
+    INTERVIEW_QUESTION_SOURCE_KINDS,
+  );
+  const questionText = requireInterviewText(input.questionText, 'questionText');
+  const sourceRef = String(input.sourceRef ?? '').trim();
+  if (sourceKind !== 'user_provided' && !sourceRef) {
+    throw new InterviewError(
+      'interview_source_ref_required',
+      `${sourceKind} questions require sourceRef.`,
+    );
+  }
+  const actor = requireInterviewText(input.actor, 'actor');
+  const ownership = resolveInterviewOwnership(s, {
+    profileId: input.profileId,
+    jobId: input.jobId,
+    applicationId: input.applicationId,
+  });
+  const supersedesSourceId = input.supersedesSourceId
+    ? requireInterviewText(input.supersedesSourceId, 'supersedesSourceId')
+    : null;
+  const correctionReason = supersedesSourceId
+    ? requireInterviewText(input.correctionReason, 'correctionReason')
+    : String(input.correctionReason ?? '').trim();
+  if (!supersedesSourceId && correctionReason) {
+    throw new InterviewError(
+      'interview_question_correction_reason_invalid',
+      'correctionReason is valid only for a correction.',
+    );
+  }
+  return {
+    profileId: ownership.profile.id,
+    jobId: ownership.job.id,
+    applicationId: ownership.application.id,
+    stage,
+    audience,
+    questionText,
+    normalizedText: normalizeQuestionText(questionText),
+    sourceKind,
+    sourceRef,
+    actor,
+    source,
+    supersedesSourceId,
+    correctionReason,
+  };
+}
+
+function projectedQuestionSource(s, row, idempotent) {
+  const rows = questionSourceRows(s, row.profile_id);
+  return {
+    ...questionSourceProjection(row, questionSuccessors(rows), questionRoots(rows)),
+    idempotent,
+  };
+}
+
+export function createInterviewQuestionSource(s, input = {}) {
+  return guardedWrite(s, () => {
+    const normalized = normalizedQuestionSourceInput(s, input);
+    let root = null;
+    if (normalized.sourceRef) {
+      root = one(s, `SELECT * FROM interview_question_sources
+        WHERE profile_id=? AND source_ref=? AND supersedes_source_id IS NULL`, [
+        normalized.profileId,
+        normalized.sourceRef,
+      ]);
+    }
+
+    if (!normalized.supersedesSourceId) {
+      if (root) {
+        if (!sameQuestionSource(root, normalized)) {
+          throw new InterviewError(
+            'interview_question_reference_conflict',
+            `Reference ${normalized.sourceRef} already identifies a different interview question source.`,
+          );
+        }
+        return projectedQuestionSource(s, root, true);
+      }
+      const rootIdentity = normalized.sourceRef || normalized.normalizedText;
+      const questionId = id(
+        'interview_question',
+        `${normalized.profileId}|${normalized.stage}|${normalized.sourceKind}|${rootIdentity}`,
+      );
+      const identityRow = one(s, 'SELECT * FROM interview_question_sources WHERE id=?', [questionId]);
+      if (identityRow) {
+        if (!sameQuestionSource(identityRow, normalized)) {
+          throw new InterviewError(
+            'interview_question_reference_conflict',
+            'The deterministic interview question identity already has different content.',
+          );
+        }
+        return projectedQuestionSource(s, identityRow, true);
+      }
+      const createdAt = now();
+      run(s, `INSERT INTO interview_question_sources
+        (id,profile_id,job_id,application_id,interview_stage,audience,question_text,normalized_text,
+         source_kind,source_ref,actor,source,created_at,supersedes_source_id,correction_reason)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        questionId,
+        normalized.profileId,
+        normalized.jobId,
+        normalized.applicationId,
+        normalized.stage,
+        normalized.audience,
+        normalized.questionText,
+        normalized.normalizedText,
+        normalized.sourceKind,
+        normalized.sourceRef,
+        normalized.actor,
+        normalized.source,
+        createdAt,
+        null,
+        '',
+      ]);
+      const event = recordAudit(
+        s,
+        'interview.question_source.created',
+        'interview_question_source',
+        questionId,
+        {
+          schema: INTERVIEW_QUESTION_SCHEMA,
+          profileId: normalized.profileId,
+          jobId: normalized.jobId,
+          applicationId: normalized.applicationId,
+          questionSourceId: questionId,
+          rootSourceId: questionId,
+          sourceKind: normalized.sourceKind,
+          sourceRef: normalized.sourceRef,
+          stage: normalized.stage,
+          audience: normalized.audience,
+          externalSideEffects: 'none',
+        },
+      );
+      queuePostCommit(s, () => syncInterviewQuestionSources(s, normalized.profileId));
+      queuePostCommit(s, () => projectAudit(s, event));
+      return projectedQuestionSource(
+        s,
+        one(s, 'SELECT * FROM interview_question_sources WHERE id=?', [questionId]),
+        false,
+      );
+    }
+
+    const superseded = one(
+      s,
+      'SELECT * FROM interview_question_sources WHERE id=?',
+      [normalized.supersedesSourceId],
+    );
+    if (!superseded) {
+      throw new InterviewError(
+        'interview_question_supersedes_unknown',
+        `Unknown superseded interview question source: ${normalized.supersedesSourceId}.`,
+      );
+    }
+    if (
+      superseded.profile_id !== normalized.profileId
+      || superseded.job_id !== normalized.jobId
+      || superseded.application_id !== normalized.applicationId
+      || superseded.interview_stage !== normalized.stage
+      || superseded.audience !== normalized.audience
+      || superseded.source_kind !== normalized.sourceKind
+      || superseded.source_ref !== normalized.sourceRef
+    ) {
+      throw new InterviewError(
+        'interview_question_supersedes_mismatch',
+        'Corrections must preserve profile, job, application, stage, audience, source kind, and source reference.',
+      );
+    }
+    if (!normalized.sourceRef) {
+      throw new InterviewError(
+        'interview_question_correction_reference_required',
+        'Interview question corrections require the root source reference.',
+      );
+    }
+    const successor = one(
+      s,
+      'SELECT * FROM interview_question_sources WHERE supersedes_source_id=?',
+      [superseded.id],
+    );
+    if (successor) {
+      if (sameQuestionSource(successor, normalized)) {
+        return projectedQuestionSource(s, successor, true);
+      }
+      throw new InterviewError(
+        'interview_question_supersedes_not_current',
+        `Interview question source ${superseded.id} is not the current correction tip.`,
+      );
+    }
+    const allRows = questionSourceRows(s, normalized.profileId);
+    const roots = questionRoots(allRows);
+    const rootSourceId = roots.get(superseded.id);
+    if (!root || root.id !== rootSourceId) {
+      throw new InterviewError(
+        'interview_question_lineage_invalid',
+        `Interview question source ${superseded.id} is not in the referenced root chain.`,
+      );
+    }
+    const correctionId = id(
+      'interview_question',
+      `${rootSourceId}|${superseded.id}|${normalized.normalizedText}|${normalized.correctionReason}`,
+    );
+    const createdAt = now();
+    run(s, `INSERT INTO interview_question_sources
+      (id,profile_id,job_id,application_id,interview_stage,audience,question_text,normalized_text,
+       source_kind,source_ref,actor,source,created_at,supersedes_source_id,correction_reason)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      correctionId,
+      normalized.profileId,
+      normalized.jobId,
+      normalized.applicationId,
+      normalized.stage,
+      normalized.audience,
+      normalized.questionText,
+      normalized.normalizedText,
+      normalized.sourceKind,
+      normalized.sourceRef,
+      normalized.actor,
+      normalized.source,
+      createdAt,
+      superseded.id,
+      normalized.correctionReason,
+    ]);
+    const event = recordAudit(
+      s,
+      'interview.question_source.corrected',
+      'interview_question_source',
+      correctionId,
+      {
+        schema: INTERVIEW_QUESTION_SCHEMA,
+        profileId: normalized.profileId,
+        jobId: normalized.jobId,
+        applicationId: normalized.applicationId,
+        questionSourceId: correctionId,
+        rootSourceId,
+        supersedesSourceId: superseded.id,
+        sourceKind: normalized.sourceKind,
+        sourceRef: normalized.sourceRef,
+        stage: normalized.stage,
+        audience: normalized.audience,
+        externalSideEffects: 'none',
+      },
+    );
+    queuePostCommit(s, () => syncInterviewQuestionSources(s, normalized.profileId));
+    queuePostCommit(s, () => projectAudit(s, event));
+    return projectedQuestionSource(
+      s,
+      one(s, 'SELECT * FROM interview_question_sources WHERE id=?', [correctionId]),
+      false,
+    );
+  });
+}
+
+export function listInterviewQuestionSources(s, input = {}) {
+  const ownership = resolveInterviewOwnership(s, {
+    profileId: input.profileId,
+    jobId: input.jobId,
+    applicationId: input.applicationId,
+  });
+  const stage = input.stage === undefined || input.stage === null || String(input.stage).trim() === ''
+    ? null
+    : normalizeInterviewEnum(input.stage, 'stage', INTERVIEW_STAGES);
+  const audience = input.audience === undefined
+    || input.audience === null
+    || String(input.audience).trim() === ''
+    ? null
+    : normalizeInterviewEnum(input.audience, 'audience', INTERVIEW_AUDIENCES);
+  return questionSourceListProjection(s, ownership.profile.id, {
+    jobId: ownership.job?.id || null,
+    applicationId: ownership.application?.id || null,
+    stage,
+    audience,
+  });
+}
+
+const INTERVIEW_MATCH_SYNONYMS = Object.freeze({
+  collaborate: 'collaboration',
+  collaborated: 'collaboration',
+  collaborative: 'collaboration',
+  deliver: 'delivery',
+  delivered: 'delivery',
+  delivering: 'delivery',
+  lead: 'leadership',
+  leaders: 'leadership',
+  leading: 'leadership',
+  led: 'leadership',
+  learn: 'learning',
+  learned: 'learning',
+  manage: 'management',
+  managed: 'management',
+  manager: 'management',
+  managing: 'management',
+  own: 'ownership',
+  owned: 'ownership',
+  owns: 'ownership',
+  scaled: 'scale',
+  scaling: 'scale',
+  scalability: 'scale',
+  strategic: 'strategy',
+});
+
+function matchTokens(value) {
+  const normalized = tokenize(value)
+    .map(token => token.replace(/^\.+|\.+$/g, ''))
+    .filter(Boolean)
+    .map(token => INTERVIEW_MATCH_SYNONYMS[token] || token);
+  return [...new Set(normalized)].sort();
+}
+
+function overlapTokens(left, right) {
+  const rightSet = new Set(right);
+  return left.filter(token => rightSet.has(token));
+}
+
+function scoreComponent(tokens, cap, weight) {
+  const cappedCount = Math.min(cap, tokens.length);
+  return {
+    tokens,
+    count: tokens.length,
+    cappedCount,
+    weight,
+    score: weight * cappedCount,
+  };
+}
+
+function matcherStoryCandidates(s, profileId) {
+  const stories = all(
+    s,
+    'SELECT * FROM interview_stories WHERE profile_id=? ORDER BY id',
+    [profileId],
+  );
+  const eligible = [];
+  const excluded = [];
+  for (const row of stories) {
+    const projected = storyProjection(s, row, { compact: false });
+    if (projected.eligibility !== 'eligible') {
+      excluded.push({
+        storyId: projected.id,
+        reason: projected.eligibility,
+        currentRevisionId: projected.currentRevision.id,
+        activeVerifiedRevisionId: projected.activeVerifiedRevision?.id || null,
+        staleProofPointIds: projected.staleProofPointIds,
+        verificationBlockers: projected.verificationBlockers,
+      });
+      continue;
+    }
+    const revision = projected.activeVerifiedRevision;
+    const linkedProofPointIds = [...new Set(
+      INTERVIEW_STORY_FACTUAL_FIELDS.flatMap(field => (
+        revision.fieldEvidence[field].map(evidence => evidence.proofPointId)
+      )),
+    )].sort();
+    const currentProofs = proofStates(s, linkedProofPointIds);
+    const linkedProofSkills = matchTokens(linkedProofPointIds.flatMap(proofPointId => (
+      parseJson(currentProofs.get(proofPointId)?.skills_json, [])
+    )).join(' '));
+    const competencyTokens = matchTokens(revision.competencyTags.join(' '));
+    const audienceTags = [...new Set(revision.audienceTags)].sort();
+    const excludedFromOther = new Set([...competencyTokens, ...linkedProofSkills]);
+    const otherStoryTokens = matchTokens(INTERVIEW_STORY_CONTENT_FIELDS
+      .map(field => revision[field])
+      .join(' '))
+      .filter(token => !excludedFromOther.has(token));
+    eligible.push({
+      storyId: projected.id,
+      storyRevisionId: revision.id,
+      competencyTags: revision.competencyTags,
+      audienceTags,
+      linkedProofPointIds,
+      competencyTokens,
+      linkedProofSkills,
+      otherStoryTokens,
+    });
+  }
+  eligible.sort((left, right) => (
+    left.storyId.localeCompare(right.storyId)
+    || left.storyRevisionId.localeCompare(right.storyRevisionId)
+  ));
+  excluded.sort((left, right) => left.storyId.localeCompare(right.storyId));
+  return { eligible, excluded };
+}
+
+function scoreStoryForQuestion(story, questionTokens, audience) {
+  const competency = scoreComponent(
+    overlapTokens(story.competencyTokens, questionTokens),
+    2,
+    4,
+  );
+  const proofSkills = scoreComponent(
+    overlapTokens(story.linkedProofSkills, questionTokens),
+    3,
+    2,
+  );
+  const storyText = scoreComponent(
+    overlapTokens(story.otherStoryTokens, questionTokens),
+    4,
+    1,
+  );
+  const audienceMatched = story.audienceTags.includes(audience);
+  const scoreComponents = {
+    competencyTagOverlap: competency,
+    linkedProofSkillOverlap: proofSkills,
+    otherStoryTokenOverlap: storyText,
+    audienceTagMatch: {
+      matched: audienceMatched,
+      score: audienceMatched ? 2 : 0,
+    },
+  };
+  const reasons = [];
+  if (competency.score) reasons.push('competency_tag_overlap');
+  if (proofSkills.score) reasons.push('linked_proof_skill_overlap');
+  if (storyText.score) reasons.push('other_story_token_overlap');
+  if (audienceMatched) reasons.push('audience_tag_match');
+  return {
+    storyId: story.storyId,
+    storyRevisionId: story.storyRevisionId,
+    score: competency.score
+      + proofSkills.score
+      + storyText.score
+      + scoreComponents.audienceTagMatch.score,
+    scoreComponents,
+    reasons,
+  };
+}
+
+export function matchStoriesToQuestions(s, input = {}) {
+  const ownership = resolveInterviewOwnership(s, { profileId: input.profileId });
+  const questions = normalizeInterviewJson(input.questions, 'questions', 'array');
+  const maxStories = input.maxStories === undefined ? 3 : Number(input.maxStories);
+  if (!Number.isInteger(maxStories) || maxStories < 1) {
+    throw new InterviewError(
+      'interview_max_stories_invalid',
+      'maxStories must be a positive integer.',
+    );
+  }
+  const candidates = matcherStoryCandidates(s, ownership.profile.id);
+  const eligibleStories = candidates.eligible.map(story => ({
+    storyId: story.storyId,
+    storyRevisionId: story.storyRevisionId,
+    competencyTags: story.competencyTags,
+    audienceTags: story.audienceTags,
+    linkedProofPointIds: story.linkedProofPointIds,
+  }));
+  const matches = questions.map((value, position) => {
+    const question = normalizeInterviewJson(value, `questions[${position}]`, 'object');
+    const questionId = requireInterviewText(question.id, `questions[${position}].id`);
+    const text = requireInterviewText(question.text, `questions[${position}].text`);
+    const audience = normalizeInterviewEnum(
+      question.audience ?? input.audience ?? 'unknown',
+      `questions[${position}].audience`,
+      INTERVIEW_AUDIENCES,
+    );
+    const questionTokens = matchTokens(text);
+    const scored = candidates.eligible
+      .map(story => scoreStoryForQuestion(story, questionTokens, audience))
+      .sort((left, right) => (
+        right.score - left.score
+        || left.storyId.localeCompare(right.storyId)
+        || left.storyRevisionId.localeCompare(right.storyRevisionId)
+      ));
+    const qualifying = scored.filter(candidate => candidate.score >= 3);
+    const bounded = qualifying.slice(0, maxStories);
+    const gapReason = bounded.length
+      ? null
+      : candidates.eligible.length
+        ? 'insufficient_overlap'
+        : candidates.excluded.some(story => story.reason === 'proof_stale')
+          ? 'proof_stale'
+          : 'no_verified_story';
+    return {
+      questionId,
+      position,
+      text,
+      normalizedText: normalizeQuestionText(text),
+      audience,
+      questionTokens,
+      coverageStatus: bounded.length ? 'covered' : 'gap',
+      gapReason,
+      candidateCount: qualifying.length,
+      candidates: scored,
+      matches: bounded,
+      selectedStory: bounded[0] || null,
+      alternativeStories: bounded.slice(1),
+    };
+  });
+  return {
+    deterministic: true,
+    profileId: ownership.profile.id,
+    maxStories,
+    eligibleStories,
+    excludedStories: candidates.excluded,
+    questions: matches,
+  };
+}
+
 const stageLabels = {
   'recruiter-screen': 'recruiter screen',
   interview: 'interview',

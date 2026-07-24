@@ -10,6 +10,7 @@ import YAML from 'yaml';
 import { all, one, openStore, save } from '../src/db.js';
 import * as interview from '../src/interview.js';
 import { retireProof, supersedeProof } from '../src/profiles.js';
+import { id as deterministicId } from '../src/utils.js';
 
 const require = createRequire(import.meta.url);
 const fixturePath = path.resolve('tests/fixtures/w07-schema13.sqlite');
@@ -788,4 +789,787 @@ test('W07-STORY-08 verification revalidates current proof ownership before block
     }),
     'interview_proof_point_profile_mismatch',
   );
+});
+
+const QUESTION_TABLES = Object.freeze(['interview_question_sources', 'audit_log']);
+
+function questionMirrorPath(root, profileId = 'profile_w07_alpha') {
+  return path.join(root, 'jobos-workspace', 'profiles', profileId, 'interviews', 'question-sources.yaml');
+}
+
+function questionRows(store) {
+  return all(store, `SELECT * FROM interview_question_sources
+    ORDER BY profile_id,source_ref,created_at,id`);
+}
+
+function questionState(store, root, profileId = 'profile_w07_alpha') {
+  const mirror = questionMirrorPath(root, profileId);
+  const auditMirror = path.join(root, 'jobos-workspace', 'audit.log.jsonl');
+  return {
+    counts: counts(store, QUESTION_TABLES),
+    rows: questionRows(store),
+    mirror: existsSync(mirror) ? readFileSync(mirror) : null,
+    auditMirror: existsSync(auditMirror) ? readFileSync(auditMirror) : null,
+  };
+}
+
+function questionInput(overrides = {}) {
+  return {
+    profileId: 'profile_w07_alpha',
+    jobId: 'job_w07_alpha',
+    applicationId: 'application_w07_alpha',
+    stage: 'hiring-manager',
+    audience: 'hiring_manager',
+    questionText: 'Tell me about a time you led a complex delivery.',
+    sourceKind: 'recruiter_provided',
+    sourceRef: 'recruiter-email-42',
+    actor: 'candidate',
+    source: 'cli',
+    ...overrides,
+  };
+}
+
+function addSecondAlphaApplication(store) {
+  const createdAt = '2026-07-21T12:00:00.000Z';
+  store.db.run(`INSERT INTO jobs
+    (id,profile_id,title,company,url,description,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`, [
+    'job_w07_alpha_second',
+    'profile_w07_alpha',
+    'Second Alpha Role',
+    'Alpha Company',
+    'https://alpha.example/jobs/second-role',
+    'A second role used only for ownership-boundary tests.',
+    createdAt,
+    createdAt,
+  ]);
+  store.db.run(`INSERT INTO applications
+    (id,job_id,profile_id,status,created_at,updated_at)
+    VALUES (?,?,?,?,?,?)`, [
+    'application_w07_alpha_second',
+    'job_w07_alpha_second',
+    'profile_w07_alpha',
+    'interview',
+    createdAt,
+    createdAt,
+  ]);
+  save(store);
+}
+
+function assertRejectedWithoutQuestionDelta(store, root, action, expectedCode) {
+  const before = questionState(store, root);
+  assert.throws(
+    action,
+    error => error instanceof interview.InterviewError && error.code === expectedCode,
+  );
+  assert.deepEqual(questionState(store, root), before);
+}
+
+function createVerifiedStory(store, overrides = {}) {
+  const draft = interview.createInterviewStory(store, storyInput(overrides));
+  return interview.verifyInterviewStory(store, {
+    profileId: draft.profileId,
+    storyId: draft.id,
+    revision: draft.currentRevision.revision,
+    confirmedFields: [],
+    actor: 'user',
+    source: 'cli',
+  });
+}
+
+test('W07-QUESTION-01 trusted CLI/TUI question roots use deterministic identity and owned projections', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const cliInput = questionInput({ source: ' CLI ' });
+  const created = interview.createInterviewQuestionSource(store, cliInput);
+  const expectedId = deterministicId(
+    'interview_question',
+    'profile_w07_alpha|hiring-manager|recruiter_provided|recruiter-email-42',
+  );
+
+  assert.equal(created.schema, interview.INTERVIEW_QUESTION_SCHEMA);
+  assert.equal(created.version, 1);
+  assert.equal(created.id, expectedId);
+  assert.equal(created.rootSourceId, expectedId);
+  assert.equal(created.profileId, 'profile_w07_alpha');
+  assert.equal(created.jobId, 'job_w07_alpha');
+  assert.equal(created.applicationId, 'application_w07_alpha');
+  assert.equal(created.stage, 'hiring-manager');
+  assert.equal(created.audience, 'hiring_manager');
+  assert.equal(created.questionText, cliInput.questionText);
+  assert.equal(created.normalizedText, 'tell me about a time you led a complex delivery');
+  assert.equal(created.sourceKind, 'recruiter_provided');
+  assert.equal(created.sourceRef, 'recruiter-email-42');
+  assert.equal(created.actor, 'candidate');
+  assert.equal(created.source, 'cli');
+  assert.equal(created.supersedesSourceId, null);
+  assert.equal(created.supersededBySourceId, null);
+  assert.equal(created.correctionReason, '');
+  assert.equal(created.current, true);
+  assert.equal(created.idempotent, false);
+
+  const tui = interview.createInterviewQuestionSource(store, questionInput({
+    stage: 'onsite',
+    audience: '',
+    questionText: 'How do you resolve conflict with peers?',
+    sourceKind: 'interviewer_provided',
+    sourceRef: 'panel-agenda-7',
+    source: ' TUI ',
+  }));
+  assert.equal(tui.id, deterministicId(
+    'interview_question',
+    'profile_w07_alpha|onsite|interviewer_provided|panel-agenda-7',
+  ));
+  assert.equal(tui.audience, 'peer_panel');
+  assert.equal(tui.source, 'tui');
+
+  const listed = interview.listInterviewQuestionSources(store, {
+    profileId: 'profile_w07_alpha',
+  });
+  assert.equal(listed.schema, interview.INTERVIEW_QUESTION_SCHEMA);
+  assert.equal(listed.version, 1);
+  assert.equal(listed.profileId, 'profile_w07_alpha');
+  assert.deepEqual(listed.sources.map(item => item.id), [expectedId, tui.id]);
+  assert.deepEqual(listed.currentSources.map(item => item.id), [expectedId, tui.id]);
+
+  const mirror = YAML.parse(readFileSync(questionMirrorPath(root), 'utf8'));
+  assert.equal(mirror.schema, interview.INTERVIEW_QUESTION_SCHEMA);
+  assert.equal(mirror.version, 1);
+  assert.equal(mirror.profileId, 'profile_w07_alpha');
+  assert.equal(mirror.policy.appendOnly, true);
+  assert.equal(mirror.policy.currentResolution, 'unique_chain_tip');
+  assert.deepEqual(mirror.sources, listed.sources);
+  assert.deepEqual(mirror.currentSources, listed.currentSources);
+});
+
+test('W07-QUESTION-02 exact root replay is side-effect free and corrections append a branchless current tip', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const input = questionInput();
+  const original = interview.createInterviewQuestionSource(store, input);
+  const afterRoot = questionState(store, root);
+
+  const replay = interview.createInterviewQuestionSource(store, input);
+  assert.equal(replay.id, original.id);
+  assert.equal(replay.idempotent, true);
+  assert.equal(replay.current, true);
+  assert.deepEqual(questionState(store, root), afterRoot);
+
+  const corrected = interview.createInterviewQuestionSource(store, {
+    ...input,
+    questionText: 'Tell me about a time you led a complex cross-team delivery.',
+    supersedesSourceId: original.id,
+    correctionReason: 'Clarified that the example should be cross-team.',
+  });
+  assert.notEqual(corrected.id, original.id);
+  assert.equal(corrected.rootSourceId, original.id);
+  assert.equal(corrected.supersedesSourceId, original.id);
+  assert.equal(corrected.current, true);
+  assert.equal(corrected.idempotent, false);
+  assert.equal(questionRows(store).length, 2);
+
+  const listed = interview.listInterviewQuestionSources(store, {
+    profileId: input.profileId,
+    applicationId: input.applicationId,
+    stage: input.stage,
+  });
+  assert.deepEqual(listed.sources.map(item => ({
+    id: item.id,
+    supersedesSourceId: item.supersedesSourceId,
+    supersededBySourceId: item.supersededBySourceId,
+    current: item.current,
+    rootSourceId: item.rootSourceId,
+  })), [
+    {
+      id: original.id,
+      supersedesSourceId: null,
+      supersededBySourceId: corrected.id,
+      current: false,
+      rootSourceId: original.id,
+    },
+    {
+      id: corrected.id,
+      supersedesSourceId: original.id,
+      supersededBySourceId: null,
+      current: true,
+      rootSourceId: original.id,
+    },
+  ]);
+  assert.deepEqual(listed.currentSources.map(item => item.id), [corrected.id]);
+
+  const afterCorrection = questionState(store, root);
+  const rootReplay = interview.createInterviewQuestionSource(store, input);
+  assert.equal(rootReplay.id, original.id);
+  assert.equal(rootReplay.idempotent, true);
+  assert.equal(rootReplay.current, false);
+  assert.equal(rootReplay.supersededBySourceId, corrected.id);
+  assert.deepEqual(questionState(store, root), afterCorrection);
+
+  assertRejectedWithoutQuestionDelta(
+    store,
+    root,
+    () => interview.createInterviewQuestionSource(store, {
+      ...input,
+      questionText: 'A competing correction.',
+      supersedesSourceId: original.id,
+      correctionReason: 'Would create a branch.',
+    }),
+    'interview_question_supersedes_not_current',
+  );
+});
+
+test('W07-QUESTION-03 source references are profile-scoped and same-profile conflicts are exact', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const alphaInput = questionInput({ sourceRef: 'shared-recruiter-ref' });
+  const alpha = interview.createInterviewQuestionSource(store, alphaInput);
+  const betaInput = questionInput({
+    profileId: 'profile_w07_beta',
+    jobId: 'job_w07_beta',
+    applicationId: 'application_w07_beta',
+    sourceRef: 'shared-recruiter-ref',
+    questionText: 'What customer migration did you lead?',
+    actor: 'beta-candidate',
+    source: 'tui',
+  });
+  const beta = interview.createInterviewQuestionSource(store, betaInput);
+
+  assert.notEqual(beta.id, alpha.id);
+  assert.equal(beta.profileId, 'profile_w07_beta');
+  assert.equal(beta.sourceRef, alpha.sourceRef);
+  assert.equal(
+    interview.createInterviewQuestionSource(store, betaInput).idempotent,
+    true,
+  );
+  assert.equal(
+    one(store, `SELECT COUNT(*) AS count FROM interview_question_sources
+      WHERE source_ref='shared-recruiter-ref'`).count,
+    2,
+  );
+
+  assertRejectedWithoutQuestionDelta(
+    store,
+    root,
+    () => interview.createInterviewQuestionSource(store, {
+      ...alphaInput,
+      stage: 'onsite',
+      audience: 'peer_panel',
+      questionText: 'A distinct root trying to reuse the same profile reference.',
+    }),
+    'interview_question_reference_conflict',
+  );
+  assertRejectedWithoutQuestionDelta(
+    store,
+    root,
+    () => interview.createInterviewQuestionSource(store, {
+      ...alphaInput,
+      questionText: 'A conflicting replay payload.',
+    }),
+    'interview_question_reference_conflict',
+  );
+});
+
+test('W07-QUESTION-04 trust, ownership, source lineage, stage, and shape reject before side effects', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const original = interview.createInterviewQuestionSource(store, questionInput());
+
+  const failures = [
+    [questionInput({ source: 'mcp' }), 'interview_question_source_untrusted'],
+    [questionInput({
+      applicationId: 'application_w07_beta',
+    }), 'interview_application_profile_mismatch'],
+    [questionInput({
+      jobId: 'job_w07_beta',
+    }), 'interview_job_profile_mismatch'],
+    [questionInput({
+      profileId: 'profile_w07_beta',
+      jobId: 'job_w07_beta',
+      applicationId: 'application_w07_beta',
+      supersedesSourceId: original.id,
+      questionText: 'Cross-profile correction.',
+      correctionReason: 'Invalid ownership.',
+      source: 'tui',
+    }), 'interview_question_supersedes_mismatch'],
+    [questionInput({ stage: 'phone-chat' }), 'interview_stage_invalid'],
+    [questionInput({ audience: 'board' }), 'interview_audience_invalid'],
+    [questionInput({ questionText: '   ' }), 'interview_question_text_required'],
+    [questionInput({ sourceKind: 'agent_inferred' }), 'interview_source_kind_invalid'],
+    [questionInput({
+      sourceKind: 'interviewer_provided',
+      sourceRef: '',
+    }), 'interview_source_ref_required'],
+  ];
+  for (const [input, code] of failures) {
+    assertRejectedWithoutQuestionDelta(
+      store,
+      root,
+      () => interview.createInterviewQuestionSource(store, input),
+      code,
+    );
+  }
+});
+
+test('W07-MATCH-01 only persisted eligible verified stories participate and exclusions are explicit', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const eligible = createVerifiedStory(store, {
+    title: 'Eligible delivery story',
+  });
+  const draft = interview.createInterviewStory(store, storyInput({
+    title: 'Draft-only story',
+  }));
+  const retired = createVerifiedStory(store, {
+    title: 'Retired story',
+  });
+  interview.retireInterviewStory(store, {
+    profileId: retired.profileId,
+    storyId: retired.id,
+    reason: 'No longer representative.',
+    actor: 'user',
+    source: 'cli',
+  });
+  const stale = createVerifiedStory(store, {
+    proofPointId: 'proof_w07_superseding',
+    title: 'Proof-stale story',
+  });
+  supersedeProof(store, 'proof_w07_superseding', {
+    summary: 'Corrected migration proof for matcher',
+    evidence: 'Corrected evidence supports 16 migrations.',
+    skills: ['migration'],
+    metrics: ['16 migrations'],
+  });
+
+  const matched = interview.matchStoriesToQuestions(store, {
+    profileId: 'profile_w07_alpha',
+    questions: [{
+      id: 'question.quantum',
+      text: 'Explain quantum compiler design.',
+      audience: 'executive',
+    }],
+    maxStories: 3,
+  });
+  assert.equal(matched.deterministic, true);
+  assert.deepEqual(matched.eligibleStories.map(item => item.storyId), [eligible.id]);
+  assert.deepEqual(
+    Object.fromEntries(matched.excludedStories.map(item => [item.storyId, item.reason])),
+    {
+      [draft.id]: 'draft_only',
+      [retired.id]: 'retired',
+      [stale.id]: 'proof_stale',
+    },
+  );
+  assert.deepEqual(
+    matched.excludedStories.find(item => item.storyId === stale.id).staleProofPointIds,
+    ['proof_w07_superseding'],
+  );
+  assert.equal(matched.questions[0].coverageStatus, 'gap');
+  assert.equal(matched.questions[0].gapReason, 'insufficient_overlap');
+  assert.equal(matched.questions[0].selectedStory, null);
+  assert.deepEqual(matched.questions[0].matches, []);
+});
+
+test('W07-MATCH-02 frozen weighted scoring exposes exact token components and reasons', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const story = createVerifiedStory(store, {
+    title: 'Platform launch',
+    situation: 'Platform launch.',
+    task: 'Delivery.',
+    action: 'Led launch.',
+    result: 'Platform.',
+    reflection: 'Learning.',
+    competencyTags: ['leadership', 'delivery'],
+    audienceTags: ['hiring_manager'],
+  });
+
+  const matched = interview.matchStoriesToQuestions(store, {
+    profileId: story.profileId,
+    questions: [{
+      id: 'question.leadership',
+      text: 'How did you lead delivery on a platform launch?',
+      audience: 'hiring_manager',
+    }],
+    maxStories: 3,
+  });
+  const question = matched.questions[0];
+  const candidate = question.selectedStory;
+  assert.deepEqual(question.questionTokens, [
+    'delivery',
+    'did',
+    'how',
+    'launch',
+    'leadership',
+    'platform',
+  ]);
+  assert.equal(question.coverageStatus, 'covered');
+  assert.equal(question.gapReason, null);
+  assert.equal(candidate.storyId, story.id);
+  assert.equal(candidate.storyRevisionId, story.activeVerifiedRevision.id);
+  assert.equal(candidate.score, 16);
+  assert.deepEqual(candidate.scoreComponents, {
+    competencyTagOverlap: {
+      tokens: ['delivery', 'leadership'],
+      count: 2,
+      cappedCount: 2,
+      weight: 4,
+      score: 8,
+    },
+    linkedProofSkillOverlap: {
+      tokens: ['delivery', 'leadership'],
+      count: 2,
+      cappedCount: 2,
+      weight: 2,
+      score: 4,
+    },
+    otherStoryTokenOverlap: {
+      tokens: ['launch', 'platform'],
+      count: 2,
+      cappedCount: 2,
+      weight: 1,
+      score: 2,
+    },
+    audienceTagMatch: {
+      matched: true,
+      score: 2,
+    },
+  });
+  assert.deepEqual(candidate.reasons, [
+    'competency_tag_overlap',
+    'linked_proof_skill_overlap',
+    'other_story_token_overlap',
+    'audience_tag_match',
+  ]);
+});
+
+test('W07-MATCH-03 ties use story/revision identity and maxStories bounds canonical alternatives', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const stories = [
+    createVerifiedStory(store, {
+      title: 'Tie story alpha',
+      situation: 'A neutral situation.',
+      task: 'A neutral task.',
+      action: 'A neutral action.',
+      result: 'A neutral result.',
+      reflection: 'A neutral reflection.',
+      competencyTags: ['collaboration'],
+      audienceTags: [],
+    }),
+    createVerifiedStory(store, {
+      title: 'Tie story beta',
+      situation: 'A neutral situation.',
+      task: 'A neutral task.',
+      action: 'A neutral action.',
+      result: 'A neutral result.',
+      reflection: 'A neutral reflection.',
+      competencyTags: ['collaboration'],
+      audienceTags: [],
+    }),
+    createVerifiedStory(store, {
+      title: 'Tie story gamma',
+      situation: 'A neutral situation.',
+      task: 'A neutral task.',
+      action: 'A neutral action.',
+      result: 'A neutral result.',
+      reflection: 'A neutral reflection.',
+      competencyTags: ['collaboration'],
+      audienceTags: [],
+    }),
+  ];
+  const expected = stories
+    .map(story => [story.id, story.activeVerifiedRevision.id])
+    .sort(([storyA, revisionA], [storyB, revisionB]) => (
+      storyA.localeCompare(storyB) || revisionA.localeCompare(revisionB)
+    ));
+
+  const matched = interview.matchStoriesToQuestions(store, {
+    profileId: 'profile_w07_alpha',
+    questions: [{
+      id: 'question.tie',
+      text: 'Describe collaboration.',
+      audience: 'unknown',
+    }],
+    maxStories: 2,
+  });
+  const question = matched.questions[0];
+  assert.equal(question.candidateCount, 3);
+  assert.equal(question.matches.length, 2);
+  assert.deepEqual(
+    question.matches.map(item => [item.storyId, item.storyRevisionId]),
+    expected.slice(0, 2),
+  );
+  assert.equal(question.selectedStory.storyId, expected[0][0]);
+  assert.deepEqual(question.alternativeStories.map(item => item.storyId), [expected[1][0]]);
+  assert.ok(question.matches.every(item => item.score === 4));
+});
+
+test('W07-MATCH-04 synonyms are static and repeated matching is byte-stable and read-only', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  createVerifiedStory(store, {
+    title: 'Leadership example',
+    situation: 'Teams were disconnected.',
+    task: 'Alignment was needed.',
+    action: 'Coordinated decisions.',
+    result: 'Teams aligned.',
+    reflection: 'Clear ownership helps.',
+    competencyTags: ['leadership'],
+    audienceTags: [],
+  });
+  const input = {
+    profileId: 'profile_w07_alpha',
+    questions: [
+      {
+        id: 'question.static-synonym',
+        text: 'How have you led teams?',
+        audience: 'unknown',
+      },
+      {
+        id: 'question.not-a-synonym',
+        text: 'How have you spearheaded teams alignment decisions?',
+        audience: 'unknown',
+      },
+    ],
+    maxStories: 3,
+  };
+  const before = {
+    tables: counts(store, [...W07_TABLES, 'audit_log']),
+    storyMirror: readFileSync(storyMirrorPath(root)),
+  };
+  const first = interview.matchStoriesToQuestions(store, input);
+  const second = interview.matchStoriesToQuestions(store, input);
+
+  assert.equal(JSON.stringify(second), JSON.stringify(first));
+  assert.deepEqual(first.questions[0].questionTokens, ['have', 'how', 'leadership', 'teams']);
+  assert.ok(!first.questions[0].questionTokens.includes('led'));
+  assert.ok(first.questions[1].questionTokens.includes('spearheaded'));
+  assert.equal(first.questions[0].selectedStory.scoreComponents.competencyTagOverlap.score, 4);
+  assert.equal(first.questions[1].selectedStory.scoreComponents.competencyTagOverlap.score, 0);
+  assert.deepEqual(counts(store, [...W07_TABLES, 'audit_log']), before.tables);
+  assert.deepEqual(readFileSync(storyMirrorPath(root)), before.storyMirror);
+});
+
+test('W07-QUESTION-05 refless user roots use normalized text identity across distinct applications', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  addSecondAlphaApplication(store);
+  const firstInput = questionInput({
+    questionText: 'What did you learn?',
+    sourceKind: 'user_provided',
+    sourceRef: '',
+  });
+  const secondInput = questionInput({
+    jobId: 'job_w07_alpha_second',
+    applicationId: 'application_w07_alpha_second',
+    questionText: 'How did you adapt?',
+    sourceKind: 'user_provided',
+    sourceRef: '',
+  });
+
+  const first = interview.createInterviewQuestionSource(store, firstInput);
+  const second = interview.createInterviewQuestionSource(store, secondInput);
+  assert.equal(first.id, deterministicId(
+    'interview_question',
+    'profile_w07_alpha|hiring-manager|user_provided|what did you learn',
+  ));
+  assert.equal(second.id, deterministicId(
+    'interview_question',
+    'profile_w07_alpha|hiring-manager|user_provided|how did you adapt',
+  ));
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.applicationId, second.applicationId);
+  assert.equal(first.sourceRef, '');
+  assert.equal(second.sourceRef, '');
+
+  const beforeReplay = questionState(store, root);
+  const replay = interview.createInterviewQuestionSource(store, firstInput);
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(questionState(store, root), beforeReplay);
+  assert.deepEqual(
+    interview.listInterviewQuestionSources(store, {
+      profileId: 'profile_w07_alpha',
+    }).currentSources.map(source => source.id).sort(),
+    [first.id, second.id].sort(),
+  );
+});
+
+test('W07-QUESTION-06 multilevel correction replay is idempotent, branchless, and mirror-stable after reopen', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const input = questionInput({ sourceRef: 'multilevel-correction-ref' });
+  const original = interview.createInterviewQuestionSource(store, input);
+  const correctionOneInput = {
+    ...input,
+    questionText: 'Tell me about a time you led a complex cross-team delivery.',
+    supersedesSourceId: original.id,
+    correctionReason: 'Clarified cross-team scope.',
+  };
+  const correctionOne = interview.createInterviewQuestionSource(store, correctionOneInput);
+  const correctionTwoInput = {
+    ...input,
+    questionText: 'Tell me about a time you led a complex cross-team delivery under a fixed deadline.',
+    supersedesSourceId: correctionOne.id,
+    correctionReason: 'Added the fixed-deadline constraint.',
+  };
+  const correctionTwo = interview.createInterviewQuestionSource(store, correctionTwoInput);
+  assert.deepEqual(
+    questionRows(store).map(row => [row.id, row.supersedes_source_id || null]),
+    [
+      [original.id, null],
+      [correctionOne.id, original.id],
+      [correctionTwo.id, correctionOne.id],
+    ],
+  );
+
+  const afterChain = questionState(store, root);
+  const replayOne = interview.createInterviewQuestionSource(store, correctionOneInput);
+  const replayTwo = interview.createInterviewQuestionSource(store, correctionTwoInput);
+  assert.equal(replayOne.id, correctionOne.id);
+  assert.equal(replayOne.idempotent, true);
+  assert.equal(replayOne.current, false);
+  assert.equal(replayTwo.id, correctionTwo.id);
+  assert.equal(replayTwo.idempotent, true);
+  assert.equal(replayTwo.current, true);
+  assert.deepEqual(questionState(store, root), afterChain);
+
+  for (const branch of [
+    {
+      ...input,
+      questionText: 'Competing correction from the root.',
+      supersedesSourceId: original.id,
+      correctionReason: 'Would branch from the root.',
+    },
+    {
+      ...input,
+      questionText: 'Competing correction from correction one.',
+      supersedesSourceId: correctionOne.id,
+      correctionReason: 'Would branch from correction one.',
+    },
+  ]) {
+    assertRejectedWithoutQuestionDelta(
+      store,
+      root,
+      () => interview.createInterviewQuestionSource(store, branch),
+      'interview_question_supersedes_not_current',
+    );
+  }
+
+  const listed = interview.listInterviewQuestionSources(store, {
+    profileId: input.profileId,
+    applicationId: input.applicationId,
+    stage: input.stage,
+  });
+  assert.deepEqual(listed.currentSources.map(source => source.id), [correctionTwo.id]);
+  const mirrorPath = questionMirrorPath(root);
+  const mirror = YAML.parse(readFileSync(mirrorPath, 'utf8'));
+  assert.deepEqual({
+    schema: mirror.schema,
+    version: mirror.version,
+    profileId: mirror.profileId,
+    sources: mirror.sources,
+    currentSources: mirror.currentSources,
+  }, listed);
+  const mirrorBytes = readFileSync(mirrorPath);
+
+  save(store);
+  store.db.close();
+  const reopened = await openStore({ workspace: root });
+  const reopenedList = interview.listInterviewQuestionSources(reopened, {
+    profileId: input.profileId,
+    applicationId: input.applicationId,
+    stage: input.stage,
+  });
+  assert.deepEqual(reopenedList, listed);
+  assert.deepEqual(readFileSync(mirrorPath), mirrorBytes);
+});
+
+test('W07-QUESTION-07 refless corrections and same-profile application/job mismatches are zero-delta', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const reflessInput = questionInput({
+    questionText: 'What did you learn from the launch?',
+    sourceKind: 'user_provided',
+    sourceRef: '',
+  });
+  const refless = interview.createInterviewQuestionSource(store, reflessInput);
+  assertRejectedWithoutQuestionDelta(
+    store,
+    root,
+    () => interview.createInterviewQuestionSource(store, {
+      ...reflessInput,
+      questionText: 'What did you learn from the platform launch?',
+      supersedesSourceId: refless.id,
+      correctionReason: 'Clarified the launch.',
+    }),
+    'interview_question_correction_reference_required',
+  );
+
+  addSecondAlphaApplication(store);
+  assertRejectedWithoutQuestionDelta(
+    store,
+    root,
+    () => interview.createInterviewQuestionSource(store, questionInput({
+      jobId: 'job_w07_alpha',
+      applicationId: 'application_w07_alpha_second',
+      sourceRef: 'same-profile-job-mismatch',
+    })),
+    'interview_application_job_mismatch',
+  );
+});
+
+test('W07-MATCH-05 invalid limits, no-story gaps, and empty questions are deterministic and read-only', async t => {
+  const root = workspaceFromFixture(t);
+  const store = await openStore({ workspace: root });
+  const input = {
+    profileId: 'profile_w07_alpha',
+    questions: [{
+      id: 'question.no-stories',
+      text: 'Describe a difficult decision.',
+      audience: 'executive',
+    }],
+  };
+  const state = () => ({
+    counts: counts(store, [...W07_TABLES, 'audit_log']),
+    questionMirror: existsSync(questionMirrorPath(root))
+      ? readFileSync(questionMirrorPath(root))
+      : null,
+    storyMirror: existsSync(storyMirrorPath(root))
+      ? readFileSync(storyMirrorPath(root))
+      : null,
+  });
+  const before = state();
+  for (const maxStories of [0, -1, 1.5, 'not-a-number', null, Infinity]) {
+    assert.throws(
+      () => interview.matchStoriesToQuestions(store, { ...input, maxStories }),
+      error => error instanceof interview.InterviewError
+        && error.code === 'interview_max_stories_invalid',
+    );
+    assert.deepEqual(state(), before);
+  }
+
+  const noStories = interview.matchStoriesToQuestions(store, {
+    ...input,
+    maxStories: 3,
+  });
+  assert.deepEqual(noStories.eligibleStories, []);
+  assert.deepEqual(noStories.excludedStories, []);
+  assert.equal(noStories.questions[0].coverageStatus, 'gap');
+  assert.equal(noStories.questions[0].gapReason, 'no_verified_story');
+  assert.equal(noStories.questions[0].candidateCount, 0);
+  assert.deepEqual(noStories.questions[0].candidates, []);
+
+  const emptyInput = {
+    profileId: 'profile_w07_alpha',
+    questions: [],
+    maxStories: 3,
+  };
+  const emptyFirst = interview.matchStoriesToQuestions(store, emptyInput);
+  const emptySecond = interview.matchStoriesToQuestions(store, emptyInput);
+  assert.equal(JSON.stringify(emptySecond), JSON.stringify(emptyFirst));
+  assert.deepEqual(emptyFirst.questions, []);
+  assert.deepEqual(emptyFirst.eligibleStories, []);
+  assert.deepEqual(emptyFirst.excludedStories, []);
+  assert.deepEqual(state(), before);
 });
