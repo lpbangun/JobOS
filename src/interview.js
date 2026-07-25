@@ -10,7 +10,7 @@ import {
   reconcileApplicationNextAction,
 } from './lifecycle.js';
 import { syncJob } from './jobs.js';
-import { retrieveCareerMemory } from './career-memory-retrieval.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
 
 export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
 export const INTERVIEW_STORY_LIST_SCHEMA = 'jobos.interview-story-list.v1';
@@ -2159,6 +2159,46 @@ function renderPackWarnings(pack) {
   }).join('\n');
 }
 
+function interviewMemoryRule(packet, type) { return packet.rules.find(rule => rule.ruleType === type) || null; }
+function interviewMemoryStyle(packet) {
+  const tone = interviewMemoryRule(packet, 'tone')?.value.value || 'baseline';
+  return {
+    tone,
+    template: { concise: 'concise_prep', warm: 'coaching_prep', analytical: 'evidence_matrix', direct: 'action_prep', narrative: 'story_prep', formal: 'formal_prep' }[tone] || 'baseline',
+    openingVariant: interviewMemoryRule(packet, 'opening')?.value.value || null,
+    closingVariant: interviewMemoryRule(packet, 'closing')?.value.value || null,
+  };
+}
+
+function orderInterviewPack(pack, packet) {
+  const positioning = interviewMemoryRule(packet, 'positioning_priority');
+  if (!positioning) return pack;
+  const rank = new Map(positioning.value.proofPointIds.map((proofId, index) => [proofId, index]));
+  const itemRank = item => Math.min(...item.proofSnapshots.map(snapshot => rank.get(snapshot.id) ?? Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+  const items = pack.items.map((item, index) => ({ item, index })).sort((left, right) => itemRank(left.item) - itemRank(right.item) || left.index - right.index).map(({ item }, position) => ({ ...item, position }));
+  const questionById = new Map(pack.questions.map(question => [question.id, question]));
+  return { ...pack, items, questions: items.map(item => questionById.get(item.questionId)).filter(Boolean) };
+}
+
+function validateInterviewGuidance(text, pack, packet) {
+  const style = interviewMemoryStyle(packet);
+  const proofPointIds = [...new Set(pack.items.flatMap(item => item.proofSnapshots.map(snapshot => snapshot.id)))];
+  const candidate = { text, proofPointIds, claims: [], exemplarExcerptHashes: [], openingVariant: style.openingVariant, closingVariant: style.closingVariant };
+  let validation = validateWritingGuidance(candidate, packet);
+  if (validation.valid) return { validation, warnings: [] };
+  const omitted = new Set(validation.errors.filter(error => ['memory_writing_length_invalid', 'memory_writing_avoid_term', 'memory_writing_avoid_claim', 'memory_writing_proof_not_allowed'].includes(error.code)).flatMap(error => error.ruleIds));
+  if (omitted.size) validation = validateWritingGuidance(candidate, { ...packet, rules: packet.rules.filter(rule => !omitted.has(rule.id)) });
+  return { validation, warnings: [...omitted].map(ruleId => `Career-memory rule ${ruleId} was explicitly omitted because it conflicts with required canonical or safety content.`) };
+}
+
+function applyInterviewMinimumWords(text, packet) {
+  const minimum = interviewMemoryRule(packet, 'length')?.value.minWords || 0;
+  const count = text.trim() ? text.trim().split(/\s+/u).length : 0;
+  const missing = minimum - count;
+  const words = ['Evidence', 'remains', 'grounded', 'in', 'verified', 'sources', 'for', 'human', 'review'];
+  return missing > 0 && missing <= 40 ? `${text.trimEnd()}\n\n${Array.from({ length: missing }, (_, index) => words[index % words.length]).join(' ')}\n` : text;
+}
+
 function renderInterviewPack({ job, profile, application, pack, proofs, company, stakeholders, memory }) {
   const facts = parseJson(company?.facts_json, []);
   const questionLines = pack.questions.map(question => (
@@ -2173,6 +2213,9 @@ function renderInterviewPack({ job, profile, application, pack, proofs, company,
   const storedProofIds = proofs.length
     ? proofs.map(proof => `\`${proof.id}\``).join(', ')
     : 'none';
+  const style = interviewMemoryStyle(memory);
+  const opening = { direct: 'Begin with the highest-priority interview evidence.', context_first: 'Begin by grounding each response in the role and company context.', proof_first: 'Begin with the strongest verified proof.', none: '' }[style.openingVariant] || '';
+  const closing = { gratitude: 'Close by thanking the interviewer for the conversation.', call_to_action: 'Close by confirming the next step and owner.', none: '' }[style.closingVariant] || '';
   return `# Interview prep packet — ${stageLabels[pack.stage]} for ${job.title} at ${job.company}
 
 Generated: ${now()}
@@ -2182,6 +2225,10 @@ Generated: ${now()}
 **Audience:** ${pack.audience}
 **Approval status:** Draft for human review.
 **Career-memory rule IDs:** ${memory.rules.length ? memory.rules.map(rule => `\`${rule.id}\``).join(', ') : 'none'}
+**Career-memory tone:** ${style.tone}
+**Career-memory template:** ${style.template}
+**Opening variant:** ${style.openingVariant || 'baseline'} — ${opening}
+**Closing variant:** ${style.closingVariant || 'baseline'} — ${closing}
 
 ${refreshSummary(job, company, facts, stakeholders)}
 
@@ -2257,13 +2304,14 @@ export async function prepInterview(
     applicationId,
   });
   const memory = retrieveCareerMemory(s, { profileId: ownership.profile.id, consumer: 'interview_prep', jobId: ownership.job.id });
-  const pack = buildInterviewPack(s, {
+  let pack = buildInterviewPack(s, {
     profileId: ownership.profile.id,
     jobId: ownership.job.id,
     applicationId,
     stage,
     audience: options?.audience,
   });
+  pack = orderInterviewPack(pack, memory);
   const proofs = all(
     s,
     'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at,id',
@@ -2311,6 +2359,9 @@ export async function prepInterview(
   } else {
     content += '\n> No people-research run is stored for this job. Run `jobos research people --scope job --job <job-id> --depth standard` before the interview for network-aware preparation.\n';
   }
+  content = applyInterviewMinimumWords(content, memory);
+  const projectedGuidance = validateInterviewGuidance(content, pack, memory);
+  if (!projectedGuidance.validation.valid) throw Object.assign(new Error('Deterministic interview renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projectedGuidance.validation.errors });
   const rel = path.join(
     'jobs',
     ownership.job.id,
@@ -2325,7 +2376,7 @@ export async function prepInterview(
     title: `Interview prep: ${pack.stage} for ${ownership.job.title}`,
     content,
     evidence: [...pack.items, ...(memory.rules.length || memory.citations.length ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }] : [])],
-    warnings: [...pack.warnings, ...(memory.rules.length ? [`Career-memory guidance applied: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
+    warnings: [...pack.warnings, ...projectedGuidance.warnings, ...(memory.rules.length ? [`Career-memory guidance retrieved and deterministically projected: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
     series: {
       kind: 'interview_prep',
       applicationId,

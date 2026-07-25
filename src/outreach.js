@@ -7,7 +7,7 @@ import { generateJson, llmConfig } from './llm.js';
 import { syncJob } from './jobs.js';
 import { contactSummaryForPlan, projectContactConfidenceV2 } from './research/contacts.js';
 import { createArtifact } from './artifacts.js';
-import { retrieveCareerMemory } from './career-memory-retrieval.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
 
 const sentChannels = new Set(['email', 'linkedin', 'other']);
 const pausedApplicationStatuses = new Set(['interview', 'offer', 'rejected']);
@@ -107,6 +107,51 @@ function profileApproach(profile) {
   if (/\bdirect\b|\bmetrics\b/.test(style)) return 'execution-focused, decision-oriented';
   if (/\bthoughtful\b|\bcollaborative\b/.test(style)) return 'context-seeking, collaboration-aware';
   return 'concise, evidence-led';
+}
+
+function memoryRule(packet, type) { return packet.rules.find(rule => rule.ruleType === type) || null; }
+function memoryStyle(packet) {
+  const tone = memoryRule(packet, 'tone')?.value.value || 'baseline';
+  return {
+    tone,
+    template: { concise: 'concise_note', warm: 'warm_note', analytical: 'evidence_note', direct: 'direct_note', narrative: 'narrative_note', formal: 'formal_note' }[tone] || 'baseline',
+    openingVariant: memoryRule(packet, 'opening')?.value.value || null,
+    closingVariant: memoryRule(packet, 'closing')?.value.value || null,
+  };
+}
+
+function applyProofPositioning(ctx, packet) {
+  const positioning = memoryRule(packet, 'positioning_priority');
+  if (!positioning) return ctx;
+  const rank = new Map(positioning.value.proofPointIds.map((proofId, index) => [proofId, index]));
+  const nonProof = ctx.evidence.filter(item => item.type !== 'profile_proof');
+  const proofs = ctx.evidence.filter(item => item.type === 'profile_proof' && rank.has(item.id)).sort((left, right) => rank.get(left.id) - rank.get(right.id));
+  const evidence = [...nonProof, ...proofs];
+  return { evidence, byId: new Map(evidence.map(item => [item.id, item])), byUrl: new Map(evidence.filter(item => item.sourceUrl).map(item => [canonicalUrl(item.sourceUrl), item])) };
+}
+
+function validateOutreachGuidance(text, evidence, packet) {
+  const style = memoryStyle(packet);
+  const candidate = {
+    text,
+    openingVariant: style.openingVariant,
+    closingVariant: style.closingVariant,
+    proofPointIds: evidence.filter(item => item.type === 'profile_proof').map(item => item.id),
+    claims: [], exemplarExcerptHashes: [],
+  };
+  let validation = validateWritingGuidance(candidate, packet);
+  if (validation.valid) return { validation, warnings: [] };
+  const omitted = new Set(validation.errors.filter(error => ['memory_writing_length_invalid', 'memory_writing_avoid_term', 'memory_writing_avoid_claim'].includes(error.code)).flatMap(error => error.ruleIds));
+  if (omitted.size) validation = validateWritingGuidance(candidate, { ...packet, rules: packet.rules.filter(rule => !omitted.has(rule.id)) });
+  return { validation, warnings: [...omitted].map(ruleId => `Career-memory rule ${ruleId} was explicitly omitted because it conflicts with required canonical or safety content.`) };
+}
+
+function applyOutreachMinimumWords(text, packet) {
+  const minimum = memoryRule(packet, 'length')?.value.minWords || 0;
+  const count = text.trim() ? text.trim().split(/\s+/u).length : 0;
+  const missing = minimum - count;
+  const words = ['Evidence', 'remains', 'grounded', 'in', 'verified', 'sources', 'for', 'human', 'review'];
+  return missing > 0 && missing <= 40 ? `${text.trimEnd()}\n\n${Array.from({ length: missing }, (_, index) => words[index % words.length]).join(' ')}\n` : text;
 }
 
 function firstName(name) {
@@ -377,6 +422,7 @@ function fallbackDraft({
   selectedEvidence = null,
   mode = 'deterministic-degraded',
   warnings: additionalWarnings = [],
+  memory,
 }) {
   const selected = selectedEvidence?.length ? selectedEvidence : defaultEvidence(ctx);
   const stakeholderFact = selected.find(item => item.type === 'stakeholder');
@@ -412,13 +458,16 @@ function fallbackDraft({
   const middle = concise
     ? [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join(' ')
     : [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join('\n\n');
-  const message = `Hi ${firstName(stakeholder.name)},
+  const memoryGuidance = memoryStyle(memory);
+  const greeting = memoryGuidance.openingVariant === 'none' ? '' : memoryGuidance.openingVariant === 'direct' ? `Hello ${firstName(stakeholder.name)},` : memoryGuidance.openingVariant === 'proof_first' && proof ? `${proof.summary}\n\nHi ${firstName(stakeholder.name)},` : `Hi ${firstName(stakeholder.name)},`;
+  const closing = memoryGuidance.closingVariant === 'none' ? '' : memoryGuidance.closingVariant === 'call_to_action' ? 'Would a brief conversation be useful?' : memoryGuidance.closingVariant === 'gratitude' ? 'Thank you for considering the question.' : 'Thanks,';
+  const message = `${greeting}
 
 ${opener}I am exploring the ${job.title} role at ${job.company}. ${middle}
 
 If appropriate, would you be open to ${strategy.ask}? I am happy to keep it brief.
 
-Thanks,
+${closing}
 ${profile.name}`;
   const modeWarning = mode === 'llm-selection'
     ? 'Provider-selected allowed evidence was rendered with deterministic canonical prose; provider-authored prose was not persisted.'
@@ -434,6 +483,8 @@ ${profile.name}`;
       toneMatch: style,
       lengthDiscipline: 'short draft',
       rendering: 'deterministic canonical prose',
+      careerMemoryTone: memoryGuidance.tone,
+      careerMemoryTemplate: memoryGuidance.template,
     },
     mode,
   };
@@ -658,16 +709,19 @@ export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal =
     : resolved.plan
       ? { channel: resolved.plan.channel, pathStrength: resolved.plan.path_strength, warnings: parseJson(resolved.plan.warnings_json, []) }
       : { channel: stakeholder.links[0] ? 'public_source_manual' : 'no_contact_selected', pathStrength: stakeholder.links[0] ? 'manual' : 'unknown', warnings: [] };
-  const ctx = evidenceContext(s, { job, profile, stakeholder, contact });
-  const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy });
+  const ctx = applyProofPositioning(evidenceContext(s, { job, profile, stakeholder, contact }), memory);
+  const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy, memory });
   const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy, memory }, fallback);
-  const memoryWarning = memory.rules.length ? [`Career-memory guidance applied: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [];
+  const memoryWarning = memory.rules.length ? [`Career-memory guidance retrieved and deterministically projected: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [];
   const warnings = [...new Set([...baseWarnings({ stakeholder, strategy, app, contact, selectedContactPath }), ...selectedContactPath.warnings, ...drafted.warnings, ...memoryWarning])];
-  const content = renderOutreachContent({ job, profile, stakeholder, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, ...drafted, warnings });
+  const style = memoryStyle(memory);
+  const content = applyOutreachMinimumWords(renderOutreachContent({ job, profile, stakeholder, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, ...drafted, warnings: [`Career-memory tone: ${style.tone}; template: ${style.template}; opening: ${style.openingVariant || 'baseline'}; closing: ${style.closingVariant || 'baseline'}.`, ...warnings] }), memory);
+  const projected = validateOutreachGuidance(content, drafted.evidence, memory);
+  if (!projected.validation.valid) throw Object.assign(new Error('Deterministic outreach renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projected.validation.errors });
   const memoryEvidence = memory.rules.length || memory.citations.length
     ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }]
     : [];
-  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: [...drafted.evidence, ...memoryEvidence], warnings, subject: drafted.subject, mode: drafted.mode });
+  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: [...drafted.evidence, ...memoryEvidence], warnings: [...warnings, ...projected.warnings], subject: drafted.subject, mode: drafted.mode });
 }
 
 export function markOutreachSent(s, { artifactId, channel, notes = '' }) {
