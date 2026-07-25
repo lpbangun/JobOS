@@ -14,6 +14,9 @@ import {
   reconcileApplicationNextAction,
 } from './lifecycle.js';
 
+import { appendMemoryObservation, queueMemorySync } from './career-memory-observations.js';
+import { JOB_FEEDBACK_INPUT_SCHEMA, normalizeJobFeedbackInput } from './career-memory-contract.js';
+
 // ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
@@ -723,8 +726,33 @@ export function diffApplicationPackets(s, firstPacketId, secondPacketId) {
 // ---------------------------------------------------------------------------
 // attestApplicationSubmitted
 // ---------------------------------------------------------------------------
-export function attestApplicationSubmitted(s, { packetId, submittedAt, note, source }) {
+function appendApplicationFeedback(s, packet, receipt, feedback, source) {
+  const observation = appendMemoryObservation(s, {
+    profileId: packet.profile_id,
+    eventType: 'job_applied',
+    sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity: { type: 'application', id: packet.application_id, versionId: receipt.id, revision: null, contentHash: receipt.receipt_hash },
+    occurredAt: feedback.occurredAt,
+    actor: 'user', source,
+    reasonCodes: feedback.reasonCodes, signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation, privateNote: feedback.privateNote,
+    payload: { decision: 'apply' }, referenceId: feedback.referenceId,
+  });
+  if (!observation.idempotent) {
+    const event = recordAudit(s, 'career_memory.observation_recorded', 'career_memory_observation', observation.id, {
+      profileId: observation.profileId, eventType: observation.eventType, sourceEntity: observation.sourceEntity,
+      reasonCodes: observation.reasonCodes, signals: observation.signals, publicExplanation: observation.publicExplanation,
+      hasPrivateNote: observation.hasPrivateNote, referenceId: feedback.referenceId,
+    }, 'none');
+    queueMemorySync(s, packet.profile_id, event);
+  }
+  return observation;
+}
+
+export function attestApplicationSubmitted(s, { packetId, submittedAt, note, source, memoryFeedback = null }) {
   assertTrustedSource(source);
+  const feedback = memoryFeedback === null ? null : normalizeJobFeedbackInput(memoryFeedback);
+  if (feedback && feedback.decision !== 'apply') throw packetError('memory_source_state_invalid', `Feedback decision ${feedback.decision} does not match application submission`);
 
   const packet = one(s, 'SELECT * FROM application_packets WHERE id=?', [packetId]);
   if (!packet) throw packetError('unknown_packet', `Unknown packet: ${packetId}`);
@@ -776,6 +804,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
           eventType: 'submission_attested',
           occurredAt: existing.submitted_at,
         });
+        const observation = feedback ? appendApplicationFeedback(s, packet, existing, feedback, source) : null;
         queuePostCommit(s, () => {
           // Refresh readiness YAML
           try { planApplication(s, { jobId: packet.job_id, profileId: packet.profile_id, writeMirror: true }); } catch {}
@@ -792,6 +821,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
           externalSideEffects: 'none',
           submissionPerformed: false,
           nextAction,
+          observation,
         };
       }
       // Conflict — different hash for same packet/type
@@ -857,6 +887,9 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       eventType: 'submission_attested',
       occurredAt: normalizedAt,
     });
+    const observation = feedback ? appendApplicationFeedback(
+      s, packet, one(s, 'SELECT * FROM application_receipts WHERE id=?', [receiptId]), feedback, source,
+    ) : null;
 
     // Audit
     const auditPayload = {
@@ -904,6 +937,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       externalSideEffects: 'none',
       submissionPerformed: false,
       nextAction,
+      observation,
     };
   });
 }

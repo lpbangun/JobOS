@@ -2,12 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 import { id, now, slug, parseJson } from './utils.js';
-import { one, all, run, save, audit } from './db.js';
+import { one, all, run, save, audit, guardedWrite, queuePostCommit, projectAudit, recordAudit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
 import { deserializeFitScore, qualifiesForHighFit, scoreMd } from './scoring.js';
 import { extractRequirementInventory } from './requirements.js';
 import { classifyLiveness, deserializeLiveness, isLivenessFresh, livenessGate, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
 import { lifecycleTaskView } from './lifecycle.js';
+import { appendMemoryObservation, queueMemorySync } from './career-memory-observations.js';
+import { JOB_FEEDBACK_INPUT_SCHEMA, canonicalHash, normalizeJobFeedbackInput } from './career-memory-contract.js';
 
 export function requirementInventory(text){ return extractRequirementInventory(text); }
 export function requirements(text){ return requirementInventory(text).requirements.map(requirement => requirement.sourceText); }
@@ -474,12 +476,95 @@ export function importNormalized(s, { profileId, job, source = 'discovery', stat
 export function importText(s,{profileId,filePath,source='text_file',url=''}){ const text=fs.readFileSync(filePath,'utf8'), parsed=parseJob(text), jidSeed=url||`${profileId}:${parsed.title}:${parsed.company}:${text}`, dbUrl=url||`jobos:text:${id('job',jidSeed)}`; return importNormalized(s,{profileId,job:{...parsed,url:dbUrl,source,description:text},source,status:'imported'}); }
 export async function importUrl(s,{profileId,url}){ let text; try { const r=await fetch(url,{headers:{'user-agent':'JobOS local CLI (+human-initiated import)'}}); const html=await r.text(); const $=cheerio.load(html); $('script,style,noscript').remove(); const title=($('title').first().text()||$('h1').first().text()||'Imported URL role').replace(/\s+/g,' ').trim(); const body=$('body').text().replace(/\s+/g,' ').trim(); text=`Title: ${title}\nCompany: Unknown company\nSource URL: ${url}\n\n${body.slice(0,12000)}`; } catch(e) { text=`Title: Imported URL role\nCompany: Unknown company\nSource URL: ${url}\n\nURL import was recorded, but content fetch failed: ${e.message}\nManual enrichment required before scoring or tailoring.`; } const tmp=path.join(s.p.state,`${id('urlimport',url)}.txt`); fs.writeFileSync(tmp,text); return importText(s,{profileId,filePath:tmp,source:'url',url}); }
 export function listJobs(s){ return all(s,'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(row => ({ ...row, liveness: deserializeLiveness(row) })); }
-export function updateJobStatus(s,jid,status){
+function jobFeedbackSource(job, statusAuditId) {
+  return {
+    type: 'job',
+    id: job.id,
+    versionId: statusAuditId,
+    revision: null,
+    contentHash: canonicalHash({
+      id: job.id,
+      profileId: job.profile_id,
+      status: job.status,
+      title: job.title,
+      company: job.company,
+      location: job.location || '',
+      workModel: job.work_model || '',
+      compensation: job.compensation || '',
+      description: job.description,
+      requirements: parseJson(job.requirements_json, []),
+      department: job.department || '',
+      postedDate: job.posted_date || '',
+    }),
+  };
+}
+
+function assertJobFeedbackSignalSource(job, signals) {
+  const native = parseJson(job.source_native_json, {});
+  const requirements = parseJson(job.requirements_json, []);
+  const requirementValues = (Array.isArray(requirements) ? requirements : Object.values(requirements || {}).flat())
+    .flatMap(value => typeof value === 'string' ? [value] : [value?.text, value?.requirement, value?.name, value?.skill])
+    .filter(Boolean)
+    .map(value => String(value).replace(/\s+/g, ' ').trim().toLowerCase());
+  const values = {
+    role_family: [job.title], seniority: [job.title], company_stage: [native.companyStage, native.company_stage],
+    industry: [native.industry], mission: [native.mission, job.description], location: [job.location],
+    work_model: [job.work_model], compensation: [job.compensation], skill: requirementValues,
+    timing: [job.posted_date], trust_risk: [job.liveness_status],
+  };
+  for (const signal of signals) {
+    const candidates = (values[signal.field] || []).map(value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean);
+    const matches = signal.match === 'exact'
+      ? candidates.includes(signal.value)
+      : candidates.some(candidate => signal.value.split(/[^a-z0-9]+/).filter(Boolean).every(token => candidate.split(/[^a-z0-9]+/).includes(token)));
+    if (!matches) throw Object.assign(new Error(`Signal ${signal.field}=${signal.value} is not present in the canonical job source.`), {
+      code: 'memory_signal_source_mismatch', type: 'validation',
+    });
+  }
+}
+
+export function updateJobStatus(s,jid,status,{memoryFeedback=null,actor='user',source='domain'}={}){
   if(!['imported','new','saved','archived'].includes(status)) throw Error(`Invalid job status: ${status}`);
   const job=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!job) throw Error(`Unknown job: ${jid}`);
-  run(s,'UPDATE jobs SET status=?, updated_at=? WHERE id=?',[status,now(),jid]);
-  audit(s,'job.status_changed','job',jid,{jobId:jid,status});
-  syncJob(s,jid); save(s); return one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
+  const feedback = memoryFeedback === null ? null : normalizeJobFeedbackInput(memoryFeedback);
+  if (feedback) {
+    const expectedDecision = status === 'saved' ? 'save' : status === 'archived' ? 'skip' : null;
+    if (feedback.decision !== expectedDecision) throw Object.assign(new Error(`Feedback decision ${feedback.decision} does not match job status ${status}.`), {
+      code: 'memory_source_state_invalid', type: 'validation',
+    });
+    assertJobFeedbackSignalSource(job, feedback.signals);
+  }
+  return guardedWrite(s,()=>{
+    const current=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!current) throw Error(`Unknown job: ${jid}`);
+    if (feedback) assertJobFeedbackSignalSource(current, feedback.signals);
+    run(s,'UPDATE jobs SET status=?, updated_at=? WHERE id=?',[status,now(),jid]);
+    const updated=one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
+    const statusEvent=recordAudit(s,'job.status_changed','job',jid,{jobId:jid,status});
+    if (feedback && !(status === 'archived' && current.status === 'archived')) {
+      const observation=appendMemoryObservation(s,{
+        profileId: updated.profile_id,
+        eventType: feedback.decision === 'save' ? 'job_saved' : 'job_skipped',
+        sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+        sourceEntity: jobFeedbackSource(updated,statusEvent.id),
+        occurredAt: feedback.occurredAt,
+        actor,
+        source,
+        reasonCodes: feedback.reasonCodes,
+        signals: feedback.signals,
+        publicExplanation: feedback.publicExplanation,
+        privateNote: feedback.privateNote,
+        payload: {decision:feedback.decision},
+        referenceId: feedback.referenceId,
+      });
+      if (!observation.idempotent) queueMemorySync(s,updated.profile_id,recordAudit(s,'career_memory.observation_recorded','career_memory_observation',observation.id,{
+        profileId: observation.profileId, eventType: observation.eventType, sourceEntity: observation.sourceEntity,
+        reasonCodes: observation.reasonCodes, signals: observation.signals, publicExplanation: observation.publicExplanation,
+        hasPrivateNote: observation.hasPrivateNote, referenceId: feedback.referenceId,
+      },'none'));
+    }
+    queuePostCommit(s,()=>{ projectAudit(s,statusEvent); syncJob(s,jid); });
+    return updated;
+  });
 }
 export function dedupeJobs(s,{apply=false}={}){
   const rows=all(s,'SELECT * FROM jobs ORDER BY created_at');
