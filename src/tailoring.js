@@ -5,6 +5,15 @@ import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 import { tailorResume } from './resume-tailoring.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
+
+function memoryEvidence(packet) {
+  return { careerMemoryRuleIds: packet.rules.map(rule => rule.id), careerMemoryCitations: packet.citations };
+}
+
+function memoryWarnings(packet) {
+  return packet.rules.length ? [`Career-memory guidance applied: ${packet.rules.map(rule => rule.id).join(', ')}.`] : [];
+}
 
 function relevant(job, proofs) {
   const jt = new Set(tokenize(`${job.title}\n${job.description}`));
@@ -43,8 +52,8 @@ function fallbackCover({ job, prof, chosen, warnings }) {
   return `# Cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\nDear hiring team,\n\nI am interested in ${job.title} at ${job.company}. The role appears aligned with my ${prof.name} search profile.\n\nEvidence I can safely claim from my proof library:\n${proofParagraph}\n\nI would tailor the final version after confirming the job requirements, company context, and any sensitive screening questions manually.\n\n## Evidence warnings\n${warningBlock}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`;
 }
 
-function tailoringPrompt({ kind, job, prof, proofs }) {
-  return `Create a ${kind === 'resume' ? 'tailored resume' : 'cover letter'} draft for this job. Use ONLY the supplied proof points for claims. Do not invent employers, metrics, credentials, or accomplishments. Return JSON with title, summary, requirementProofMap array of at least 3 items when possible ({requirement, proofPointId, bullet}), warnings array, and coverLetter string for cover-letter work. Include only proofPointId values that appear in PROOF POINTS.\n\nPROFILE:\n${JSON.stringify({ id: prof.id, name: prof.name, preferences: parseJson(prof.preferences_json, {}) }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs.map(p => ({ id: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, location: job.location, description: job.description, requirements: requirements(job.description) }, null, 2)}\n\nThe rendered output will include a Requirement-to-proof map, so make that map concrete and useful.`;
+function tailoringPrompt({ kind, job, prof, proofs, memory }) {
+  return `Create a ${kind === 'resume' ? 'tailored resume' : 'cover letter'} draft for this job. Use ONLY the supplied proof points for claims. Do not invent employers, metrics, credentials, or accomplishments. Return JSON with title, summary, requirementProofMap array of at least 3 items when possible ({requirement, proofPointId, bullet}), warnings array, and coverLetter string for cover-letter work. Include only proofPointId values that appear in PROOF POINTS.\n\nCAREER MEMORY (bounded public guidance):\n${JSON.stringify(memory, null, 2)}\n\nPROFILE:\n${JSON.stringify({ id: prof.id, name: prof.name, preferences: parseJson(prof.preferences_json, {}) }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs.map(p => ({ id: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, location: job.location, description: job.description, requirements: requirements(job.description) }, null, 2)}\n\nThe rendered output will include a Requirement-to-proof map, so make that map concrete and useful.`;
 }
 
 function groundedItems(json, proofById) {
@@ -91,10 +100,11 @@ export async function tailor(s, jid, pid, kind, options = {}) {
   const prof = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (!prof) throw Error(`Unknown profile: ${pid}`);
   if (job.profile_id !== pid) throw Object.assign(new Error(`Job ${jid} belongs to profile ${job.profile_id}, not ${pid}`), { code: 'profile_job_mismatch', type: 'validation' });
+  const memory = retrieveCareerMemory(s, { profileId: pid, consumer: 'tailoring', jobId: jid, artifactType: 'cover_letter' });
   const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified'", [pid]);
   const enriched = relevant(job, proofs);
   const chosen = enriched.filter(p => p.relevance > 0).slice(0, kind === 'resume' ? 5 : 3);
-  const warnings = [];
+  const warnings = memoryWarnings(memory);
   if (!proofs.length) warnings.push('No proof points exist for this profile; draft intentionally avoids unsupported achievement claims.');
   else if (!chosen.length) warnings.push('No proof points matched job language; add evidence before strengthening this artifact.');
   const proofById = new Map(enriched.map(p => [p.id, p]));
@@ -105,11 +115,13 @@ export async function tailor(s, jid, pid, kind, options = {}) {
       const result = await generateJson({
         schemaName: kind === 'resume' ? 'jobos_tailored_resume' : 'jobos_cover_letter',
         system: 'You are JobOS tailoring. You create useful drafts while strictly grounding every achievement claim in supplied proof point IDs.',
-        user: tailoringPrompt({ kind, job, prof, proofs: enriched })
+        user: tailoringPrompt({ kind, job, prof, proofs: enriched, memory })
       });
       if (result.ok) {
         const rendered = kind === 'resume' ? renderLlmResume({ job, prof, json: result.json, proofById }) : renderLlmCover({ job, prof, json: result.json, proofById });
-        return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content: rendered.content, evidence: rendered.evidence, warnings: rendered.warnings });
+        const guidanceValidation = validateWritingGuidance({ text: rendered.content, proofPointIds: rendered.evidence.map(item => item.proofPointId) }, memory);
+        if (guidanceValidation.valid) return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content: rendered.content, evidence: [...rendered.evidence, memoryEvidence(memory)], warnings: [...rendered.warnings, ...memoryWarnings(memory)] });
+        warnings.push(`LLM tailoring output failed career-memory validation (${guidanceValidation.errors.map(error => error.code).join(', ')}); used deterministic renderer.`);
       }
     } catch (e) {
       if (e?.type === 'agent_error') throw e;
@@ -117,7 +129,7 @@ export async function tailor(s, jid, pid, kind, options = {}) {
     }
   }
 
-  const evidence = chosen.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics }));
+  const evidence = [...chosen.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), memoryEvidence(memory)];
   const content = kind === 'resume' ? fallbackResume({ job, prof, chosen, warnings }) : fallbackCover({ job, prof, chosen, warnings });
   return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content, evidence, warnings });
 }

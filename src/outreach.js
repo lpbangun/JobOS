@@ -7,6 +7,7 @@ import { generateJson, llmConfig } from './llm.js';
 import { syncJob } from './jobs.js';
 import { contactSummaryForPlan, projectContactConfidenceV2 } from './research/contacts.js';
 import { createArtifact } from './artifacts.js';
+import { retrieveCareerMemory } from './career-memory-retrieval.js';
 
 const sentChannels = new Set(['email', 'linkedin', 'other']);
 const pausedApplicationStatuses = new Set(['interview', 'offer', 'rejected']);
@@ -438,7 +439,7 @@ ${profile.name}`;
   };
 }
 
-function outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy }) {
+function outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy, memory }) {
   return `Select evidence for a human-reviewed outreach draft. Return JSON with strategyClass and a non-empty evidence array. Do not author subject or message prose.
 
 Rules:
@@ -446,6 +447,9 @@ Rules:
 - Use the supplied ROLE_STRATEGY class; do not substitute a different-role strategy.
 - Do not claim that JobOS sent or will send anything.
 - JobOS will render all final prose deterministically from canonical evidence and strategy.
+
+CAREER_MEMORY (bounded public guidance):
+${JSON.stringify(memory, null, 2)}
 
 ROLE_STRATEGY:
 ${JSON.stringify(strategy, null, 2)}
@@ -469,12 +473,12 @@ ${JSON.stringify(ctx.evidence, null, 2)}`;
 async function llmDraft(input, fallback) {
   const cfg = llmConfig();
   if (!cfg.configured) return fallback;
-  const { job, profile, stakeholder, goal, ctx, strategy } = input;
+  const { job, profile, stakeholder, goal, ctx, strategy, memory } = input;
   try {
     const result = await generateJson({
       schemaName: 'jobos_outreach_draft',
       system: 'You are JobOS outreach evidence selection. Select only allowed evidence. Never send messages or imply external action. Do not author final prose.',
-      user: outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy }),
+      user: outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy, memory }),
       temperature: 0.2,
       maxTokens: 900,
     });
@@ -644,6 +648,7 @@ function resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planI
 export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal = null, planId = null, contactId = null }) {
   const resolved = resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planId, contactId });
   const { job, profile, stakeholder, contact } = resolved;
+  const memory = retrieveCareerMemory(s, { profileId, consumer: 'outreach', jobId: job.id });
   const safeGoal = slug(resolved.goal || 'informational');
   const app = one(s, 'SELECT status FROM applications WHERE job_id=? ORDER BY updated_at DESC LIMIT 1', [job.id]);
   const stakeholderClass = classifyStakeholder(stakeholder);
@@ -655,10 +660,14 @@ export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal =
       : { channel: stakeholder.links[0] ? 'public_source_manual' : 'no_contact_selected', pathStrength: stakeholder.links[0] ? 'manual' : 'unknown', warnings: [] };
   const ctx = evidenceContext(s, { job, profile, stakeholder, contact });
   const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy });
-  const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy }, fallback);
-  const warnings = [...new Set([...baseWarnings({ stakeholder, strategy, app, contact, selectedContactPath }), ...selectedContactPath.warnings, ...drafted.warnings])];
+  const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy, memory }, fallback);
+  const memoryWarning = memory.rules.length ? [`Career-memory guidance applied: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [];
+  const warnings = [...new Set([...baseWarnings({ stakeholder, strategy, app, contact, selectedContactPath }), ...selectedContactPath.warnings, ...drafted.warnings, ...memoryWarning])];
   const content = renderOutreachContent({ job, profile, stakeholder, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, ...drafted, warnings });
-  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: drafted.evidence, warnings, subject: drafted.subject, mode: drafted.mode });
+  const memoryEvidence = memory.rules.length || memory.citations.length
+    ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }]
+    : [];
+  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: [...drafted.evidence, ...memoryEvidence], warnings, subject: drafted.subject, mode: drafted.mode });
 }
 
 export function markOutreachSent(s, { artifactId, channel, notes = '' }) {

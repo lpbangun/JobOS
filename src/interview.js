@@ -10,6 +10,7 @@ import {
   reconcileApplicationNextAction,
 } from './lifecycle.js';
 import { syncJob } from './jobs.js';
+import { retrieveCareerMemory } from './career-memory-retrieval.js';
 
 export const INTERVIEW_STORY_SCHEMA = 'jobos.interview-story.v1';
 export const INTERVIEW_STORY_LIST_SCHEMA = 'jobos.interview-story-list.v1';
@@ -2158,7 +2159,7 @@ function renderPackWarnings(pack) {
   }).join('\n');
 }
 
-function renderInterviewPack({ job, profile, application, pack, proofs, company, stakeholders }) {
+function renderInterviewPack({ job, profile, application, pack, proofs, company, stakeholders, memory }) {
   const facts = parseJson(company?.facts_json, []);
   const questionLines = pack.questions.map(question => (
     `- [${question.origin}] \`${question.id}\` — ${question.text}`
@@ -2180,6 +2181,7 @@ Generated: ${now()}
 **Profile:** ${profile.name}
 **Audience:** ${pack.audience}
 **Approval status:** Draft for human review.
+**Career-memory rule IDs:** ${memory.rules.length ? memory.rules.map(rule => `\`${rule.id}\``).join(', ') : 'none'}
 
 ${refreshSummary(job, company, facts, stakeholders)}
 
@@ -2254,6 +2256,7 @@ export async function prepInterview(
     jobId: application.job_id,
     applicationId,
   });
+  const memory = retrieveCareerMemory(s, { profileId: ownership.profile.id, consumer: 'interview_prep', jobId: ownership.job.id });
   const pack = buildInterviewPack(s, {
     profileId: ownership.profile.id,
     jobId: ownership.job.id,
@@ -2285,6 +2288,7 @@ export async function prepInterview(
     proofs,
     company,
     stakeholders,
+    memory,
   });
   const researchRun = one(
     s,
@@ -2320,8 +2324,8 @@ export async function prepInterview(
     path: rel,
     title: `Interview prep: ${pack.stage} for ${ownership.job.title}`,
     content,
-    evidence: pack.items,
-    warnings: pack.warnings,
+    evidence: [...pack.items, ...(memory.rules.length || memory.citations.length ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }] : [])],
+    warnings: [...pack.warnings, ...(memory.rules.length ? [`Career-memory guidance applied: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
     series: {
       kind: 'interview_prep',
       applicationId,

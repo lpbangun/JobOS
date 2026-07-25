@@ -7,6 +7,7 @@ import { currentResume, validateResumeDocument } from './resumes.js';
 import { renderResumePdf, resolveLayoutProfile } from './resume-renderer.js';
 import { parseJson, tokenize } from './utils.js';
 import { writeYaml } from './workspace.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
 
 function unique(values) { return [...new Set(values.filter(Boolean))]; }
 function copy(value) { return structuredClone(value); }
@@ -246,8 +247,8 @@ export function renderSemanticResumeMarkdown(document, { sectionOrder = ['summar
   return `# ${identity.name}\n\n${contact}\n\n${sectionOrder.map(name => sections[name]).filter(Boolean).join('\n\n')}\n`;
 }
 
-function tailoringPrompt(job, profile, canonical, coverage, proofs) {
-  return `Return only typed resume transformations. Never return identity, employers, titles, dates, education, credentials, or LaTeX. Use only listed sourceBulletId, proofPointId, and selectedSkillIds. Every rewritten factual claim must cite active proof IDs. Schema: ${JSON.stringify(RESUME_TRANSFORMATION_SCHEMA)}\n\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, requirements: inventoryForJob(job) })}\nPROFILE: ${JSON.stringify({ id: profile.id, name: profile.name })}\nCANONICAL: ${JSON.stringify(canonical)}\nCOVERAGE: ${JSON.stringify(coverage)}\nPROOFS: ${JSON.stringify(proofs.map(proof => ({ id: proof.id, summary: proof.summary, metrics: proof.metrics, skills: proof.skills, sourceResumeEntryId: proof.source_resume_entry_id })))}`;
+function tailoringPrompt(job, profile, canonical, coverage, proofs, memory) {
+  return `Return only typed resume transformations. Never return identity, employers, titles, dates, education, credentials, or LaTeX. Use only listed sourceBulletId, proofPointId, and selectedSkillIds. Every rewritten factual claim must cite active proof IDs. Schema: ${JSON.stringify(RESUME_TRANSFORMATION_SCHEMA)}\n\nCAREER MEMORY (bounded public guidance): ${JSON.stringify(memory)}\n\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, requirements: inventoryForJob(job) })}\nPROFILE: ${JSON.stringify({ id: profile.id, name: profile.name })}\nCANONICAL: ${JSON.stringify(canonical)}\nCOVERAGE: ${JSON.stringify(coverage)}\nPROOFS: ${JSON.stringify(proofs.map(proof => ({ id: proof.id, summary: proof.summary, metrics: proof.metrics, skills: proof.skills, sourceResumeEntryId: proof.source_resume_entry_id })))}`;
 }
 
 export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutProfileId = null, pageSize = 'letter', pageLimit = 2, density = 'standard', format = 'markdown' }) {
@@ -256,6 +257,7 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw Error(`Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+  const memory = retrieveCareerMemory(s, { profileId, consumer: 'tailoring', jobId, artifactType: 'resume' });
   const source = currentResume(s, profileId);
   if (!source) throw Object.assign(new Error('A canonical resume is required before tailoring.'), { code: 'resume_source_missing', type: 'validation' });
   const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified' ORDER BY created_at", [profileId]).map(proofRecord);
@@ -268,7 +270,7 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
   let selectedLayout = layoutProfileId;
   if (cfg.configured && proofs.length) {
     try {
-      const generated = await generateJson({ schemaName: 'jobos_resume_transformations', system: 'You are a constrained resume content transformer. Never invent facts or alter fixed fields.', user: tailoringPrompt(job, profile, source.document, initialCoverage, proofs) });
+      const generated = await generateJson({ schemaName: 'jobos_resume_transformations', system: 'You are a constrained resume content transformer. Never invent facts or alter fixed fields.', user: tailoringPrompt(job, profile, source.document, initialCoverage, proofs, memory) });
       if (generated.ok) {
         const transformed = applyResumeTransformations(document, generated.json, proofs);
         document = transformed.document;
@@ -286,7 +288,14 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
   const validation = validateTailoredResume({ document, canonical: source.document, proofs, coverage, sourceResumeRevisionId: source.id });
   validation.warnings.push(...transformationWarnings.map(message => ({ code: 'resume_transformation_warning', message })));
   const layoutProfile = resolveLayoutProfile(job, { layout: selectedLayout, sectionOrder, pageSize, pageLimit, density });
-  const content = renderSemanticResumeMarkdown(document, layoutProfile);
+  let content = renderSemanticResumeMarkdown(document, layoutProfile);
+  const guidanceValidation = validateWritingGuidance({ text: content, proofPointIds: selectedProofPointIds }, memory);
+  if (!guidanceValidation.valid && mode === 'llm') {
+    transformationWarnings.push(`LLM transformation failed career-memory validation (${guidanceValidation.errors.map(error => error.code).join(', ')}); retained deterministic resume.`);
+    document = reorderByCoverage(groundCanonicalClaims(source.document, proofs), initialCoverage);
+    content = renderSemanticResumeMarkdown(document, layoutProfile);
+    mode = 'deterministic';
+  }
   const relativePath = path.join('jobs', job.id, 'artifacts', 'resume-tailored.md');
   let renderManifest = { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] };
   const artifact = createArtifact(s, {
@@ -296,8 +305,8 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
     path: relativePath,
     title: `Tailored resume for ${job.title}`,
     content,
-    evidence: selectedProofPointIds.map(proofPointId => ({ proofPointId })),
-    warnings: validation.warnings.map(warning => warning.message),
+    evidence: [...selectedProofPointIds.map(proofPointId => ({ proofPointId })), { careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }],
+    warnings: [...validation.warnings.map(warning => warning.message), ...(memory.rules.length ? [`Career-memory guidance applied: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
     series: { kind: 'resume' },
     auditPayload: { sourceResumeRevisionId: source.id, semanticValidationStatus: validation.valid ? 'passed' : 'blocked', mode },
     mutate: (store, created) => run(store, 'INSERT INTO artifact_resume_documents (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json) VALUES (?,?,?,?,?,?,?,?)', [created.id, 1, source.id, JSON.stringify(document), JSON.stringify(coverage), JSON.stringify(validation), JSON.stringify(layoutProfile), JSON.stringify(renderManifest)])
