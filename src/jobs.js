@@ -499,13 +499,17 @@ function jobFeedbackSource(job, statusAuditId) {
   };
 }
 
-function assertJobFeedbackSignalSource(job, signals) {
+export function assertJobFeedbackSignalSource(job, signals) {
   const native = parseJson(job.source_native_json, {});
-  const requirements = parseJson(job.requirements_json, []);
-  const requirementValues = (Array.isArray(requirements) ? requirements : Object.values(requirements || {}).flat())
-    .flatMap(value => typeof value === 'string' ? [value] : [value?.text, value?.requirement, value?.name, value?.skill])
-    .filter(Boolean)
-    .map(value => String(value).replace(/\s+/g, ' ').trim().toLowerCase());
+  const parsedRequirements = parseJson(job.requirements_json, []);
+  const requirements = Array.isArray(parsedRequirements)
+    ? parsedRequirements
+    : Object.values(parsedRequirements || {}).flatMap(value => Array.isArray(value) ? value : []);
+  const requirementValues = requirements.flatMap(value => {
+    if (typeof value === 'string') return [value];
+    if (!value || typeof value !== 'object') return [];
+    return [value.text, value.requirement, value.name, value.skill].filter(Boolean);
+  }).map(value => String(value).replace(/\s+/g, ' ').trim().toLowerCase());
   const values = {
     role_family: [job.title], seniority: [job.title], company_stage: [native.companyStage, native.company_stage],
     industry: [native.industry], mission: [native.mission, job.description], location: [job.location],
@@ -523,6 +527,111 @@ function assertJobFeedbackSignalSource(job, signals) {
   }
 }
 
+function memoryProducerError(code, message, details = {}) {
+  return Object.assign(new Error(message), { code, type: 'validation', details });
+}
+
+function memoryObservationProjection(s, row) {
+  const projection = {
+    schema: 'jobos.career-memory-observation.v1',
+    id: row.id,
+    profileId: row.profile_id,
+    eventType: row.event_type,
+    occurredAt: row.occurred_at,
+    recordedAt: row.recorded_at,
+    actor: row.actor,
+    source: row.source,
+    sourceEntity: {
+      type: row.source_entity_type,
+      id: row.source_entity_id,
+      versionId: row.source_version_id,
+      revision: row.source_revision === null ? null : Number(row.source_revision),
+      contentHash: row.source_content_hash,
+    },
+    reasonCodes: parseJson(row.reason_codes_json, []),
+    signals: parseJson(row.signal_json, []),
+    publicExplanation: row.public_explanation || '',
+    hasPrivateNote: Boolean(row.private_note),
+    current: !one(s, 'SELECT id FROM career_memory_observations WHERE supersedes_observation_id=?', [row.id]),
+    supersedesObservationId: row.supersedes_observation_id || null,
+    payload: parseJson(row.payload_json, {}),
+    interpretation: 'attributed_observation_only_no_preference_or_causal_claim',
+    externalSideEffects: 'none',
+  };
+  Object.defineProperty(projection, 'idempotent', { value: true, enumerable: false });
+  return projection;
+}
+
+function producerObservationHash({ profileId, eventType, sourceEntity, feedback, actor, source }) {
+  const publicHash = canonicalHash({
+    profileId,
+    eventType,
+    sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity,
+    occurredAt: feedback.occurredAt,
+    actor,
+    source,
+    reasonCodes: feedback.reasonCodes,
+    signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation,
+    payload: { decision: feedback.decision },
+    referenceId: feedback.referenceId,
+    supersedesObservationId: null,
+    undoesObservationId: null,
+    correctionReason: '',
+  });
+  return canonicalHash({ publicHash, privateNoteHash: canonicalHash(feedback.privateNote) });
+}
+
+export function preflightProducerFeedback(s, { profileId, eventType, sourceEntity = null, feedback, actor, source, job }) {
+  const normalizedActor = typeof actor === 'string' ? actor.replace(/\s+/g, ' ').trim() : '';
+  const normalizedSource = typeof source === 'string' ? source.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+  if (!normalizedActor || ['unknown', 'unknown_legacy', 'legacy', 'system'].includes(normalizedActor.toLowerCase())) {
+    throw memoryProducerError('memory_actor_invalid', 'actor must identify the user who made the decision.');
+  }
+  if (!['cli', 'tui'].includes(normalizedSource)) {
+    throw memoryProducerError('memory_source_invalid', 'W08 observations can be recorded only by trusted CLI or TUI human flows.');
+  }
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+    throw memoryProducerError('memory_profile_unknown', `Unknown profile: ${profileId}.`);
+  }
+  assertJobFeedbackSignalSource(job, feedback.signals);
+  const existing = one(s, 'SELECT * FROM career_memory_observations WHERE profile_id=? AND reference_id=?', [profileId, feedback.referenceId]);
+  if (!existing) return null;
+  if (!sourceEntity) {
+    throw memoryProducerError('memory_reference_conflict', `Reference ${feedback.referenceId} identifies feedback for a different source.`, {
+      profileId, referenceId: feedback.referenceId,
+    });
+  }
+  const observationHash = producerObservationHash({
+    profileId, eventType, sourceEntity, feedback, actor: normalizedActor, source: normalizedSource,
+  });
+  if (existing.observation_hash !== observationHash) {
+    throw memoryProducerError('memory_reference_conflict', `Reference ${feedback.referenceId} already identifies different observation content.`, {
+      profileId, referenceId: feedback.referenceId,
+    });
+  }
+  return memoryObservationProjection(s, existing);
+}
+
+function preflightJobStatusFeedback(s, job, status, feedback, actor, source) {
+  const eventType = feedback.decision === 'save' ? 'job_saved' : 'job_skipped';
+  const statusEvent = one(s, `SELECT * FROM audit_log
+    WHERE action='job.status_changed' AND entity_type='job' AND entity_id=?
+    ORDER BY rowid DESC LIMIT 1`, [job.id]);
+  const sourceEntity = job.status === status && parseJson(statusEvent?.payload_json, {}).status === status
+    ? jobFeedbackSource(job, statusEvent.id)
+    : null;
+  const replay = preflightProducerFeedback(s, {
+    profileId: job.profile_id, eventType, sourceEntity, feedback, actor, source, job,
+  });
+  if (replay) return replay;
+  if (job.status === status) {
+    throw memoryProducerError('memory_source_state_invalid', `Job ${job.id} is already in the canonical ${status} state without matching feedback.`);
+  }
+  return null;
+}
+
 export function updateJobStatus(s,jid,status,{memoryFeedback=null,actor='user',source='domain'}={}){
   if(!['imported','new','saved','archived'].includes(status)) throw Error(`Invalid job status: ${status}`);
   const job=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!job) throw Error(`Unknown job: ${jid}`);
@@ -532,16 +641,20 @@ export function updateJobStatus(s,jid,status,{memoryFeedback=null,actor='user',s
     if (feedback.decision !== expectedDecision) throw Object.assign(new Error(`Feedback decision ${feedback.decision} does not match job status ${status}.`), {
       code: 'memory_source_state_invalid', type: 'validation',
     });
-    assertJobFeedbackSignalSource(job, feedback.signals);
+    preflightJobStatusFeedback(s, job, status, feedback, actor, source);
   }
   return guardedWrite(s,()=>{
     const current=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!current) throw Error(`Unknown job: ${jid}`);
-    if (feedback) assertJobFeedbackSignalSource(current, feedback.signals);
+    if (feedback) {
+      const replay = preflightJobStatusFeedback(s, current, status, feedback, actor, source);
+      if (replay) return { ...current, observation: replay };
+    }
     run(s,'UPDATE jobs SET status=?, updated_at=? WHERE id=?',[status,now(),jid]);
     const updated=one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
     const statusEvent=recordAudit(s,'job.status_changed','job',jid,{jobId:jid,status});
-    if (feedback && !(status === 'archived' && current.status === 'archived')) {
-      const observation=appendMemoryObservation(s,{
+    let observation=null;
+    if (feedback) {
+      observation=appendMemoryObservation(s,{
         profileId: updated.profile_id,
         eventType: feedback.decision === 'save' ? 'job_saved' : 'job_skipped',
         sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
@@ -563,7 +676,7 @@ export function updateJobStatus(s,jid,status,{memoryFeedback=null,actor='user',s
       },'none'));
     }
     queuePostCommit(s,()=>{ projectAudit(s,statusEvent); syncJob(s,jid); });
-    return updated;
+    return feedback ? { ...updated, observation } : updated;
   });
 }
 export function dedupeJobs(s,{apply=false}={}){
