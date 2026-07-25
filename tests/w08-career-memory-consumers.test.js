@@ -340,3 +340,59 @@ test('W08-CONSUMERS-06 avoid and proof-positioning violations remain active vali
     error => error.code === 'memory_writing_fallback_invalid' && error.details.some(item => item.code === 'memory_writing_proof_not_allowed'),
   );
 });
+
+test('W08-CONSUMERS-07 outreach opening none has no greeting and passes structural validation', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const job = one(store, "SELECT jobs.* FROM jobs JOIN stakeholders ON stakeholders.job_id=jobs.id WHERE jobs.profile_id='alpha' ORDER BY jobs.id LIMIT 1");
+  const stakeholder = one(store, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY id LIMIT 1', [job.id]);
+  acceptWritingRule(store, { scope: 'outreach', ruleType: 'opening', value: { value: 'none' }, suffix: 'outreach-opening-none' });
+
+  const result = await draftOutreach(store, { jobId: job.id, profileId: 'alpha', stakeholderId: stakeholder.id, goal: 'informational' });
+  const message = result.content.match(/## Draft message\n([\s\S]*?)\n\n## Evidence used/)?.[1] || '';
+  assert.match(message, /^(?:I hope your week is going well\. )?I am exploring /);
+  assert.doesNotMatch(message, /^(?:Hi|Hello|Dear)\b/);
+});
+
+test('W08-CONSUMERS-08 outreach context-first opening is materially rendered and validated', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const job = one(store, "SELECT jobs.* FROM jobs JOIN stakeholders ON stakeholders.job_id=jobs.id WHERE jobs.profile_id='alpha' ORDER BY jobs.id LIMIT 1");
+  const stakeholder = one(store, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY id LIMIT 1', [job.id]);
+  acceptWritingRule(store, { scope: 'outreach', ruleType: 'opening', value: { value: 'context_first' }, suffix: 'outreach-opening-context' });
+
+  const result = await draftOutreach(store, { jobId: job.id, profileId: 'alpha', stakeholderId: stakeholder.id, goal: 'informational' });
+  const message = result.content.match(/## Draft message\n([\s\S]*?)\n\n## Evidence used/)?.[1] || '';
+  assert.ok(message.startsWith(`Regarding the ${job.title} role at ${job.company},\n\nHi `));
+});
+
+test('W08-CONSUMERS-09 interview opening none validates only the opening slot, not later body prose', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const application = one(store, "SELECT * FROM applications WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  acceptWritingRule(store, { scope: 'interview_prep', ruleType: 'opening', value: { value: 'none' }, suffix: 'interview-opening-none' });
+  run(store, 'UPDATE jobs SET title=? WHERE id=?', ['Start with the public role context', application.job_id]);
+
+  const result = await prepInterview(store, application.id);
+  assert.match(result.content, /Role: Start with the public role context/);
+  assert.doesNotMatch(result.content, /Start with the highest-priority verified interview evidence\.|Start by connecting each response to the role and company context\.|Start with the strongest verified proof snapshot\./);
+});
+
+test('W08-CONSUMERS-10 analytical, direct, and narrative outreach tones alter message prose', async t => {
+  const expected = {
+    analytical: 'I am assessing the evidence in three parts: role context, verified proof, and a focused question.',
+    direct: 'I will be direct: my question is about source-backed fit and the team’s current need.',
+    narrative: 'The thread connecting my interest is the role context, one verified proof, and a question about the team’s work.',
+  };
+  const messages = [];
+  for (const [tone, marker] of Object.entries(expected)) {
+    await t.test(tone, async subtest => {
+      const store = await openStore({ workspace: workspace(subtest) });
+      const job = one(store, "SELECT jobs.* FROM jobs JOIN stakeholders ON stakeholders.job_id=jobs.id WHERE jobs.profile_id='alpha' ORDER BY jobs.id LIMIT 1");
+      const stakeholder = one(store, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY id LIMIT 1', [job.id]);
+      acceptWritingRule(store, { scope: 'outreach', ruleType: 'tone', value: { value: tone }, suffix: `outreach-tone-${tone}` });
+      const result = await draftOutreach(store, { jobId: job.id, profileId: 'alpha', stakeholderId: stakeholder.id, goal: 'informational' });
+      const message = result.content.match(/## Draft message\n([\s\S]*?)\n\n## Evidence used/)?.[1] || '';
+      assert.ok(message.includes(marker));
+      messages.push(message);
+    });
+  }
+  assert.equal(new Set(messages).size, 3);
+});

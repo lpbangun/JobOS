@@ -132,10 +132,12 @@ function applyProofPositioning(ctx, packet) {
 
 function validateOutreachGuidance(text, evidence, packet) {
   const style = memoryStyle(packet);
+  const draftMessage = text.match(/## Draft message\n([\s\S]*?)\n\n## Evidence used/)?.[1] || '';
   const openingChecks = {
     direct: /## Draft message\n(?:Hello|Dear) [^,]+,/,
     proof_first: /## Draft message\n(?!Hi |Hello |Dear )\S[^\n]*\n\nHi /,
-    none: /## Draft message\n\nI am exploring/,
+    context_first: /## Draft message\nRegarding the [^\n]+ role at [^\n]+,\n\n(?:Hi|Dear) [^,]+,/,
+    none: /## Draft message\n(?:I hope your week is going well\. )?I am exploring/,
   };
   const closingChecks = {
     call_to_action: /Would a brief conversation be useful\?\n[^\n]+\n/,
@@ -151,9 +153,12 @@ function validateOutreachGuidance(text, evidence, packet) {
   };
   const validation = validateWritingGuidance(candidate, packet);
   const toneRule = memoryRule(packet, 'tone');
-  const toneRendered = style.tone === 'formal' ? /## Draft message\nDear /.test(text)
-    : style.tone === 'warm' ? /I hope your week is going well\./.test(text)
-      : true;
+  const toneRendered = style.tone === 'formal' ? /(?:^|\n\n)Dear [^,]+,/.test(draftMessage)
+    : style.tone === 'warm' ? /I hope your week is going well\./.test(draftMessage)
+      : style.tone === 'analytical' ? /I am assessing the evidence in three parts: role context, verified proof, and a focused question\./.test(draftMessage)
+        : style.tone === 'direct' ? /I will be direct: my question is about source-backed fit and the team’s current need\./.test(draftMessage)
+          : style.tone === 'narrative' ? /The thread connecting my interest is the role context, one verified proof, and a question about the team’s work\./.test(draftMessage)
+            : true;
   if (toneRule && !toneRendered) {
     validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: style.template } });
     validation.valid = false;
@@ -444,6 +449,11 @@ function fallbackDraft({
   const stakeholderLine = stakeholderFact ? `I saw that ${stakeholderFact.summary}.` : '';
   const companyLine = companyFact ? `I noted the source-backed company context that ${companyFact.summary}.` : '';
   const proofLine = proof ? `One relevant proof from my background: ${proof.summary}.` : 'I do not have a stored proof selected for this note, so I would keep any background claim out until it is verified.';
+  const toneLine = {
+    analytical: 'I am assessing the evidence in three parts: role context, verified proof, and a focused question.',
+    direct: 'I will be direct: my question is about source-backed fit and the team’s current need.',
+    narrative: 'The thread connecting my interest is the role context, one verified proof, and a question about the team’s work.',
+  }[memoryGuidance.tone] || '';
   const styleLine = /\bdirect\b|\bmetrics\b/i.test(style)
     ? 'I will keep this brief and focus on source-backed relevance.'
     : /\bthoughtful\b|\bcollaborative\b/i.test(style)
@@ -464,14 +474,17 @@ function fallbackDraft({
     unknown: 'I am making a conservative informational inquiry and want to verify that this is relevant to you.',
   }[strategy.class];
   const middle = concise
-    ? [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join(' ')
-    : [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join('\n\n');
+    ? [stakeholderLine, companyLine, proofLine, toneLine, styleLine, goalLine, roleLine].filter(Boolean).join(' ')
+    : [stakeholderLine, companyLine, proofLine, toneLine, styleLine, goalLine, roleLine].filter(Boolean).join('\n\n');
   const directGreeting = memoryGuidance.tone === 'formal' ? `Dear ${firstName(stakeholder.name)},` : `Hello ${firstName(stakeholder.name)},`;
-  const greeting = memoryGuidance.openingVariant === 'none' ? '' : memoryGuidance.openingVariant === 'direct' ? directGreeting : memoryGuidance.openingVariant === 'proof_first' && proof ? `${proof.summary}\n\nHi ${firstName(stakeholder.name)},` : memoryGuidance.tone === 'formal' ? `Dear ${firstName(stakeholder.name)},` : `Hi ${firstName(stakeholder.name)},`;
+  const standardGreeting = memoryGuidance.tone === 'formal' ? `Dear ${firstName(stakeholder.name)},` : `Hi ${firstName(stakeholder.name)},`;
+  const greeting = memoryGuidance.openingVariant === 'none' ? ''
+    : memoryGuidance.openingVariant === 'direct' ? directGreeting
+      : memoryGuidance.openingVariant === 'proof_first' && proof ? `${proof.summary}\n\nHi ${firstName(stakeholder.name)},`
+        : memoryGuidance.openingVariant === 'context_first' ? `Regarding the ${job.title} role at ${job.company},\n\n${standardGreeting}`
+          : standardGreeting;
   const closing = memoryGuidance.closingVariant === 'none' ? '' : memoryGuidance.closingVariant === 'call_to_action' ? 'Would a brief conversation be useful?' : memoryGuidance.closingVariant === 'gratitude' ? 'Thank you for considering the question.' : 'Thanks,';
-  const message = `${greeting}
-
-${opener}I am exploring the ${job.title} role at ${job.company}. ${middle}
+  const message = `${greeting ? `${greeting}\n\n` : ''}${opener}I am exploring the ${job.title} role at ${job.company}. ${middle}
 
 If appropriate, would you be open to ${strategy.ask}? I am happy to keep it brief.
 

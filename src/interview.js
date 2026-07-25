@@ -2183,12 +2183,12 @@ function orderInterviewPack(pack, packet) {
 function validateInterviewGuidance(text, pack, packet) {
   const style = interviewMemoryStyle(packet);
   const proofPointIds = [...new Set(pack.items.flatMap(item => item.proofSnapshots.map(snapshot => snapshot.id)))];
-  const openingChecks = {
-    direct: /Start with the highest-priority verified interview evidence\./,
-    context_first: /Start by connecting each response to the role and company context\./,
-    proof_first: /Start with the strongest verified proof snapshot\./,
-    none: /\*\*Closing variant:/,
-  };
+  const heading = interviewTemplateHeading(packet);
+  const openingSection = text.split(`${heading}\n\n`)[1]?.split('\n\n## Company / role refresh')[0].trim();
+  const expectedOpening = interviewOpening(packet);
+  const openingRendered = style.openingVariant
+    ? openingSection !== undefined && openingSection === expectedOpening
+    : false;
   const closingChecks = {
     gratitude: /End by thanking the interviewer for the conversation\.\n$/,
     call_to_action: /End by confirming the next step and its owner\.\n$/,
@@ -2196,8 +2196,7 @@ function validateInterviewGuidance(text, pack, packet) {
   };
   const candidate = {
     text, proofPointIds, claims: [], exemplarExcerptHashes: [],
-    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text)
-      && (style.openingVariant !== 'none' || !/Start (?:with|by)/.test(text)) ? style.openingVariant : null,
+    openingVariant: openingRendered ? style.openingVariant : null,
     closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text)
       && (style.closingVariant !== 'none' || !/End by /.test(text)) ? style.closingVariant : null,
   };
