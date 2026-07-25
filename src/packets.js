@@ -757,16 +757,6 @@ function applicationFeedbackPreflight(s, packet, { normalizedAt, note, source, f
   ]);
   const job = one(s, 'SELECT * FROM jobs WHERE id=? AND profile_id=?', [lockedPacket.job_id, lockedPacket.profile_id]);
   if (!application || !job) throw packetError('memory_profile_source_mismatch', 'Packet application ownership is invalid.');
-  let lockedHash = null;
-  try {
-    lockedHash = packetContentHash(buildPacketProjection(s, { jobId: lockedPacket.job_id, profileId: lockedPacket.profile_id }));
-  } catch {}
-  const currency = packetCurrency(s, lockedPacket, lockedHash);
-  if (currency !== 'current') {
-    throw packetError('packet_stale', `Packet ${lockedPacket.id} is ${currency}; only current packets are attestable`, {
-      changedPaths: lockedHash !== lockedPacket.content_hash ? ['/contentHash'] : [],
-    });
-  }
   const existing = one(s, 'SELECT * FROM application_receipts WHERE packet_id=? ORDER BY recorded_at,id LIMIT 1', [lockedPacket.id]);
   if (existing && existing.type !== 'user_attestation') {
     throw packetError('packet_already_submitted', `Packet ${lockedPacket.id} already has confirmed submission evidence`, {
@@ -815,6 +805,18 @@ function applicationFeedbackPreflight(s, packet, { normalizedAt, note, source, f
     job,
   });
   if (replay && !existing) throw packetError('memory_source_state_invalid', 'Application feedback replay has no immutable receipt source.');
+  if (replay) return { packet: lockedPacket, application, existing, receiptHash, receiptId, replay };
+
+  let lockedHash = null;
+  try {
+    lockedHash = packetContentHash(buildPacketProjection(s, { jobId: lockedPacket.job_id, profileId: lockedPacket.profile_id }));
+  } catch {}
+  const currency = packetCurrency(s, lockedPacket, lockedHash);
+  if (currency !== 'current') {
+    throw packetError('packet_stale', `Packet ${lockedPacket.id} is ${currency}; only current packets are attestable`, {
+      changedPaths: lockedHash !== lockedPacket.content_hash ? ['/contentHash'] : [],
+    });
+  }
   return { packet: lockedPacket, application, existing, receiptHash, receiptId, replay };
 }
 

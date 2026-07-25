@@ -121,6 +121,43 @@ test('W08 producers: application attestation records and replays receipt-backed 
   assertZeroDelta(fixture.store, fixture.root, beforeReplay);
 });
 
+test('W08 producers: immutable receipt feedback replay survives later packet staleness without deltas', async t => {
+  const fixture = await seedW02Workspace(t);
+  const packet = createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
+  const input = feedback('apply', 'apply-stale-replay-reference');
+  const attestation = {
+    packetId: packet.id,
+    submittedAt: input.occurredAt,
+    note: 'Immutable application receipt.',
+    source: 'cli',
+    memoryFeedback: input,
+  };
+  const first = attestApplicationSubmitted(fixture.store, attestation);
+
+  const answer = one(fixture.store, "SELECT id FROM answers WHERE sensitivity IN ('public','personal') ORDER BY id LIMIT 1");
+  run(fixture.store, 'UPDATE answers SET answer_text=?,updated_at=? WHERE id=?', [
+    'Changed after the immutable receipt was recorded', '2026-07-26T00:00:00.000Z', answer.id,
+  ]);
+  const beforeReplay = mutationSnapshot(fixture.store, fixture.root);
+
+  const replay = attestApplicationSubmitted(fixture.store, attestation);
+  assert.equal(replay.idempotent, true);
+  assert.deepEqual(replay.observation, first.observation);
+  assertZeroDelta(fixture.store, fixture.root, beforeReplay);
+
+  assertCode(() => attestApplicationSubmitted(fixture.store, {
+    ...attestation,
+    memoryFeedback: { ...input, privateNote: 'Conflicting replay content' },
+  }), 'memory_reference_conflict');
+  assertZeroDelta(fixture.store, fixture.root, beforeReplay);
+
+  assertCode(() => attestApplicationSubmitted(fixture.store, {
+    ...attestation,
+    memoryFeedback: { ...input, referenceId: 'apply-stale-new-reference' },
+  }), 'packet_stale');
+  assertZeroDelta(fixture.store, fixture.root, beforeReplay);
+});
+
 test('W08 producers: exact save replay returns the same observation with zero deltas and conflict rejects', async t => {
   const { store, job } = await newJob(t, 'saved-replay');
   const root = store.p.root;
