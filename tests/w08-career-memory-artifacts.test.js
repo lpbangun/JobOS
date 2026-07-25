@@ -436,3 +436,99 @@ test('W08-ART-10 existing review/edit without memoryFeedback remains behaviorall
   assert.ok(one(store, `SELECT * FROM audit_log WHERE action='artifact.edited' AND entity_id=?`, [edited.id]));
   store.db.close();
 });
+
+// ── W08-ART-F1: first feedback on an already-approved artifact is a real write ──
+
+test('W08-ART-F1 already-approved artifact records first feedback audit and mirror atomically as non-idempotent', async t => {
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const approved = alphaApprovedArtifact(store);
+  writeArtifactMirror(store, approved);
+  const before = phase2Counts(store);
+  const feedback = artifactFeedback({
+    reasonCodes: [],
+    signals: [],
+    referenceId: 'w08-approved-first-feedback',
+  });
+
+  const result = approveArtifact(store, approved.id, {
+    reviewedBy: 'cli',
+    note: 'feedback after approval',
+    memoryFeedback: feedback,
+  });
+
+  assert.equal(result.idempotent, false, 'creating the first observation is not an idempotent call');
+  assert.equal(phase2Counts(store).observations, before.observations + 1);
+  assert.equal(phase2Counts(store).audit, before.audit + 1);
+  const observation = one(store, 'SELECT * FROM career_memory_observations WHERE reference_id=?', [feedback.referenceId]);
+  assert.ok(observation);
+  assert.ok(one(store, "SELECT * FROM audit_log WHERE action='career_memory.observation_recorded' AND entity_id=?", [observation.id]));
+  assert.match(readFileSync(memoryMirror(root), 'utf8'), new RegExp(observation.id));
+  store.db.close();
+});
+
+// ── W08-ART-F2: review replay identity includes private feedback ──
+
+test('W08-ART-F2 review reference replay conflicts when only privateNote changes', async t => {
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const draft = alphaCurrentDraftArtifact(store);
+  writeArtifactMirror(store, draft);
+  const referenceId = 'w08-review-private-note-conflict';
+  approveArtifact(store, draft.id, {
+    reviewedBy: 'cli',
+    note: 'approve',
+    memoryFeedback: artifactFeedback({ referenceId, privateNote: 'first private note' }),
+  });
+  const afterFirst = phase2Counts(store);
+
+  assert.throws(() => approveArtifact(store, draft.id, {
+    reviewedBy: 'cli',
+    note: 'approve',
+    memoryFeedback: artifactFeedback({ referenceId, privateNote: 'different private note' }),
+  }), error => error?.code === 'memory_reference_conflict');
+  assert.deepEqual(phase2Counts(store), afterFirst);
+  store.db.close();
+});
+
+// ── W08-ART-F3: edit replay identity includes all normalized feedback ──
+
+test('W08-ART-F3 same-content edit replay conflicts when normalized feedback identity changes', async t => {
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const base = alphaApprovedArtifact(store);
+  writeArtifactMirror(store, base);
+  const content = '# Edited prep\n\nSame replay content.\n';
+  const referenceId = 'w08-edit-feedback-identity-conflict';
+  ingestEditedArtifact(store, {
+    artifactId: base.id,
+    content,
+    source: 'tui',
+    memoryFeedback: artifactFeedback({ referenceId, privateNote: 'first private note' }),
+  });
+  const afterFirst = phase2Counts(store);
+
+  assert.throws(() => ingestEditedArtifact(store, {
+    artifactId: base.id,
+    content,
+    source: 'tui',
+    memoryFeedback: artifactFeedback({ referenceId, privateNote: 'different private note' }),
+  }), error => error?.code === 'memory_reference_conflict');
+  assert.deepEqual(phase2Counts(store), afterFirst);
+  store.db.close();
+});
+
+test('W08-ART-F4 same-content edit without feedback preserves legacy rejection behavior', async t => {
+  const { root } = fixtureWorkspace(t);
+  const store = await openStore({ workspace: root });
+  const base = alphaApprovedArtifact(store);
+  const before = phase2Counts(store);
+
+  assert.throws(() => ingestEditedArtifact(store, {
+    artifactId: base.id,
+    content: base.content,
+    source: 'tui',
+  }), error => error?.code === 'artifact_same_content');
+  assert.deepEqual(phase2Counts(store), before);
+  store.db.close();
+});
