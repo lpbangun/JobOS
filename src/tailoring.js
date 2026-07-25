@@ -40,12 +40,54 @@ function guidanceHeader(packet) {
   return `**Career-memory tone:** ${variants.tone}\n**Career-memory template:** ${variants.template}\n**Opening variant:** ${variants.openingVariant || 'baseline'}\n**Closing variant:** ${variants.closingVariant || 'baseline'}\n\n`;
 }
 
-function applyMinimumWords(text, packet) {
-  const minimum = memoryRule(packet, 'length')?.value.minWords || 0;
-  const count = text.trim() ? text.trim().split(/\s+/u).length : 0;
-  const missing = minimum - count;
-  const words = ['Evidence', 'remains', 'grounded', 'in', 'verified', 'sources', 'for', 'human', 'review'];
-  return missing > 0 && missing <= 40 ? `${text.trimEnd()}\n\n${Array.from({ length: missing }, (_, index) => words[index % words.length]).join(' ')}\n` : text;
+function coverTemplateHeading(packet) {
+  const style = writingVariants(packet);
+  return {
+    concise_brief: '## Concise brief — role and proof',
+    warm_letter: '## Warm letter — why this role and evidence',
+    evidence_analysis: '## Evidence analysis — role requirements and proof',
+    direct_brief: '## Direct brief — fit and evidence',
+    narrative_letter: '## Narrative letter — context, evidence, and next step',
+    formal_letter: '## Formal letter — candidacy and evidence',
+  }[style.template] || '## Letter — role and evidence';
+}
+
+function coverOpening({ job, prof, chosen, packet }) {
+  const variant = writingVariants(packet).openingVariant;
+  return {
+    direct: `I am applying for ${job.title} at ${job.company}.`,
+    context_first: `The work described for ${job.title} at ${job.company} aligns with the context of my ${prof.name} search profile.`,
+    proof_first: chosen[0]?.summary || `I am interested in ${job.title} at ${job.company}.`,
+    none: '',
+  }[variant] ?? `I am interested in ${job.title} at ${job.company}. The role appears aligned with my ${prof.name} search profile.`;
+}
+
+function coverClosing(packet) {
+  return {
+    gratitude: 'Thank you for considering this evidence-grounded draft.',
+    call_to_action: 'I would welcome a conversation about the role and the verified evidence above.',
+    none: '',
+  }[writingVariants(packet).closingVariant] ?? 'I would tailor the final version after confirming the job requirements, company context, and any sensitive screening questions manually.';
+}
+
+function renderedCoverVariants(text, packet) {
+  const style = writingVariants(packet);
+  const openingChecks = {
+    direct: /Dear hiring team,\n\nI am applying for /,
+    context_first: /Dear hiring team,\n\nThe work described for /,
+    proof_first: /Dear hiring team,\n\n(?!I am applying for |The work described for |\n)/,
+    none: /Dear hiring team,\n\n\n\nEvidence I can safely claim|Dear hiring team,\n\n\n\n## Proof-grounded claims/,
+  };
+  const closingChecks = {
+    gratitude: /Thank you for considering this evidence-grounded draft\./,
+    call_to_action: /I would welcome a conversation about the role and the verified evidence above\./,
+    none: /(?:## Evidence warnings|## External-action gate)/,
+  };
+  return {
+    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text) ? style.openingVariant : null,
+    closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text)
+      && (style.closingVariant !== 'none' || !/Thank you for considering this evidence-grounded draft|I would welcome a conversation about the role/.test(text)) ? style.closingVariant : null,
+  };
 }
 
 function orderedGuidedProofs(proofs, packet) {
@@ -57,17 +99,15 @@ function orderedGuidedProofs(proofs, packet) {
 
 function validationProjection(text, packet, proofPointIds) {
   const variants = writingVariants(packet);
-  const candidate = { text, proofPointIds, claims: [], exemplarExcerptHashes: [], openingVariant: variants.openingVariant, closingVariant: variants.closingVariant };
-  let validation = validateWritingGuidance(candidate, packet);
-  if (validation.valid) return { validation, warnings: [] };
-  const omittable = new Set(validation.errors.filter(error => ['memory_writing_length_invalid', 'memory_writing_avoid_term', 'memory_writing_avoid_claim'].includes(error.code)).flatMap(error => error.ruleIds));
-  if (!omittable.size) return { validation, warnings: [] };
-  const projectedPacket = { ...packet, rules: packet.rules.filter(rule => !omittable.has(rule.id)) };
-  validation = validateWritingGuidance(candidate, projectedPacket);
-  return {
-    validation,
-    warnings: [...omittable].map(ruleId => `Career-memory rule ${ruleId} was explicitly omitted because it conflicts with required canonical or safety content.`)
-  };
+  const rendered = renderedCoverVariants(text, packet);
+  const candidate = { text, proofPointIds, claims: [], exemplarExcerptHashes: [], ...rendered };
+  const validation = validateWritingGuidance(candidate, packet);
+  const toneRule = memoryRule(packet, 'tone');
+  if (toneRule && !text.includes(coverTemplateHeading(packet))) {
+    validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: variants.template } });
+    validation.valid = false;
+  }
+  return { validation, warnings: [] };
 }
 
 function relevant(job, proofs) {
@@ -104,19 +144,11 @@ function fallbackResume({ job, prof, chosen, warnings }) {
 function fallbackCover({ job, prof, chosen, warnings, memory }) {
   const warningBlock = warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None from deterministic evidence checks.';
   const proofParagraph = chosen.length ? chosen.map(p => `- ${p.summary}${p.evidence ? ` (evidence: ${p.evidence})` : ''}`).join('\n') : '- [Add a verified proof point before sending.]';
-  const variants = writingVariants(memory);
-  const opening = {
-    direct: `I am applying for ${job.title} at ${job.company}.`,
-    context_first: `The work described for ${job.title} at ${job.company} aligns with the context of my ${prof.name} search profile.`,
-    proof_first: chosen[0] ? chosen[0].summary : `I am interested in ${job.title} at ${job.company}.`,
-    none: '',
-  }[variants.openingVariant] ?? `I am interested in ${job.title} at ${job.company}. The role appears aligned with my ${prof.name} search profile.`;
-  const closing = {
-    gratitude: 'Thank you for considering this evidence-grounded draft.',
-    call_to_action: 'I would welcome a conversation about the role and the verified evidence above.',
-    none: '',
-  }[variants.closingVariant] ?? 'I would tailor the final version after confirming the job requirements, company context, and any sensitive screening questions manually.';
-  return `# Cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${guidanceHeader(memory)}Dear hiring team,\n\n${opening}\n\nEvidence I can safely claim from my proof library:\n${proofParagraph}\n\n${closing}\n\n## Evidence warnings\n${warningBlock}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`;
+  const opening = coverOpening({ job, prof, chosen, packet: memory });
+  const closing = coverClosing(memory);
+  const template = memory.rules.length ? `${coverTemplateHeading(memory)}\n\n` : '';
+  const review = memory.rules.length ? '\n\nDuring human review, compare each cited proof with the role requirements, preserve its source meaning, and remove any statement that cannot be verified from the stored evidence.' : '';
+  return `# Cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${guidanceHeader(memory)}${template}Dear hiring team,\n\n${opening}\n\nEvidence I can safely claim from my proof library:\n${proofParagraph}${review}\n\n${closing}\n\n## Evidence warnings\n${warningBlock}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`;
 }
 
 function tailoringPrompt({ kind, job, prof, proofs, memory }) {
@@ -150,14 +182,21 @@ function renderLlmResume({ job, prof, json, proofById }) {
   return { content: `# LLM tailored resume draft — ${prof.name} for ${job.title}\n\n**Company:** ${job.company}\n\n**Approval status:** Draft; human review required before submission.\n\n## Target role summary\n${summary}\n\n## Requirement-to-proof map\n${map}\n\n## Evidence warnings\n${warningBlock}\n\n## Human review checklist\n- Confirm every claim is true and current.\n- Confirm the resume format before submission.\n- Do not submit from JobOS; external applications remain human-gated.\n`, warnings, evidence: items.map((x, idx) => ({ proofPointId: x.proofPointId, requirement: mappedRequirement(x, idx, job), summary: x.proof.summary, metrics: x.proof.metrics })) };
 }
 
-function renderLlmCover({ job, prof, json, proofById }) {
+function renderLlmCover({ job, prof, json, proofById, memory }) {
   const items = groundedItems(json, proofById);
   const warnings = Array.isArray(json.warnings) ? json.warnings.map(String) : [];
   if (!items.length) warnings.push('LLM returned no valid proof-grounded cover-letter mappings; add proof points or review manually.');
   const proofLines = items.map(x => `- ${groundedBullet(x)} _(proof: ${x.proofPointId})_`).join('\n') || '- [Add a verified proof point before sending.]';
   if (json.coverLetter) warnings.push('LLM cover-letter prose was omitted; JobOS renders only proof-grounded claims plus neutral role/company context.');
-  const letter = `Dear hiring team,\n\nI am interested in ${job.title} at ${job.company}. The role appears to connect with my ${prof.name} search profile, and the proof-grounded examples below are the only accomplishment claims JobOS is staging for human review.`;
-  return { content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${letter}\n\n## Proof-grounded claims\n${proofLines}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`, warnings, evidence: items.map(x => ({ proofPointId: x.proofPointId, requirement: x.requirement, summary: x.proof.summary, metrics: x.proof.metrics })) };
+  if (!memory.rules.length) {
+    const letter = `Dear hiring team,\n\nI am interested in ${job.title} at ${job.company}. The role appears to connect with my ${prof.name} search profile, and the proof-grounded examples below are the only accomplishment claims JobOS is staging for human review.`;
+    return { content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${letter}\n\n## Proof-grounded claims\n${proofLines}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`, warnings, evidence: items.map(x => ({ proofPointId: x.proofPointId, requirement: x.requirement, summary: x.proof.summary, metrics: x.proof.metrics })) };
+  }
+  const chosen = items.map(item => item.proof);
+  const opening = coverOpening({ job, prof, chosen, packet: memory });
+  const closing = coverClosing(memory);
+  const letter = `Dear hiring team,\n\n${opening}`;
+  return { content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${coverTemplateHeading(memory)}\n\n${letter}\n\n## Proof-grounded claims\n${proofLines}\n\n${closing}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`, warnings, evidence: items.map(x => ({ proofPointId: x.proofPointId, requirement: x.requirement, summary: x.proof.summary, metrics: x.proof.metrics })) };
 }
 
 export async function tailor(s, jid, pid, kind, options = {}) {
@@ -185,8 +224,8 @@ export async function tailor(s, jid, pid, kind, options = {}) {
         user: tailoringPrompt({ kind, job, prof, proofs: enriched, memory })
       });
       if (result.ok) {
-        const rendered = kind === 'resume' ? renderLlmResume({ job, prof, json: result.json, proofById }) : renderLlmCover({ job, prof, json: result.json, proofById });
-        const guidedContent = applyMinimumWords(`${guidanceHeader(memory)}${rendered.content}`, memory);
+        const rendered = kind === 'resume' ? renderLlmResume({ job, prof, json: result.json, proofById }) : renderLlmCover({ job, prof, json: result.json, proofById, memory });
+        const guidedContent = `${guidanceHeader(memory)}${rendered.content}`;
         const projected = validationProjection(guidedContent, memory, rendered.evidence.map(item => item.proofPointId));
         if (projected.validation.valid) return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content: guidedContent, evidence: [...rendered.evidence, ...memoryEvidence(memory)], warnings: [...rendered.warnings, ...projected.warnings, ...memoryWarnings(memory)] });
         warnings.push(`LLM tailoring output failed career-memory validation (${projected.validation.errors.map(error => error.code).join(', ')}); used deterministic renderer.`);
@@ -198,7 +237,7 @@ export async function tailor(s, jid, pid, kind, options = {}) {
   }
 
   const evidence = [...chosen.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), ...memoryEvidence(memory)];
-  const content = applyMinimumWords(kind === 'resume' ? `${guidanceHeader(memory)}${fallbackResume({ job, prof, chosen, warnings })}` : fallbackCover({ job, prof, chosen, warnings, memory }), memory);
+  const content = kind === 'resume' ? `${guidanceHeader(memory)}${fallbackResume({ job, prof, chosen, warnings })}` : fallbackCover({ job, prof, chosen, warnings, memory });
   const projected = validationProjection(content, memory, chosen.map(proof => proof.id));
   if (!projected.validation.valid) throw Object.assign(new Error('Deterministic tailoring renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projected.validation.errors });
   return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content, evidence, warnings: [...warnings, ...projected.warnings] });

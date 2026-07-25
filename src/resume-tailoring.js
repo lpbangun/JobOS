@@ -211,12 +211,55 @@ function resumeGuidanceHeader(packet) {
   return `**Career-memory tone:** ${style.tone}\n**Career-memory template:** ${style.template}\n**Opening variant:** ${style.openingVariant || 'baseline'}\n**Closing variant:** ${style.closingVariant || 'baseline'}\n\n`;
 }
 
-function applyResumeMinimumWords(text, packet) {
-  const minimum = resumeMemoryRule(packet, 'length')?.value.minWords || 0;
-  const count = text.trim() ? text.trim().split(/\s+/u).length : 0;
-  const missing = minimum - count;
-  const words = ['Evidence', 'remains', 'grounded', 'in', 'verified', 'sources', 'for', 'human', 'review'];
-  return missing > 0 && missing <= 40 ? `${text.trimEnd()}\n\n${Array.from({ length: missing }, (_, index) => words[index % words.length]).join(' ')}\n` : text;
+function resumeTemplateHeading(packet) {
+  return {
+    concise_resume: '## Concise resume — selected evidence',
+    warm_resume: '## Warm resume — contribution and evidence',
+    evidence_resume: '## Evidence resume — requirement analysis',
+    direct_resume: '## Direct resume — evidence first',
+    narrative_resume: '## Narrative resume — progression and impact',
+    formal_resume: '## Formal resume — qualifications and evidence',
+  }[resumeMemoryStyle(packet).template] || '## Resume — qualifications and evidence';
+}
+
+function resumeGuidanceFrame(text, document, packet) {
+  if (!packet.rules.length) return text;
+  const style = resumeMemoryStyle(packet);
+  const firstEvidence = [...(document.experience || []), ...(document.projects || [])].flatMap(entry => entry.bullets || [])[0]?.text
+    || document.summary?.text
+    || 'Review the strongest verified evidence first.';
+  const opening = {
+    direct: 'Direct opening: Review the role-aligned qualifications below.',
+    context_first: 'Context-led opening: Read these qualifications against the target role and its stated requirements.',
+    proof_first: `Evidence-led opening: ${firstEvidence}`,
+    none: '',
+  }[style.openingVariant] ?? '';
+  const closing = {
+    gratitude: 'Guided closing: Thank the reader for reviewing these verified qualifications.',
+    call_to_action: 'Guided closing: Discuss the cited evidence and role requirements in the next conversation.',
+    none: '',
+  }[style.closingVariant] ?? '';
+  return `${resumeGuidanceHeader(packet)}${resumeTemplateHeading(packet)}\n\n${opening}${opening ? '\n\n' : ''}${text.trimEnd()}${closing ? `\n\n${closing}` : ''}\n`;
+}
+
+function renderedResumeVariants(text, packet) {
+  const style = resumeMemoryStyle(packet);
+  const openingChecks = {
+    direct: /Direct opening: Review the role-aligned qualifications below\./,
+    context_first: /Context-led opening: Read these qualifications against the target role/,
+    proof_first: /Evidence-led opening: \S/,
+    none: new RegExp(`${resumeTemplateHeading(packet).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n\\n#`),
+  };
+  const closingChecks = {
+    gratitude: /Guided closing: Thank the reader for reviewing these verified qualifications\./,
+    call_to_action: /Guided closing: Discuss the cited evidence and role requirements in the next conversation\./,
+    none: /\n$/,
+  };
+  return {
+    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text) ? style.openingVariant : null,
+    closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text)
+      && (style.closingVariant !== 'none' || !/Guided closing:/.test(text)) ? style.closingVariant : null,
+  };
 }
 
 function selectedResumeProofIds(document) {
@@ -225,12 +268,14 @@ function selectedResumeProofIds(document) {
 
 function validateResumeGuidance(text, selectedProofPointIds, packet) {
   const style = resumeMemoryStyle(packet);
-  const candidate = { text, proofPointIds: selectedProofPointIds, claims: [], exemplarExcerptHashes: [], openingVariant: style.openingVariant, closingVariant: style.closingVariant };
-  let validation = validateWritingGuidance(candidate, packet);
-  if (validation.valid) return { validation, warnings: [] };
-  const omitted = new Set(validation.errors.filter(error => ['memory_writing_length_invalid', 'memory_writing_avoid_term', 'memory_writing_avoid_claim'].includes(error.code)).flatMap(error => error.ruleIds));
-  if (omitted.size) validation = validateWritingGuidance(candidate, { ...packet, rules: packet.rules.filter(rule => !omitted.has(rule.id)) });
-  return { validation, warnings: [...omitted].map(ruleId => `Career-memory rule ${ruleId} was explicitly omitted because it conflicts with required canonical or safety content.`) };
+  const candidate = { text, proofPointIds: selectedProofPointIds, claims: [], exemplarExcerptHashes: [], ...renderedResumeVariants(text, packet) };
+  const validation = validateWritingGuidance(candidate, packet);
+  const toneRule = resumeMemoryRule(packet, 'tone');
+  if (toneRule && !text.includes(resumeTemplateHeading(packet))) {
+    validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: style.template } });
+    validation.valid = false;
+  }
+  return { validation, warnings: [] };
 }
 
 export function validateTailoredResume({ document, canonical, proofs, coverage, sourceResumeRevisionId }) {
@@ -346,7 +391,7 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
     return { selectedProofPointIds, coverage, validation };
   };
   let state = deriveState(document);
-  let content = applyResumeMinimumWords(`${resumeGuidanceHeader(memory)}${renderSemanticResumeMarkdown(document, layoutProfile)}`, memory);
+  let content = resumeGuidanceFrame(renderSemanticResumeMarkdown(document, layoutProfile), document, memory);
   let guidance = validateResumeGuidance(content, state.selectedProofPointIds, memory);
   if (mode === 'llm' && (generatedOutputRejected || !state.validation.valid || !guidance.validation.valid)) {
     const codes = [...state.validation.blockers.map(blocker => blocker.code), ...guidance.validation.errors.map(error => error.code)];
@@ -354,7 +399,7 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
     document = copy(deterministicDocument);
     mode = 'deterministic';
     state = deriveState(document);
-    content = applyResumeMinimumWords(`${resumeGuidanceHeader(memory)}${renderSemanticResumeMarkdown(document, layoutProfile)}`, memory);
+    content = resumeGuidanceFrame(renderSemanticResumeMarkdown(document, layoutProfile), document, memory);
     guidance = validateResumeGuidance(content, state.selectedProofPointIds, memory);
   }
   if (!guidance.validation.valid) throw Object.assign(new Error('Deterministic resume renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: guidance.validation.errors });

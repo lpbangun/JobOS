@@ -189,12 +189,28 @@ test('W08-CONSUMERS-03 cover tailoring actively renders accepted writing guidanc
   assert.match(result.content, /Career-memory template:\*\* warm_letter/);
   assert.match(result.content, /Opening variant:\*\* proof_first/);
   assert.match(result.content, /Closing variant:\*\* gratitude/);
+  assert.match(result.content, /## Warm letter — why this role and evidence/);
+  assert.match(result.content, new RegExp(`Dear hiring team,\\n\\n${proof.summary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(result.content, /Thank you for considering this evidence-grounded draft\.\n\n## Evidence warnings/);
   assert.ok(result.content.trim().split(/\s+/u).length >= 120);
   assert.doesNotMatch(result.content, /synergy|doubled revenue/i);
   const memoryEvidence = result.evidence.find(item => item.careerMemoryRuleIds);
   assert.ok(memoryEvidence.careerMemoryRuleIds.length >= 7);
   assert.ok(memoryEvidence.careerMemoryCitations.length > 0);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_(?:NOTE|REVIEW_NOTE)/);
+
+  const provider = await fakeLlm({ requirementProofMap: [{ requirement: 'Product', proofPointId: proof.id, bullet: proof.summary }], coverLetter: 'Provider prose is not persisted.', warnings: [] });
+  const restore = setLlm(provider.baseUrl);
+  try {
+    const llmResult = await tailor(store, job.id, 'alpha', 'cover');
+    assert.match(llmResult.content, /## Warm letter — why this role and evidence/);
+    assert.match(llmResult.content, new RegExp(`Dear hiring team,\\n\\n${proof.summary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(llmResult.content, /Thank you for considering this evidence-grounded draft\.\n\n## Evidence warnings/);
+    assert.doesNotMatch(llmResult.content, /Provider prose is not persisted/);
+  } finally {
+    restore();
+    await provider.close();
+  }
 });
 
 test('W08-CONSUMERS-03B resume invalid LLM output is discarded and persisted metadata matches deterministic fallback', async t => {
@@ -216,6 +232,9 @@ test('W08-CONSUMERS-03B resume invalid LLM output is discarded and persisted met
     assert.match(result.content, /Career-memory tone:\*\* direct/);
     assert.match(result.content, /Opening variant:\*\* proof_first/);
     assert.match(result.content, /Closing variant:\*\* none/);
+    assert.match(result.content, /## Direct resume — evidence first/);
+    assert.match(result.content, new RegExp(`Evidence-led opening: ${proof.summary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.doesNotMatch(result.content, /Guided closing:/);
     assert.doesNotMatch(result.content, /Invented unsupported empire growth|invented-skill/i);
     const selected = [...new Set([...(result.document.summary?.proofPointIds || []), ...result.document.experience.flatMap(entry => entry.bullets.flatMap(bullet => bullet.proofPointIds || [])), ...result.document.projects.flatMap(entry => entry.bullets.flatMap(bullet => bullet.proofPointIds || []))])];
     const persisted = one(store, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [result.id]);
@@ -253,6 +272,8 @@ test('W08-CONSUMERS-04 outreach and interview prep actively render tone guidance
   assert.equal(outreach.mode, 'deterministic-degraded');
   assert.match(outreach.content, /Career-memory tone: formal/);
   assert.match(outreach.content, /opening: direct; closing: call_to_action/);
+  assert.match(outreach.content, /Dear [^,]+,/);
+  assert.match(outreach.content, /Would a brief conversation be useful\?\nalpha/i);
   assert.doesNotMatch(outreach.content, /synergy|guaranteed reply|unsupported-private-reference/i);
   assert.doesNotMatch(JSON.stringify(provider.requests), /PRIVATE_(?:NOTE|REVIEW_NOTE)/);
 
@@ -265,5 +286,57 @@ test('W08-CONSUMERS-04 outreach and interview prep actively render tone guidance
   assert.match(interview.content, /Career-memory tone:\*\* analytical/);
   assert.match(interview.content, /Opening variant:\*\* context_first/);
   assert.match(interview.content, /Closing variant:\*\* gratitude/);
+  assert.match(interview.content, /## Evidence matrix approach/);
+  assert.match(interview.content, /Start by connecting each response to the role and company context\./);
+  assert.match(interview.content, /End by thanking the interviewer for the conversation\.\n$/);
   assert.doesNotMatch(interview.content, /synergy|PRIVATE_(?:NOTE|REVIEW_NOTE)/i);
+});
+
+test('W08-CONSUMERS-05 active word and avoid rules reject output instead of being omitted', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const job = one(store, "SELECT * FROM jobs WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  const proof = one(store, "SELECT * FROM proof_points WHERE profile_id='alpha' AND status='active' AND verification_status='verified' ORDER BY id LIMIT 1");
+  acceptWritingRule(store, { scope: 'cover_letter', ruleType: 'length', value: { minWords: 1, maxWords: 10 }, suffix: 'cover-tight-max' });
+  const provider = await fakeLlm({ requirementProofMap: [{ requirement: 'Product', proofPointId: proof.id, bullet: proof.summary }], warnings: [] });
+  const restore = setLlm(provider.baseUrl);
+  try {
+    await assert.rejects(
+      tailor(store, job.id, 'alpha', 'cover'),
+      error => error.code === 'memory_writing_fallback_invalid' && error.details.some(item => item.code === 'memory_writing_length_invalid'),
+    );
+    assert.equal(provider.requests.length, 1, 'the invalid provider result must be validated before deterministic fallback is rejected');
+  } finally {
+    restore();
+    await provider.close();
+  }
+  assert.equal(one(store, "SELECT COUNT(*) AS count FROM artifacts WHERE job_id=? AND type='cover_letter'", [job.id]).count, 0);
+
+  acceptWritingRule(store, { scope: 'outreach', ruleType: 'length', value: { minWords: 1200, maxWords: 1200 }, suffix: 'outreach-large-min' });
+  const outreachJob = one(store, "SELECT jobs.* FROM jobs JOIN stakeholders ON stakeholders.job_id=jobs.id WHERE jobs.profile_id='alpha' ORDER BY jobs.id LIMIT 1");
+  const stakeholder = one(store, 'SELECT * FROM stakeholders WHERE job_id=? ORDER BY id LIMIT 1', [outreachJob.id]);
+  await assert.rejects(
+    draftOutreach(store, { jobId: outreachJob.id, profileId: 'alpha', stakeholderId: stakeholder.id, goal: 'informational' }),
+    error => error.code === 'memory_writing_fallback_invalid' && error.details.some(item => item.code === 'memory_writing_length_invalid'),
+  );
+});
+
+test('W08-CONSUMERS-06 avoid and proof-positioning violations remain active validation failures', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const job = one(store, "SELECT * FROM jobs WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  acceptWritingRule(store, { scope: 'resume', ruleType: 'avoid_term', value: { terms: ['experience'] }, suffix: 'resume-required-term' });
+  await assert.rejects(
+    tailorResume(store, { jobId: job.id, profileId: 'alpha' }),
+    error => error.code === 'memory_writing_fallback_invalid' && error.details.some(item => item.code === 'memory_writing_avoid_term'),
+  );
+
+  const sourceProof = one(store, "SELECT * FROM proof_points WHERE profile_id='alpha' AND status='active' AND verification_status='verified' ORDER BY id LIMIT 1");
+  const alternateProof = { ...sourceProof, id: 'proof-not-in-pack', summary: 'Alternate verified proof that is not used by the frozen interview story.' };
+  const columns = Object.keys(alternateProof);
+  guardedWrite(store, () => run(store, `INSERT INTO proof_points (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, columns.map(column => alternateProof[column])));
+  acceptWritingRule(store, { scope: 'interview_prep', ruleType: 'positioning_priority', value: { theme: 'restricted', proofPointIds: [alternateProof.id] }, suffix: 'interview-proof-restriction' });
+  const application = one(store, "SELECT * FROM applications WHERE profile_id='alpha' ORDER BY id LIMIT 1");
+  await assert.rejects(
+    prepInterview(store, application.id),
+    error => error.code === 'memory_writing_fallback_invalid' && error.details.some(item => item.code === 'memory_writing_proof_not_allowed'),
+  );
 });

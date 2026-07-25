@@ -2183,20 +2183,59 @@ function orderInterviewPack(pack, packet) {
 function validateInterviewGuidance(text, pack, packet) {
   const style = interviewMemoryStyle(packet);
   const proofPointIds = [...new Set(pack.items.flatMap(item => item.proofSnapshots.map(snapshot => snapshot.id)))];
-  const candidate = { text, proofPointIds, claims: [], exemplarExcerptHashes: [], openingVariant: style.openingVariant, closingVariant: style.closingVariant };
-  let validation = validateWritingGuidance(candidate, packet);
-  if (validation.valid) return { validation, warnings: [] };
-  const omitted = new Set(validation.errors.filter(error => ['memory_writing_length_invalid', 'memory_writing_avoid_term', 'memory_writing_avoid_claim', 'memory_writing_proof_not_allowed'].includes(error.code)).flatMap(error => error.ruleIds));
-  if (omitted.size) validation = validateWritingGuidance(candidate, { ...packet, rules: packet.rules.filter(rule => !omitted.has(rule.id)) });
-  return { validation, warnings: [...omitted].map(ruleId => `Career-memory rule ${ruleId} was explicitly omitted because it conflicts with required canonical or safety content.`) };
+  const openingChecks = {
+    direct: /Start with the highest-priority verified interview evidence\./,
+    context_first: /Start by connecting each response to the role and company context\./,
+    proof_first: /Start with the strongest verified proof snapshot\./,
+    none: /\*\*Closing variant:/,
+  };
+  const closingChecks = {
+    gratitude: /End by thanking the interviewer for the conversation\.\n$/,
+    call_to_action: /End by confirming the next step and its owner\.\n$/,
+    none: /\n$/,
+  };
+  const candidate = {
+    text, proofPointIds, claims: [], exemplarExcerptHashes: [],
+    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text)
+      && (style.openingVariant !== 'none' || !/Start (?:with|by)/.test(text)) ? style.openingVariant : null,
+    closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text)
+      && (style.closingVariant !== 'none' || !/End by /.test(text)) ? style.closingVariant : null,
+  };
+  const validation = validateWritingGuidance(candidate, packet);
+  const toneRule = interviewMemoryRule(packet, 'tone');
+  if (toneRule && !text.includes(interviewTemplateHeading(packet))) {
+    validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: style.template } });
+    validation.valid = false;
+  }
+  return { validation, warnings: [] };
 }
 
-function applyInterviewMinimumWords(text, packet) {
-  const minimum = interviewMemoryRule(packet, 'length')?.value.minWords || 0;
-  const count = text.trim() ? text.trim().split(/\s+/u).length : 0;
-  const missing = minimum - count;
-  const words = ['Evidence', 'remains', 'grounded', 'in', 'verified', 'sources', 'for', 'human', 'review'];
-  return missing > 0 && missing <= 40 ? `${text.trimEnd()}\n\n${Array.from({ length: missing }, (_, index) => words[index % words.length]).join(' ')}\n` : text;
+function interviewTemplateHeading(packet) {
+  return {
+    concise_prep: '## Concise preparation route',
+    coaching_prep: '## Coaching preparation route',
+    evidence_matrix: '## Evidence matrix approach',
+    action_prep: '## Action-focused preparation route',
+    story_prep: '## Story-led preparation route',
+    formal_prep: '## Formal preparation route',
+  }[interviewMemoryStyle(packet).template] || '## Interview preparation route';
+}
+
+function interviewOpening(packet) {
+  return {
+    direct: 'Start with the highest-priority verified interview evidence.',
+    context_first: 'Start by connecting each response to the role and company context.',
+    proof_first: 'Start with the strongest verified proof snapshot.',
+    none: '',
+  }[interviewMemoryStyle(packet).openingVariant] || '';
+}
+
+function interviewClosing(packet) {
+  return {
+    gratitude: 'End by thanking the interviewer for the conversation.',
+    call_to_action: 'End by confirming the next step and its owner.',
+    none: '',
+  }[interviewMemoryStyle(packet).closingVariant] || '';
 }
 
 function renderInterviewPack({ job, profile, application, pack, proofs, company, stakeholders, memory }) {
@@ -2214,8 +2253,9 @@ function renderInterviewPack({ job, profile, application, pack, proofs, company,
     ? proofs.map(proof => `\`${proof.id}\``).join(', ')
     : 'none';
   const style = interviewMemoryStyle(memory);
-  const opening = { direct: 'Begin with the highest-priority interview evidence.', context_first: 'Begin by grounding each response in the role and company context.', proof_first: 'Begin with the strongest verified proof.', none: '' }[style.openingVariant] || '';
-  const closing = { gratitude: 'Close by thanking the interviewer for the conversation.', call_to_action: 'Close by confirming the next step and owner.', none: '' }[style.closingVariant] || '';
+  const memoryStyleBlock = memory.rules.length
+    ? `**Opening variant:** ${style.openingVariant || 'baseline'}\n**Closing variant:** ${style.closingVariant || 'baseline'}\n\n${interviewTemplateHeading(memory)}\n\n${interviewOpening(memory)}`
+    : '**Opening variant:** baseline — \n**Closing variant:** baseline — ';
   return `# Interview prep packet — ${stageLabels[pack.stage]} for ${job.title} at ${job.company}
 
 Generated: ${now()}
@@ -2227,8 +2267,7 @@ Generated: ${now()}
 **Career-memory rule IDs:** ${memory.rules.length ? memory.rules.map(rule => `\`${rule.id}\``).join(', ') : 'none'}
 **Career-memory tone:** ${style.tone}
 **Career-memory template:** ${style.template}
-**Opening variant:** ${style.openingVariant || 'baseline'} — ${opening}
-**Closing variant:** ${style.closingVariant || 'baseline'} — ${closing}
+${memoryStyleBlock}
 
 ${refreshSummary(job, company, facts, stakeholders)}
 
@@ -2359,7 +2398,8 @@ export async function prepInterview(
   } else {
     content += '\n> No people-research run is stored for this job. Run `jobos research people --scope job --job <job-id> --depth standard` before the interview for network-aware preparation.\n';
   }
-  content = applyInterviewMinimumWords(content, memory);
+  const guidedClosing = interviewClosing(memory);
+  if (guidedClosing) content = `${content.trimEnd()}\n\n${guidedClosing}\n`;
   const projectedGuidance = validateInterviewGuidance(content, pack, memory);
   if (!projectedGuidance.validation.valid) throw Object.assign(new Error('Deterministic interview renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projectedGuidance.validation.errors });
   const rel = path.join(
