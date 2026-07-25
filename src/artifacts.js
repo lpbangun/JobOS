@@ -5,9 +5,27 @@ import { all, guardedWrite, one, projectAudit, queuePostCommit, recordAudit, run
 import { id, now, parseJson, slug } from './utils.js';
 import { writeMd } from './workspace.js';
 import { planApplication } from './readiness.js';
+import {
+  appendMemoryObservation,
+  queueMemorySync,
+} from './career-memory-observations.js';
+import {
+  ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+  normalizeArtifactFeedbackInput,
+  normalizeRfc3339,
+} from './career-memory-contract.js';
 
 const REVIEW_STATUSES = new Set(['draft_needs_human_review', 'approved', 'rejected']);
 const HUMAN_REVIEW_SOURCES = new Set(['cli', 'tui']);
+const REVIEW_DECISION_BY_EVENT = Object.freeze({
+  artifact_approved: 'approve',
+  artifact_rejected: 'reject',
+});
+const EDIT_DECISION = 'edit';
+const FEEDBACK_DECISION_BY_REVIEW = Object.freeze({
+  approved: 'approve',
+  rejected: 'reject',
+});
 
 export class ArtifactError extends Error {
   constructor(code, message, details = {}) {
@@ -337,16 +355,96 @@ export function preflightResumeArtifact(s, artifactId) {
   };
 }
 
-function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
+function reviewArtifactFeedbackInput(memoryFeedback, decision) {
+  if (memoryFeedback == null) return null;
+  return normalizeArtifactFeedbackInput(memoryFeedback, { decision });
+}
+
+function artifactSourceEntity(row, auditEvent) {
+  return {
+    type: 'artifact',
+    id: row.id,
+    versionId: auditEvent.id,
+    revision: Number(row.revision),
+    contentHash: row.content_hash,
+  };
+}
+
+function recordArtifactReviewObservation(s, row, auditEvent, eventType, feedback, reviewedBy) {
+  const decision = REVIEW_DECISION_BY_EVENT[eventType];
+  const occurredAt = auditEvent.createdAt || auditEvent.created_at;
+  const versionId = auditEvent.id;
+  const observation = appendMemoryObservation(s, {
+    profileId: row.profile_id,
+    eventType,
+    sourceSchema: ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity: artifactSourceEntity(row, { id: versionId }),
+    occurredAt: normalizeRfc3339(occurredAt, 'occurredAt'),
+    actor: reviewedBy,
+    source: reviewedBy,
+    reasonCodes: feedback.reasonCodes,
+    signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation,
+    privateNote: feedback.privateNote,
+    payload: { decision },
+    referenceId: feedback.referenceId,
+  });
+  return observation;
+}
+
+function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '', memoryFeedback = null }) {
   if (!HUMAN_REVIEW_SOURCES.has(reviewedBy)) {
     throw new ArtifactError('human_review_required', 'Artifact approval and rejection require the trusted CLI or TUI human review flow.', { artifactId, reviewedBy: reviewedBy || null });
   }
   if (decision === 'rejected' && !String(note).trim()) {
     throw new ArtifactError('artifact_rejection_note_required', 'Rejecting an artifact requires a review note.', { artifactId });
   }
+  const feedback = reviewArtifactFeedbackInput(memoryFeedback, FEEDBACK_DECISION_BY_REVIEW[decision]);
+  // Pre-check: if feedback with this referenceId already produced an observation for this
+  // profile+event, return idempotently without entering guardedWrite (avoids store_revision bump).
+  if (feedback) {
+    const profileId = one(s, 'SELECT profile_id FROM artifacts WHERE id=?', [artifactId])?.profile_id;
+    const existing = one(s, `SELECT * FROM career_memory_observations
+      WHERE profile_id=? AND reference_id=? AND event_type=?`, [
+      profileId,
+      feedback.referenceId,
+      decision === 'approved' ? 'artifact_approved' : 'artifact_rejected',
+    ]);
+    if (existing) {
+      // Verify the existing observation matches the current feedback; conflicting reuse fails.
+      const existingReasons = JSON.parse(existing.reason_codes_json);
+      const existingSignals = JSON.parse(existing.signal_json);
+      const existingPublic = existing.public_explanation || '';
+      if (JSON.stringify(existingReasons) !== JSON.stringify(feedback.reasonCodes)
+        || JSON.stringify(existingSignals) !== JSON.stringify(feedback.signals)
+        || existingPublic !== feedback.publicExplanation) {
+        throw new ArtifactError('memory_reference_conflict', `Reference ${feedback.referenceId} already identifies different observation content.`, { referenceId: feedback.referenceId });
+      }
+      const reviewed = getArtifact(s, artifactId);
+      return {
+        ...reviewed,
+        idempotent: true,
+        externalSideEffects: 'none',
+        submissionPerformed: false,
+        applicationStatusChanged: false,
+      };
+    }
+  }
   return guardedWrite(s, () => {
     const row = verifyReviewable(s, artifactId, decision);
     if (decision === 'approved' && row.approval_status === 'approved') {
+      if (feedback) {
+        const event = one(s, `SELECT * FROM audit_log WHERE action='artifact.approved' AND entity_type='artifact' AND entity_id=?
+          ORDER BY created_at DESC,id DESC LIMIT 1`, [artifactId]);
+        const observation = recordArtifactReviewObservation(s, row, event, 'artifact_approved', feedback, reviewedBy);
+        if (observation.idempotent) {
+          const memRow = one(s, "SELECT * FROM audit_log WHERE action='career_memory.observation_recorded' AND entity_type='career_memory_observation' AND entity_id=? ORDER BY rowid DESC LIMIT 1", [observation.id]);
+          if (memRow) {
+            const memEvent = { id: memRow.id, action: memRow.action, entityType: memRow.entity_type, entityId: memRow.entity_id, payload: JSON.parse(memRow.payload_json), externalSideEffect: memRow.external_side_effect, createdAt: memRow.created_at };
+            queueMemorySync(s, row.profile_id, memEvent);
+          }
+        }
+      }
       return {
         ...rowProjection(row, row.revision),
         idempotent: true,
@@ -373,6 +471,25 @@ function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
       applicationStatusChanged: false
     };
     const event = recordAudit(s, `artifact.${decision}`, 'artifact', artifactId, payload, 'none');
+    if (feedback) {
+      const eventType = decision === 'approved' ? 'artifact_approved' : 'artifact_rejected';
+      const observation = recordArtifactReviewObservation(s, row, event, eventType, feedback, reviewedBy);
+      if (!observation.idempotent) {
+        const memEvent = recordAudit(s, 'career_memory.observation_recorded', 'career_memory_observation', observation.id, {
+          profileId: observation.profileId,
+          eventType: observation.eventType,
+          sourceSchema: ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+          sourceEntity: observation.sourceEntity,
+          reasonCodes: observation.reasonCodes,
+          signals: observation.signals,
+          publicExplanation: observation.publicExplanation,
+          hasPrivateNote: observation.hasPrivateNote,
+          referenceId: feedback.referenceId,
+          observationHash: one(s, 'SELECT observation_hash FROM career_memory_observations WHERE id=?', [observation.id]).observation_hash,
+        }, 'none');
+        queueMemorySync(s, row.profile_id, memEvent);
+      }
+    }
     const reviewed = rowProjection(one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]), row.revision);
     queuePostCommit(s, () => projectAudit(s, event));
     if (reviewed.jobId && reviewed.profileId && ['resume', 'cover_letter'].includes(reviewed.type)) {
@@ -388,12 +505,12 @@ function _reviewArtifact(s, artifactId, { decision, reviewedBy, note = '' }) {
   });
 }
 
-export function approveArtifact(s, artifactId, { reviewedBy = 'cli', note = '' } = {}) {
-  return _reviewArtifact(s, artifactId, { decision: 'approved', reviewedBy, note });
+export function approveArtifact(s, artifactId, { reviewedBy = 'cli', note = '', memoryFeedback = null } = {}) {
+  return _reviewArtifact(s, artifactId, { decision: 'approved', reviewedBy, note, memoryFeedback });
 }
 
-export function rejectArtifact(s, artifactId, { reviewedBy = 'cli', note = '' } = {}) {
-  return _reviewArtifact(s, artifactId, { decision: 'rejected', reviewedBy, note });
+export function rejectArtifact(s, artifactId, { reviewedBy = 'cli', note = '', memoryFeedback = null } = {}) {
+  return _reviewArtifact(s, artifactId, { decision: 'rejected', reviewedBy, note, memoryFeedback });
 }
 
 // TUI artifact-review compatibility wrappers
@@ -421,29 +538,128 @@ export function reviewArtifact(s, { artifactId, approvalStatus, note = '', sourc
   return rowProjection(one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]), row.revision);
 }
 
-export function ingestEditedArtifact(s, { artifactId, content, source = 'tui' }) {
-  if (!['tui', 'api', 'cli'].includes(source)) throw new ArtifactError('invalid_edit_source', 'Invalid source: must be tui, api, or cli');
-  const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
-  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
-  const result = createArtifact(s, {
-    jobId: row.job_id,
-    profileId: row.profile_id,
-    type: row.type,
-    path: row.path,
-    title: row.title,
-    content,
-    evidence: parseJson(row.evidence_json, []),
-    warnings: parseJson(row.warnings_json, []),
-    seriesKey: row.series_key,
-    auditAction: null
+function canonicalLineDiffHash(lines) {
+  return crypto.createHash('sha256').update(lines.join('\n'), 'utf8').digest('hex');
+}
+
+function recordArtifactEditObservation(s, baseRow, newArtifact, editEvent, feedback, source) {
+  const diffLines = simpleLineDiff(baseRow.content, newArtifact.content);
+  const added = diffLines.filter(line => line.startsWith('+')).length;
+  const removed = diffLines.filter(line => line.startsWith('-')).length;
+  const observation = appendMemoryObservation(s, {
+    profileId: newArtifact.profileId,
+    eventType: 'artifact_edited',
+    sourceSchema: ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity: {
+      type: 'artifact',
+      id: newArtifact.id,
+      versionId: editEvent.id,
+      revision: Number(newArtifact.revision),
+      contentHash: newArtifact.contentHash,
+    },
+    occurredAt: normalizeRfc3339(editEvent.createdAt, 'occurredAt'),
+    actor: source,
+    source,
+    reasonCodes: feedback.reasonCodes,
+    signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation,
+    privateNote: feedback.privateNote,
+    payload: { decision: EDIT_DECISION },
+    referenceId: feedback.referenceId,
   });
-  recordAudit(s, 'artifact.edited', 'artifact', result.id, {
-    jobId: row.job_id || null,
-    profileId: row.profile_id || null,
-    previousArtifactId: artifactId,
-    artifactId: result.id,
-    path: row.path,
-    source
-  }, 'none');
-  return result;
+  return { observation, diffHash: canonicalLineDiffHash(diffLines), addedLines: added, removedLines: removed };
+}
+
+export function ingestEditedArtifact(s, { artifactId, content, source = 'tui', memoryFeedback = null }) {
+  if (!['tui', 'api', 'cli'].includes(source)) throw new ArtifactError('invalid_edit_source', 'Invalid source: must be tui, api, or cli');
+  const feedback = reviewArtifactFeedbackInput(memoryFeedback, EDIT_DECISION);
+  const baseRow = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+  if (!baseRow) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
+  const normalizedContent = normalizeArtifactContent(content);
+  if (artifactContentHash(normalizedContent) === baseRow.content_hash) {
+    throw new ArtifactError('artifact_same_content', `Edited content is identical to artifact ${artifactId}; no revision created.`, { artifactId });
+  }
+  // Exact edit replay: if feedback with this referenceId already produced an artifact_edited
+  // observation for this profile, return the existing new revision idempotently.
+  if (feedback) {
+    const existing = one(s, `SELECT * FROM career_memory_observations
+      WHERE profile_id=? AND reference_id=? AND event_type='artifact_edited'`, [baseRow.profile_id, feedback.referenceId]);
+    if (existing) {
+      const existingArtifact = getArtifact(s, existing.source_entity_id);
+      if (existingArtifact.contentHash === artifactContentHash(normalizedContent)) {
+        return existingArtifact;
+      }
+      throw new ArtifactError('memory_reference_conflict', `Reference ${feedback.referenceId} already identifies a different edit observation.`, { referenceId: feedback.referenceId });
+    }
+  }
+  return guardedWrite(s, () => {
+    const currentBase = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
+    if (!currentBase) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`);
+    if (feedback) {
+      const existing = one(s, `SELECT * FROM career_memory_observations
+        WHERE profile_id=? AND reference_id=? AND event_type='artifact_edited'`, [currentBase.profile_id, feedback.referenceId]);
+      if (existing) {
+        const existingArtifact = getArtifact(s, existing.source_entity_id);
+        if (existingArtifact.contentHash === artifactContentHash(normalizedContent)) {
+          return existingArtifact;
+        }
+        throw new ArtifactError('memory_reference_conflict', `Reference ${feedback.referenceId} already identifies a different edit observation.`, { referenceId: feedback.referenceId });
+      }
+    }
+    const outcome = insertArtifact(s, {
+      jobId: currentBase.job_id,
+      profileId: currentBase.profile_id,
+      type: currentBase.type,
+      path: currentBase.path,
+      title: currentBase.title,
+      content,
+      evidence: parseJson(currentBase.evidence_json, []),
+      warnings: parseJson(currentBase.warnings_json, []),
+      seriesKey: currentBase.series_key,
+      auditAction: null,
+    });
+    const editEvent = recordAudit(s, 'artifact.edited', 'artifact', outcome.artifact.id, {
+      jobId: currentBase.job_id || null,
+      profileId: currentBase.profile_id || null,
+      previousArtifactId: artifactId,
+      artifactId: outcome.artifact.id,
+      path: currentBase.path,
+      source,
+    }, 'none');
+    if (feedback) {
+      const { observation, diffHash, addedLines, removedLines } = recordArtifactEditObservation(s, currentBase, outcome.artifact, editEvent, feedback, source);
+      // Store edit metadata in the audit payload (observation payload is decision-only by contract).
+      run(s, 'UPDATE audit_log SET payload_json=? WHERE id=?', [JSON.stringify({
+        jobId: currentBase.job_id || null,
+        profileId: currentBase.profile_id || null,
+        previousArtifactId: artifactId,
+        artifactId: outcome.artifact.id,
+        baseRevision: Number(currentBase.revision),
+        newRevision: Number(outcome.artifact.revision),
+        baseContentHash: currentBase.content_hash,
+        newContentHash: outcome.artifact.contentHash,
+        diffHash,
+        addedLines,
+        removedLines,
+        path: currentBase.path,
+        source,
+      }), editEvent.id]);
+      if (!observation.idempotent) {
+        const memEvent = recordAudit(s, 'career_memory.observation_recorded', 'career_memory_observation', observation.id, {
+          profileId: observation.profileId,
+          eventType: observation.eventType,
+          sourceSchema: ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+          sourceEntity: observation.sourceEntity,
+          reasonCodes: observation.reasonCodes,
+          signals: observation.signals,
+          publicExplanation: observation.publicExplanation,
+          hasPrivateNote: observation.hasPrivateNote,
+          referenceId: feedback.referenceId,
+          observationHash: one(s, 'SELECT observation_hash FROM career_memory_observations WHERE id=?', [observation.id]).observation_hash,
+        }, 'none');
+        queueMemorySync(s, currentBase.profile_id, memEvent);
+      }
+    }
+    return outcome.artifact;
+  });
 }
