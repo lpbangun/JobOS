@@ -259,7 +259,7 @@ ${section('Workflows', workflows)}
 ${section('Extend', extend)}${advanced}
 
 Global flags:
-  ${globalFlags.join('\n  ')}
+  ${globalFlags.join(' · ')}
 
 Run \"jobos <command> --help\" for command-specific help.`;
 }
