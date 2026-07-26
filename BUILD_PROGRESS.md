@@ -1,11 +1,12 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-23
+## Current status — 2026-07-26
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
 ### Primary workflows
 
+- `jobos setup`, `setup status`, and `setup next` expose a resumable, read-only projection over seven canonical core steps. The TUI `g` overlay uses the same projection; profile/job ambiguity requires explicit selection, resume/proof blockers retain W01 correction codes, materials reuse readiness v4, and provider/browser/calibration/network remain optional.
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
@@ -67,6 +68,7 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
+- W09 focused verification on 2026-07-26: `tests/w09-guided-onboarding.test.js` **8/8 passed**; CLI/cleanup/sprint9/TUI-ACP compatibility **30/30 passed**; keymap/W08 surface and consumer compatibility **32/32 passed**. No broad `npm test` was run by the bounded W09 worker.
 - `npm test`: **368/368 passed** on 2026-07-23 after live-form/browser/MCP hardening, including private exact-target migration, public snapshot privacy, pinned protected routing, locator alignment, confirmed login-shaped outcomes, catch-all exact-contact handling, and leadership LaTeX semantics.
 - `npm test`: **265/265 passed** on 2026-07-22, including discovery-integrity retry/budget/isolation/liveness/gate contracts, status-namespace, canonical outreach-due semantics, MCP catalog, removed-API, workflow-help and TUI-command vocabulary, watchlist consolidation, CLI compatibility, and all established CLI, TUI, ACP, MCP, readiness, research, outreach, and workflow checks.
 - `npm run smoke` and `npm run smoke:live-form`: passed on 2026-07-23. The general clean-workspace smoke reaches materials-ready → form-ready → packet/manual receipt confirmation; the real Chromium live-form smoke proves one-submit manual (`externalSideEffects: none`) and configured (`user_configured_form_submission`) paths.

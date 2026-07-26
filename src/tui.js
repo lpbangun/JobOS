@@ -52,7 +52,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
     ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
@@ -61,7 +61,8 @@ export const TUI_KEYMAP = Object.freeze({
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
-  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']])
+  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']]),
+  setup: Object.freeze([['j/k', 'step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
 });
 
 /**
@@ -70,14 +71,15 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', ':', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
   due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
-  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape'])
+  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape']),
+  setup: Object.freeze(['j', 'k', 'return', 'c', 'r', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -419,6 +421,7 @@ function agentPanel(model, state, width, height, color) {
 }
 
 function overlayItems(model, state) {
+  if (state.overlay === 'setup') return model.onboarding?.steps || [];
   if (state.overlay === 'review') return model.review;
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
@@ -662,7 +665,23 @@ function overlayPanel(model, state, width, height, color) {
   const selected = model.selected;
   let title = String(state.overlay || 'overlay').toUpperCase();
   let body = [];
-  if (state.overlay === 'review') {
+  if (state.overlay === 'setup') {
+    const setup = model.onboarding;
+    title = `GUIDED SETUP · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} REQUIRED`;
+    const items = setup?.steps || [];
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 10));
+    body = visible.items.map((item, offset) => {
+      const selectedStep = visible.start + offset === state.overlayIndex;
+      return `${selectedStep ? '▶' : ' '} ${item.required ? 'required' : 'optional'} · ${item.id} · ${item.status} · ${item.summary}`;
+    });
+    const focused = items[state.overlayIndex];
+    if (focused) {
+      body.push('', `FOCUS · ${focused.id}`);
+      body.push(...focused.blockers.map(item => `blocker ${item.code} · ${item.message}`));
+      if (focused.actions[0]) body.push(`action ${focused.actions[0].label} · ${focused.actions[0].command}`);
+    }
+    body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+  } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.approvalStatus} · ${item.jobId || 'no job'}`);
@@ -1048,6 +1067,8 @@ export class JobosTui {
     stdin = process.stdin,
     stdout = process.stdout,
     profileId = null,
+    selectedJobId = null,
+    initialOverlay = null,
     connectAgent = true,
     color = stdout.isTTY,
     now = () => new Date()
@@ -1056,9 +1077,10 @@ export class JobosTui {
     this.stdin = stdin;
     this.stdout = stdout;
     this.now = now;
-    this.state = { ...defaultTuiState(), profileId };
-    this.model = buildTuiModel(store, { profileId, at: this.now().toISOString() });
-    this.state.selectedJobId = this.model.selectedJobId;
+    this.state = { ...defaultTuiState(), profileId, setupProfileId: profileId, setupJobId: selectedJobId };
+    this.model = buildTuiModel(store, { profileId, selectedJobId, at: this.now().toISOString() });
+    this.state.selectedJobId = selectedJobId || this.model.selectedJobId;
+    this.state.overlay = initialOverlay || (this.model.empty.noProfile ? 'setup' : null);
     this.shouldConnectAgent = connectAgent;
     this.color = Boolean(color);
     this.client = null;
@@ -1111,8 +1133,8 @@ export class JobosTui {
     const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
     this.model = buildTuiModel(this.store, {
-      profileId: this.state.profileId,
-      selectedJobId: this.state.selectedJobId,
+      profileId: this.state.overlay === 'setup' ? this.state.setupProfileId : this.state.profileId,
+      selectedJobId: this.state.overlay === 'setup' ? this.state.setupJobId : this.state.selectedJobId,
       at: this.now().toISOString()
     });
     this.state.profileId = this.model.profileId;
@@ -1276,6 +1298,19 @@ export class JobosTui {
       this.state.status = `${name} overlay · Esc closes`;
     }
     this.render();
+  }
+
+  openSetupOverlay() {
+    if (this.state.setupProfileId || this.model.profiles.length === 1) this.state.setupJobId = this.state.selectedJobId;
+    else this.state.setupJobId = null;
+    this.state.overlay = 'setup';
+    this.state.overlayIndex = 0;
+    this.state.mode = 'normal';
+    this.state.input = '';
+    this.refresh({ disk: false });
+    this.state.status = 'setup overlay · recomputed from canonical state · Esc closes';
+    this.render();
+    return true;
   }
 
   closeTransient() {
@@ -2637,6 +2672,22 @@ export class JobosTui {
 
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
+    if (this.state.overlay === 'setup') {
+      const items = this.model.onboarding?.steps || [];
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if (value === 'r') {
+        this.refresh();
+        this.state.status = 'setup recomputed from canonical SQLite state';
+        return true;
+      } else if (value === 'c') {
+        return this.openSetupCorrection(items[this.state.overlayIndex]);
+      } else if (key.name === 'return' || key.name === 'enter') {
+        return this.openSetupAction(items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
     if (this.state.overlay === 'memory' && ['1', '2', '3', '4'].includes(value)) {
       this.state.memoryView = ['observations', 'proposals', 'career-brief', 'voice-guide'][Number(value) - 1];
@@ -2726,6 +2777,42 @@ export class JobosTui {
     }
     this.render();
     return true;
+  }
+
+  openSetupCorrection(item) {
+    const overlays = {
+      profile: 'profile',
+      intake: 'discovery',
+      source: 'discovery',
+      materials: 'review',
+      calibration: 'memory',
+      network: 'build-network',
+      provider: 'system',
+      browser: 'system'
+    };
+    const target = overlays[item?.id];
+    if (target) return this.openOverlay(target);
+    this.state.status = item?.actions?.[0]?.command
+      ? `Correction is human-owned · ${item.actions[0].command}`
+      : `No correction is needed for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
+  }
+
+  openSetupAction(item) {
+    const actionId = item?.actions?.[0]?.id;
+    if (!actionId) {
+      this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'score_job' || actionId === 'pursue_job') {
+      this.state.pendingConfirm = { kind: 'setup-domain-action', action: actionId === 'score_job' ? 'score' : 'pursue' };
+      this.state.status = `Confirm ${actionId === 'score_job' ? 'deterministic scoring' : 'pursuit and local draft creation'}? (y/n)`;
+      this.render();
+      return true;
+    }
+    return this.openSetupCorrection(item);
   }
 
   onBuildNetworkKey(value, key, items) {
@@ -2845,6 +2932,10 @@ export class JobosTui {
       this.state.pendingConfirm = null;
       this.state.mode = 'normal';
       this.state.input = '';
+      if (confirm.kind === 'setup-domain-action') {
+        void this.runAction(confirm.action);
+        return true;
+      }
       if (confirm.kind === 'editor-with-note' || confirm.next === 'editor') void this.openArtifactEditor();
       else this.applyPendingAutoOpen();
       this.state.status = confirm.kind === 'editor-with-note' ? 'Feedback discarded; opening editor.' : 'Feedback discarded.';
@@ -2951,10 +3042,8 @@ export class JobosTui {
     else if (value === 'p') void this.runAction('pursue');
     else if (value === 'z') void this.runAction('score');
     else if (value === 'd') void this.runAction('daily');
-    else if (value === 'g') {
-      this.state.status = 'state refreshed from disk';
-      this.refresh();
-    } else if (value === 'c') void this.connectAgent();
+    else if (value === 'g') this.openSetupOverlay();
+    else if (value === 'c') void this.connectAgent();
     else if (value === 'x' && this.client?.state === 'working') {
       this.client.cancel();
       this.state.status = 'cancelling agent turn';

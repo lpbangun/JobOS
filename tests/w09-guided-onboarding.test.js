@@ -105,3 +105,36 @@ test('W09-TRUST-02 injected capability failures are optional, typed, and redacte
   assert.equal(status.steps.find(step => step.id === 'browser').status, 'unavailable');
   assert.doesNotMatch(JSON.stringify(status), /secret-value|private\/path/);
 });
+
+test('W09-RECOVERY-01 and W09-JOURNEY-05 TUI auto-opens only for no profile and g opens setup', async () => {
+  const { JobosTui, TUI_KEYMAP, TUI_HANDLED_KEYS } = await import('../src/tui.js');
+  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+  const emptyStore = await openStore({ workspace: root() });
+  const emptyTui = new JobosTui(emptyStore, { stdout: output, connectAgent: false, now: () => new Date(AS_OF) });
+  assert.equal(emptyTui.state.overlay, 'setup');
+
+  const populatedStore = await openStore({ workspace: root() });
+  createProfile(populatedStore, 'Alpha');
+  const tui = new JobosTui(populatedStore, { stdout: output, connectAgent: false, now: () => new Date(AS_OF) });
+  assert.equal(tui.state.overlay, null);
+  tui.onKeypress('g', { name: 'g' });
+  assert.equal(tui.state.overlay, 'setup');
+  assert.deepEqual(TUI_KEYMAP.global.find(([key]) => key === 'g'), ['g', 'setup']);
+  assert.ok(TUI_HANDLED_KEYS.global.includes('g'));
+});
+
+test('W09-RECOVERY-05 setup navigation, recompute, and Escape are zero-write', async () => {
+  const { JobosTui } = await import('../src/tui.js');
+  const workspace = root();
+  const s = await openStore({ workspace });
+  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+  const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  const before = readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite'));
+  tui.onKeypress('j', { name: 'j' });
+  assert.equal(tui.state.overlayIndex, 1);
+  tui.onKeypress('r', { name: 'r' });
+  assert.equal(tui.state.overlay, 'setup');
+  tui.onKeypress('', { name: 'escape' });
+  assert.equal(tui.state.overlay, null);
+  assert.deepEqual(readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite')), before);
+});
