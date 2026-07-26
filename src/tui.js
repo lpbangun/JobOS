@@ -2782,6 +2782,10 @@ export class JobosTui {
   }
 
   openSetupCorrection(item) {
+    const actionId = item?.actions?.[0]?.id;
+    if (['resume', 'proofs', 'intake'].includes(item?.id) || (item?.id === 'profile' && actionId === 'create_profile')) {
+      return this.openSetupAction(item);
+    }
     const overlays = {
       profile: 'profile',
       intake: 'discovery',
