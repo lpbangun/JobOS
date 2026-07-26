@@ -17,6 +17,13 @@ const MCP_DENY = new Set([
   'add_interview_question_source',
   'record_interview_debrief',
   'correct_interview_debrief',
+  'record_job_feedback',
+  'correct_memory_observation',
+  'undo_memory_observation',
+  'accept_memory_proposal',
+  'reject_memory_proposal',
+  'revoke_memory_proposal',
+  'undo_memory_transition',
 ]);
 const tools = DOMAIN_TOOLS.filter(t => !MCP_DENY.has(t.name));
 
