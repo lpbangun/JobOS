@@ -30,6 +30,7 @@ import { addAgent, listAgents, testAgent } from './agents.js';
 import { callDomainTool } from './domain-tools.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
 import { preflightResumeArtifact } from './artifacts.js';
+import { getMemoryObservation } from './career-memory-observations.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -68,6 +69,8 @@ export const commandRegistry = [
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
   cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
+  cmd(['profile', 'brief'], 'jobos profile brief --profile <id> [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the deterministic cited career brief.'),
+  cmd(['profile', 'voice-guide'], 'jobos profile voice-guide --profile <id> [--artifact-type <type>] [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the proof-safe voice and positioning guide.'),
   cmd(['resume', 'import'], 'jobos resume import --profile <profile-id> --file <path> [--json]', 'Import a complete resume into a versioned canonical source record.', { flags: ['--profile <profile-id>', '--file <path>'] }),
   cmd(['resume', 'show'], 'jobos resume show --profile <profile-id> [--revision <n>] [--json]', 'Inspect the current or historical canonical resume revision.', { flags: ['--profile <profile-id>', '--revision <n>'] }),
   cmd(['resume', 'validate'], 'jobos resume validate --profile <profile-id> [--json]', 'Validate the current canonical resume and expose correctable fields.', { flags: ['--profile <profile-id>'] }),
@@ -81,6 +84,19 @@ export const commandRegistry = [
   cmd(['answers', 'add'], 'jobos answers add --profile <profile-id> --category <category> --question <text> --answer <text> [--sensitivity personal] [--json]', 'Store a verified reusable application answer locally.', { flags: ['--category <category>', '--question <text>', '--answer <text>', '--sensitivity <class>', '--reuse <scope>', '--status <status>', '--source <ref>', '--employer <name>'] }),
   cmd(['answers', 'list'], 'jobos answers list --profile <profile-id> [--category <category>] [--json]', 'List local answers with sensitive values redacted.', { flags: ['--category <category>', '--status <status>'] }),
   cmd(['answers', 'match'], 'jobos answers match --profile <profile-id> --questions <json-file> [--employer <name>] [--json]', 'Match verified non-sensitive answers to application questions.', { flags: ['--questions <json-file>', '--employer <name>'] }),
+  cmd(['feedback', 'job'], 'jobos feedback job <job-id> --profile <id> --file <job-feedback.json> [--validate-only] --json', 'Record direct structured job feedback or validate it without writes.'),
+  cmd(['feedback', 'observations'], 'jobos feedback observations --profile <id> [--since <days>] [--type <csv>] [--history] --json', 'List profile-scoped observations without private-note text.'),
+  cmd(['feedback', 'observations', 'show'], 'jobos feedback observations show <observation-id> --profile <id> [--include-private-note] --json', 'Show one observation; private notes require this explicit trusted CLI flag.'),
+  cmd(['feedback', 'observations', 'correct'], 'jobos feedback observations correct <observation-id> --profile <id> --file <replacement.json> --reason <text> [--validate-only] --json', 'Append a complete direct-human observation correction.'),
+  cmd(['feedback', 'observations', 'undo'], 'jobos feedback observations undo <observation-id> --profile <id> --reference <id> --reason <text> --json', 'Undo the current observation correction.'),
+  cmd(['preferences', 'proposals'], 'jobos preferences proposals --profile <id> [--status <csv>] [--domain search|writing] [--scope <scope>] --json', 'List immutable career-memory proposals and transition history.'),
+  cmd(['preferences', 'propose'], 'jobos preferences propose --profile <id> --file <proposal.json> [--validate-only] --json', 'Create an inactive cited proposal or validate it without writes.'),
+  cmd(['preferences', 'derive'], 'jobos preferences derive --profile <id> [--as-of <rfc3339>] [--dry-run] --json', 'Deterministically derive inactive proposals.'),
+  cmd(['preferences', 'accept'], 'jobos preferences accept <proposal-id> --profile <id> --reference <id> [--reason <text>] --json', 'Accept an eligible proposal through trusted human input.'),
+  cmd(['preferences', 'reject'], 'jobos preferences reject <proposal-id> --profile <id> --reference <id> --reason <text> --json', 'Reject an inactive proposal.'),
+  cmd(['preferences', 'revoke'], 'jobos preferences revoke <proposal-id> --profile <id> --reference <id> --reason <text> --json', 'Revoke accepted guidance immediately.'),
+  cmd(['preferences', 'undo'], 'jobos preferences undo <transition-id> --profile <id> --reference <id> --reason <text> --json', 'Apply the frozen inverse of a current reversible transition.'),
+  cmd(['memory', 'retrieve'], 'jobos memory retrieve --profile <id> --consumer discovery|scoring|tailoring|outreach|interview_prep [--job <id>] [--artifact-type <type>] [--as-of <rfc3339>] --json', 'Retrieve bounded accepted guidance with private notes excluded.'),
   cmd(['jobs', 'import-text'], 'jobos jobs import-text --profile <profile> --file <path> [--json]', 'Import a job description from a local text or Markdown file.', { flags: ['--file <path>'] }),
   cmd(['jobs', 'import-url'], 'jobos jobs import-url <url> --profile <profile> [--json]', 'Import a human-provided public job URL.'),
   cmd(['jobs', 'list'], 'jobos jobs list [--json]', 'List imported jobs.'),
@@ -679,6 +695,22 @@ export async function main(argv = process.argv.slice(2)) {
     out(setNetworkIntent(s, { profileId: needProfile(flags), intent: data.intent, affiliations: data.affiliations }));
     return;
   }
+  if (group === 'profile' && ['brief', 'voice-guide'].includes(action)) {
+    const args = {
+      profileId: needProfile(flags),
+      revision: flags.revision == null ? null : numberFlag(flags, 'revision', null, { min: 1 }),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+      refresh: flags.refresh === true,
+    };
+    const result = action === 'brief'
+      ? await callDomainTool(s, 'get_career_brief', args, { source: 'cli' })
+      : await callDomainTool(s, 'get_voice_positioning_guide', {
+        ...args,
+        artifactType: flags['artifact-type'] ? String(flags['artifact-type']) : null,
+      }, { source: 'cli' });
+    out(result);
+    return;
+  }
   if (group === 'resume' && action === 'import') {
     const row = importResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
     out({ id: row.id, profileId: row.profile_id, revision: row.revision, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
@@ -770,6 +802,99 @@ export async function main(argv = process.argv.slice(2)) {
       usage(`Invalid --questions JSON file: ${e.message}`);
     }
     out(await callDomainTool(s, 'answers_match', { profileId: needProfile(flags), questions, employer: flags.employer ? String(flags.employer) : '' }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'job') {
+    if (!subaction) usage('Missing job id');
+    out(await callDomainTool(s, 'record_job_feedback', {
+      profileId: needProfile(flags), jobId: String(subaction),
+      feedback: structuredJsonFile(flags, 'job-feedback.json'),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && !subaction) {
+    out(await callDomainTool(s, 'list_memory_observations', {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? 365 : numberFlag(flags, 'since', 365, { min: 0 }),
+      types: flags.type ? splitCsv(flags.type) : null,
+      includeHistory: flags.history === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'show') {
+    if (!rest[0]) usage('Missing observation id');
+    out(getMemoryObservation(s, {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      includePrivateNote: flags['include-private-note'] === true,
+    }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'correct') {
+    if (!rest[0]) usage('Missing observation id');
+    out(await callDomainTool(s, 'correct_memory_observation', {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      replacement: structuredJsonFile(flags, 'replacement.json'),
+      reason: String(requireFlag(flags, 'reason')),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'undo') {
+    if (!rest[0]) usage('Missing observation id');
+    out(await callDomainTool(s, 'undo_memory_observation', {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      referenceId: String(requireFlag(flags, 'reference')), reason: String(requireFlag(flags, 'reason')),
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'proposals') {
+    out(await callDomainTool(s, 'list_memory_proposals', {
+      profileId: needProfile(flags), statuses: flags.status ? splitCsv(flags.status) : null,
+      domain: flags.domain ? String(flags.domain) : null,
+      scope: flags.scope ? String(flags.scope) : null, includeEvidence: true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'propose') {
+    out(await callDomainTool(s, 'create_memory_proposal', {
+      profileId: needProfile(flags), proposal: structuredJsonFile(flags, 'proposal.json'),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'derive') {
+    out(await callDomainTool(s, 'derive_memory_proposals', {
+      profileId: needProfile(flags), asOf: flags['as-of'] ? String(flags['as-of']) : null,
+      dryRun: flags['dry-run'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && ['accept', 'reject', 'revoke'].includes(action)) {
+    if (!subaction) usage('Missing proposal id');
+    const reason = flags.reason ? String(flags.reason) : '';
+    if (action !== 'accept' && !reason) usage(`Missing --reason for preferences ${action}`);
+    out(await callDomainTool(s, `${action}_memory_proposal`, {
+      profileId: needProfile(flags), proposalId: String(subaction),
+      referenceId: String(requireFlag(flags, 'reference')), reason,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'undo') {
+    if (!subaction) usage('Missing transition id');
+    out(await callDomainTool(s, 'undo_memory_transition', {
+      profileId: needProfile(flags), transitionId: String(subaction),
+      referenceId: String(requireFlag(flags, 'reference')), reason: String(requireFlag(flags, 'reason')),
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'memory' && action === 'retrieve') {
+    out(await callDomainTool(s, 'retrieve_career_memory', {
+      profileId: needProfile(flags), consumer: String(requireFlag(flags, 'consumer')),
+      jobId: flags.job ? String(flags.job) : null,
+      artifactType: flags['artifact-type'] ? String(flags['artifact-type']) : null,
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'jobs' && action === 'import-text') {

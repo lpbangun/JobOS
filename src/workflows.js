@@ -11,6 +11,7 @@ import { tailor } from './tailoring.js';
 import { appCreate } from './tracking.js';
 import { draftOutreach } from './outreach.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
+import { evaluateSearchGuidance } from './career-memory-retrieval.js';
 
 const pursuitStages = [
   'score',
@@ -124,7 +125,14 @@ export async function runDaily(s, { profileId }) {
   const discovery = await runAllSearches(s, { profileId });
   const dedupe = dedupeJobs(s, { apply: true });
   const runs = discovery.runs || [];
-  const jobs = runs.flatMap(run => run.jobs || []).sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || String(a.company || '').localeCompare(String(b.company || '')));
+  const jobs = runs.flatMap(run => run.jobs || []).map(job => {
+    const memoryGuidance = evaluateSearchGuidance(s, { profileId, jobId: job.id });
+    return {
+      ...job,
+      memoryGuidance,
+      guidedScore: Math.max(0, Math.min(100, Number(job.score || 0) + memoryGuidance.adjustment))
+    };
+  }).sort((a, b) => Number(b.guidedScore || 0) - Number(a.guidedScore || 0) || String(a.company || '').localeCompare(String(b.company || '')));
   const failures = runs.filter(run => run.status !== 'succeeded' || (run.errors || []).length).map(run => ({ searchId: run.searchId, searchName: run.searchName, adapter: run.adapter, status: run.status, errors: run.errors || [], metadata: run.metadata || null }));
   const status = ['succeeded', 'partial', 'failed'].includes(discovery.status) ? discovery.status : (failures.length ? 'partial' : 'succeeded');
   return {

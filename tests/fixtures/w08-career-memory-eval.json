@@ -1,0 +1,75 @@
+{
+  "schema": "jobos.career-memory-eval-fixture.v1",
+  "scope": {
+    "representative": false,
+    "causal": false,
+    "description": "Deterministic held-out contract fixture; results describe only these frozen cases."
+  },
+  "calibration": {
+    "profileId": "alpha",
+    "observations": [
+      { "id": "cal-role-01", "date": "2026-06-01", "sourceRoot": "job:calibration-01", "field": "role_family", "value": "product manager" },
+      { "id": "cal-role-02", "date": "2026-06-02", "sourceRoot": "job:calibration-02", "field": "role_family", "value": "product manager" },
+      { "id": "cal-role-03", "date": "2026-06-03", "sourceRoot": "job:calibration-03", "field": "role_family", "value": "product manager" },
+      { "id": "cal-industry-01", "date": "2026-06-04", "sourceRoot": "job:calibration-04", "field": "industry", "value": "edtech" },
+      { "id": "cal-industry-02", "date": "2026-06-05", "sourceRoot": "job:calibration-05", "field": "industry", "value": "edtech" },
+      { "id": "cal-industry-03", "date": "2026-06-06", "sourceRoot": "job:calibration-06", "field": "industry", "value": "edtech" }
+    ],
+    "acceptedSearchRules": [
+      { "id": "rule-role", "field": "roleFamily", "match": "product manager", "polarity": "prefer", "evidenceIds": ["cal-role-01", "cal-role-02", "cal-role-03"] },
+      { "id": "rule-industry", "field": "industry", "match": "edtech", "polarity": "prefer", "evidenceIds": ["cal-industry-01", "cal-industry-02", "cal-industry-03"] },
+      { "id": "rule-mission", "field": "mission", "match": "learning", "polarity": "prefer", "evidenceIds": ["cal-role-01", "cal-role-02", "cal-role-03"] },
+      { "id": "rule-location", "field": "location", "match": "remote", "polarity": "prefer", "evidenceIds": ["cal-industry-01", "cal-industry-02", "cal-industry-03"] },
+      { "id": "rule-work-model", "field": "workModel", "match": "remote", "polarity": "prefer", "evidenceIds": ["cal-role-01", "cal-industry-02", "cal-role-03"] }
+    ],
+    "acceptedWritingRules": {
+      "resume": ["resume-tone", "resume-length", "resume-opening", "resume-closing", "resume-avoid", "resume-positioning"],
+      "cover_letter": ["cover-tone", "cover-length", "cover-opening", "cover-closing", "cover-avoid", "cover-positioning"],
+      "outreach": ["outreach-tone", "outreach-length", "outreach-opening", "outreach-closing", "outreach-avoid", "outreach-positioning"],
+      "interview_prep": ["interview-tone", "interview-length", "interview-opening", "interview-closing", "interview-avoid", "interview-positioning"]
+    }
+  },
+  "heldOut": {
+    "search": {
+      "reviewBudget": 5,
+      "expected": { "baseline": { "numerator": 2, "denominator": 5 }, "guided": { "numerator": 4, "denominator": 5 } },
+      "jobs": [
+        { "id": "heldout-n1", "relevant": false, "baseScore": 90, "roleFamily": "sales", "industry": "fintech", "mission": "payments", "location": "new york", "workModel": "onsite" },
+        { "id": "heldout-r1", "relevant": true, "baseScore": 88, "roleFamily": "product manager", "industry": "edtech", "mission": "learning", "location": "remote", "workModel": "remote" },
+        { "id": "heldout-n2", "relevant": false, "baseScore": 86, "roleFamily": "operations", "industry": "retail", "mission": "commerce", "location": "chicago", "workModel": "hybrid" },
+        { "id": "heldout-n3", "relevant": false, "baseScore": 84, "roleFamily": "marketing", "industry": "media", "mission": "advertising", "location": "los angeles", "workModel": "onsite" },
+        { "id": "heldout-r2", "relevant": true, "baseScore": 82, "roleFamily": "product manager", "industry": "edtech", "mission": "learning", "location": "remote", "workModel": "remote" },
+        { "id": "heldout-n4", "relevant": false, "baseScore": 80, "roleFamily": "finance", "industry": "banking", "mission": "trading", "location": "boston", "workModel": "hybrid" },
+        { "id": "heldout-r3", "relevant": true, "baseScore": 78, "roleFamily": "product manager", "industry": "edtech", "mission": "learning", "location": "remote", "workModel": "remote" },
+        { "id": "heldout-r4", "relevant": true, "baseScore": 77, "roleFamily": "product manager", "industry": "edtech", "mission": "learning", "location": "remote", "workModel": "remote" },
+        { "id": "heldout-n5", "relevant": false, "baseScore": 74, "roleFamily": "engineering", "industry": "security", "mission": "infrastructure", "location": "austin", "workModel": "onsite" },
+        { "id": "heldout-n6", "relevant": false, "baseScore": 72, "roleFamily": "design", "industry": "consumer", "mission": "shopping", "location": "seattle", "workModel": "hybrid" }
+      ]
+    },
+    "writing": {
+      "proofs": [
+        { "id": "proof-learning-workflow", "text": "Led educator discovery and reduced manual review time by 30%.", "active": true, "verified": true },
+        { "id": "proof-launch", "text": "Shipped a learning workflow with design and engineering partners.", "active": true, "verified": true }
+      ],
+      "unsupportedClaim": "increased revenue by 73%",
+      "cases": [
+        { "id": "heldout-resume", "artifactType": "resume", "tone": "concise", "minWords": 8, "maxWords": 18, "opening": "proof_first", "closing": "none", "avoidTerms": ["synergy"], "proofPointIds": ["proof-learning-workflow"], "activeRuleIds": ["resume-tone", "resume-length", "resume-opening", "resume-closing", "resume-avoid", "resume-positioning"], "output": { "text": "Led educator discovery and reduced manual review time by 30% through a learning workflow.", "tone": "concise", "opening": "proof_first", "closing": "none", "proofPointIds": ["proof-learning-workflow"], "citedRuleIds": ["resume-tone", "resume-length", "resume-opening", "resume-closing", "resume-avoid", "resume-positioning"] } },
+        { "id": "heldout-cover", "artifactType": "cover_letter", "tone": "warm", "minWords": 12, "maxWords": 24, "opening": "context_first", "closing": "gratitude", "avoidTerms": ["rockstar"], "proofPointIds": ["proof-learning-workflow", "proof-launch"], "activeRuleIds": ["cover-tone", "cover-length", "cover-opening", "cover-closing", "cover-avoid", "cover-positioning"], "output": { "text": "Your learning mission resonates with my educator discovery work and evidence-backed launch experience. Thank you for considering my application.", "tone": "warm", "opening": "context_first", "closing": "gratitude", "proofPointIds": ["proof-learning-workflow", "proof-launch"], "citedRuleIds": ["cover-tone", "cover-length", "cover-opening", "cover-closing", "cover-avoid", "cover-positioning"] } },
+        { "id": "heldout-outreach", "artifactType": "outreach", "tone": "direct", "minWords": 12, "maxWords": 24, "opening": "direct", "closing": "call_to_action", "avoidTerms": ["pick your brain"], "proofPointIds": ["proof-launch"], "activeRuleIds": ["outreach-tone", "outreach-length", "outreach-opening", "outreach-closing", "outreach-avoid", "outreach-positioning"], "output": { "text": "I shipped a cross-functional learning workflow and would value fifteen minutes to discuss your product priorities next week.", "tone": "direct", "opening": "direct", "closing": "call_to_action", "proofPointIds": ["proof-launch"], "citedRuleIds": ["outreach-tone", "outreach-length", "outreach-opening", "outreach-closing", "outreach-avoid", "outreach-positioning"] } },
+        { "id": "heldout-interview", "artifactType": "interview_prep", "tone": "analytical", "minWords": 12, "maxWords": 26, "opening": "proof_first", "closing": "none", "avoidTerms": ["guaranteed"], "proofPointIds": ["proof-learning-workflow", "proof-launch"], "activeRuleIds": ["interview-tone", "interview-length", "interview-opening", "interview-closing", "interview-avoid", "interview-positioning"], "output": { "text": "I led educator discovery, aligned design and engineering, and reduced manual review time by 30% after launching the workflow.", "tone": "analytical", "opening": "proof_first", "closing": "none", "proofPointIds": ["proof-learning-workflow", "proof-launch"], "citedRuleIds": ["interview-tone", "interview-length", "interview-opening", "interview-closing", "interview-avoid", "interview-positioning"] } }
+      ]
+    },
+    "goldens": [
+      { "id": "contradictory-support", "expected": "excluded_conflict" },
+      { "id": "stale-evidence", "expected": "excluded_stale" },
+      { "id": "ordinary-single-sample", "expected": "inactive_insufficient_evidence" },
+      { "id": "protected-trait-signal", "expected": "rejected_protected" },
+      { "id": "cross-profile-source", "expected": "rejected_profile_mismatch" },
+      { "id": "corrected-w05-outcome", "expected": "current_revision_only" },
+      { "id": "corrected-w07-debrief", "expected": "current_revision_only" },
+      { "id": "retired-proof", "expected": "excluded_proof_ineligible" },
+      { "id": "revoked-rule", "expected": "excluded_revoked" },
+      { "id": "approved-exemplar-revision", "expected": "exact_revision_and_hash" }
+    ]
+  }
+}

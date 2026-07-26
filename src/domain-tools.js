@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit, score } from './scoring.js';
 import { tailor } from './tailoring.js';
 import { researchCompany } from './research.js';
@@ -18,7 +21,7 @@ import { recentRuns, runAutomationByName } from './scheduler/core.js';
 import { addAnswer, matchAnswers } from './answers.js';
 import { runDaily, runPursuit } from './workflows.js';
 import { compileApplicationReadiness, planApplication } from './readiness.js';
-import { all, one } from './db.js';
+import { all, one, openStore } from './db.js';
 import { parseJson } from './utils.js';
 import { approveArtifact, artifactQueue, diffArtifact, rejectArtifact } from './artifacts.js';
 import {
@@ -33,6 +36,10 @@ import { DOM_ADAPTER_MANIFEST, inspectLiveForm } from './form-browser.js';
 import { getFormSnapshot } from './forms.js';
 import { checkpointApplicationForm, fillApplicationForm } from './form-actions.js';
 import { submitApplicationForm } from './form-submission.js';
+import { correctMemoryObservation, listMemoryObservations, recordJobFeedback, undoMemoryObservation } from './career-memory-observations.js';
+import { createMemoryProposal, deriveMemoryProposals, listMemoryProposals, transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
+import { getCareerBrief, getVoicePositioningGuide } from './career-memory-projections.js';
+import { retrieveCareerMemory } from './career-memory-retrieval.js';
 
 export class DomainToolError extends Error {
   constructor(code, message, details = {}) {
@@ -50,6 +57,8 @@ export class DomainToolError extends Error {
 
 const object = properties => ({ type: 'object', properties });
 const required = (properties, names) => ({ ...object(properties), required: names });
+const closed = properties => ({ type: 'object', properties, additionalProperties: false });
+const closedRequired = (properties, names) => ({ ...closed(properties), required: names });
 const text = { type: 'string' };
 const boolean = { type: 'boolean' };
 const stringArray = { type: 'array', items: text };
@@ -112,6 +121,55 @@ const researchBudget = object({
   maxDurationMs: { type: 'number' },
   maxCostUsd: { type: ['number', 'null'] }
 });
+const memorySearchValue = closedRequired({
+  polarity: { type: 'string', enum: ['prefer', 'avoid'] },
+  value: text,
+  match: { type: 'string', enum: ['exact', 'token'] },
+}, ['polarity', 'value', 'match']);
+const memoryProposalValue = {
+  oneOf: [
+    memorySearchValue,
+    closedRequired({ value: text }, ['value']),
+    closedRequired({ minWords: { type: 'number' }, maxWords: { type: 'number' } }, ['minWords', 'maxWords']),
+    closedRequired({ terms: stringArray }, ['terms']),
+    closedRequired({ claimPattern: text, reasonCode: { type: 'string', enum: ['unsupported', 'unwanted_positioning'] } }, ['claimPattern', 'reasonCode']),
+    closedRequired({ theme: text, proofPointIds: stringArray }, ['theme', 'proofPointIds']),
+    closedRequired({ artifactId: text, revision: { type: 'number' }, contentHash: text, startLine: { type: 'number' }, endLine: { type: 'number' }, excerptHash: text }, ['artifactId', 'revision', 'contentHash', 'startLine', 'endLine', 'excerptHash']),
+  ],
+};
+const memoryEvidence = closedRequired({
+  observationSchema: text,
+  observationId: text,
+  polarity: { type: 'string', enum: ['support', 'conflict'] },
+}, ['observationSchema', 'observationId', 'polarity']);
+const memoryProposalInput = closedRequired({
+  schema: { type: 'string', enum: ['jobos.memory-proposal-input.v1'] },
+  domain: { type: 'string', enum: ['search', 'writing'] },
+  scope: { type: 'string', enum: ['search', 'resume', 'cover_letter', 'outreach', 'interview_prep', 'writing_global'] },
+  ruleType: text,
+  value: memoryProposalValue,
+  rationale: text,
+  evidence: { type: 'array', items: memoryEvidence },
+  referenceId: text,
+  createdAt: text,
+}, ['schema', 'domain', 'scope', 'ruleType', 'value', 'rationale', 'evidence', 'referenceId']);
+const memorySignal = closed({ field: text, polarity: text, value: { oneOf: [text, memoryProposalValue] }, match: text, ruleType: text });
+const jobFeedbackInput = closedRequired({
+  schema: { type: 'string', enum: ['jobos.job-feedback-input.v1'] },
+  decision: { type: 'string', enum: ['save', 'skip', 'apply'] },
+  reasonCodes: stringArray,
+  signals: { type: 'array', items: memorySignal },
+  publicExplanation: text,
+  privateNote: text,
+  referenceId: text,
+  occurredAt: text,
+}, ['schema', 'decision', 'reasonCodes', 'signals', 'publicExplanation', 'privateNote', 'referenceId', 'occurredAt']);
+const memoryReplacement = closedRequired({
+  reasonCodes: stringArray,
+  signals: { type: 'array', items: memorySignal },
+  publicExplanation: text,
+  privateNote: text,
+}, ['reasonCodes', 'signals', 'publicExplanation', 'privateNote']);
 const peopleResearchRequest = {
   profileId: text,
   scope: { type: 'string', enum: ['profile', 'target', 'job', 'person'] },
@@ -190,6 +248,20 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'list_automation_runs', description: 'List recent automation runs.', inputSchema: object({ limit: { type: 'number' } }) },
   { name: 'daily_discovery', description: 'Run every saved discovery source for one profile and return ranked results plus isolated failures.', inputSchema: required({ profileId: text }, ['profileId']) },
   { name: 'pursue_job', description: 'Run the integrated fit, research, network, answers, artifact, application, and outreach-preparation workflow.', inputSchema: required({ jobId: text, profileId: text, stage: text, dryRun: { type: 'boolean' }, stageTimeoutMs: { type: 'number' } }, ['jobId', 'profileId']) },
+  { name: 'list_memory_observations', description: 'List profile-scoped career-memory observations without private-note text.', inputSchema: closedRequired({ profileId: text, sinceDays: { type: ['number', 'null'] }, types: stringArray, includeHistory: boolean }, ['profileId']) },
+  { name: 'list_memory_proposals', description: 'List immutable profile-scoped career-memory proposals and transition history.', inputSchema: closedRequired({ profileId: text, statuses: stringArray, domain: { type: 'string', enum: ['search', 'writing'] }, scope: text, includeEvidence: boolean }, ['profileId']) },
+  { name: 'get_career_brief', description: 'Read or explicitly refresh the deterministic cited career brief.', inputSchema: closedRequired({ profileId: text, revision: { type: ['number', 'null'] }, asOf: text, refresh: boolean }, ['profileId']) },
+  { name: 'get_voice_positioning_guide', description: 'Read or explicitly refresh the deterministic proof-safe voice and positioning guide.', inputSchema: closedRequired({ profileId: text, artifactType: text, revision: { type: ['number', 'null'] }, asOf: text, refresh: boolean }, ['profileId']) },
+  { name: 'retrieve_career_memory', description: 'Retrieve bounded accepted guidance with private notes excluded.', inputSchema: closedRequired({ profileId: text, consumer: { type: 'string', enum: ['discovery', 'scoring', 'tailoring', 'outreach', 'interview_prep'] }, jobId: text, artifactType: text, asOf: text }, ['profileId', 'consumer']) },
+  { name: 'derive_memory_proposals', description: 'Derive inactive memory proposals, optionally as a write-free dry run.', inputSchema: closedRequired({ profileId: text, asOf: text, dryRun: boolean }, ['profileId']) },
+  { name: 'create_memory_proposal', description: 'Create only an inactive cited memory proposal.', inputSchema: closedRequired({ profileId: text, proposal: memoryProposalInput, validateOnly: boolean }, ['profileId', 'proposal']) },
+  { name: 'record_job_feedback', description: 'Record direct trusted-human structured job feedback.', inputSchema: closedRequired({ profileId: text, jobId: text, feedback: jobFeedbackInput, validateOnly: boolean }, ['profileId', 'jobId', 'feedback']) },
+  { name: 'correct_memory_observation', description: 'Append a direct trusted-human observation correction.', inputSchema: closedRequired({ profileId: text, observationId: text, replacement: memoryReplacement, reason: text, validateOnly: boolean }, ['profileId', 'observationId', 'replacement', 'reason']) },
+  { name: 'undo_memory_observation', description: 'Undo the current direct-human observation correction.', inputSchema: closedRequired({ profileId: text, observationId: text, referenceId: text, reason: text }, ['profileId', 'observationId', 'referenceId', 'reason']) },
+  { name: 'accept_memory_proposal', description: 'Direct trusted-human acceptance of an eligible proposal.', inputSchema: closedRequired({ profileId: text, proposalId: text, referenceId: text, reason: text }, ['profileId', 'proposalId', 'referenceId']) },
+  { name: 'reject_memory_proposal', description: 'Direct trusted-human rejection of an inactive proposal.', inputSchema: closedRequired({ profileId: text, proposalId: text, referenceId: text, reason: text }, ['profileId', 'proposalId', 'referenceId', 'reason']) },
+  { name: 'revoke_memory_proposal', description: 'Direct trusted-human revocation of accepted guidance.', inputSchema: closedRequired({ profileId: text, proposalId: text, referenceId: text, reason: text }, ['profileId', 'proposalId', 'referenceId', 'reason']) },
+  { name: 'undo_memory_transition', description: 'Direct trusted-human inverse of a current reversible transition.', inputSchema: closedRequired({ profileId: text, transitionId: text, referenceId: text, reason: text }, ['profileId', 'transitionId', 'referenceId', 'reason']) },
 ]);
 
 const EFFECT_ATTESTATION_STATUSES = new Set(['applied', 'submitted', 'sent']);
@@ -210,6 +282,12 @@ const HUMAN_INTERVIEW_MUTATIONS = new Set([
   'correct_interview_debrief',
 ]);
 const HUMAN_INTERVIEW_INPUT_MESSAGE = 'Interview verification, retirement, sourced questions, and debrief recording or correction require trusted CLI or TUI human input.';
+const HUMAN_MEMORY_MUTATIONS = new Set([
+  'record_job_feedback', 'correct_memory_observation', 'undo_memory_observation',
+  'accept_memory_proposal', 'reject_memory_proposal', 'revoke_memory_proposal',
+  'undo_memory_transition',
+]);
+const HUMAN_MEMORY_INPUT_MESSAGE = 'Career-memory feedback, corrections, and lifecycle decisions require trusted CLI or TUI human input.';
 
 function trustedInterviewSource(options) {
   const source = mediationSource(options);
@@ -265,11 +343,26 @@ function attributedInterviewDebrief(args, source) {
 
 function enforcePolicy(name, args, options) {
   const source = mediationSource(options);
+  if (HUMAN_MEMORY_MUTATIONS.has(name) && !['cli', 'tui'].includes(source)) {
+    throw new DomainToolError(
+      'human_memory_input_required',
+      HUMAN_MEMORY_INPUT_MESSAGE,
+      { tool: name, source, status: null, externalSideEffect: 'none' },
+    );
+  }
   if (!['acp', 'mcp'].includes(source)) return;
   if (HUMAN_INTERVIEW_MUTATIONS.has(name)) {
     throw new DomainToolError(
       'human_interview_input_required',
       HUMAN_INTERVIEW_INPUT_MESSAGE,
+      { tool: name, source, status: null, externalSideEffect: 'none' },
+    );
+  }
+  if (name === 'create_memory_proposal'
+    && (args.proposal?.ruleType === 'approved_exemplar' || args.proposal?.scope === 'writing_global')) {
+    throw new DomainToolError(
+      'human_memory_input_required',
+      'Agents cannot designate approved exemplars or globally promote career-memory guidance.',
       { tool: name, source, status: null, externalSideEffect: 'none' },
     );
   }
@@ -332,6 +425,29 @@ function enforcePolicy(name, args, options) {
   );
 }
 
+async function validateWithoutWorkspaceWrites(s, operation) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jobos-memory-validation-'));
+  try {
+    fs.mkdirSync(path.join(root, '.jobos'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.jobos', 'jobos.sqlite'), Buffer.from(s.db.export()));
+    const isolated = await openStore({ workspace: root });
+    try {
+      const normalizedPublicPayload = await operation(isolated);
+      return {
+        schema: 'jobos.career-memory-validation.v1',
+        valid: true,
+        wouldWrite: false,
+        normalizedPublicPayload,
+        errors: [],
+        externalSideEffects: 'none',
+      };
+    } finally {
+      isolated.db.close();
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
 
 function fitForRow(row) {
   return deserializeFitScore(parseJson(row.score_json, null), {
@@ -495,6 +611,95 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   const tool = DOMAIN_TOOLS.find(item => item.name === name);
   if (!tool) throw new DomainToolError('unknown_domain_tool', `Unknown JobOS domain tool: ${name}`, { name });
   enforcePolicy(name, args, options);
+
+  const memorySource = mediationSource(options);
+  const memoryNow = () => new Date().toISOString();
+  const ensureMemoryOwner = result => {
+    if (result.profileId !== args.profileId) {
+      throw new DomainToolError('memory_profile_mismatch', 'Career-memory evidence belongs to a different profile.', { profileId: args.profileId });
+    }
+    return result;
+  };
+  if (name === 'list_memory_observations') return listMemoryObservations(s, {
+    profileId: args.profileId,
+    sinceDays: args.sinceDays === undefined ? 365 : args.sinceDays,
+    types: args.types || null,
+    includeHistory: Boolean(args.includeHistory),
+    includePrivateNotes: false,
+  });
+  if (name === 'list_memory_proposals') return listMemoryProposals(s, {
+    profileId: args.profileId,
+    statuses: args.statuses || null,
+    domain: args.domain || null,
+    scope: args.scope || null,
+    includeEvidence: args.includeEvidence !== false,
+  });
+  if (name === 'get_career_brief' || name === 'get_voice_positioning_guide') {
+    if (args.refresh === true && !['cli', 'tui'].includes(memorySource)) {
+      throw new DomainToolError('human_memory_input_required', 'Refreshing a persisted career-memory projection requires trusted CLI or TUI input.', { tool: name, source: memorySource, status: null, externalSideEffect: 'none' });
+    }
+    const projectionArgs = {
+      profileId: args.profileId,
+      revision: args.revision ?? null,
+      refresh: args.refresh === true,
+      asOf: args.asOf ? new Date(args.asOf) : new Date(),
+    };
+    return name === 'get_career_brief'
+      ? getCareerBrief(s, projectionArgs)
+      : getVoicePositioningGuide(s, { ...projectionArgs, artifactType: args.artifactType || null });
+  }
+  if (name === 'retrieve_career_memory') return retrieveCareerMemory(s, {
+    profileId: args.profileId,
+    consumer: args.consumer,
+    jobId: args.jobId || null,
+    artifactType: args.artifactType || null,
+    asOf: args.asOf ? new Date(args.asOf) : new Date(),
+  });
+  if (name === 'derive_memory_proposals') return deriveMemoryProposals(s, {
+    profileId: args.profileId,
+    asOf: args.asOf ? new Date(args.asOf) : new Date(),
+    dryRun: Boolean(args.dryRun),
+    source: 'deterministic',
+  });
+  if (name === 'create_memory_proposal') {
+    const operation = store => ensureMemoryOwner(createMemoryProposal(store, args.proposal));
+    const validation = await validateWithoutWorkspaceWrites(s, operation);
+    return args.validateOnly ? validation : operation(s);
+  }
+  if (name === 'record_job_feedback') {
+    const operation = store => recordJobFeedback(store, {
+      profileId: args.profileId, jobId: args.jobId, input: args.feedback,
+      actor: 'user', source: memorySource,
+    });
+    return args.validateOnly ? await validateWithoutWorkspaceWrites(s, operation) : operation(s);
+  }
+  if (name === 'correct_memory_observation') {
+    const operation = store => correctMemoryObservation(store, {
+      profileId: args.profileId, observationId: args.observationId,
+      replacement: args.replacement, reason: args.reason,
+      referenceId: args.replacement?.referenceId || `correction:${args.observationId}:${memoryNow()}`,
+      actor: 'user', source: memorySource,
+      occurredAt: args.replacement?.occurredAt || memoryNow(),
+    });
+    return args.validateOnly ? await validateWithoutWorkspaceWrites(s, operation) : operation(s);
+  }
+  if (name === 'undo_memory_observation') return undoMemoryObservation(s, {
+    profileId: args.profileId, observationId: args.observationId,
+    referenceId: args.referenceId, reason: args.reason,
+    actor: 'user', source: memorySource, occurredAt: memoryNow(),
+  });
+  if (['accept_memory_proposal', 'reject_memory_proposal', 'revoke_memory_proposal'].includes(name)) {
+    return transitionMemoryProposal(s, {
+      profileId: args.profileId, proposalId: args.proposalId,
+      action: name.split('_')[0], reason: args.reason || '', referenceId: args.referenceId,
+      actor: 'user', source: memorySource,
+    });
+  }
+  if (name === 'undo_memory_transition') return undoMemoryTransition(s, {
+    profileId: args.profileId, transitionId: args.transitionId,
+    referenceId: args.referenceId, reason: args.reason,
+    actor: 'user', source: memorySource,
+  });
 
   if (name === 'list_jobs') return listJobSummaries(s, args);
   if (name === 'get_job_context') return selectedJobContext(s, args.jobId, args.profileId);

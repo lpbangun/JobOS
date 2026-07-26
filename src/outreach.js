@@ -7,6 +7,7 @@ import { generateJson, llmConfig } from './llm.js';
 import { syncJob } from './jobs.js';
 import { contactSummaryForPlan, projectContactConfidenceV2 } from './research/contacts.js';
 import { createArtifact } from './artifacts.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
 
 const sentChannels = new Set(['email', 'linkedin', 'other']);
 const pausedApplicationStatuses = new Set(['interview', 'offer', 'rejected']);
@@ -106,6 +107,63 @@ function profileApproach(profile) {
   if (/\bdirect\b|\bmetrics\b/.test(style)) return 'execution-focused, decision-oriented';
   if (/\bthoughtful\b|\bcollaborative\b/.test(style)) return 'context-seeking, collaboration-aware';
   return 'concise, evidence-led';
+}
+
+function memoryRule(packet, type) { return packet.rules.find(rule => rule.ruleType === type) || null; }
+function memoryStyle(packet) {
+  const tone = memoryRule(packet, 'tone')?.value.value || 'baseline';
+  return {
+    tone,
+    template: { concise: 'concise_note', warm: 'warm_note', analytical: 'evidence_note', direct: 'direct_note', narrative: 'narrative_note', formal: 'formal_note' }[tone] || 'baseline',
+    openingVariant: memoryRule(packet, 'opening')?.value.value || null,
+    closingVariant: memoryRule(packet, 'closing')?.value.value || null,
+  };
+}
+
+function applyProofPositioning(ctx, packet) {
+  const positioning = memoryRule(packet, 'positioning_priority');
+  if (!positioning) return ctx;
+  const rank = new Map(positioning.value.proofPointIds.map((proofId, index) => [proofId, index]));
+  const nonProof = ctx.evidence.filter(item => item.type !== 'profile_proof');
+  const proofs = ctx.evidence.filter(item => item.type === 'profile_proof' && rank.has(item.id)).sort((left, right) => rank.get(left.id) - rank.get(right.id));
+  const evidence = [...nonProof, ...proofs];
+  return { evidence, byId: new Map(evidence.map(item => [item.id, item])), byUrl: new Map(evidence.filter(item => item.sourceUrl).map(item => [canonicalUrl(item.sourceUrl), item])) };
+}
+
+function validateOutreachGuidance(text, evidence, packet) {
+  const style = memoryStyle(packet);
+  const draftMessage = text.match(/## Draft message\n([\s\S]*?)\n\n## Evidence used/)?.[1] || '';
+  const openingChecks = {
+    direct: /## Draft message\n(?:Hello|Dear) [^,]+,/,
+    proof_first: /## Draft message\n(?!Hi |Hello |Dear )\S[^\n]*\n\nHi /,
+    context_first: /## Draft message\nRegarding the [^\n]+ role at [^\n]+,\n\n(?:Hi|Dear) [^,]+,/,
+    none: /## Draft message\n(?:I hope your week is going well\. )?I am exploring/,
+  };
+  const closingChecks = {
+    call_to_action: /Would a brief conversation be useful\?\n[^\n]+\n/,
+    gratitude: /Thank you for considering the question\.\n[^\n]+\n/,
+    none: /I am happy to keep it brief\.\n\n\n[^\n]+\n/,
+  };
+  const candidate = {
+    text,
+    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text) ? style.openingVariant : null,
+    closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text) ? style.closingVariant : null,
+    proofPointIds: evidence.filter(item => item.type === 'profile_proof').map(item => item.id),
+    claims: [], exemplarExcerptHashes: [],
+  };
+  const validation = validateWritingGuidance(candidate, packet);
+  const toneRule = memoryRule(packet, 'tone');
+  const toneRendered = style.tone === 'formal' ? /(?:^|\n\n)Dear [^,]+,/.test(draftMessage)
+    : style.tone === 'warm' ? /I hope your week is going well\./.test(draftMessage)
+      : style.tone === 'analytical' ? /I am assessing the evidence in three parts: role context, verified proof, and a focused question\./.test(draftMessage)
+        : style.tone === 'direct' ? /I will be direct: my question is about source-backed fit and the team’s current need\./.test(draftMessage)
+          : style.tone === 'narrative' ? /The thread connecting my interest is the role context, one verified proof, and a question about the team’s work\./.test(draftMessage)
+            : true;
+  if (toneRule && !toneRendered) {
+    validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: style.template } });
+    validation.valid = false;
+  }
+  return { validation, warnings: [] };
 }
 
 function firstName(name) {
@@ -376,19 +434,26 @@ function fallbackDraft({
   selectedEvidence = null,
   mode = 'deterministic-degraded',
   warnings: additionalWarnings = [],
+  memory,
 }) {
   const selected = selectedEvidence?.length ? selectedEvidence : defaultEvidence(ctx);
   const stakeholderFact = selected.find(item => item.type === 'stakeholder');
   const companyFact = selected.find(item => item.type === 'company_fact');
   const proof = selected.find(item => item.type === 'profile_proof');
   const style = profileStyle(profile);
-  const warm = /\bwarm|friendly|personal\b/i.test(style);
-  const concise = /\bconcise|brief|short\b/i.test(style);
+  const memoryGuidance = memoryStyle(memory);
+  const warm = memoryGuidance.tone === 'warm' || /\bwarm|friendly|personal\b/i.test(style);
+  const concise = memoryGuidance.tone === 'concise' || /\bconcise|brief|short\b/i.test(style);
   const subject = `${strategy.class.replace(/_/g, ' ')} question about ${job.company}`;
   const opener = warm ? 'I hope your week is going well. ' : '';
   const stakeholderLine = stakeholderFact ? `I saw that ${stakeholderFact.summary}.` : '';
   const companyLine = companyFact ? `I noted the source-backed company context that ${companyFact.summary}.` : '';
   const proofLine = proof ? `One relevant proof from my background: ${proof.summary}.` : 'I do not have a stored proof selected for this note, so I would keep any background claim out until it is verified.';
+  const toneLine = {
+    analytical: 'I am assessing the evidence in three parts: role context, verified proof, and a focused question.',
+    direct: 'I will be direct: my question is about source-backed fit and the team’s current need.',
+    narrative: 'The thread connecting my interest is the role context, one verified proof, and a question about the team’s work.',
+  }[memoryGuidance.tone] || '';
   const styleLine = /\bdirect\b|\bmetrics\b/i.test(style)
     ? 'I will keep this brief and focus on source-backed relevance.'
     : /\bthoughtful\b|\bcollaborative\b/i.test(style)
@@ -409,15 +474,21 @@ function fallbackDraft({
     unknown: 'I am making a conservative informational inquiry and want to verify that this is relevant to you.',
   }[strategy.class];
   const middle = concise
-    ? [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join(' ')
-    : [stakeholderLine, companyLine, proofLine, styleLine, goalLine, roleLine].filter(Boolean).join('\n\n');
-  const message = `Hi ${firstName(stakeholder.name)},
-
-${opener}I am exploring the ${job.title} role at ${job.company}. ${middle}
+    ? [stakeholderLine, companyLine, proofLine, toneLine, styleLine, goalLine, roleLine].filter(Boolean).join(' ')
+    : [stakeholderLine, companyLine, proofLine, toneLine, styleLine, goalLine, roleLine].filter(Boolean).join('\n\n');
+  const directGreeting = memoryGuidance.tone === 'formal' ? `Dear ${firstName(stakeholder.name)},` : `Hello ${firstName(stakeholder.name)},`;
+  const standardGreeting = memoryGuidance.tone === 'formal' ? `Dear ${firstName(stakeholder.name)},` : `Hi ${firstName(stakeholder.name)},`;
+  const greeting = memoryGuidance.openingVariant === 'none' ? ''
+    : memoryGuidance.openingVariant === 'direct' ? directGreeting
+      : memoryGuidance.openingVariant === 'proof_first' && proof ? `${proof.summary}\n\nHi ${firstName(stakeholder.name)},`
+        : memoryGuidance.openingVariant === 'context_first' ? `Regarding the ${job.title} role at ${job.company},\n\n${standardGreeting}`
+          : standardGreeting;
+  const closing = memoryGuidance.closingVariant === 'none' ? '' : memoryGuidance.closingVariant === 'call_to_action' ? 'Would a brief conversation be useful?' : memoryGuidance.closingVariant === 'gratitude' ? 'Thank you for considering the question.' : 'Thanks,';
+  const message = `${greeting ? `${greeting}\n\n` : ''}${opener}I am exploring the ${job.title} role at ${job.company}. ${middle}
 
 If appropriate, would you be open to ${strategy.ask}? I am happy to keep it brief.
 
-Thanks,
+${closing}
 ${profile.name}`;
   const modeWarning = mode === 'llm-selection'
     ? 'Provider-selected allowed evidence was rendered with deterministic canonical prose; provider-authored prose was not persisted.'
@@ -433,12 +504,14 @@ ${profile.name}`;
       toneMatch: style,
       lengthDiscipline: 'short draft',
       rendering: 'deterministic canonical prose',
+      careerMemoryTone: memoryGuidance.tone,
+      careerMemoryTemplate: memoryGuidance.template,
     },
     mode,
   };
 }
 
-function outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy }) {
+function outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy, memory }) {
   return `Select evidence for a human-reviewed outreach draft. Return JSON with strategyClass and a non-empty evidence array. Do not author subject or message prose.
 
 Rules:
@@ -446,6 +519,9 @@ Rules:
 - Use the supplied ROLE_STRATEGY class; do not substitute a different-role strategy.
 - Do not claim that JobOS sent or will send anything.
 - JobOS will render all final prose deterministically from canonical evidence and strategy.
+
+CAREER_MEMORY (bounded public guidance):
+${JSON.stringify(memory, null, 2)}
 
 ROLE_STRATEGY:
 ${JSON.stringify(strategy, null, 2)}
@@ -469,12 +545,12 @@ ${JSON.stringify(ctx.evidence, null, 2)}`;
 async function llmDraft(input, fallback) {
   const cfg = llmConfig();
   if (!cfg.configured) return fallback;
-  const { job, profile, stakeholder, goal, ctx, strategy } = input;
+  const { job, profile, stakeholder, goal, ctx, strategy, memory } = input;
   try {
     const result = await generateJson({
       schemaName: 'jobos_outreach_draft',
       system: 'You are JobOS outreach evidence selection. Select only allowed evidence. Never send messages or imply external action. Do not author final prose.',
-      user: outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy }),
+      user: outreachPrompt({ job, profile, stakeholder, goal, ctx, strategy, memory }),
       temperature: 0.2,
       maxTokens: 900,
     });
@@ -644,6 +720,7 @@ function resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planI
 export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal = null, planId = null, contactId = null }) {
   const resolved = resolvePlanAndContact(s, { jobId, profileId, stakeholderId, goal, planId, contactId });
   const { job, profile, stakeholder, contact } = resolved;
+  const memory = retrieveCareerMemory(s, { profileId, consumer: 'outreach', jobId: job.id });
   const safeGoal = slug(resolved.goal || 'informational');
   const app = one(s, 'SELECT status FROM applications WHERE job_id=? ORDER BY updated_at DESC LIMIT 1', [job.id]);
   const stakeholderClass = classifyStakeholder(stakeholder);
@@ -653,12 +730,19 @@ export async function draftOutreach(s, { jobId, profileId, stakeholderId, goal =
     : resolved.plan
       ? { channel: resolved.plan.channel, pathStrength: resolved.plan.path_strength, warnings: parseJson(resolved.plan.warnings_json, []) }
       : { channel: stakeholder.links[0] ? 'public_source_manual' : 'no_contact_selected', pathStrength: stakeholder.links[0] ? 'manual' : 'unknown', warnings: [] };
-  const ctx = evidenceContext(s, { job, profile, stakeholder, contact });
-  const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy });
-  const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy }, fallback);
-  const warnings = [...new Set([...baseWarnings({ stakeholder, strategy, app, contact, selectedContactPath }), ...selectedContactPath.warnings, ...drafted.warnings])];
-  const content = renderOutreachContent({ job, profile, stakeholder, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, ...drafted, warnings });
-  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: drafted.evidence, warnings, subject: drafted.subject, mode: drafted.mode });
+  const ctx = applyProofPositioning(evidenceContext(s, { job, profile, stakeholder, contact }), memory);
+  const fallback = fallbackDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy, memory });
+  const drafted = await llmDraft({ job, profile, stakeholder, goal: safeGoal, ctx, strategy, memory }, fallback);
+  const memoryWarning = memory.rules.length ? [`Career-memory guidance retrieved and deterministically projected: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [];
+  const warnings = [...new Set([...baseWarnings({ stakeholder, strategy, app, contact, selectedContactPath }), ...selectedContactPath.warnings, ...drafted.warnings, ...memoryWarning])];
+  const style = memoryStyle(memory);
+  const content = renderOutreachContent({ job, profile, stakeholder, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, ...drafted, warnings: [`Career-memory tone: ${style.tone}; template: ${style.template}; opening: ${style.openingVariant || 'baseline'}; closing: ${style.closingVariant || 'baseline'}.`, ...warnings] });
+  const projected = validateOutreachGuidance(content, drafted.evidence, memory);
+  if (!projected.validation.valid) throw Object.assign(new Error('Deterministic outreach renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projected.validation.errors });
+  const memoryEvidence = memory.rules.length || memory.citations.length
+    ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }]
+    : [];
+  return saveOutreachArtifact(s, { job, profile, stakeholder, contact, stakeholderClass, strategy, selectedContactPath, goal: safeGoal, content, evidence: [...drafted.evidence, ...memoryEvidence], warnings: [...warnings, ...projected.warnings], subject: drafted.subject, mode: drafted.mode });
 }
 
 export function markOutreachSent(s, { artifactId, channel, notes = '' }) {

@@ -5,7 +5,7 @@ import { id, now, parseJson } from './utils.js';
 import { one, all, run, guardedWrite, queuePostCommit, recordAudit, projectAudit } from './db.js';
 import { compileApplicationReadiness, planApplication } from './readiness.js';
 import { applicationId, _writeApp } from './tracking.js';
-import { syncJob } from './jobs.js';
+import { assertJobFeedbackSignalSource, preflightProducerFeedback, syncJob } from './jobs.js';
 import { writeYaml } from './workspace.js';
 import { canonicalPacketFormBinding, resolveFormBindings } from './forms.js';
 import {
@@ -13,6 +13,9 @@ import {
   lifecycleTaskView,
   reconcileApplicationNextAction,
 } from './lifecycle.js';
+
+import { appendMemoryObservation, queueMemorySync } from './career-memory-observations.js';
+import { JOB_FEEDBACK_INPUT_SCHEMA, normalizeJobFeedbackInput } from './career-memory-contract.js';
 
 // ---------------------------------------------------------------------------
 // Error helper
@@ -723,10 +726,124 @@ export function diffApplicationPackets(s, firstPacketId, secondPacketId) {
 // ---------------------------------------------------------------------------
 // attestApplicationSubmitted
 // ---------------------------------------------------------------------------
-export function attestApplicationSubmitted(s, { packetId, submittedAt, note, source }) {
-  assertTrustedSource(source);
+function appendApplicationFeedback(s, packet, receipt, feedback, source) {
+  const observation = appendMemoryObservation(s, {
+    profileId: packet.profile_id,
+    eventType: 'job_applied',
+    sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity: { type: 'application', id: packet.application_id, versionId: receipt.id, revision: null, contentHash: receipt.receipt_hash },
+    occurredAt: feedback.occurredAt,
+    actor: 'user', source,
+    reasonCodes: feedback.reasonCodes, signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation, privateNote: feedback.privateNote,
+    payload: { decision: 'apply' }, referenceId: feedback.referenceId,
+  });
+  if (!observation.idempotent) {
+    const event = recordAudit(s, 'career_memory.observation_recorded', 'career_memory_observation', observation.id, {
+      profileId: observation.profileId, eventType: observation.eventType, sourceEntity: observation.sourceEntity,
+      reasonCodes: observation.reasonCodes, signals: observation.signals, publicExplanation: observation.publicExplanation,
+      hasPrivateNote: observation.hasPrivateNote, referenceId: feedback.referenceId,
+    }, 'none');
+    queueMemorySync(s, packet.profile_id, event);
+  }
+  return observation;
+}
 
-  const packet = one(s, 'SELECT * FROM application_packets WHERE id=?', [packetId]);
+function applicationFeedbackPreflight(s, packet, { normalizedAt, note, source, feedback }) {
+  const lockedPacket = one(s, 'SELECT * FROM application_packets WHERE id=?', [packet.id]);
+  if (!lockedPacket) throw packetError('unknown_packet', `Unknown packet: ${packet.id}`);
+  const application = one(s, 'SELECT * FROM applications WHERE id=? AND profile_id=? AND job_id=?', [
+    lockedPacket.application_id, lockedPacket.profile_id, lockedPacket.job_id,
+  ]);
+  const job = one(s, 'SELECT * FROM jobs WHERE id=? AND profile_id=?', [lockedPacket.job_id, lockedPacket.profile_id]);
+  if (!application || !job) throw packetError('memory_profile_source_mismatch', 'Packet application ownership is invalid.');
+  const existing = one(s, 'SELECT * FROM application_receipts WHERE packet_id=? ORDER BY recorded_at,id LIMIT 1', [lockedPacket.id]);
+  if (existing && existing.type !== 'user_attestation') {
+    throw packetError('packet_already_submitted', `Packet ${lockedPacket.id} already has confirmed submission evidence`, {
+      receiptId: existing.id, receiptType: existing.type, idempotent: true,
+    });
+  }
+  if (!existing) {
+    const confirmedAttempt = one(s, "SELECT id FROM form_submission_attempts WHERE packet_id=? AND status='confirmed' LIMIT 1", [lockedPacket.id]);
+    if (confirmedAttempt) {
+      throw packetError('packet_already_submitted', `Packet ${lockedPacket.id} already has a confirmed configured submission`, {
+        submissionAttemptId: confirmedAttempt.id, idempotent: true,
+      });
+    }
+  }
+  const appliedOrLater = new Set(['applied', 'recruiter-screen', 'interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
+  const preApply = new Set(['saved', 'researching', 'materials-ready']);
+  if ((existing && !appliedOrLater.has(application.status))
+    || (!existing && !preApply.has(application.status) && !appliedOrLater.has(application.status))) {
+    throw packetError('memory_source_state_invalid', `Application ${application.id} is not in an attestable canonical state.`);
+  }
+  const receiptContent = buildReceiptContent({
+    type: 'user_attestation',
+    packetHash: lockedPacket.content_hash,
+    submittedAt: normalizedAt,
+    externalReference: '',
+    evidenceHash: '',
+    note: note || '',
+    formFingerprint: lockedPacket.form_fingerprint,
+  });
+  const receiptHash = packetContentHash(receiptContent);
+  if (existing && existing.receipt_hash !== receiptHash) {
+    throw packetError('receipt_conflict', `Existing receipt for packet ${lockedPacket.id} has different content; original receipt unchanged`);
+  }
+  const receiptId = existing?.id || id('rcpt', `${lockedPacket.id}:user_attestation:${normalizedAt}`);
+  const sourceEntity = {
+    type: 'application', id: application.id, versionId: receiptId, revision: null, contentHash: receiptHash,
+  };
+  assertJobFeedbackSignalSource(job, feedback.signals);
+  const replay = preflightProducerFeedback(s, {
+    profileId: lockedPacket.profile_id,
+    eventType: 'job_applied',
+    sourceEntity,
+    feedback,
+    actor: 'user',
+    source,
+    job,
+  });
+  if (replay && !existing) throw packetError('memory_source_state_invalid', 'Application feedback replay has no immutable receipt source.');
+  if (replay) return { packet: lockedPacket, application, existing, receiptHash, receiptId, replay };
+
+  let lockedHash = null;
+  try {
+    lockedHash = packetContentHash(buildPacketProjection(s, { jobId: lockedPacket.job_id, profileId: lockedPacket.profile_id }));
+  } catch {}
+  const currency = packetCurrency(s, lockedPacket, lockedHash);
+  if (currency !== 'current') {
+    throw packetError('packet_stale', `Packet ${lockedPacket.id} is ${currency}; only current packets are attestable`, {
+      changedPaths: lockedHash !== lockedPacket.content_hash ? ['/contentHash'] : [],
+    });
+  }
+  return { packet: lockedPacket, application, existing, receiptHash, receiptId, replay };
+}
+
+function applicationFeedbackReplayResult(s, packet, receipt, observation) {
+  const action = one(s, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open' ORDER BY created_at DESC,id DESC LIMIT 1`, [packet.application_id]);
+  return {
+    receipt: formatReceiptRow(receipt),
+    receiptId: receipt.id,
+    idempotent: true,
+    receiptBound: true,
+    applicationStatusChanged: false,
+    previousStatus: null,
+    currentStatus: null,
+    externalSideEffects: 'none',
+    submissionPerformed: false,
+    nextAction: action ? lifecycleTaskView(action, { nowDate: new Date(receipt.submitted_at) }) : null,
+    observation,
+  };
+}
+
+export function attestApplicationSubmitted(s, { packetId, submittedAt, note, source, memoryFeedback = null }) {
+  assertTrustedSource(source);
+  const feedback = memoryFeedback === null ? null : normalizeJobFeedbackInput(memoryFeedback);
+  if (feedback && feedback.decision !== 'apply') throw packetError('memory_source_state_invalid', `Feedback decision ${feedback.decision} does not match application submission`);
+
+  let packet = one(s, 'SELECT * FROM application_packets WHERE id=?', [packetId]);
   if (!packet) throw packetError('unknown_packet', `Unknown packet: ${packetId}`);
   if (Number(packet.packet_version || 1) !== 2 || !packet.form_fingerprint || !packet.form_binding_json) {
     throw packetError('legacy_packet_unbound', `Packet ${packetId} is not bound to a versioned live form; re-inspect and freeze a packet v2`);
@@ -734,10 +851,21 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
 
   // Validate submitted_at
   const normalizedAt = normalizeRfc3339(submittedAt);
-  const packetHash = packet.content_hash;
+  let packetHash = packet.content_hash;
+
+  if (feedback) {
+    const preflight = applicationFeedbackPreflight(s, packet, { normalizedAt, note, source, feedback });
+    if (preflight.replay) return applicationFeedbackReplayResult(s, preflight.packet, preflight.existing, preflight.replay);
+  }
 
 
   return guardedWrite(s, () => {
+    if (feedback) {
+      const preflight = applicationFeedbackPreflight(s, packet, { normalizedAt, note, source, feedback });
+      if (preflight.replay) return applicationFeedbackReplayResult(s, preflight.packet, preflight.existing, preflight.replay);
+      packet = preflight.packet;
+      packetHash = packet.content_hash;
+    }
     // Re-check every receipt/confirmed-attempt closure before allowing manual evidence.
     const anyReceipt = one(s, 'SELECT * FROM application_receipts WHERE packet_id=? ORDER BY recorded_at,id LIMIT 1', [packetId]);
     if (anyReceipt && anyReceipt.type !== 'user_attestation') {
@@ -776,6 +904,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
           eventType: 'submission_attested',
           occurredAt: existing.submitted_at,
         });
+        const observation = feedback ? appendApplicationFeedback(s, packet, existing, feedback, source) : null;
         queuePostCommit(s, () => {
           // Refresh readiness YAML
           try { planApplication(s, { jobId: packet.job_id, profileId: packet.profile_id, writeMirror: true }); } catch {}
@@ -792,6 +921,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
           externalSideEffects: 'none',
           submissionPerformed: false,
           nextAction,
+          observation,
         };
       }
       // Conflict — different hash for same packet/type
@@ -857,6 +987,9 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       eventType: 'submission_attested',
       occurredAt: normalizedAt,
     });
+    const observation = feedback ? appendApplicationFeedback(
+      s, packet, one(s, 'SELECT * FROM application_receipts WHERE id=?', [receiptId]), feedback, source,
+    ) : null;
 
     // Audit
     const auditPayload = {
@@ -904,6 +1037,7 @@ export function attestApplicationSubmitted(s, { packetId, submittedAt, note, sou
       externalSideEffects: 'none',
       submissionPerformed: false,
       nextAction,
+      observation,
     };
   });
 }

@@ -166,6 +166,180 @@ CREATE TABLE IF NOT EXISTS interview_debrief_revisions (
   FOREIGN KEY(supersedes_revision_id) REFERENCES interview_debrief_revisions(id)
 );`;
 
+const w08CareerMemorySchema = `CREATE TABLE IF NOT EXISTS career_memory_observations (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  event_type TEXT NOT NULL CHECK(event_type IN (
+    'job_saved','job_skipped','job_applied',
+    'artifact_approved','artifact_rejected','artifact_edited'
+  )),
+  source_schema TEXT NOT NULL,
+  source_entity_type TEXT NOT NULL CHECK(source_entity_type IN ('job','application','artifact')),
+  source_entity_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL,
+  source_revision INTEGER CHECK(source_revision IS NULL OR source_revision > 0),
+  source_content_hash TEXT NOT NULL DEFAULT '',
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
+  reason_codes_json TEXT NOT NULL DEFAULT '[]',
+  signal_json TEXT NOT NULL DEFAULT '[]',
+  public_explanation TEXT NOT NULL DEFAULT '',
+  private_note TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  reference_id TEXT NOT NULL,
+  supersedes_observation_id TEXT,
+  undoes_observation_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  observation_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(profile_id, reference_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_observation_id, profile_id)
+    REFERENCES career_memory_observations(id, profile_id),
+  FOREIGN KEY(undoes_observation_id, profile_id)
+    REFERENCES career_memory_observations(id, profile_id),
+  CHECK(supersedes_observation_id IS NULL OR correction_reason != '')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS career_memory_observations_one_successor_idx
+  ON career_memory_observations(supersedes_observation_id)
+  WHERE supersedes_observation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS career_memory_observations_profile_time_idx
+  ON career_memory_observations(profile_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS career_memory_observations_source_idx
+  ON career_memory_observations(profile_id, source_schema, source_entity_type, source_entity_id, source_version_id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposals (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  domain TEXT NOT NULL CHECK(domain IN ('search','writing')),
+  scope TEXT NOT NULL CHECK(scope IN ('search','resume','cover_letter','outreach','interview_prep','writing_global')),
+  rule_type TEXT NOT NULL CHECK(rule_type IN (
+    'role_family','seniority','company_stage','industry','mission','location',
+    'work_model','compensation','skill','timing','trust_risk',
+    'tone','length','opening','closing','avoid_term','avoid_claim',
+    'positioning_priority','approved_exemplar'
+  )),
+  value_json TEXT NOT NULL,
+  rule_key TEXT NOT NULL,
+  conflict_key TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  confidence_milli INTEGER NOT NULL CHECK(confidence_milli BETWEEN 0 AND 1000),
+  confidence_band TEXT NOT NULL CHECK(confidence_band IN ('low','medium','high')),
+  conflict_state TEXT NOT NULL CHECK(conflict_state IN ('none','present')),
+  evidence_hash TEXT NOT NULL,
+  evidence_fresh_until TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp','deterministic')),
+  proposal_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  CHECK((domain='search' AND scope='search') OR (domain='writing' AND scope!='search')),
+  CHECK(NOT (rule_type='approved_exemplar' AND scope='writing_global'))
+);
+CREATE INDEX IF NOT EXISTS career_memory_proposals_profile_rule_idx
+  ON career_memory_proposals(profile_id, domain, scope, conflict_key, created_at, id);
+CREATE INDEX IF NOT EXISTS career_memory_proposals_profile_fresh_idx
+  ON career_memory_proposals(profile_id, evidence_fresh_until, id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposal_evidence (
+  proposal_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  observation_schema TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  source_entity_type TEXT NOT NULL,
+  source_entity_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  polarity TEXT NOT NULL CHECK(polarity IN ('support','conflict')),
+  weight INTEGER NOT NULL CHECK(weight IN (1,2)),
+  evidence_hash TEXT NOT NULL,
+  PRIMARY KEY(proposal_id, position),
+  UNIQUE(proposal_id, observation_schema, observation_id),
+  FOREIGN KEY(proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS career_memory_proposal_evidence_source_idx
+  ON career_memory_proposal_evidence(profile_id, observation_schema, observation_id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposal_transitions (
+  id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  from_status TEXT CHECK(from_status IS NULL OR from_status IN ('proposed','accepted','rejected','superseded','revoked')),
+  to_status TEXT NOT NULL CHECK(to_status IN ('proposed','accepted','rejected','superseded','revoked')),
+  reason TEXT NOT NULL DEFAULT '',
+  reference_id TEXT NOT NULL,
+  replacement_proposal_id TEXT,
+  undoes_transition_id TEXT,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp','deterministic')),
+  occurred_at TEXT NOT NULL,
+  transition_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(id, proposal_id, profile_id),
+  UNIQUE(proposal_id, sequence),
+  UNIQUE(profile_id, reference_id),
+  FOREIGN KEY(proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(replacement_proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(undoes_transition_id, profile_id)
+    REFERENCES career_memory_proposal_transitions(id, profile_id),
+  CHECK((sequence=1 AND from_status IS NULL AND to_status='proposed') OR sequence>1)
+);
+CREATE INDEX IF NOT EXISTS career_memory_transitions_resolve_idx
+  ON career_memory_proposal_transitions(profile_id, proposal_id, sequence DESC);
+
+CREATE TABLE IF NOT EXISTS career_memory_projection_revisions (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  projection_type TEXT NOT NULL CHECK(projection_type IN ('career_brief','voice_positioning_guide')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  as_of TEXT NOT NULL,
+  source_state_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(profile_id, projection_type, revision),
+  UNIQUE(profile_id, projection_type, source_state_hash),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS career_memory_projection_current_idx
+  ON career_memory_projection_revisions(profile_id, projection_type, revision DESC);
+
+CREATE TABLE IF NOT EXISTS career_memory_projection_sources (
+  projection_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  source_kind TEXT NOT NULL CHECK(source_kind IN (
+    'profile_field','proof_point','saved_search','accepted_rule','observation','artifact_revision'
+  )),
+  source_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL DEFAULT '',
+  source_hash TEXT NOT NULL,
+  PRIMARY KEY(projection_id, position),
+  UNIQUE(projection_id, source_kind, source_id, source_version_id),
+  FOREIGN KEY(projection_id, profile_id)
+    REFERENCES career_memory_projection_revisions(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);`;
+
+function migrateW08CareerMemory(db) {
+  db.run(w08CareerMemorySchema);
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W08 career-memory migration left foreign-key violations');
+}
+
 const schema = `PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, preferences_json TEXT NOT NULL, resume_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -331,7 +505,7 @@ CREATE TABLE IF NOT EXISTS form_submission_attempts (
   external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')),
   FOREIGN KEY(packet_id) REFERENCES application_packets(id),
   FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id)
-);${interviewSchema}`;
+);${interviewSchema}${w08CareerMemorySchema}`;
 
 function tableDefinition(db, name) {
   return String(dbRows(db, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [name])[0]?.sql || '');
@@ -682,6 +856,7 @@ function migrate(db){
   }
   migrateW02Constraints(db);
   migrateW06Tasks(db);
+  migrateW08CareerMemory(db);
   const backfillKey = 'migration_resume_import_backfill';
   const check = db.prepare('SELECT value FROM meta WHERE key=?', [backfillKey]);
   let alreadyBackfilled = false;
@@ -1002,6 +1177,7 @@ function loadAuthoritativeStore(s) {
   migrateArtifacts(s.db);
   migratePolicyPreferences(s.db);
   seedDefaultAutomations(s);
+  s.db.run('PRAGMA foreign_keys=ON');
   s.baseRevision = revisionOf(s.db);
   return s;
 }
@@ -1031,6 +1207,7 @@ function persistLocked(s) {
       try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
     } catch {}
     s.baseRevision = next;
+    s.db.run('PRAGMA foreign_keys=ON');
   } finally {
     if (temp) try { fs.unlinkSync(temp); } catch {}
   }
@@ -1060,12 +1237,14 @@ export async function openStore(flags={}) {
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','14']);
+  db.run('PRAGMA foreign_keys=ON');
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','15']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   const { backfillLifecycleActions } = await import('./lifecycle.js');
   const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '14' || affectedJobIds.length) save(store);
+  if (!existed || previousSchemaVersion !== '15' || affectedJobIds.length) save(store);
+  db.run('PRAGMA foreign_keys=ON');
   if (affectedJobIds.length) {
     const { syncJob } = await import('./jobs.js');
     for (const jobId of affectedJobIds) syncJob(store, jobId);

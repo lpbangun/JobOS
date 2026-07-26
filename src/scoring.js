@@ -4,6 +4,7 @@ import { assertJobLivenessGate, resolveJobLiveness, syncJob } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 import { activeVerifiedProofs } from './profiles.js';
 import { buildRequirementCoverage, inventoryForJob, requirementTextsForJob } from './requirements.js';
+import { evaluateSearchGuidance } from './career-memory-retrieval.js';
 
 export const FIT_CONTRACT = 'jobos.fit-score.v1';
 export const FIT_DIMENSION_WEIGHTS = Object.freeze({
@@ -662,6 +663,7 @@ export async function score(s, jobId, profileId, opts = {}) {
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw Error(`Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+  const memoryGuidance = evaluateSearchGuidance(s, { profileId, jobId });
   const liveness = await resolveJobLiveness(s, jobId, opts);
   assertJobLivenessGate(liveness, 'be scored');
   job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
@@ -713,6 +715,7 @@ export async function score(s, jobId, profileId, opts = {}) {
   save(s);
   return {
     ...fit,
+    memoryGuidance,
     postingLiveness: liveness.handoff,
     ...(liveness.warning ? { warnings: [liveness.warning] } : {})
   };

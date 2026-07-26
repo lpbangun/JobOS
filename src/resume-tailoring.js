@@ -7,6 +7,7 @@ import { currentResume, validateResumeDocument } from './resumes.js';
 import { renderResumePdf, resolveLayoutProfile } from './resume-renderer.js';
 import { parseJson, tokenize } from './utils.js';
 import { writeYaml } from './workspace.js';
+import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
 
 function unique(values) { return [...new Set(values.filter(Boolean))]; }
 function copy(value) { return structuredClone(value); }
@@ -180,6 +181,103 @@ function reorderByCoverage(document, coverage) {
   return output;
 }
 
+function resumeMemoryRule(packet, type) { return packet.rules.find(rule => rule.ruleType === type) || null; }
+function resumeMemoryStyle(packet) {
+  const tone = resumeMemoryRule(packet, 'tone')?.value.value || 'baseline';
+  return {
+    tone,
+    template: { concise: 'concise_resume', warm: 'warm_resume', analytical: 'evidence_resume', direct: 'direct_resume', narrative: 'narrative_resume', formal: 'formal_resume' }[tone] || 'baseline',
+    openingVariant: resumeMemoryRule(packet, 'opening')?.value.value || null,
+    closingVariant: resumeMemoryRule(packet, 'closing')?.value.value || null,
+  };
+}
+
+function applyResumeGuidance(document, packet) {
+  const positioning = resumeMemoryRule(packet, 'positioning_priority');
+  if (!positioning) return document;
+  const output = copy(document);
+  const rank = new Map(positioning.value.proofPointIds.map((proofPointId, index) => [proofPointId, index]));
+  const bulletRank = bullet => Math.min(...(bullet.proofPointIds || []).map(proofPointId => rank.get(proofPointId) ?? Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+  for (const sectionName of ['experience', 'projects']) for (const entry of output[sectionName] || []) {
+    entry.bullets = (entry.bullets || []).filter(bullet => (bullet.proofPointIds || []).some(proofPointId => rank.has(proofPointId))).sort((left, right) => bulletRank(left) - bulletRank(right));
+  }
+  if (output.summary?.generated && !(output.summary.proofPointIds || []).some(proofPointId => rank.has(proofPointId))) output.summary = null;
+  return output;
+}
+
+function resumeGuidanceHeader(packet) {
+  if (!packet.rules.length) return '';
+  const style = resumeMemoryStyle(packet);
+  return `**Career-memory tone:** ${style.tone}\n**Career-memory template:** ${style.template}\n**Opening variant:** ${style.openingVariant || 'baseline'}\n**Closing variant:** ${style.closingVariant || 'baseline'}\n\n`;
+}
+
+function resumeTemplateHeading(packet) {
+  return {
+    concise_resume: '## Concise resume — selected evidence',
+    warm_resume: '## Warm resume — contribution and evidence',
+    evidence_resume: '## Evidence resume — requirement analysis',
+    direct_resume: '## Direct resume — evidence first',
+    narrative_resume: '## Narrative resume — progression and impact',
+    formal_resume: '## Formal resume — qualifications and evidence',
+  }[resumeMemoryStyle(packet).template] || '## Resume — qualifications and evidence';
+}
+
+function resumeGuidanceFrame(text, document, packet) {
+  if (!packet.rules.length) return text;
+  const style = resumeMemoryStyle(packet);
+  const firstEvidence = [...(document.experience || []), ...(document.projects || [])].flatMap(entry => entry.bullets || [])[0]?.text
+    || document.summary?.text
+    || 'Review the strongest verified evidence first.';
+  const opening = {
+    direct: 'Direct opening: Review the role-aligned qualifications below.',
+    context_first: 'Context-led opening: Read these qualifications against the target role and its stated requirements.',
+    proof_first: `Evidence-led opening: ${firstEvidence}`,
+    none: '',
+  }[style.openingVariant] ?? '';
+  const closing = {
+    gratitude: 'Guided closing: Thank the reader for reviewing these verified qualifications.',
+    call_to_action: 'Guided closing: Discuss the cited evidence and role requirements in the next conversation.',
+    none: '',
+  }[style.closingVariant] ?? '';
+  return `${resumeGuidanceHeader(packet)}${resumeTemplateHeading(packet)}\n\n${opening}${opening ? '\n\n' : ''}${text.trimEnd()}${closing ? `\n\n${closing}` : ''}\n`;
+}
+
+function renderedResumeVariants(text, packet) {
+  const style = resumeMemoryStyle(packet);
+  const openingChecks = {
+    direct: /Direct opening: Review the role-aligned qualifications below\./,
+    context_first: /Context-led opening: Read these qualifications against the target role/,
+    proof_first: /Evidence-led opening: \S/,
+    none: new RegExp(`${resumeTemplateHeading(packet).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n\\n#`),
+  };
+  const closingChecks = {
+    gratitude: /Guided closing: Thank the reader for reviewing these verified qualifications\./,
+    call_to_action: /Guided closing: Discuss the cited evidence and role requirements in the next conversation\./,
+    none: /\n$/,
+  };
+  return {
+    openingVariant: style.openingVariant && openingChecks[style.openingVariant]?.test(text) ? style.openingVariant : null,
+    closingVariant: style.closingVariant && closingChecks[style.closingVariant]?.test(text)
+      && (style.closingVariant !== 'none' || !/Guided closing:/.test(text)) ? style.closingVariant : null,
+  };
+}
+
+function selectedResumeProofIds(document) {
+  return unique([...(document.summary?.proofPointIds || []), ...(document.experience || []).flatMap(entry => (entry.bullets || []).flatMap(bullet => bullet.proofPointIds || [])), ...(document.projects || []).flatMap(entry => (entry.bullets || []).flatMap(bullet => bullet.proofPointIds || []))]);
+}
+
+function validateResumeGuidance(text, selectedProofPointIds, packet) {
+  const style = resumeMemoryStyle(packet);
+  const candidate = { text, proofPointIds: selectedProofPointIds, claims: [], exemplarExcerptHashes: [], ...renderedResumeVariants(text, packet) };
+  const validation = validateWritingGuidance(candidate, packet);
+  const toneRule = resumeMemoryRule(packet, 'tone');
+  if (toneRule && !text.includes(resumeTemplateHeading(packet))) {
+    validation.errors.push({ code: 'memory_writing_tone_invalid', ruleIds: [toneRule.id], details: { expectedTemplate: style.template } });
+    validation.valid = false;
+  }
+  return { validation, warnings: [] };
+}
+
 export function validateTailoredResume({ document, canonical, proofs, coverage, sourceResumeRevisionId }) {
   const base = validateResumeDocument(document);
   const blockers = [...base.blockers];
@@ -246,8 +344,8 @@ export function renderSemanticResumeMarkdown(document, { sectionOrder = ['summar
   return `# ${identity.name}\n\n${contact}\n\n${sectionOrder.map(name => sections[name]).filter(Boolean).join('\n\n')}\n`;
 }
 
-function tailoringPrompt(job, profile, canonical, coverage, proofs) {
-  return `Return only typed resume transformations. Never return identity, employers, titles, dates, education, credentials, or LaTeX. Use only listed sourceBulletId, proofPointId, and selectedSkillIds. Every rewritten factual claim must cite active proof IDs. Schema: ${JSON.stringify(RESUME_TRANSFORMATION_SCHEMA)}\n\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, requirements: inventoryForJob(job) })}\nPROFILE: ${JSON.stringify({ id: profile.id, name: profile.name })}\nCANONICAL: ${JSON.stringify(canonical)}\nCOVERAGE: ${JSON.stringify(coverage)}\nPROOFS: ${JSON.stringify(proofs.map(proof => ({ id: proof.id, summary: proof.summary, metrics: proof.metrics, skills: proof.skills, sourceResumeEntryId: proof.source_resume_entry_id })))}`;
+function tailoringPrompt(job, profile, canonical, coverage, proofs, memory) {
+  return `Return only typed resume transformations. Never return identity, employers, titles, dates, education, credentials, or LaTeX. Use only listed sourceBulletId, proofPointId, and selectedSkillIds. Every rewritten factual claim must cite active proof IDs. Schema: ${JSON.stringify(RESUME_TRANSFORMATION_SCHEMA)}\n\nCAREER MEMORY (bounded public guidance): ${JSON.stringify(memory)}\n\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, requirements: inventoryForJob(job) })}\nPROFILE: ${JSON.stringify({ id: profile.id, name: profile.name })}\nCANONICAL: ${JSON.stringify(canonical)}\nCOVERAGE: ${JSON.stringify(coverage)}\nPROOFS: ${JSON.stringify(proofs.map(proof => ({ id: proof.id, summary: proof.summary, metrics: proof.metrics, skills: proof.skills, sourceResumeEntryId: proof.source_resume_entry_id })))}`;
 }
 
 export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutProfileId = null, pageSize = 'letter', pageLimit = 2, density = 'standard', format = 'markdown' }) {
@@ -256,23 +354,27 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
   if (!profile) throw Error(`Unknown profile: ${profileId}`);
   if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+  const memory = retrieveCareerMemory(s, { profileId, consumer: 'tailoring', jobId, artifactType: 'resume' });
   const source = currentResume(s, profileId);
   if (!source) throw Object.assign(new Error('A canonical resume is required before tailoring.'), { code: 'resume_source_missing', type: 'validation' });
   const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified' ORDER BY created_at", [profileId]).map(proofRecord);
   const inventory = inventoryForJob(job);
   const initialCoverage = buildRequirementCoverage(inventory, proofs);
-  let document = reorderByCoverage(groundCanonicalClaims(source.document, proofs), initialCoverage);
+  const deterministicDocument = applyResumeGuidance(reorderByCoverage(groundCanonicalClaims(source.document, proofs), initialCoverage), memory);
+  let document = copy(deterministicDocument);
   const transformationWarnings = [];
   const cfg = llmConfig();
   let mode = 'deterministic';
+  let generatedOutputRejected = false;
   let selectedLayout = layoutProfileId;
   if (cfg.configured && proofs.length) {
     try {
-      const generated = await generateJson({ schemaName: 'jobos_resume_transformations', system: 'You are a constrained resume content transformer. Never invent facts or alter fixed fields.', user: tailoringPrompt(job, profile, source.document, initialCoverage, proofs) });
+      const generated = await generateJson({ schemaName: 'jobos_resume_transformations', system: 'You are a constrained resume content transformer. Never invent facts or alter fixed fields.', user: tailoringPrompt(job, profile, source.document, initialCoverage, proofs, memory) });
       if (generated.ok) {
         const transformed = applyResumeTransformations(document, generated.json, proofs);
-        document = transformed.document;
+        document = applyResumeGuidance(transformed.document, memory);
         transformationWarnings.push(...transformed.warnings);
+        generatedOutputRejected = transformed.warnings.some(message => /^Ignored unknown skill IDs\b/.test(message));
         selectedLayout = transformed.layoutProfileId || selectedLayout;
         mode = 'llm';
       }
@@ -281,12 +383,29 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
       transformationWarnings.push(`LLM transformation failed; used deterministic complete resume: ${error.message}`);
     }
   }
-  const selectedProofPointIds = unique([...(document.summary?.proofPointIds || []), ...(document.experience || []).flatMap(entry => (entry.bullets || []).flatMap(bullet => bullet.proofPointIds || [])), ...(document.projects || []).flatMap(entry => (entry.bullets || []).flatMap(bullet => bullet.proofPointIds || []))]);
-  const coverage = buildRequirementCoverage(inventory, proofs, { selectedProofPointIds });
-  const validation = validateTailoredResume({ document, canonical: source.document, proofs, coverage, sourceResumeRevisionId: source.id });
-  validation.warnings.push(...transformationWarnings.map(message => ({ code: 'resume_transformation_warning', message })));
   const layoutProfile = resolveLayoutProfile(job, { layout: selectedLayout, sectionOrder, pageSize, pageLimit, density });
-  const content = renderSemanticResumeMarkdown(document, layoutProfile);
+  const deriveState = currentDocument => {
+    const selectedProofPointIds = selectedResumeProofIds(currentDocument);
+    const coverage = buildRequirementCoverage(inventory, proofs, { selectedProofPointIds });
+    const validation = validateTailoredResume({ document: currentDocument, canonical: source.document, proofs, coverage, sourceResumeRevisionId: source.id });
+    return { selectedProofPointIds, coverage, validation };
+  };
+  let state = deriveState(document);
+  let content = resumeGuidanceFrame(renderSemanticResumeMarkdown(document, layoutProfile), document, memory);
+  let guidance = validateResumeGuidance(content, state.selectedProofPointIds, memory);
+  if (mode === 'llm' && (generatedOutputRejected || !state.validation.valid || !guidance.validation.valid)) {
+    const codes = [...state.validation.blockers.map(blocker => blocker.code), ...guidance.validation.errors.map(error => error.code)];
+    transformationWarnings.push(`LLM transformation failed generated-output validation (${codes.join(', ')}); used deterministic complete resume.`);
+    document = copy(deterministicDocument);
+    mode = 'deterministic';
+    state = deriveState(document);
+    content = resumeGuidanceFrame(renderSemanticResumeMarkdown(document, layoutProfile), document, memory);
+    guidance = validateResumeGuidance(content, state.selectedProofPointIds, memory);
+  }
+  if (!guidance.validation.valid) throw Object.assign(new Error('Deterministic resume renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: guidance.validation.errors });
+  const { selectedProofPointIds, coverage, validation } = state;
+  validation.warnings.push(...transformationWarnings.map(message => ({ code: 'resume_transformation_warning', message })));
+  validation.warnings.push(...guidance.warnings.map(message => ({ code: 'resume_memory_rule_omitted', message })));
   const relativePath = path.join('jobs', job.id, 'artifacts', 'resume-tailored.md');
   let renderManifest = { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] };
   const artifact = createArtifact(s, {
@@ -296,8 +415,11 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
     path: relativePath,
     title: `Tailored resume for ${job.title}`,
     content,
-    evidence: selectedProofPointIds.map(proofPointId => ({ proofPointId })),
-    warnings: validation.warnings.map(warning => warning.message),
+    evidence: [
+      ...selectedProofPointIds.map(proofPointId => ({ proofPointId })),
+      ...(memory.rules.length || memory.citations.length ? [{ careerMemoryRuleIds: memory.rules.map(rule => rule.id), careerMemoryCitations: memory.citations }] : []),
+    ],
+    warnings: [...validation.warnings.map(warning => warning.message), ...(memory.rules.length ? [`Career-memory guidance retrieved and deterministically projected: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
     series: { kind: 'resume' },
     auditPayload: { sourceResumeRevisionId: source.id, semanticValidationStatus: validation.valid ? 'passed' : 'blocked', mode },
     mutate: (store, created) => run(store, 'INSERT INTO artifact_resume_documents (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json) VALUES (?,?,?,?,?,?,?,?)', [created.id, 1, source.id, JSON.stringify(document), JSON.stringify(coverage), JSON.stringify(validation), JSON.stringify(layoutProfile), JSON.stringify(renderManifest)])

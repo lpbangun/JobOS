@@ -312,7 +312,7 @@ test('W06-MIGRATE-01 schema 12 migrates without rewriting W02/W05/application ev
   const root = workspaceFromFixture(t);
   const store = await openStore({ workspace: root });
 
-  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '14');
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '15');
   assert.deepEqual(all(store, 'PRAGMA foreign_key_check'), []);
   assert.deepEqual(stableRows(store, 'application_packets'), before.packets);
   assert.deepEqual(stableRows(store, 'application_receipts'), before.receipts);
