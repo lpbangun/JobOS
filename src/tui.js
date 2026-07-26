@@ -7,7 +7,9 @@ import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
-import { setNetworkIntent } from './profiles.js';
+import { addProof, createProfile, setNetworkIntent } from './profiles.js';
+import { importResume, replaceResume } from './resumes.js';
+import { importText } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
@@ -967,7 +969,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
@@ -1016,7 +1018,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -2812,7 +2814,77 @@ export class JobosTui {
       this.render();
       return true;
     }
+    if (actionId === 'create_profile') {
+      this.state.mode = 'setup-profile';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter the canonical profile name · Enter saves · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (['import_resume', 'replace_resume', 'import_local_job'].includes(actionId)) {
+      this.state.mode = 'setup-file';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter a local file path · validation runs before setup advances · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (actionId === 'correct_proofs') {
+      this.state.mode = 'setup-proof';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
+      this.render();
+      return true;
+    }
     return this.openSetupCorrection(item);
+  }
+
+  commitSetupForm() {
+    const actionId = this.state.setupFormAction;
+    const input = this.state.input.trim();
+    if (!input) {
+      this.state.error = 'Input is required';
+      this.state.status = 'Setup input is required; no canonical state was changed.';
+      this.render();
+      return true;
+    }
+    try {
+      if (actionId === 'create_profile') {
+        const result = createProfile(this.store, input);
+        this.state.setupProfileId = result.profile.id;
+        this.state.profileId = result.profile.id;
+      } else if (actionId === 'import_resume' || actionId === 'replace_resume') {
+        const owner = actionId === 'replace_resume' ? replaceResume : importResume;
+        owner(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+      } else if (actionId === 'correct_proofs') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        if (!summary) throw new Error('Proof summary is required.');
+        addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
+      } else if (actionId === 'import_local_job') {
+        const result = importText(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+        this.state.setupJobId = result.job.id;
+        this.state.selectedJobId = result.job.id;
+      }
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.setupFormAction = null;
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      const nextStepId = this.model.onboarding.nextAction
+        ? this.model.onboarding.steps.find(item => item.actions.some(candidate => candidate.id === this.model.onboarding.nextAction.id))?.id
+        : null;
+      const nextIndex = this.model.onboarding.steps.findIndex(item => item.id === nextStepId);
+      if (nextIndex >= 0) this.state.overlayIndex = nextIndex;
+      this.state.status = `${actionId} complete · setup recomputed from canonical state`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${actionId} failed: ${error.message} · correct the input and retry`;
+      this.render();
+    }
+    return true;
   }
 
   onBuildNetworkKey(value, key, items) {
@@ -2872,6 +2944,7 @@ export class JobosTui {
     if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
+      if (['setup-profile', 'setup-file', 'setup-proof'].includes(mode)) return this.commitSetupForm();
       if (mode === 'review-note') {
         void this.submitReviewNote();
         return true;
@@ -2991,7 +3064,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);

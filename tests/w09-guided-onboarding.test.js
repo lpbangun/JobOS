@@ -138,3 +138,25 @@ test('W09-RECOVERY-05 setup navigation, recompute, and Escape are zero-write', a
   assert.equal(tui.state.overlay, null);
   assert.deepEqual(readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite')), before);
 });
+
+test('W09-JOURNEY-02 TUI canonical form advances only after success and retains invalid correction input', async () => {
+  const { JobosTui } = await import('../src/tui.js');
+  const s = await openStore({ workspace: root() });
+  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+  const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  tui.onKeypress('j', { name: 'j' });
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.mode, 'setup-profile');
+  tui.state.input = 'Guided Profile';
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.model.onboarding.steps.find(step => step.id === 'profile').status, 'complete');
+  assert.equal(tui.model.onboarding.nextAction.id, 'import_resume');
+  assert.equal(tui.state.overlayIndex, 2);
+  tui.onKeypress('', { name: 'return' });
+  tui.state.input = '/definitely/missing/resume.json';
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.mode, 'setup-file');
+  assert.equal(tui.state.input, '/definitely/missing/resume.json');
+  assert.match(tui.state.status, /import_resume failed/);
+  assert.equal(tui.model.onboarding.steps.find(step => step.id === 'resume').status, 'blocked');
+});
