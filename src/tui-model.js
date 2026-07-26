@@ -10,6 +10,9 @@ import { listPersonCandidates } from './research/contacts.js';
 import { due, taskView } from './tracking.js';
 import { requirementTextsForJob } from './requirements.js';
 import { compareFitDecisions } from './scoring.js';
+import { listMemoryObservations } from './career-memory-observations.js';
+import { listMemoryProposals, resolveActiveMemoryRules } from './career-memory-proposals.js';
+import { getCareerBrief, getVoicePositioningGuide } from './career-memory-projections.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set([
   'saved',
@@ -293,6 +296,51 @@ function interviewProjection(s, { profileId, selected }) {
   };
 }
 
+function memoryProjection(s, { profileId, at }) {
+  if (!profileId) {
+    return {
+      profileId: null,
+      observations: [],
+      proposals: [],
+      careerBrief: null,
+      voiceGuide: null,
+      counts: { observations: 0, proposals: 0, active: 0 },
+    };
+  }
+  const nowDate = new Date(at);
+  const observations = listMemoryObservations(s, {
+    profileId,
+    sinceDays: null,
+    includeHistory: false,
+    includePrivateNotes: false,
+    nowDate,
+  }).observations;
+  const resolved = resolveActiveMemoryRules(s, { profileId, asOf: nowDate });
+  const activeIds = new Set(resolved.rules.map(rule => rule.id));
+  const excludedReasons = new Map(resolved.excluded.map(item => [item.proposalId, item.reason]));
+  const proposals = listMemoryProposals(s, { profileId, includeEvidence: true }).proposals.map(proposal => {
+    const stale = proposal.evidenceFreshUntil < at;
+    const active = activeIds.has(proposal.id);
+    const inactiveReason = active
+      ? null
+      : excludedReasons.get(proposal.id)
+        || (stale ? 'evidence_stale' : `status_${proposal.status}`);
+    return { ...proposal, stale, active, inactiveReason };
+  });
+  return {
+    profileId,
+    observations,
+    proposals,
+    careerBrief: getCareerBrief(s, { profileId, refresh: false, asOf: nowDate }),
+    voiceGuide: getVoicePositioningGuide(s, { profileId, refresh: false, asOf: nowDate }),
+    counts: {
+      observations: observations.length,
+      proposals: proposals.length,
+      active: proposals.filter(proposal => proposal.active).length,
+    },
+  };
+}
+
 export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = new Date().toISOString() } = {}) {
   const profiles = all(s, 'SELECT id,name,created_at,updated_at FROM profiles ORDER BY created_at').map(row => ({
     id: row.id,
@@ -421,6 +469,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     profileId: selectedProfile,
     selected: details
   });
+  const memory = memoryProjection(s, { profileId: selectedProfile, at });
 
   return {
     version: 2,
@@ -441,6 +490,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selectedJobId: selectedId,
     selected: details,
     interviews,
+    memory,
     review: reviews,
     log: logs,
     dueTasks: dueRows.slice(0, 20).map(row => ({

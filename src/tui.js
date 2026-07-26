@@ -16,6 +16,8 @@ import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
 import { getInterviewDebrief } from './interview.js';
+import { transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
+import { refreshMemoryProjection } from './career-memory-projections.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -49,7 +51,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
-    ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
+    ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
     ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
     ['Tab', 'strip'], ['Enter', 'jump']
   ]),
@@ -58,7 +60,8 @@ export const TUI_KEYMAP = Object.freeze({
   discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
-  stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
+  stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
+  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']])
 });
 
 /**
@@ -67,13 +70,14 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
   due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
-  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
+  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
+  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -422,6 +426,10 @@ function overlayItems(model, state) {
   if (state.overlay === 'network') return networkOverlayItems(model);
   if (state.overlay === 'due') return dueOverlayTasks(model, state);
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
+  if (state.overlay === 'memory') {
+    if (state.memoryView === 'proposals') return model.memory?.proposals || [];
+    if (state.memoryView === 'observations') return model.memory?.observations || [];
+  }
   return [];
 }
 
@@ -716,6 +724,54 @@ function overlayPanel(model, state, width, height, color) {
       ':debrief-correct <debrief-id> | <json-file> | <reason>',
       'Esc closes'
     );
+  } else if (state.overlay === 'memory') {
+    const memory = model.memory || {};
+    const view = state.memoryView || 'observations';
+    const labels = { observations: 'OBSERVATIONS', proposals: 'PROPOSALS', 'career-brief': 'CAREER BRIEF', 'voice-guide': 'VOICE GUIDE' };
+    title = `CAREER MEMORY · ${labels[view]}`;
+    body = [
+      `Profile: ${memory.profileId || 'none'} · observations ${memory.counts?.observations || 0} · proposals ${memory.counts?.proposals || 0} · active ${memory.counts?.active || 0}`,
+      '1 observations · 2 proposals · 3 career brief · 4 voice guide',
+      '',
+    ];
+    if (view === 'observations') {
+      const rows = memory.observations || [];
+      const visible = visibleWindow(rows, state.overlayIndex, Math.max(3, height - 8));
+      body.push(...visible.items.map((item, offset) => {
+        const source = item.sourceEntity || {};
+        return `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.eventType} · ${item.id} · ${source.type || 'source'}:${source.id || '—'}@${source.versionId || '—'} · private:${item.hasPrivateNote ? 'yes' : 'no'}`;
+      }));
+      if (!rows.length) body.push('No current observations for this profile.');
+    } else if (view === 'proposals') {
+      const rows = memory.proposals || [];
+      const visible = visibleWindow(rows, state.overlayIndex, Math.max(3, height - 9));
+      body.push(...visible.items.flatMap((item, offset) => [
+        `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.id} · ${item.status} · ${item.confidenceBand}/${item.confidenceMilli} · conflict:${item.conflictState} · ${item.stale ? 'stale' : 'fresh'}`,
+        `  ${item.domain}/${item.scope}/${item.ruleType} · ${item.active ? 'active' : `inactive:${item.inactiveReason}`}`,
+        `  evidence ${(item.evidence || []).map(evidence => `${evidence.observationSchema}:${evidence.observationId}@${evidence.sourceEntity?.versionId || '—'}`).join(', ') || 'none'}`,
+      ]));
+      if (!rows.length) body.push('No proposals for this profile.');
+      body.push('', ':memory accept <proposal-id>', ':memory reject <proposal-id> | <reason>', ':memory revoke <proposal-id> | <reason>', ':memory undo <transition-id> | <reason>');
+    } else if (view === 'career-brief') {
+      const brief = memory.careerBrief;
+      body.push(
+        `source state ${brief?.sourceStateHash || '—'} · revision ${brief?.revision ?? 'live'}`,
+        `targets ${JSON.stringify(brief?.canonicalTargets || {})}`,
+        `active guidance ${(brief?.activeGuidance || []).map(item => item.ruleId).join(', ') || 'none'}`,
+        `citations ${(brief?.citations || []).length}`,
+        ...(brief?.citations || []).slice(0, 4).map(citation => `  ${citation.sourceKind}:${citation.sourceId}@${citation.sourceVersionId || '—'}`),
+      );
+    } else {
+      const guide = memory.voiceGuide;
+      body.push(
+        `source state ${guide?.sourceStateHash || '—'} · revision ${guide?.revision ?? 'live'}`,
+        `baseline ${JSON.stringify(guide?.baseline || {})}`,
+        `active rules ${(guide?.activeRuleIds || []).join(', ') || 'none'}`,
+        `citations ${(guide?.citations || []).length} · proofs remain factual authority`,
+        ...(guide?.citations || []).slice(0, 4).map(citation => `  ${citation.sourceKind}:${citation.sourceId}@${citation.sourceVersionId || '—'}`),
+      );
+    }
+    body.push('', `${keyHints('memory')} · :memory refresh`);
   } else if (state.overlay === 'log') {
     if (model.log.length) {
       const visible = visibleWindow(model.log, state.overlayIndex, Math.max(3, height - 9));
@@ -877,14 +933,14 @@ function footerLines(width) {
   if (width >= 90) {
     return [
       ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
-      ' r review l log · n network o docs q answers · s sources ? system · :reschedule <due> | <reason> · : command Q quit'
+      ' r review l log · m memory n network o docs q answers · s sources ? system · :reschedule <due> | <reason> · : command Q quit'
     ];
   }
   return [
     ' j/k select · 1 today · 2 all · 3 high',
     ' 4 review · 5 materials-ready · 6 applied · 7 interview',
     ' p pursue · z score · d daily · a agent · i prompt',
-    ' r review · l log · n network · o docs · q answers',
+    ' r review · l log · m memory · n network · o docs · q answers',
     ' s sources · ? system · b build-network · : command · Q quit'
   ];
 }
@@ -982,7 +1038,8 @@ export function defaultTuiState() {
     busy: null,
     messages: [],
     catalog: [],
-    networkDraft: null
+    networkDraft: null,
+    memoryView: 'observations'
   };
 }
 
@@ -992,13 +1049,15 @@ export class JobosTui {
     stdout = process.stdout,
     profileId = null,
     connectAgent = true,
-    color = stdout.isTTY
+    color = stdout.isTTY,
+    now = () => new Date()
   } = {}) {
     this.store = store;
     this.stdin = stdin;
     this.stdout = stdout;
+    this.now = now;
     this.state = { ...defaultTuiState(), profileId };
-    this.model = buildTuiModel(store, { profileId });
+    this.model = buildTuiModel(store, { profileId, at: this.now().toISOString() });
     this.state.selectedJobId = this.model.selectedJobId;
     this.shouldConnectAgent = connectAgent;
     this.color = Boolean(color);
@@ -1053,7 +1112,8 @@ export class JobosTui {
     if (disk) reload(this.store);
     this.model = buildTuiModel(this.store, {
       profileId: this.state.profileId,
-      selectedJobId: this.state.selectedJobId
+      selectedJobId: this.state.selectedJobId,
+      at: this.now().toISOString()
     });
     this.state.profileId = this.model.profileId;
     this.state.selectedJobId = this.model.selectedJobId;
@@ -1211,6 +1271,7 @@ export class JobosTui {
       this.state.networkDraft = seedNetworkDraft(this.model);
       this.state.status = 'build-network editor · Enter edits fields · Esc closes';
     } else {
+      if (name === 'memory') this.state.memoryView = 'observations';
       if (name === 'docs') this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
       this.state.status = `${name} overlay · Esc closes`;
     }
@@ -1567,6 +1628,10 @@ export class JobosTui {
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
+    if (command === 'memory') {
+      if (!argText) return this.openOverlay('memory');
+      return this.executeMemoryCommand(argText);
+    }
     if (command === 'interviews') return this.openOverlay('interviews');
     if (command === 'build-network') return this.openOverlay('build-network');
     if (command === 'packet') {
@@ -1595,7 +1660,76 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${trimmed}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create form attest receipt answer add interviews prep story-verify story-retire debrief debrief-correct weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Commands: pursue score daily network memory packet packet create form attest receipt answer add interviews prep story-verify story-retire debrief debrief-correct weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
+    this.render();
+  }
+
+  executeMemoryCommand(argText) {
+    const text = String(argText || '').trim();
+    const parts = text.split('|').map(part => part.trim());
+    const [head, reasonPart = ''] = parts;
+    const [action, target, ...extra] = head.split(/\s+/).filter(Boolean);
+    const reason = reasonPart.trim();
+    const usage = 'Usage: :memory accept <proposal-id> | :memory reject|revoke <proposal-id> | <reason> | :memory undo <transition-id> | <reason> | :memory refresh';
+    if (action === 'refresh' && !target) return this.refreshMemoryWorkspace();
+    if (parts.length > 2 || !['accept', 'reject', 'revoke', 'undo'].includes(action) || !target || extra.length
+      || (['reject', 'revoke', 'undo'].includes(action) && !reason)) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const profileId = this.model.profileId;
+    if (!profileId || this.state.busy) return;
+    const count = Number(one(this.store, 'SELECT COUNT(*) AS count FROM career_memory_proposal_transitions WHERE profile_id=?', [profileId])?.count || 0);
+    const referenceId = `tui-memory:${profileId}:${action}:${target}:${count + 1}`;
+    try {
+      const result = action === 'undo'
+        ? undoMemoryTransition(this.store, {
+            profileId,
+            transitionId: target,
+            reason,
+            referenceId,
+            actor: 'user',
+            source: 'tui',
+            nowDate: this.now(),
+          })
+        : transitionMemoryProposal(this.store, {
+            profileId,
+            proposalId: target,
+            action,
+            reason,
+            referenceId,
+            actor: 'user',
+            source: 'tui',
+            nowDate: this.now(),
+          });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.overlay = 'memory';
+      this.state.memoryView = 'proposals';
+      this.state.status = `Memory ${action} complete · ${result.toStatus} · ${target}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Memory ${action} failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  refreshMemoryWorkspace() {
+    const profileId = this.model.profileId;
+    if (!profileId || this.state.busy) return;
+    try {
+      const asOf = this.now();
+      refreshMemoryProjection(this.store, { profileId, projectionType: 'career_brief', asOf, actor: 'user', source: 'tui' });
+      refreshMemoryProjection(this.store, { profileId, projectionType: 'voice_positioning_guide', asOf, actor: 'user', source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.overlay = 'memory';
+      this.state.status = 'Career Memory projections refreshed deterministically.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Memory refresh failed: ${error.message}`;
+    }
     this.render();
   }
 
@@ -2504,6 +2638,13 @@ export class JobosTui {
   onOverlayKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
+    if (this.state.overlay === 'memory' && ['1', '2', '3', '4'].includes(value)) {
+      this.state.memoryView = ['observations', 'proposals', 'career-brief', 'voice-guide'][Number(value) - 1];
+      this.state.overlayIndex = 0;
+      this.state.status = `Career Memory · ${this.state.memoryView}`;
+      this.render();
+      return true;
+    }
     if (this.state.overlay === 'discovery') {
       if (key.name === 'return' || key.name === 'enter') return this.openDiscoverySelection();
       if (value === 'j') return this.moveDiscoverySelection(1);
@@ -2799,6 +2940,7 @@ export class JobosTui {
     } else if (value === 't') this.beginStage();
     else if (value === 'r') this.openOverlay('review');
     else if (value === 'l') this.openOverlay('log');
+    else if (value === 'm') this.openOverlay('memory');
     else if (value === 'n') this.openOverlay('network');
     else if (value === 'o') this.openDocuments();
     else if (value === 'q') this.openOverlay('answers');
