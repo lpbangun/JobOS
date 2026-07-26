@@ -276,6 +276,64 @@ test('W09-RESUME-02 proof recovery exposes verify, replace, retire, and add rout
   assert.deepEqual(proofStep.actions.map(action => action.id), ['verify_proof', 'replace_proof', 'retire_proof', 'add_proof']);
 });
 
+test('W09-RESUME-02 setup executes each proof recovery route through canonical lifecycle state', async () => {
+  const { JobosTui } = await import('../src/tui.js');
+  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+  const proofStepIndex = tui => tui.model.onboarding.steps.findIndex(step => step.id === 'proofs');
+  const openRoute = (tui, routeIndex) => {
+    tui.state.overlayIndex = proofStepIndex(tui);
+    tui.onKeypress('', { name: 'return' });
+    assert.equal(tui.state.overlay, 'setup-action-picker');
+    tui.state.overlayIndex = routeIndex;
+    tui.onKeypress('', { name: 'return' });
+  };
+
+  const verifyStore = await openStore({ workspace: root() });
+  const verifyProfileId = createProfile(verifyStore, 'Verify').profile.id;
+  const verifyOriginal = addProof(verifyStore, verifyProfileId, 'Needs verification', 'source', []);
+  verifyStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [verifyOriginal.id]);
+  const verifyTui = new JobosTui(verifyStore, { stdout: output, connectAgent: false, profileId: verifyProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  openRoute(verifyTui, 0);
+  assert.equal(verifyTui.state.pendingConfirm?.kind, 'setup-proof-verify');
+  verifyTui.onKeypress('y', { name: 'y' });
+  assert.equal(verifyStore.db.exec('SELECT verification_status FROM proof_points WHERE id=?', [verifyOriginal.id])[0].values[0][0], 'verified');
+
+  const replaceStore = await openStore({ workspace: root() });
+  const replaceProfileId = createProfile(replaceStore, 'Replace').profile.id;
+  const replaceOriginal = addProof(replaceStore, replaceProfileId, 'Incorrect claim', 'source', []);
+  replaceStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [replaceOriginal.id]);
+  const replaceTui = new JobosTui(replaceStore, { stdout: output, connectAgent: false, profileId: replaceProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  openRoute(replaceTui, 1);
+  assert.equal(replaceTui.state.mode, 'setup-proof');
+  replaceTui.state.input = 'Corrected claim | corrected source';
+  replaceTui.onKeypress('', { name: 'return' });
+  const replacement = replaceStore.db.exec('SELECT summary,evidence,status,verification_status,supersedes_proof_point_id FROM proof_points WHERE profile_id=? AND id<>?', [replaceProfileId, replaceOriginal.id])[0].values[0];
+  assert.deepEqual(replacement, ['Corrected claim', 'corrected source', 'active', 'verified', replaceOriginal.id]);
+  assert.deepEqual(replaceStore.db.exec('SELECT status,retirement_reason FROM proof_points WHERE id=?', [replaceOriginal.id])[0].values[0], ['retired', 'superseded']);
+
+  const retireStore = await openStore({ workspace: root() });
+  const retireProfileId = createProfile(retireStore, 'Retire').profile.id;
+  const retireOriginal = addProof(retireStore, retireProfileId, 'Withdraw claim', 'source', []);
+  retireStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [retireOriginal.id]);
+  const retireTui = new JobosTui(retireStore, { stdout: output, connectAgent: false, profileId: retireProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  openRoute(retireTui, 2);
+  assert.equal(retireTui.state.mode, 'setup-proof');
+  retireTui.state.input = 'Source is no longer reliable';
+  retireTui.onKeypress('', { name: 'return' });
+  assert.deepEqual(retireStore.db.exec('SELECT status,retirement_reason FROM proof_points WHERE id=?', [retireOriginal.id])[0].values[0], ['retired', 'Source is no longer reliable']);
+
+  const addStore = await openStore({ workspace: root() });
+  const addProfileId = createProfile(addStore, 'Add').profile.id;
+  const addOriginal = addProof(addStore, addProfileId, 'Existing claim', 'source', []);
+  addStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [addOriginal.id]);
+  const addTui = new JobosTui(addStore, { stdout: output, connectAgent: false, profileId: addProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  openRoute(addTui, 3);
+  assert.equal(addTui.state.mode, 'setup-proof');
+  addTui.state.input = 'New claim | new source';
+  addTui.onKeypress('', { name: 'return' });
+  assert.deepEqual(addStore.db.exec('SELECT summary,evidence,status,verification_status FROM proof_points WHERE profile_id=? AND summary=?', [addProfileId, 'New claim'])[0].values[0], ['New claim', 'new source', 'active', 'verified']);
+});
+
 test('W09-CALIBRATION-03 setup review mediates explicit accept and reject over eligible inactive proposals', async () => {
   const { JobosTui } = await import('../src/tui.js');
   const s = await openStore({ workspace: root() });

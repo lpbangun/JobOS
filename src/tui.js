@@ -7,7 +7,7 @@ import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
-import { addProof, createProfile, setNetworkIntent, verifyProof } from './profiles.js';
+import { addProof, createProfile, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
 import { importResume, replaceResume } from './resumes.js';
 import { importText } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
@@ -424,6 +424,7 @@ function agentPanel(model, state, width, height, color) {
 
 function overlayItems(model, state) {
   if (state.overlay === 'setup') return model.onboarding?.steps || [];
+  if (state.overlay === 'setup-action-picker') return state.setupActionItems || [];
   if (state.overlay === 'setup-profile-picker') return model.profiles || [];
   if (state.overlay === 'setup-job-picker') return model.jobs || [];
   if (state.overlay === 'review') return model.review;
@@ -682,9 +683,14 @@ function overlayPanel(model, state, width, height, color) {
     if (focused) {
       body.push('', `FOCUS · ${focused.id}`);
       body.push(...focused.blockers.map(item => `blocker ${item.code} · ${item.message}`));
-      if (focused.actions[0]) body.push(`action ${focused.actions[0].label} · ${focused.actions[0].command}`);
+      if (focused.actions[0]) body.push(...focused.actions.map(action => `action ${action.label} · ${action.command}`));
     }
     body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+  } else if (state.overlay === 'setup-action-picker') {
+    title = `GUIDED SETUP · SELECT ${state.setupActionStepId || 'ACTION'}`;
+    const items = state.setupActionItems || [];
+    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label} · ${item.command}`);
+    body.push('', 'j/k select · Enter runs the selected guided action · Esc returns to setup');
   } else if (state.overlay === 'setup-profile-picker') {
     title = 'GUIDED SETUP · SELECT PROFILE';
     body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
@@ -1062,6 +1068,9 @@ export function defaultTuiState() {
     stripIndex: 0,
     pendingConfirm: null,
     pendingSuppressContactId: null,
+    setupActionItems: [],
+    setupActionStepId: null,
+    setupProofId: null,
     packetDetail: null,
     mode: 'normal',
     input: '',
@@ -2697,6 +2706,22 @@ export class JobosTui {
   }
 
   onOverlayKey(value, key) {
+    if (this.state.overlay === 'setup-action-picker') {
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        const stepId = this.state.setupActionStepId;
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+      } else if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
+        this.state.overlay = 'setup';
+        return this.openSetupAction(step, items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
     if (this.state.overlay === 'setup-profile-picker' || this.state.overlay === 'setup-job-picker') {
       const picker = this.state.overlay;
       const items = overlayItems(this.model, this.state);
@@ -2861,10 +2886,20 @@ export class JobosTui {
     return true;
   }
 
-  openSetupAction(item) {
-    const actionId = item?.actions?.[0]?.id;
+  openSetupAction(item, selectedAction = null) {
+    const action = selectedAction || item?.actions?.[0];
+    const actionId = action?.id;
     if (!actionId) {
       this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.render();
+      return true;
+    }
+    if (!selectedAction && item.actions.length > 1) {
+      this.state.overlay = 'setup-action-picker';
+      this.state.overlayIndex = 0;
+      this.state.setupActionItems = item.actions;
+      this.state.setupActionStepId = item.id;
+      this.state.status = `Select a ${item.id} recovery action.`;
       this.render();
       return true;
     }
@@ -2890,7 +2925,7 @@ export class JobosTui {
       return true;
     }
     if (actionId === 'verify_proof') {
-      const proofId = String(item.actions[0].command).match(/proof verify\s+(\S+)/)?.[1];
+      const proofId = String(action.command).match(/proof verify\s+(\S+)/)?.[1];
       this.state.pendingConfirm = { kind: 'setup-proof-verify', proofId };
       this.state.status = `Verify proof ${proofId} as a trusted human? (y/n)`;
       this.render();
@@ -2918,15 +2953,23 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (actionId === 'add_proof') {
+    if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
+      const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
       this.state.mode = 'setup-proof';
       this.state.input = '';
       this.state.setupFormAction = actionId;
-      this.state.status = 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
+      this.state.setupProofId = proofId;
+      this.state.status = actionId === 'retire_proof'
+        ? 'Enter the retirement reason · Enter retires this canonical proof · Esc cancels'
+        : actionId === 'replace_proof'
+          ? 'Enter replacement proof summary | evidence · Enter supersedes the canonical proof · Esc cancels'
+          : 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
       this.render();
       return true;
     }
-    return this.openSetupCorrection(item);
+    this.state.status = action?.command ? `This action is human-owned · ${action.command}` : `No guided action is available for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
   }
 
   commitSetupForm() {
@@ -2950,6 +2993,11 @@ export class JobosTui {
         const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
         if (!summary) throw new Error('Proof summary is required.');
         addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
+      } else if (actionId === 'replace_proof') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        supersedeProof(this.store, this.state.setupProofId, { summary, evidence: evidenceParts.join(' | ') });
+      } else if (actionId === 'retire_proof') {
+        retireProof(this.store, this.state.setupProofId, input);
       } else if (actionId === 'import_local_job') {
         const result = importText(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
         this.state.setupJobId = result.job.id;
@@ -2958,6 +3006,7 @@ export class JobosTui {
       this.state.mode = 'normal';
       this.state.input = '';
       this.state.setupFormAction = null;
+      this.state.setupProofId = null;
       this.state.error = null;
       this.state.overlay = 'setup';
       this.refresh({ disk: false });
