@@ -5,13 +5,15 @@ import { spawnSync } from 'node:child_process';
 import { all, one, openStore, run as dbRun, save } from '../src/db.js';
 import { createSearch, runSavedSearch } from '../src/discovery.js';
 import { greenhouse } from '../src/discovery/adapters.js';
-import { importNormalized } from '../src/jobs.js';
+import { importNormalized, updateJobStatus } from '../src/jobs.js';
 import { score as scoreJob } from '../src/scoring.js';
 import { selectedJobContext } from '../src/domain-tools.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { runPursuit } from '../src/workflows.js';
 import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
 import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
+import { refreshMemoryProjection } from '../src/career-memory-projections.js';
+import { retrieveCareerMemory } from '../src/career-memory-retrieval.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
 const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
@@ -159,6 +161,65 @@ try {
   if (!(score.overall > 0) || score.contract !== 'jobos.fit-score.v1' || score.postingLiveness?.status !== 'uncertain') {
     throw new Error('W04 manual score did not expose fit v1 beside uncertain posting liveness');
   }
+  const w08Store = await openStore({ workspace: root });
+  const privateMemorySentinel = 'W08_PRIVATE_SMOKE_NOTE_DO_NOT_MIRROR';
+  const memoryObservation = updateJobStatus(w08Store, job.id, 'saved', {
+    actor: 'user',
+    source: 'cli',
+    memoryFeedback: {
+      schema: 'jobos.job-feedback-input.v1',
+      decision: 'save',
+      reasonCodes: ['role_fit'],
+      signals: [],
+      publicExplanation: '',
+      privateNote: privateMemorySentinel,
+      referenceId: 'w08-smoke-job-save',
+      occurredAt: new Date().toISOString()
+    }
+  });
+  const memoryPacket = retrieveCareerMemory(w08Store, {
+    profileId: profile.id,
+    consumer: 'scoring',
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const careerBrief = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'career_brief',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const voiceGuide = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'voice_positioning_guide',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const careerBriefReplay = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'career_brief',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const memoryMirrorFiles = [
+    'observations.yaml',
+    'career-brief.yaml',
+    'career-brief.md',
+    'voice-positioning-guide.yaml',
+    'voice-positioning-guide.md'
+  ].map(file => path.join(root, 'jobos-workspace', 'profiles', profile.id, 'memory', file));
+  const memoryMirrorText = memoryMirrorFiles.map(file => readFileSync(file, 'utf8'));
+  if (!memoryObservation.observation?.id
+    || memoryPacket.externalSideEffects !== 'none'
+    || careerBriefReplay.revision !== careerBrief.revision
+    || careerBriefReplay.sourceStateHash !== careerBrief.sourceStateHash
+    || memoryMirrorText.some(text => text.includes(privateMemorySentinel) || /(^|\n)\s*[&*][A-Za-z0-9_-]+/.test(text))) {
+    throw new Error('W08 memory observation, retrieval, projection replay, or private mirror contract failed');
+  }
+  w08Store.db.close();
   const w04Store = await openStore({ workspace: root });
   const uncertainFit = JSON.parse(one(w04Store, 'SELECT score_json FROM jobs WHERE id=?', [job.id]).score_json);
   setSmokeLiveness(w04Store, job.id, 'active');
@@ -575,6 +636,18 @@ try {
       currentFollowupActions: followupActions.length,
       currentAttributedObservations: currentDebriefObservations.length,
       readableMirrors: requiredInterviewMirrors.length,
+      externalSideEffects: 'none'
+    },
+    w08: {
+      observationId: memoryObservation.observation.id,
+      observationSourceVersionId: memoryObservation.observation.sourceEntity.versionId,
+      retrievalSchema: memoryPacket.schema,
+      careerBriefRevision: careerBrief.revision,
+      careerBriefSourceStateHash: careerBrief.sourceStateHash,
+      voiceGuideRevision: voiceGuide.revision,
+      readablePrivateNoteFreeMirrors: memoryMirrorFiles.length,
+      representative: false,
+      causalAttribution: false,
       externalSideEffects: 'none'
     },
     schedulerRun: schedulerRun.runs[0].id,
