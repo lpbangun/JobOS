@@ -17,7 +17,7 @@ import { evaluateSearchGuidance, retrieveCareerMemory } from '../src/career-memo
 import { createMemoryProposal, getMemoryProposal, transitionMemoryProposal } from '../src/career-memory-proposals.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
-const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
+const env = { ...process.env, JOBOS_HOME: root, JOBOS_SEARCH_PROVIDER: 'none', JOBOS_ACP_COMMAND: '__jobos_missing_acp__', JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '', XAI_API_KEY: '', GOOGLE_API_KEY: '', GEMINI_API_KEY: '' };
 function run(args, raw = false) {
   const result = spawnSync(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${args.join(' ')} failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
@@ -46,6 +46,8 @@ function setSmokeLiveness(s, jobId, status) {
 try {
   const guide = JSON.parse(run(['agent-guide', '--json']));
   if (!guide.commands?.length || !existsSync(path.join(root, '.jobos', 'jobos.sqlite')) || !existsSync(path.join(root, 'jobos-workspace'))) throw new Error('First command did not auto-create the JobOS workspace');
+  const initialSetup = JSON.parse(run(['setup', 'next', '--json']));
+  if (initialSetup.nextAction?.id !== 'create_profile' || initialSetup.policy.cloudKeyRequired !== false || initialSetup.policy.externalSideEffects !== 'none') throw new Error('W09 clean setup did not begin at the keyless profile action');
   const preferences = path.join(root, 'preferences.json');
   writeFileSync(preferences, JSON.stringify({
     targetRoleFamilies: ['Product Manager'],
@@ -55,6 +57,8 @@ try {
     missionKeywords: ['learning', 'educator']
   }));
   const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--preferences', preferences, '--json']));
+  const resumedAfterProfile = JSON.parse(run(['setup', 'next', '--profile', profile.id, '--json']));
+  if (resumedAfterProfile.nextAction?.id !== 'import_resume') throw new Error('W09 interrupted setup did not resume at canonical resume import');
   const proof = JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', '--evidence', 'Verified portfolio case study', '--skills', 'product discovery,user research,stakeholder management,launch execution', '--json']));
   const resume = path.join(root, 'resume.json');
   writeFileSync(resume, JSON.stringify({
@@ -69,6 +73,8 @@ try {
     additionalSections: []
   }, null, 2));
   JSON.parse(run(['resume', 'import', '--profile', profile.id, '--file', resume, '--json']));
+  const resumedAfterResume = JSON.parse(run(['setup', 'next', '--profile', profile.id, '--json']));
+  if (resumedAfterResume.nextAction?.id !== 'import_local_job') throw new Error('W09 interrupted setup did not resume at local job intake');
   JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json'), '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   const discovery = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   if (discovery.status !== 'succeeded' || discovery.counts.imported !== 1 || discovery.counts.highFit < 1) throw new Error('Fixture-backed discovery run did not import and flag a high-fit job');
@@ -162,6 +168,8 @@ try {
   if (!(score.overall > 0) || score.contract !== 'jobos.fit-score.v1' || score.postingLiveness?.status !== 'uncertain') {
     throw new Error('W04 manual score did not expose fit v1 beside uncertain posting liveness');
   }
+  const resumedAfterDecision = JSON.parse(run(['setup', 'status', '--profile', profile.id, '--job', job.id, '--json']));
+  if (resumedAfterDecision.steps.find(step => step.id === 'decision')?.status !== 'complete' || resumedAfterDecision.nextAction?.id !== 'pursue_job') throw new Error('W09 explicit local job decision did not hand off to pursuit');
   const w08Store = await openStore({ workspace: root });
   const privateMemorySentinel = 'W08_PRIVATE_SMOKE_NOTE_DO_NOT_MIRROR';
   const memoryObservation = updateJobStatus(w08Store, job.id, 'saved', {
@@ -410,6 +418,10 @@ try {
   }
   const approvedPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
   if (approvedPlan.status !== 'materials-ready' || approvedPlan.localApprovalComplete !== true) throw new Error(`Application did not reach materials-ready local readiness: ${approvedPlan.status}`);
+  const completedSetup = JSON.parse(run(['setup', 'status', '--profile', profile.id, '--job', job.id, '--json']));
+  if (!completedSetup.coreReady || completedSetup.state !== 'complete' || completedSetup.steps.find(step => step.id === 'materials')?.evidence.readinessStatus !== 'materials-ready' || completedSetup.steps.find(step => step.id === 'calibration')?.status !== 'optional_ready') {
+    throw new Error('W09 setup did not derive core completion and visible optional calibration from canonical state');
+  }
   const afterReviewStore = await openStore({ workspace: root });
   persistFormSnapshot(afterReviewStore, buildFormSnapshot({
     snapshotId: 'form_smoke_application',

@@ -72,6 +72,16 @@ Core commands remain usable when Playwright or Chromium is absent; browser comma
 
 ## Five-minute workflow
 
+Start or resume the derived guided journey. Setup status is recomputed from canonical SQLite rows; it creates no checkpoint or duplicate profile, resume, proof, source, job, score, or preference state.
+
+```bash
+npm run jobos -- setup
+npm run jobos -- setup status --json
+npm run jobos -- setup next --json
+```
+
+The seven required steps are workspace, profile, resume, verified proofs, job intake, explicit fit decision, and local materials approval. A local text job import is a supported offline route. Calibration, an ACP provider, Playwright/browser authentication, network setup, cloud accounts, and API keys are optional and never block core completion. In the TUI, `g` opens setup, `j/k` changes the focused step, `r` recomputes from disk, `c` opens correction, and Escape closes without writing.
+
 ```bash
 # 1. Create local state and a proof-backed target profile.
 npm run jobos -- init --json

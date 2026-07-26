@@ -7,7 +7,9 @@ import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
-import { setNetworkIntent } from './profiles.js';
+import { addProof, createProfile, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
+import { importResume, replaceResume } from './resumes.js';
+import { importText } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
@@ -52,7 +54,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
     ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
@@ -61,7 +63,8 @@ export const TUI_KEYMAP = Object.freeze({
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
-  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']])
+  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']]),
+  setup: Object.freeze([['j/k', 'step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
 });
 
 /**
@@ -70,14 +73,15 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', ':', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
   due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
-  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape'])
+  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape']),
+  setup: Object.freeze(['j', 'k', 'return', 'c', 'r', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -419,6 +423,10 @@ function agentPanel(model, state, width, height, color) {
 }
 
 function overlayItems(model, state) {
+  if (state.overlay === 'setup') return model.onboarding?.steps || [];
+  if (state.overlay === 'setup-action-picker') return state.setupActionItems || [];
+  if (state.overlay === 'setup-profile-picker') return model.profiles || [];
+  if (state.overlay === 'setup-job-picker') return model.jobs || [];
   if (state.overlay === 'review') return model.review;
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
@@ -662,7 +670,36 @@ function overlayPanel(model, state, width, height, color) {
   const selected = model.selected;
   let title = String(state.overlay || 'overlay').toUpperCase();
   let body = [];
-  if (state.overlay === 'review') {
+  if (state.overlay === 'setup') {
+    const setup = model.onboarding;
+    title = `GUIDED SETUP · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} REQUIRED`;
+    const items = setup?.steps || [];
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 10));
+    body = visible.items.map((item, offset) => {
+      const selectedStep = visible.start + offset === state.overlayIndex;
+      return `${selectedStep ? '▶' : ' '} ${item.required ? 'required' : 'optional'} · ${item.id} · ${item.status} · ${item.summary}`;
+    });
+    const focused = items[state.overlayIndex];
+    if (focused) {
+      body.push('', `FOCUS · ${focused.id}`);
+      body.push(...focused.blockers.map(item => `blocker ${item.code} · ${item.message}`));
+      if (focused.actions[0]) body.push(...focused.actions.map(action => `action ${action.label} · ${action.command}`));
+    }
+    body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+  } else if (state.overlay === 'setup-action-picker') {
+    title = `GUIDED SETUP · SELECT ${state.setupActionStepId || 'ACTION'}`;
+    const items = state.setupActionItems || [];
+    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label} · ${item.command}`);
+    body.push('', 'j/k select · Enter runs the selected guided action · Esc returns to setup');
+  } else if (state.overlay === 'setup-profile-picker') {
+    title = 'GUIDED SETUP · SELECT PROFILE';
+    body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+  } else if (state.overlay === 'setup-job-picker') {
+    title = 'GUIDED SETUP · SELECT JOB';
+    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+  } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.approvalStatus} · ${item.jobId || 'no job'}`);
@@ -948,7 +985,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
@@ -993,11 +1030,12 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
   }
   if (state.pendingConfirm) {
-    lines.push(paint(fit('Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
+    const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
+    lines.push(paint(fit(guided ? 'Guided trusted action · y/Enter confirm · n/Esc cancel' : 'Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -1030,6 +1068,9 @@ export function defaultTuiState() {
     stripIndex: 0,
     pendingConfirm: null,
     pendingSuppressContactId: null,
+    setupActionItems: [],
+    setupActionStepId: null,
+    setupProofId: null,
     packetDetail: null,
     mode: 'normal',
     input: '',
@@ -1048,6 +1089,8 @@ export class JobosTui {
     stdin = process.stdin,
     stdout = process.stdout,
     profileId = null,
+    selectedJobId = null,
+    initialOverlay = null,
     connectAgent = true,
     color = stdout.isTTY,
     now = () => new Date()
@@ -1056,9 +1099,10 @@ export class JobosTui {
     this.stdin = stdin;
     this.stdout = stdout;
     this.now = now;
-    this.state = { ...defaultTuiState(), profileId };
-    this.model = buildTuiModel(store, { profileId, at: this.now().toISOString() });
-    this.state.selectedJobId = this.model.selectedJobId;
+    this.state = { ...defaultTuiState(), profileId, setupProfileId: profileId, setupJobId: selectedJobId };
+    this.model = buildTuiModel(store, { profileId, selectedJobId, at: this.now().toISOString() });
+    this.state.selectedJobId = selectedJobId || this.model.selectedJobId;
+    this.state.overlay = initialOverlay || (this.model.empty.noProfile ? 'setup' : null);
     this.shouldConnectAgent = connectAgent;
     this.color = Boolean(color);
     this.client = null;
@@ -1110,13 +1154,17 @@ export class JobosTui {
     const previousReviewIndex = Math.max(0, previousModel?.review?.findIndex(item => item.id === previousArtifactId) ?? 0);
     const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
+    const setupSurface = ['setup', 'setup-profile-picker', 'setup-job-picker'].includes(this.state.overlay)
+      || this.state.mode === 'setup-calibration';
     this.model = buildTuiModel(this.store, {
-      profileId: this.state.profileId,
-      selectedJobId: this.state.selectedJobId,
+      profileId: setupSurface ? this.state.setupProfileId : this.state.profileId,
+      selectedJobId: setupSurface ? this.state.setupJobId : this.state.selectedJobId,
       at: this.now().toISOString()
     });
-    this.state.profileId = this.model.profileId;
-    this.state.selectedJobId = this.model.selectedJobId;
+    if (!setupSurface) {
+      this.state.profileId = this.model.profileId;
+      this.state.selectedJobId = this.model.selectedJobId;
+    }
 
     const docs = this.model.selected?.docs || [];
     const shouldClampArtifact = Boolean(this.state.selectedArtifactId) || this.state.overlay === 'review' || this.state.overlay === 'docs';
@@ -1276,6 +1324,22 @@ export class JobosTui {
       this.state.status = `${name} overlay · Esc closes`;
     }
     this.render();
+  }
+
+  openSetupOverlay() {
+    const shellProfileId = this.model.profiles.some(profile => profile.id === this.state.profileId) ? this.state.profileId : null;
+    if (shellProfileId) this.state.setupProfileId = shellProfileId;
+    else if (this.model.profiles.length === 1) this.state.setupProfileId = this.model.profiles[0].id;
+    const selectedJob = this.model.jobs.find(job => job.id === this.state.selectedJobId);
+    this.state.setupJobId = selectedJob && this.state.setupProfileId === this.state.profileId ? selectedJob.id : null;
+    this.state.overlay = 'setup';
+    this.state.overlayIndex = 0;
+    this.state.mode = 'normal';
+    this.state.input = '';
+    this.refresh({ disk: false });
+    this.state.status = 'setup overlay · recomputed from canonical state · Esc closes';
+    this.render();
+    return true;
   }
 
   closeTransient() {
@@ -1675,6 +1739,12 @@ export class JobosTui {
     if (parts.length > 2 || !['accept', 'reject', 'revoke', 'undo'].includes(action) || !target || extra.length
       || (['reject', 'revoke', 'undo'].includes(action) && !reason)) {
       this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (this.state.setupCalibrationReview && ['accept', 'reject'].includes(action)) {
+      this.state.pendingConfirm = { kind: 'setup-memory-transition', argText: text };
+      this.state.status = `Confirm explicit calibration proposal ${action}: ${target}? (y/n)`;
       this.render();
       return;
     }
@@ -2636,7 +2706,71 @@ export class JobosTui {
   }
 
   onOverlayKey(value, key) {
+    if (this.state.overlay === 'setup-action-picker') {
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        const stepId = this.state.setupActionStepId;
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+      } else if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
+        this.state.overlay = 'setup';
+        return this.openSetupAction(step, items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
+    if (this.state.overlay === 'setup-profile-picker' || this.state.overlay === 'setup-job-picker') {
+      const picker = this.state.overlay;
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === (picker === 'setup-profile-picker' ? 'profile' : 'decision'));
+        this.render();
+        return true;
+      }
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        if (picker === 'setup-profile-picker') {
+          this.state.setupProfileId = items[this.state.overlayIndex].id;
+          this.state.profileId = items[this.state.overlayIndex].id;
+          this.state.setupJobId = null;
+          this.state.selectedJobId = null;
+        } else {
+          this.state.setupJobId = items[this.state.overlayIndex].id;
+          this.state.selectedJobId = items[this.state.overlayIndex].id;
+        }
+        const stepId = picker === 'setup-profile-picker' ? 'profile' : 'decision';
+        this.state.overlay = 'setup';
+        this.refresh({ disk: false });
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+        this.state.status = `${stepId} selected explicitly · setup recomputed`;
+        this.render();
+        return true;
+      }
+      this.render();
+      return true;
+    }
     if (key.name === 'escape') return this.closeTransient();
+    if (this.state.overlay === 'setup') {
+      const items = this.model.onboarding?.steps || [];
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if (value === 'r') {
+        this.refresh();
+        this.state.status = 'setup recomputed from canonical SQLite state';
+        return true;
+      } else if (value === 'c') {
+        return this.openSetupCorrection(items[this.state.overlayIndex]);
+      } else if (key.name === 'return' || key.name === 'enter') {
+        return this.openSetupAction(items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
     if (this.state.overlay === 'memory' && ['1', '2', '3', '4'].includes(value)) {
       this.state.memoryView = ['observations', 'proposals', 'career-brief', 'voice-guide'][Number(value) - 1];
@@ -2728,6 +2862,231 @@ export class JobosTui {
     return true;
   }
 
+  openSetupCorrection(item) {
+    const actionId = item?.actions?.[0]?.id;
+    if (['resume', 'proofs', 'intake'].includes(item?.id) || (item?.id === 'profile' && actionId === 'create_profile')) {
+      return this.openSetupAction(item);
+    }
+    const overlays = {
+      profile: 'setup-profile-picker',
+      intake: 'discovery',
+      source: 'discovery',
+      materials: 'review',
+      calibration: 'memory',
+      network: 'build-network',
+      provider: 'system',
+      browser: 'system'
+    };
+    const target = overlays[item?.id];
+    if (target) return this.openOverlay(target);
+    this.state.status = item?.actions?.[0]?.command
+      ? `Correction is human-owned · ${item.actions[0].command}`
+      : `No correction is needed for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
+  }
+
+  openSetupAction(item, selectedAction = null) {
+    const action = selectedAction || item?.actions?.[0];
+    const actionId = action?.id;
+    if (!actionId) {
+      this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.render();
+      return true;
+    }
+    if (!selectedAction && item.actions.length > 1) {
+      this.state.overlay = 'setup-action-picker';
+      this.state.overlayIndex = 0;
+      this.state.setupActionItems = item.actions;
+      this.state.setupActionStepId = item.id;
+      this.state.status = `Select a ${item.id} recovery action.`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'select_profile') return this.openOverlay('setup-profile-picker');
+    if (actionId === 'select_job' || actionId === 'select_current_job') return this.openOverlay('setup-job-picker');
+    if (actionId === 'record_calibration') {
+      this.state.mode = 'setup-calibration';
+      this.state.input = '';
+      this.state.status = 'Enter feedback JSON with jobId, decision, reasonCodes, optional signals/explanations · Enter previews';
+      this.render();
+      return true;
+    }
+    if (actionId === 'derive_calibration') {
+      this.state.pendingConfirm = { kind: 'setup-calibration-derive' };
+      this.state.status = 'Derive inactive proposals from current attributed observations? (y/n)';
+      this.render();
+      return true;
+    }
+    if (actionId === 'review_calibration') {
+      this.openOverlay('memory');
+      this.state.memoryView = 'proposals';
+      this.state.setupCalibrationReview = true;
+      return true;
+    }
+    if (actionId === 'verify_proof') {
+      const proofId = String(action.command).match(/proof verify\s+(\S+)/)?.[1];
+      this.state.pendingConfirm = { kind: 'setup-proof-verify', proofId };
+      this.state.status = `Verify proof ${proofId} as a trusted human? (y/n)`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'score_job' || actionId === 'pursue_job') {
+      this.state.pendingConfirm = { kind: 'setup-domain-action', action: actionId === 'score_job' ? 'score' : 'pursue' };
+      this.state.status = `Confirm ${actionId === 'score_job' ? 'deterministic scoring' : 'pursuit and local draft creation'}? (y/n)`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'create_profile') {
+      this.state.mode = 'setup-profile';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter the canonical profile name · Enter saves · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (['import_resume', 'replace_resume', 'import_local_job'].includes(actionId)) {
+      this.state.mode = 'setup-file';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter a local file path · validation runs before setup advances · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
+      const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
+      this.state.mode = 'setup-proof';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.setupProofId = proofId;
+      this.state.status = actionId === 'retire_proof'
+        ? 'Enter the retirement reason · Enter retires this canonical proof · Esc cancels'
+        : actionId === 'replace_proof'
+          ? 'Enter replacement proof summary | evidence · Enter supersedes the canonical proof · Esc cancels'
+          : 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
+      this.render();
+      return true;
+    }
+    this.state.status = action?.command ? `This action is human-owned · ${action.command}` : `No guided action is available for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
+  }
+
+  commitSetupForm() {
+    const actionId = this.state.setupFormAction;
+    const input = this.state.input.trim();
+    if (!input) {
+      this.state.error = 'Input is required';
+      this.state.status = 'Setup input is required; no canonical state was changed.';
+      this.render();
+      return true;
+    }
+    try {
+      if (actionId === 'create_profile') {
+        const result = createProfile(this.store, input);
+        this.state.setupProfileId = result.profile.id;
+        this.state.profileId = result.profile.id;
+      } else if (actionId === 'import_resume' || actionId === 'replace_resume') {
+        const owner = actionId === 'replace_resume' ? replaceResume : importResume;
+        owner(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+      } else if (actionId === 'add_proof') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        if (!summary) throw new Error('Proof summary is required.');
+        addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
+      } else if (actionId === 'replace_proof') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        supersedeProof(this.store, this.state.setupProofId, { summary, evidence: evidenceParts.join(' | ') });
+      } else if (actionId === 'retire_proof') {
+        retireProof(this.store, this.state.setupProofId, input);
+      } else if (actionId === 'import_local_job') {
+        const result = importText(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+        this.state.setupJobId = result.job.id;
+        this.state.selectedJobId = result.job.id;
+      }
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.setupFormAction = null;
+      this.state.setupProofId = null;
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      const nextStepId = this.model.onboarding.nextAction
+        ? this.model.onboarding.steps.find(item => item.actions.some(candidate => candidate.id === this.model.onboarding.nextAction.id))?.id
+        : null;
+      const nextIndex = this.model.onboarding.steps.findIndex(item => item.id === nextStepId);
+      if (nextIndex >= 0) this.state.overlayIndex = nextIndex;
+      this.state.status = `${actionId} complete · setup recomputed from canonical state`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${actionId} failed: ${error.message} · correct the input and retry`;
+      this.render();
+    }
+    return true;
+  }
+
+  async previewSetupCalibration() {
+    try {
+      const parsed = JSON.parse(this.state.input);
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      const jobId = String(parsed.jobId || this.state.setupJobId || '');
+      const sequence = Number(one(this.store, 'SELECT COUNT(*) AS count FROM career_memory_observations WHERE profile_id=?', [profileId])?.count || 0) + 1;
+      const feedback = {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: parsed.decision,
+        reasonCodes: parsed.reasonCodes,
+        signals: parsed.signals || [],
+        publicExplanation: parsed.publicExplanation || '',
+        privateNote: parsed.privateNote || '',
+        referenceId: `tui-setup-calibration:${profileId}:${jobId}:${sequence}`,
+        occurredAt: this.now().toISOString()
+      };
+      await callDomainTool(this.store, 'record_job_feedback', { profileId, jobId, feedback, validateOnly: true }, { source: 'tui' });
+      this.state.pendingConfirm = { kind: 'setup-calibration-feedback', profileId, jobId, feedback };
+      this.state.mode = 'normal';
+      this.state.error = null;
+      this.state.status = `Preview · job ${jobId} · ${feedback.decision} · reasons ${feedback.reasonCodes.join(',')} · private note ${feedback.privateNote ? 'present' : 'absent'} · confirm? (y/n)`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration preview failed: ${error.message} · correct the JSON and retry`;
+    }
+    this.render();
+  }
+
+  async commitSetupCalibration(confirm) {
+    try {
+      await callDomainTool(this.store, 'record_job_feedback', {
+        profileId: confirm.profileId, jobId: confirm.jobId, feedback: confirm.feedback, validateOnly: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration feedback recorded · proposal derivation remains explicit';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration recording failed: ${error.message}`;
+      this.render();
+    }
+  }
+
+  async deriveSetupCalibration() {
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      await callDomainTool(this.store, 'derive_memory_proposals', {
+        profileId, asOf: this.now().toISOString(), dryRun: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration proposals derived · inactive until explicitly accepted; review to accept or reject';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration derivation failed: ${error.message}`;
+      this.render();
+    }
+  }
+
   onBuildNetworkKey(value, key, items) {
     const item = items[this.state.overlayIndex];
     if (!item) return this.render();
@@ -2785,6 +3144,11 @@ export class JobosTui {
     if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
+      if (['setup-profile', 'setup-file', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (mode === 'setup-calibration') {
+        void this.previewSetupCalibration();
+        return true;
+      }
       if (mode === 'review-note') {
         void this.submitReviewNote();
         return true;
@@ -2845,6 +3209,40 @@ export class JobosTui {
       this.state.pendingConfirm = null;
       this.state.mode = 'normal';
       this.state.input = '';
+      if (confirm.kind === 'setup-domain-action') {
+        void this.runAction(confirm.action);
+        return true;
+      }
+      if (confirm.kind === 'setup-calibration-feedback') {
+        void this.commitSetupCalibration(confirm);
+        return true;
+      }
+      if (confirm.kind === 'setup-calibration-derive') {
+        void this.deriveSetupCalibration();
+        return true;
+      }
+      if (confirm.kind === 'setup-proof-verify') {
+        try {
+          verifyProof(this.store, confirm.proofId);
+          this.state.overlay = 'setup';
+          this.refresh({ disk: false });
+          this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'proofs');
+          this.state.error = null;
+          this.state.status = `Proof ${confirm.proofId} verified · setup recomputed`;
+        } catch (error) {
+          this.state.error = error.message;
+          this.state.status = `Proof verification failed: ${error.message}`;
+          this.render();
+        }
+        return true;
+      }
+      if (confirm.kind === 'setup-memory-transition') {
+        const guided = this.state.setupCalibrationReview;
+        this.state.setupCalibrationReview = false;
+        this.executeMemoryCommand(confirm.argText);
+        this.state.setupCalibrationReview = guided;
+        return true;
+      }
       if (confirm.kind === 'editor-with-note' || confirm.next === 'editor') void this.openArtifactEditor();
       else this.applyPendingAutoOpen();
       this.state.status = confirm.kind === 'editor-with-note' ? 'Feedback discarded; opening editor.' : 'Feedback discarded.';
@@ -2900,7 +3298,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);
@@ -2951,10 +3349,8 @@ export class JobosTui {
     else if (value === 'p') void this.runAction('pursue');
     else if (value === 'z') void this.runAction('score');
     else if (value === 'd') void this.runAction('daily');
-    else if (value === 'g') {
-      this.state.status = 'state refreshed from disk';
-      this.refresh();
-    } else if (value === 'c') void this.connectAgent();
+    else if (value === 'g') this.openSetupOverlay();
+    else if (value === 'c') void this.connectAgent();
     else if (value === 'x' && this.client?.state === 'working') {
       this.client.cancel();
       this.state.status = 'cancelling agent turn';

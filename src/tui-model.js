@@ -13,6 +13,7 @@ import { compareFitDecisions } from './scoring.js';
 import { listMemoryObservations } from './career-memory-observations.js';
 import { listMemoryProposals, resolveActiveMemoryRules } from './career-memory-proposals.js';
 import { getCareerBrief, getVoicePositioningGuide } from './career-memory-projections.js';
+import { buildOnboardingStatus } from './onboarding.js';
 
 const ACTIVE_APPLICATION_STATUSES = new Set([
   'saved',
@@ -470,6 +471,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details
   });
   const memory = memoryProjection(s, { profileId: selectedProfile, at });
+  const onboarding = buildOnboardingStatus(s, { profileId, jobId: selectedJobId, asOf: at });
 
   return {
     version: 2,
@@ -491,6 +493,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selected: details,
     interviews,
     memory,
+    onboarding,
     review: reviews,
     log: logs,
     dueTasks: dueRows.slice(0, 20).map(row => ({

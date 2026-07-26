@@ -31,6 +31,7 @@ import { callDomainTool } from './domain-tools.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
 import { preflightResumeArtifact } from './artifacts.js';
 import { getMemoryObservation } from './career-memory-observations.js';
+import { inspectOnboardingStatus } from './onboarding.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -63,6 +64,9 @@ function cmd(pathParts, usage, summary, opts = {}) {
 
 export const commandRegistry = [
   cmd(['init'], 'jobos init [--json]', 'Create or verify the local database and agent-readable workspace.'),
+  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup', 'status'], 'jobos setup status [--profile <profile-id>] [--job <job-id>] [--json]', 'Inspect the read-only guided setup projection and optional capability status.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup', 'next'], 'jobos setup next [--profile <profile-id>] [--job <job-id>] [--json]', 'Return the next canonical or optional guided setup action without writing.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
   cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the locked data-bound terminal product shell with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
@@ -234,10 +238,10 @@ function commandFor(parts) {
 }
 
 function renderRootHelp({ allCommands = false } = {}) {
-  const primaryNames = new Set(['init', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
+  const primaryNames = new Set(['init', 'setup', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
   const primary = commandRegistry.filter(command => primaryNames.has(command.name));
   const section = (title, names) => `${title}:\n${names.map(command => `  ${command.usage}\n      ${command.summary}`).join('\n')}`;
-  const setup = primary.filter(command => ['init', 'profile create'].includes(command.name));
+  const setup = primary.filter(command => ['init', 'setup', 'profile create'].includes(command.name));
   const workflows = primary.filter(command => ['tui', 'daily', 'pursue', 'jobs list', 'network paths'].includes(command.name));
   const extend = primary.filter(command => ['agents list', 'browser status'].includes(command.name));
   const advanced = allCommands ? `\n\nAdvanced commands:\n${commandRegistry.filter(command => !primaryNames.has(command.name)).map(command => `  ${command.usage}`).join('\n')}` : '\n\nRun "jobos help --all" for every low-level command.';
@@ -255,7 +259,7 @@ ${section('Workflows', workflows)}
 ${section('Extend', extend)}${advanced}
 
 Global flags:
-  ${globalFlags.join('\n  ')}
+  ${globalFlags.join(' · ')}
 
 Run \"jobos <command> --help\" for command-specific help.`;
 }
@@ -633,6 +637,35 @@ export async function main(argv = process.argv.slice(2)) {
   if (group === 'agent-guide') {
     if (flags.json) out(registryJson());
     else text(renderAgentGuide());
+    return;
+  }
+  if (group === 'setup') {
+    if (action && !['status', 'next'].includes(action)) usage(`Unknown setup command: ${action}`);
+    const setupOptions = {
+      profileId: flags.profile ? String(flags.profile) : null,
+      jobId: flags.job ? String(flags.job) : null,
+      includeCapabilities: true
+    };
+    if (flags.json || action) {
+      const status = await inspectOnboardingStatus(s, setupOptions);
+      out(action === 'next' ? {
+        schema: status.schema,
+        profileId: status.profileId,
+        jobId: status.jobId,
+        state: status.state,
+        nextAction: status.nextAction,
+        policy: status.policy
+      } : status);
+      return;
+    }
+    const { startTui } = await import('./tui.js');
+    const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    await startTui(s, {
+      profileId: setupOptions.profileId,
+      selectedJobId: setupOptions.jobId,
+      initialOverlay: 'setup',
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
+    });
     return;
   }
   if (group === 'tui') {
