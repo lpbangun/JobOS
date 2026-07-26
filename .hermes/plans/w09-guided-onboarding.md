@@ -2,7 +2,7 @@
 
 ## Outcome and authority boundary
 
-W09 adds one guided CLI/TUI journey over the domain flows already shipped in W01, W02, W03, and W08. A clean workspace can reach a trustworthy pursue decision and the existing `materials-ready` readiness state without learning internal IDs or command order. Interrupting the journey loses no completed work: status and the next action are recomputed from canonical state on every open.
+W09 adds one guided CLI/TUI journey over the domain flows already shipped in W01, W02, W03, and W08. A clean workspace can reach a trustworthy pursue decision and complete local materials approval without learning internal IDs or command order. Interrupting the journey loses no completed work: status and the next action are recomputed from canonical state on every open.
 
 W09 does not add an onboarding database, wizard checkpoint table, duplicate profile/source/proof/preference record, required agent, cloud service, API key, browser, or external action. SQLite and existing private provider/browser configuration remain authoritative. Setup output is a read-only projection.
 
@@ -14,7 +14,7 @@ The guided journey is:
 4. verify, correct, replace, retire, or add proof points through W01;
 5. configure a canonical public saved search and/or import a user-selected local job;
 6. score a current non-expired job and show the existing evidence, uncertainty, legitimacy, and accepted-memory adjustment separately;
-7. confirm the pursue decision, run the existing pursuit graph, review exact artifact revisions, and reach W02 `materials-ready`;
+7. confirm the pursue decision, run the existing pursuit graph, review exact artifact revisions, and complete W02 local materials approval;
 8. optionally calibrate with explicit ratings/reasons over canonical jobs, inspect resulting W08 observations/proposals, and explicitly accept or reject proposals;
 9. optionally configure an ACP provider and private browser profile, with honest capability/recovery status.
 
@@ -29,7 +29,7 @@ The guided journey is:
 | Resume and proofs | `profile_resume_revisions`, `proof_points`, proof lifecycle, and W01 validators | Completion derives from the current valid resume plus active verified proofs. Blockers link to existing correction commands. |
 | Discovery sources | `saved_searches` and W03 source configuration | Source completion derives from a profile-owned canonical saved search. No wizard-owned source JSON. |
 | Jobs, liveness, and fit | `jobs`, posting-liveness evidence, and persisted `fit_scores` | Intake/decision derive from current profile-owned rows. Guidance cannot override expired gates or fit math. |
-| Pursuit and materials | workflow stage results, artifacts, exact review state, and `compileApplicationReadiness` | Materials completion is true only when the existing readiness result is `materials-ready` or `form-ready`; W09 does not invent a readiness label. |
+| Pursuit and materials | workflow stage results, artifacts, exact review state, and `compileApplicationReadiness` | Materials completion is true when `readiness.localApprovalComplete` is true, `materialsStatus` is `approved`, or readiness `status` is `materials-ready`, `form-ready`, or `form-blocked`. W09 does not invent a readiness label, and live-form state does not become a core blocker. |
 | Career Memory | W08 observations, proposals, transitions, projections, and active-rule resolver | Calibration invokes existing trusted-human APIs. Proposal derivation and lifecycle remain W08-owned. |
 | Agent/provider | live `agentBackendCatalog`, Hermes/private provider config, and environment | Read-only capability probe. No key, token, model, or auth state is stored in SQLite or mirrors. |
 | Browser | `.jobos/browser/` private state and `browserStatus` | Read-only capability/profile probe and existing recovery commands. No browser secret enters setup JSON, audit, or mirror. |
@@ -84,7 +84,7 @@ Required step order and exact completion rules:
 4. `proofs`: at least one selected-profile proof is both `status='active'` and `verification_status='verified'`. Unverified imported proofs are not treated as complete.
 5. `intake`: at least one selected-profile job exists. A saved search alone prepares discovery but does not satisfy intake; a local text/URL import is a valid keyless route.
 6. `decision`: one explicitly selected profile-owned job has fresh/current liveness other than `expired` and a persisted current W04 fit result. If several jobs exist and no `--job` is supplied, selection is required; setup must not silently score or pursue the first job.
-7. `materials`: `compileApplicationReadiness` for the selected profile/job returns `materials-ready` or `form-ready`. `blocked` and `ready-for-review` remain incomplete and expose their existing blocker/next-action vocabulary. `form-ready` counts because it strictly includes materials readiness.
+7. `materials`: `compileApplicationReadiness` for the selected profile/job has `localApprovalComplete === true`, has `materialsStatus === 'approved'`, or returns `status` in `{ materials-ready, form-ready, form-blocked }`. `blocked` and `ready-for-review` remain incomplete and expose their existing blocker/next-action vocabulary. `form-blocked` completes this core step because local materials are already approved; it must not force live-form field resolution into the core journey. Form and network remain optional and outside `coreReady`.
 
 Optional step order:
 
@@ -118,7 +118,7 @@ Do not expose setup mutations as a generic MCP tool. Agents may read the normal 
 
 ### TUI
 
-Add `g` = `setup` to `TUI_KEYMAP.global`. `jobos tui` automatically opens the setup overlay only when there is no profile; otherwise it preserves the normal shell and the user opens setup with `g`. `jobos setup` always opens it.
+Explicitly rebind `g` from its current silent disk-refresh handler to `setup`, and add `g` = `setup` to `TUI_KEYMAP.global` and `TUI_HANDLED_KEYS.global`. Disk refresh remains available through the existing refresh paths, including setup overlay `r` recomputation and refreshes after successful mutations; no alternate global key is required. Keymap invariant and residual-handler tests must prove `TUI_KEYMAP`, `TUI_HANDLED_KEYS`, and the live handler remain consistent and that no old silent-refresh `g` branch survives. `jobos tui` automatically opens the setup overlay only when there is no profile; otherwise it preserves the normal shell and the user opens setup with `g`. `jobos setup` always opens it.
 
 The setup overlay renders all steps, required/optional labels, current blockers, and one focused action. Enter opens an in-TUI form or existing overlay for the action; Escape closes without writes; `j/k` changes step; `r` recomputes; `c` opens correction for the focused canonical record. No action executes merely because the overlay opened or because status was computed.
 
@@ -154,7 +154,7 @@ Recovery is state-derived, idempotent, and narrow:
 | Uncertain job | Allow scoring/pursuit with the existing visible uncertainty warning; do not relabel active. |
 | Pursuit stage failure | Read existing stage `failed/skipped` result and recovery guidance; retry only the failed stage plus declared dependencies. Preserve successful stages/artifact history. |
 | Missing/rejected/stale artifact | Reuse readiness blockers and exact revision queue/diff/redraft/review. Never approve or regenerate silently. |
-| `ready-for-review` | Focus exact pending current revisions. Completion changes only after trusted approval makes canonical readiness `materials-ready`. |
+| `ready-for-review` | Focus exact pending current revisions. Completion changes only after trusted approval makes `localApprovalComplete` true / `materialsStatus` `approved`, reflected by readiness `materials-ready`, `form-ready`, or `form-blocked`. |
 | Calibration has too little/conflicting evidence | Observation remains visible; W08 may produce no proposal or inactive/conflicted proposal. Setup remains core-complete. |
 | Proposal exists | Display proposed versus active separately. No ranking/writing effect until explicit acceptance. |
 | Provider absent/auth fails | Optional `unavailable`/`misconfigured`; show `hermes setup`, `hermes acp --check`; deterministic flow remains enabled. |
@@ -186,7 +186,7 @@ Trust invariants:
 |---|---|
 | `W09-JOURNEY-01` | Clean workspace projects the seven required steps in frozen order with profile as first blocker. |
 | `W09-JOURNEY-02` | Guided canonical actions reach an explicit job score/pursue decision without the user supplying internal IDs manually. |
-| `W09-JOURNEY-03` | Exact artifact review advances only through existing readiness and reaches `materials-ready`; setup never aliases `ready-for-review`. |
+| `W09-JOURNEY-03` | Exact artifact review advances only through existing readiness; materials completes when `localApprovalComplete` is true, `materialsStatus` is `approved`, or status is `materials-ready`, `form-ready`, or `form-blocked`. Setup never aliases `ready-for-review`, and `form-blocked` never makes live-form resolution a core requirement. |
 | `W09-JOURNEY-04` | Multiple profiles/jobs require explicit selection; profile/job ownership is enforced. |
 | `W09-JOURNEY-05` | CLI JSON, `setup next`, TUI overlay, and canonical state agree after each action. |
 | `W09-RESUME-01` | Missing/invalid canonical resume blocks and exposes W01 validator codes and correction routes. |
@@ -272,7 +272,8 @@ Add TUI tests to the same W09 file, using existing render/key harnesses.
 RED first:
 
 - no-profile auto-open and existing-profile no-auto-open;
-- `g`, navigation, Escape zero-write, correction focus, and explicit confirmation;
+- `g` is explicitly rebound from silent disk refresh to setup; navigation, Escape zero-write, correction focus, and explicit confirmation;
+- `TUI_KEYMAP`, `TUI_HANDLED_KEYS`, and handler/residual tests stay consistent, with no residual silent-refresh `g` branch; existing refresh paths remain available;
 - failed action remains focused and does not advance;
 - successful mutation reloads authoritative state and setup/normal models agree;
 - agent pane cannot trigger human setup/calibration/review actions;
