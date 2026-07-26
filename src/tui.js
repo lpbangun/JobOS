@@ -7,7 +7,7 @@ import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
-import { addProof, createProfile, setNetworkIntent } from './profiles.js';
+import { addProof, createProfile, setNetworkIntent, verifyProof } from './profiles.js';
 import { importResume, replaceResume } from './resumes.js';
 import { importText } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
@@ -424,6 +424,8 @@ function agentPanel(model, state, width, height, color) {
 
 function overlayItems(model, state) {
   if (state.overlay === 'setup') return model.onboarding?.steps || [];
+  if (state.overlay === 'setup-profile-picker') return model.profiles || [];
+  if (state.overlay === 'setup-job-picker') return model.jobs || [];
   if (state.overlay === 'review') return model.review;
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
@@ -683,6 +685,14 @@ function overlayPanel(model, state, width, height, color) {
       if (focused.actions[0]) body.push(`action ${focused.actions[0].label} · ${focused.actions[0].command}`);
     }
     body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+  } else if (state.overlay === 'setup-profile-picker') {
+    title = 'GUIDED SETUP · SELECT PROFILE';
+    body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+  } else if (state.overlay === 'setup-job-picker') {
+    title = 'GUIDED SETUP · SELECT JOB';
+    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
   } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
@@ -969,7 +979,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = Math.max(60, width);
   const safeHeight = Math.max(20, height);
   const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof']);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
@@ -1014,11 +1024,12 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
   }
   if (state.pendingConfirm) {
-    lines.push(paint(fit('Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
+    const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
+    lines.push(paint(fit(guided ? 'Guided trusted action · y/Enter confirm · n/Esc cancel' : 'Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence' };
+    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -1134,13 +1145,17 @@ export class JobosTui {
     const previousReviewIndex = Math.max(0, previousModel?.review?.findIndex(item => item.id === previousArtifactId) ?? 0);
     const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
+    const setupSurface = ['setup', 'setup-profile-picker', 'setup-job-picker'].includes(this.state.overlay)
+      || this.state.mode === 'setup-calibration';
     this.model = buildTuiModel(this.store, {
-      profileId: this.state.overlay === 'setup' ? this.state.setupProfileId : this.state.profileId,
-      selectedJobId: this.state.overlay === 'setup' ? this.state.setupJobId : this.state.selectedJobId,
+      profileId: setupSurface ? this.state.setupProfileId : this.state.profileId,
+      selectedJobId: setupSurface ? this.state.setupJobId : this.state.selectedJobId,
       at: this.now().toISOString()
     });
-    this.state.profileId = this.model.profileId;
-    this.state.selectedJobId = this.model.selectedJobId;
+    if (!setupSurface) {
+      this.state.profileId = this.model.profileId;
+      this.state.selectedJobId = this.model.selectedJobId;
+    }
 
     const docs = this.model.selected?.docs || [];
     const shouldClampArtifact = Boolean(this.state.selectedArtifactId) || this.state.overlay === 'review' || this.state.overlay === 'docs';
@@ -1303,8 +1318,11 @@ export class JobosTui {
   }
 
   openSetupOverlay() {
-    if (this.state.setupProfileId || this.model.profiles.length === 1) this.state.setupJobId = this.state.selectedJobId;
-    else this.state.setupJobId = null;
+    const shellProfileId = this.model.profiles.some(profile => profile.id === this.state.profileId) ? this.state.profileId : null;
+    if (shellProfileId) this.state.setupProfileId = shellProfileId;
+    else if (this.model.profiles.length === 1) this.state.setupProfileId = this.model.profiles[0].id;
+    const selectedJob = this.model.jobs.find(job => job.id === this.state.selectedJobId);
+    this.state.setupJobId = selectedJob && this.state.setupProfileId === this.state.profileId ? selectedJob.id : null;
     this.state.overlay = 'setup';
     this.state.overlayIndex = 0;
     this.state.mode = 'normal';
@@ -1712,6 +1730,12 @@ export class JobosTui {
     if (parts.length > 2 || !['accept', 'reject', 'revoke', 'undo'].includes(action) || !target || extra.length
       || (['reject', 'revoke', 'undo'].includes(action) && !reason)) {
       this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (this.state.setupCalibrationReview && ['accept', 'reject'].includes(action)) {
+      this.state.pendingConfirm = { kind: 'setup-memory-transition', argText: text };
+      this.state.status = `Confirm explicit calibration proposal ${action}: ${target}? (y/n)`;
       this.render();
       return;
     }
@@ -2673,6 +2697,38 @@ export class JobosTui {
   }
 
   onOverlayKey(value, key) {
+    if (this.state.overlay === 'setup-profile-picker' || this.state.overlay === 'setup-job-picker') {
+      const picker = this.state.overlay;
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === (picker === 'setup-profile-picker' ? 'profile' : 'decision'));
+        this.render();
+        return true;
+      }
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        if (picker === 'setup-profile-picker') {
+          this.state.setupProfileId = items[this.state.overlayIndex].id;
+          this.state.profileId = items[this.state.overlayIndex].id;
+          this.state.setupJobId = null;
+          this.state.selectedJobId = null;
+        } else {
+          this.state.setupJobId = items[this.state.overlayIndex].id;
+          this.state.selectedJobId = items[this.state.overlayIndex].id;
+        }
+        const stepId = picker === 'setup-profile-picker' ? 'profile' : 'decision';
+        this.state.overlay = 'setup';
+        this.refresh({ disk: false });
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+        this.state.status = `${stepId} selected explicitly · setup recomputed`;
+        this.render();
+        return true;
+      }
+      this.render();
+      return true;
+    }
     if (key.name === 'escape') return this.closeTransient();
     if (this.state.overlay === 'setup') {
       const items = this.model.onboarding?.steps || [];
@@ -2787,7 +2843,7 @@ export class JobosTui {
       return this.openSetupAction(item);
     }
     const overlays = {
-      profile: 'profile',
+      profile: 'setup-profile-picker',
       intake: 'discovery',
       source: 'discovery',
       materials: 'review',
@@ -2809,6 +2865,34 @@ export class JobosTui {
     const actionId = item?.actions?.[0]?.id;
     if (!actionId) {
       this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'select_profile') return this.openOverlay('setup-profile-picker');
+    if (actionId === 'select_job' || actionId === 'select_current_job') return this.openOverlay('setup-job-picker');
+    if (actionId === 'record_calibration') {
+      this.state.mode = 'setup-calibration';
+      this.state.input = '';
+      this.state.status = 'Enter feedback JSON with jobId, decision, reasonCodes, optional signals/explanations · Enter previews';
+      this.render();
+      return true;
+    }
+    if (actionId === 'derive_calibration') {
+      this.state.pendingConfirm = { kind: 'setup-calibration-derive' };
+      this.state.status = 'Derive inactive proposals from current attributed observations? (y/n)';
+      this.render();
+      return true;
+    }
+    if (actionId === 'review_calibration') {
+      this.openOverlay('memory');
+      this.state.memoryView = 'proposals';
+      this.state.setupCalibrationReview = true;
+      return true;
+    }
+    if (actionId === 'verify_proof') {
+      const proofId = String(item.actions[0].command).match(/proof verify\s+(\S+)/)?.[1];
+      this.state.pendingConfirm = { kind: 'setup-proof-verify', proofId };
+      this.state.status = `Verify proof ${proofId} as a trusted human? (y/n)`;
       this.render();
       return true;
     }
@@ -2834,7 +2918,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (actionId === 'correct_proofs') {
+    if (actionId === 'add_proof') {
       this.state.mode = 'setup-proof';
       this.state.input = '';
       this.state.setupFormAction = actionId;
@@ -2862,7 +2946,7 @@ export class JobosTui {
       } else if (actionId === 'import_resume' || actionId === 'replace_resume') {
         const owner = actionId === 'replace_resume' ? replaceResume : importResume;
         owner(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
-      } else if (actionId === 'correct_proofs') {
+      } else if (actionId === 'add_proof') {
         const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
         if (!summary) throw new Error('Proof summary is required.');
         addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
@@ -2889,6 +2973,69 @@ export class JobosTui {
       this.render();
     }
     return true;
+  }
+
+  async previewSetupCalibration() {
+    try {
+      const parsed = JSON.parse(this.state.input);
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      const jobId = String(parsed.jobId || this.state.setupJobId || '');
+      const sequence = Number(one(this.store, 'SELECT COUNT(*) AS count FROM career_memory_observations WHERE profile_id=?', [profileId])?.count || 0) + 1;
+      const feedback = {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: parsed.decision,
+        reasonCodes: parsed.reasonCodes,
+        signals: parsed.signals || [],
+        publicExplanation: parsed.publicExplanation || '',
+        privateNote: parsed.privateNote || '',
+        referenceId: `tui-setup-calibration:${profileId}:${jobId}:${sequence}`,
+        occurredAt: this.now().toISOString()
+      };
+      await callDomainTool(this.store, 'record_job_feedback', { profileId, jobId, feedback, validateOnly: true }, { source: 'tui' });
+      this.state.pendingConfirm = { kind: 'setup-calibration-feedback', profileId, jobId, feedback };
+      this.state.mode = 'normal';
+      this.state.error = null;
+      this.state.status = `Preview · job ${jobId} · ${feedback.decision} · reasons ${feedback.reasonCodes.join(',')} · private note ${feedback.privateNote ? 'present' : 'absent'} · confirm? (y/n)`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration preview failed: ${error.message} · correct the JSON and retry`;
+    }
+    this.render();
+  }
+
+  async commitSetupCalibration(confirm) {
+    try {
+      await callDomainTool(this.store, 'record_job_feedback', {
+        profileId: confirm.profileId, jobId: confirm.jobId, feedback: confirm.feedback, validateOnly: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration feedback recorded · proposal derivation remains explicit';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration recording failed: ${error.message}`;
+      this.render();
+    }
+  }
+
+  async deriveSetupCalibration() {
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      await callDomainTool(this.store, 'derive_memory_proposals', {
+        profileId, asOf: this.now().toISOString(), dryRun: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration proposals derived · inactive until explicitly accepted; review to accept or reject';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration derivation failed: ${error.message}`;
+      this.render();
+    }
   }
 
   onBuildNetworkKey(value, key, items) {
@@ -2949,6 +3096,10 @@ export class JobosTui {
       const text = this.state.input.trim();
       const mode = this.state.mode;
       if (['setup-profile', 'setup-file', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (mode === 'setup-calibration') {
+        void this.previewSetupCalibration();
+        return true;
+      }
       if (mode === 'review-note') {
         void this.submitReviewNote();
         return true;
@@ -3013,6 +3164,36 @@ export class JobosTui {
         void this.runAction(confirm.action);
         return true;
       }
+      if (confirm.kind === 'setup-calibration-feedback') {
+        void this.commitSetupCalibration(confirm);
+        return true;
+      }
+      if (confirm.kind === 'setup-calibration-derive') {
+        void this.deriveSetupCalibration();
+        return true;
+      }
+      if (confirm.kind === 'setup-proof-verify') {
+        try {
+          verifyProof(this.store, confirm.proofId);
+          this.state.overlay = 'setup';
+          this.refresh({ disk: false });
+          this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'proofs');
+          this.state.error = null;
+          this.state.status = `Proof ${confirm.proofId} verified · setup recomputed`;
+        } catch (error) {
+          this.state.error = error.message;
+          this.state.status = `Proof verification failed: ${error.message}`;
+          this.render();
+        }
+        return true;
+      }
+      if (confirm.kind === 'setup-memory-transition') {
+        const guided = this.state.setupCalibrationReview;
+        this.state.setupCalibrationReview = false;
+        this.executeMemoryCommand(confirm.argText);
+        this.state.setupCalibrationReview = guided;
+        return true;
+      }
       if (confirm.kind === 'editor-with-note' || confirm.next === 'editor') void this.openArtifactEditor();
       else this.applyPendingAutoOpen();
       this.state.status = confirm.kind === 'editor-with-note' ? 'Feedback discarded; opening editor.' : 'Feedback discarded.';
@@ -3068,7 +3249,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);

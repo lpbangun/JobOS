@@ -11,6 +11,14 @@ const REQUIRED_IDS = ['workspace', 'profile', 'resume', 'proofs', 'intake', 'dec
 const OPTIONAL_IDS = ['source', 'calibration', 'provider', 'browser', 'network'];
 const MATERIALS_COMPLETE = new Set(['materials-ready', 'form-ready', 'form-blocked']);
 
+export function isOnboardingMaterialsComplete(readiness) {
+  return Boolean(readiness && (
+    readiness.localApprovalComplete === true
+    || readiness.materialsStatus === 'approved'
+    || MATERIALS_COMPLETE.has(readiness.status)
+  ));
+}
+
 const policy = Object.freeze({
   canonicalState: 'sqlite',
   projectionPersisted: false,
@@ -139,9 +147,15 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
   const proofs = pid ? all(s, 'SELECT id,status,verification_status FROM proof_points WHERE profile_id=? ORDER BY id', [pid]) : [];
   const verified = proofs.filter(item => item.status === 'active' && item.verification_status === 'verified');
   const proofComplete = verified.length > 0;
+  const proofActions = !pid ? [] : proofs.length ? [
+    action('verify_proof', 'Verify proof', `jobos proof verify ${proofs[0].id} --json`),
+    action('replace_proof', 'Replace proof', `jobos proof supersede ${proofs[0].id} --summary <claim> --evidence <source> --json`),
+    action('retire_proof', 'Retire proof', `jobos proof retire ${proofs[0].id} --json`),
+    action('add_proof', 'Add proof', `jobos proof add --profile ${pid} --summary <claim> --evidence <source> --json`)
+  ] : [action('add_proof', 'Add proof', `jobos proof add --profile ${pid} --summary <claim> --evidence <source> --json`)];
   steps.push(step('proofs', 'canonical', true, proofComplete ? 'complete' : 'blocked', proofComplete ? 'Verified active proof is available.' : 'At least one active proof must be verified.',
     proofComplete ? [] : [blocker('verified_proof_missing', 'No active verified proof exists.', 'Verify, replace, retire, or add a proof point.')],
-    pid ? [action('correct_proofs', 'Review proof points', `jobos proof add --profile ${pid} --summary <claim> --evidence <source> --json`)] : [],
+    proofActions,
     { proofCount: proofs.length, activeVerifiedCount: verified.length, activeVerifiedProofIds: verified.map(item => item.id) }));
 
   const intakeComplete = jobs.length > 0;
@@ -166,7 +180,7 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     decisionBlockers, decisionActions, { selectedJobId: jid, livenessStatus: job?.liveness_status || null, livenessCheckedAt: job?.liveness_checked_at || null, fitPersisted: scored, uncertaintyWarning: job?.liveness_status === 'uncertain' }));
 
   const readiness = readinessProjection(s, pid, job);
-  const materialsComplete = Boolean(readiness && (readiness.localApprovalComplete === true || readiness.materialsStatus === 'approved' || MATERIALS_COMPLETE.has(readiness.status)));
+  const materialsComplete = isOnboardingMaterialsComplete(readiness);
   const readinessBlockers = readiness?.blockers || [];
   const materialBlockers = !decisionComplete ? [blocker('decision_required', 'Complete the explicit fit decision first.', 'Complete decision setup.')]
     : materialsComplete ? []
@@ -184,8 +198,13 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     { searchCount: searches.length, searchIds: searches.map(item => item.id), adapters: [...new Set(searches.map(item => item.adapter))] }));
 
   const memory = memorySummary(s, pid, canonicalAsOf);
-  steps.push(step('calibration', 'canonical', false, memory.observationIds.length ? 'optional_ready' : 'optional_incomplete', memory.observationIds.length ? 'Attributed calibration feedback exists; proposals remain separately governed.' : 'Optional calibration has not been recorded.', [],
-    pid ? [action('record_calibration', 'Record attributed job feedback', `jobos feedback job <job-id> --profile ${pid} --file <job-feedback.json> --json`)] : [], memory));
+  const proposalCount = Object.values(memory.proposalCounts).reduce((sum, count) => sum + count, 0);
+  const calibrationActions = !pid ? [] : !memory.observationIds.length
+    ? [action('record_calibration', 'Record attributed job feedback', `jobos feedback job <job-id> --profile ${pid} --file <job-feedback.json> --json`)]
+    : proposalCount === 0
+      ? [action('derive_calibration', 'Derive inactive proposals', `jobos preferences derive --profile ${pid} --json`)]
+      : [action('review_calibration', 'Review inactive proposals', `jobos preferences proposals --profile ${pid} --json`, { mutates: false })];
+  steps.push(step('calibration', 'canonical', false, memory.observationIds.length ? 'optional_ready' : 'optional_incomplete', memory.observationIds.length ? 'Attributed calibration feedback exists; proposals remain separately governed.' : 'Optional calibration has not been recorded.', [], calibrationActions, memory));
 
   steps.push(step('provider', 'optional_external', false, 'unavailable', 'Provider capability was not probed by the canonical projector.', [],
     [action('inspect_provider', 'Inspect provider', 'hermes acp --check', { mutates: false, externalSideEffect: 'none' })], { probeStatus: 'not_requested' }));
