@@ -13,7 +13,8 @@ import { runPursuit } from '../src/workflows.js';
 import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
 import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 import { refreshMemoryProjection } from '../src/career-memory-projections.js';
-import { retrieveCareerMemory } from '../src/career-memory-retrieval.js';
+import { evaluateSearchGuidance, retrieveCareerMemory } from '../src/career-memory-retrieval.js';
+import { createMemoryProposal, getMemoryProposal, transitionMemoryProposal } from '../src/career-memory-proposals.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
 const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
@@ -170,13 +171,111 @@ try {
       schema: 'jobos.job-feedback-input.v1',
       decision: 'save',
       reasonCodes: ['role_fit'],
-      signals: [],
+      signals: [{ field: 'location', polarity: 'prefer', value: 'remote', match: 'token' }],
       publicExplanation: '',
       privateNote: privateMemorySentinel,
       referenceId: 'w08-smoke-job-save',
-      occurredAt: new Date().toISOString()
+      occurredAt: '2026-07-21T12:00:00.000Z'
     }
   });
+  const memoryEvidence = [memoryObservation.observation];
+  for (const [index, evidenceJobId] of [richJobId, activeW03.id].entries()) {
+    const feedback = updateJobStatus(w08Store, evidenceJobId, 'saved', {
+      actor: 'user',
+      source: 'cli',
+      memoryFeedback: {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: 'save',
+        reasonCodes: ['location'],
+        signals: [{ field: 'location', polarity: 'prefer', value: 'remote', match: 'token' }],
+        publicExplanation: '',
+        privateNote: `${privateMemorySentinel}_${index + 2}`,
+        referenceId: `w08-smoke-location-save-${index + 2}`,
+        occurredAt: `2026-07-${22 + index}T12:00:00.000Z`
+      }
+    });
+    memoryEvidence.push(feedback.observation);
+  }
+  const memoryProposalInput = {
+    schema: 'jobos.memory-proposal-input.v1',
+    domain: 'search',
+    scope: 'search',
+    ruleType: 'location',
+    value: { polarity: 'prefer', value: 'remote', match: 'token' },
+    rationale: 'Repeated direct job feedback supports this visible location preference.',
+    evidence: memoryEvidence.map(item => ({
+      observationSchema: 'jobos.career-memory-observation.v1',
+      observationId: item.id,
+      polarity: 'support'
+    })),
+    referenceId: 'w08-smoke-location-proposal',
+    createdAt: '2026-07-24T12:00:00.000Z'
+  };
+  const memoryProposal = createMemoryProposal(w08Store, memoryProposalInput);
+  const memoryProposalReplay = createMemoryProposal(w08Store, memoryProposalInput);
+  const preAcceptanceGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  if (memoryProposalReplay.id !== memoryProposal.id || memoryProposalReplay.idempotent !== true
+    || preAcceptanceGuidance.adjustment !== 0 || preAcceptanceGuidance.matchedRuleIds.length !== 0
+    || preAcceptanceGuidance.citations.length !== 0) {
+    throw new Error('W08 proposed guidance was not idempotent and effect-free before acceptance');
+  }
+  const acceptedMemoryTransition = transitionMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id,
+    action: 'accept',
+    reason: '',
+    referenceId: 'w08-smoke-location-accept',
+    actor: 'user',
+    source: 'cli',
+    nowDate: new Date()
+  });
+  const acceptedMemoryGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const evidenceCitationIds = new Set(memoryEvidence.map(item => item.id));
+  if (acceptedMemoryTransition.toStatus !== 'accepted'
+    || acceptedMemoryGuidance.adjustment !== 2
+    || JSON.stringify(acceptedMemoryGuidance.matchedRuleIds) !== JSON.stringify([memoryProposal.id])
+    || acceptedMemoryGuidance.citations.length !== memoryEvidence.length
+    || acceptedMemoryGuidance.citations.some(citation => !evidenceCitationIds.has(citation.id))) {
+    throw new Error('W08 accepted search guidance did not have the exact cited consumer effect');
+  }
+  const revokedMemoryTransition = transitionMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id,
+    action: 'revoke',
+    reason: 'Restore the pre-acceptance smoke baseline.',
+    referenceId: 'w08-smoke-location-revoke',
+    actor: 'user',
+    source: 'cli',
+    nowDate: new Date()
+  });
+  const revokedMemoryGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const memoryProposalHistory = getMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id
+  });
+  if (revokedMemoryTransition.toStatus !== 'revoked'
+    || JSON.stringify(revokedMemoryGuidance) !== JSON.stringify(preAcceptanceGuidance)
+    || memoryProposalHistory.status !== 'revoked'
+    || JSON.stringify(memoryProposalHistory.transitions.map(item => item.toStatus)) !== JSON.stringify(['proposed', 'accepted', 'revoked'])
+    || JSON.stringify(memoryProposalHistory.transitions.map(item => item.referenceId)) !== JSON.stringify([
+      'w08-smoke-location-proposal',
+      'w08-smoke-location-accept',
+      'w08-smoke-location-revoke'
+    ])) {
+    throw new Error('W08 revocation did not restore baseline guidance with complete lifecycle history');
+  }
   const memoryPacket = retrieveCareerMemory(w08Store, {
     profileId: profile.id,
     consumer: 'scoring',
@@ -641,6 +740,14 @@ try {
     w08: {
       observationId: memoryObservation.observation.id,
       observationSourceVersionId: memoryObservation.observation.sourceEntity.versionId,
+      proposalId: memoryProposal.id,
+      proposalReplayIdempotent: memoryProposalReplay.idempotent,
+      preAcceptanceAdjustment: preAcceptanceGuidance.adjustment,
+      acceptedAdjustment: acceptedMemoryGuidance.adjustment,
+      acceptedMatchedRuleIds: acceptedMemoryGuidance.matchedRuleIds,
+      acceptedCitationCount: acceptedMemoryGuidance.citations.length,
+      revokedAdjustment: revokedMemoryGuidance.adjustment,
+      lifecycleHistory: memoryProposalHistory.transitions.map(item => item.toStatus),
       retrievalSchema: memoryPacket.schema,
       careerBriefRevision: careerBrief.revision,
       careerBriefSourceStateHash: careerBrief.sourceStateHash,
