@@ -545,6 +545,13 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
     'add_interview_question_source',
     'record_interview_debrief',
     'correct_interview_debrief',
+    'record_job_feedback',
+    'correct_memory_observation',
+    'undo_memory_observation',
+    'accept_memory_proposal',
+    'reject_memory_proposal',
+    'revoke_memory_proposal',
+    'undo_memory_transition',
   ];
   const advertised = mcpToolNames();
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
