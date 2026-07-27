@@ -72,6 +72,8 @@ function completePursuitResume() {
 function createPursuitProfile(jobos, root) {
   const resume = fixtureFile(root, 'resume.json', JSON.stringify(completePursuitResume(), null, 2));
   const profile = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  assert.ok(profile.proofPointCount >= 3);
+  assert.equal(profile.canonicalResumeCreated, true);
   const profileMirror = readFileSync(path.join(root, 'jobos-workspace', 'profiles', `${profile.id}.yaml`), 'utf8');
   const proofIds = [...profileMirror.matchAll(/id:\s*(proof_[a-f0-9]+)/g)].map(match => match[1]);
   assert.ok(proofIds.length >= 3);

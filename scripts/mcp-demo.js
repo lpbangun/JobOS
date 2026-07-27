@@ -3,9 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 import { openStore, reload, one } from '../src/db.js';
 import { selectedJobContext } from '../src/domain-tools.js';
 import { redactSensitive } from '../src/acp.js';
+import { seedMcpDemo } from './seed-mcp-demo.js';
 
 const CLI_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli.js');
 const REQUESTED_PROTOCOL_VERSION = '2024-11-05';
@@ -28,9 +30,10 @@ function parseToolResult(response) {
 }
 
 class McpProcessClient {
-  constructor({ root, transcriptPath, timeoutMs = 30_000 }) {
+  constructor({ root, transcriptPath, secrets = process.env, timeoutMs = 30_000 }) {
     this.root = root;
     this.transcriptPath = transcriptPath;
+    this.secrets = secrets;
     this.timeoutMs = timeoutMs;
     this.nextId = 1;
     this.pending = new Map();
@@ -45,7 +48,7 @@ class McpProcessClient {
       timestamp: new Date().toISOString(),
       type: 'mcp_frame',
       direction,
-      message: redactSensitive(message, process.env)
+      message: redactSensitive(message, this.secrets)
     };
     fs.appendFileSync(this.transcriptPath, `${JSON.stringify(row)}\n`, { mode: 0o600 });
   }
@@ -140,15 +143,16 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [jobId])?.count || 0)
   };
 
-  const client = new McpProcessClient({ root, transcriptPath, timeoutMs: Number(timeoutMs) });
+  const typedErrors = [];
+  const demoSentinel = process.env.W10_MCP_SECRET || 'w10-mcp-demo-sentinel';
+  const secrets = { ...process.env, W10_MCP_SECRET: demoSentinel };
+  const client = new McpProcessClient({ root, transcriptPath, secrets, timeoutMs: Number(timeoutMs) });
   client.start();
   let initialize;
   let list;
   let scoreResponse;
   let contextResponse;
   let exit;
-  const typedErrors = [];
-  const demoSentinel = process.env.W10_MCP_SECRET || 'w10-mcp-demo-sentinel';
   try {
     initialize = await client.request('initialize', {
       protocolVersion: REQUESTED_PROTOCOL_VERSION,
@@ -172,7 +176,7 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
       typedErrors.push({
         type: protocolError?.code === -32601 ? 'method_not_found' : 'protocol_error',
         code: protocolError?.code ?? null,
-        message: redactSensitive(protocolError?.message || error.message, process.env)
+        message: redactSensitive(protocolError?.message || error.message, secrets)
       });
     }
   } finally {
@@ -232,8 +236,8 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
     fitBefore: before.context.fit,
     fitAfter: after.context.fit,
     exit,
-    stderr: redactSensitive(client.stderr, process.env),
-    transcript: redactSensitive(transcriptPath, process.env)
+    stderr: redactSensitive(client.stderr, secrets),
+    transcript: redactSensitive(transcriptPath, secrets)
   };
   fs.appendFileSync(transcriptPath, `${JSON.stringify({ timestamp: new Date().toISOString(), type: 'summary', ...summary })}\n`, { mode: 0o600 });
   if (!summary.ok) throw Object.assign(new Error(`MCP demo did not meet the protocol/state bar; inspect ${transcriptPath}`), { summary });
@@ -242,15 +246,28 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
 
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
-  if (typeof flags.job !== 'string' || !flags.job) throw new Error('Missing --job <job-id>');
-  const summary = await runMcpDemo({
-    workspace: flags.workspace,
-    profileId: flags.profile || null,
-    jobId: String(flags.job),
-    output: flags.output || null,
-    timeoutMs: typeof flags.timeout === 'string' && Number.isFinite(Number(flags.timeout)) ? Number(flags.timeout) : 30_000
-  });
-  console.log(JSON.stringify(summary, null, 2));
+  const bareInvocation = !flags.job && !flags.workspace && !flags.profile;
+  let temporaryRoot = null;
+  try {
+    if (bareInvocation) {
+      temporaryRoot = fs.mkdtempSync(path.join(tmpdir(), 'jobos-mcp-demo-'));
+      const seeded = await seedMcpDemo(path.join(temporaryRoot, 'workspace'));
+      flags.workspace = seeded.workspace;
+      flags.profile = seeded.profileId;
+      flags.job = seeded.jobId;
+    }
+    if (typeof flags.job !== 'string' || !flags.job) throw new Error('Missing --job <job-id>');
+    const summary = await runMcpDemo({
+      workspace: flags.workspace,
+      profileId: flags.profile || null,
+      jobId: String(flags.job),
+      output: flags.output || null,
+      timeoutMs: typeof flags.timeout === 'string' && Number.isFinite(Number(flags.timeout)) ? Number(flags.timeout) : 30_000
+    });
+    console.log(JSON.stringify(summary, null, 2));
+  } finally {
+    if (temporaryRoot) fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

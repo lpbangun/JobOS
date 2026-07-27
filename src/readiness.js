@@ -168,8 +168,8 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
 
   if (!proofs.length) blockers.push(blocker(
     'missing_proofs',
-    'The profile has no stored proof points, so JobOS cannot ground application claims.',
-    `Add evidence with "jobos proof add --profile ${profileId} --summary <claim> --evidence <source> --json".`
+    'The profile has no active verified proof points, so JobOS cannot ground application claims.',
+    `Verify an imported proof or add evidence with "jobos proof add --profile ${profileId} --summary <claim> --evidence <source> --json".`
   ));
   if (!resume.artifactId) blockers.push(blocker(
     'missing_resume_material',

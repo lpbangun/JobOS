@@ -43,38 +43,27 @@ const INDUSTRY_LEXICON = [
   [['consulting', 'professional services'], 'consulting'],
   [['recruiting', 'talent acquisition', 'people ops', 'workforce'], 'hr/workforce']
 ];
-const MISSION_LEXICON = ['mission', 'access', 'equity', 'inclusion', 'sustainability', 'climate', 'community', 'open source', 'social impact', 'underserved', 'educators', 'learning', 'health outcomes', 'affordable', 'democratize', 'empower'];
-const SKILL_STOPLIST = new Set(['they', 'them', 'were', 'have', 'been', 'their', 'which', 'about', 'would', 'could', 'should', 'there', 'when', 'what', 'your', 'using', 'used', 'also', 'more', 'most', 'other', 'some', 'such', 'than', 'then', 'these', 'those', 'each', 'both', 'while', 'after', 'before', 'during', 'between', 'under', 'over', 'across', 'through', 'within', 'without', 'teams', 'team', 'time', 'week', 'weekly', 'daily', 'monthly', 'year', 'years', 'work', 'working', 'role', 'roles', 'ability', 'strong', 'include', 'includes', 'including', 'many', 'every', 'toward', 'towards', 'around', 'among', 'based', 'related', 'required', 'preferred', 'plus', 'responsibilities', 'requirements', 'skills', 'experience', 'projects', 'summary', 'profile', 'manual', 'way', 'ways', 'new', 'made', 'make', 'like', 'well', 'even', 'back', 'goes', 'went', 'into', 'onto', 'must', 'need', 'needed', 'help', 'helped', 'want', 'take', 'took', 'done', 'doing', 'just', 'only', 'very', 'really']);
-export function extractResumePreferences(resumeText, document = null, proofSkills = []) {
+export function extractResumePreferences(resumeText, document = null) {
   const text = String(resumeText || '');
   const lower = ` ${text.toLowerCase()} `;
   const industries = INDUSTRY_LEXICON.filter(([terms]) => terms.some(term => lower.includes(term))).map(([, label]) => label);
-  const missionKeywords = MISSION_LEXICON.filter(term => lower.includes(term)).slice(0, 8);
-  const structuredSkills = (document?.skills || []).map(skill => String(skill?.name || '').trim()).filter(Boolean);
-  const resumeSkills = (proofSkills || []).map(skill => String(skill || '').trim().toLowerCase()).filter(skill => skill && !SKILL_STOPLIST.has(skill));
-  const skills = [...new Set([...structuredSkills, ...resumeSkills])].slice(0, 15);
-  const locations = [];
-  const looksLikeLocation = value => /^(remote|hybrid|on[- ]?site)$/i.test(value) || /[A-Z][a-zA-Z]+,\s*[A-Z]{2}\b/.test(value) || (value.split(/\s+/).length <= 4 && /^[A-Z]/.test(value));
-  const identityLocation = String(document?.identity?.location || '').trim();
-  if (identityLocation && looksLikeLocation(identityLocation)) locations.push(identityLocation);
-  for (const entry of document?.experience || []) {
-    const entryLocation = String(entry?.location || '').trim();
-    if (entryLocation && looksLikeLocation(entryLocation) && !locations.some(existing => existing.toLowerCase() === entryLocation.toLowerCase())) locations.push(entryLocation);
-  }
-  if (!locations.length) {
-    if (/\bremote\b/i.test(text)) locations.push('Remote');
-    else {
-      const cityState = text.match(/\b([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+){0,2}),\s*([A-Z]{2})\b/);
-      if (cityState) locations.push(`${cityState[1]}, ${cityState[2]}`);
-    }
-  }
-  let workModel = '';
-  if (/\bremote\b/i.test(text)) workModel = 'remote';
-  else if (/\bhybrid\b/i.test(text)) workModel = 'hybrid';
-  else if (/\bon[- ]?site\b/i.test(text)) workModel = 'on_site';
-  const titles = (document?.experience || []).map(entry => String(entry?.title || '').trim()).filter(Boolean);
-  const targetRoleFamilies = titles.length ? [...new Set([titles[0]])] : [];
-  return { industries, missionKeywords, skills, locations, workModel, targetRoleFamilies };
+  const skills = [...new Set(
+    (document?.skills || [])
+      .map(skill => String(skill?.name || '').trim())
+      .filter(Boolean)
+  )].slice(0, 15);
+  // Resume facts are not job-search preferences. In particular, a past title,
+  // office location, or remote role must not become a target role, desired
+  // location, or work-model constraint. Those fields require explicit profile
+  // preferences; unknown is safer than a fabricated preference.
+  return {
+    industries,
+    missionKeywords: [],
+    skills,
+    locations: [],
+    workModel: '',
+    targetRoleFamilies: []
+  };
 }
 export function syncProfile(s, pid){ const p=one(s,'SELECT * FROM profiles WHERE id=?',[pid]); if(!p) return; const proofs=all(s,'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at',[pid]); const affs=all(s,'SELECT * FROM profile_affiliations WHERE profile_id=? ORDER BY type,organization',[pid]).map(a=>({id:a.id,type:a.type,organization:a.organization,role_or_program:a.role_or_program,start_date:a.start_date,end_date:a.end_date,source:a.source,confidence:a.confidence,status:a.status})); writeYaml(path.join(s.p.profiles,`${pid}.yaml`),{id:p.id,name:p.name,preferences:parseJson(p.preferences_json,{}),affiliations:affs,proofPoints:proofs.map(x=>({id:x.id,summary:x.summary,evidence:x.evidence,skills:parseJson(x.skills_json,[]),metrics:parseJson(x.metrics_json,[]),source:x.source,metadata:parseJson(x.metadata_json,{})})),updatedAt:p.updated_at}); writeMd(path.join(s.p.proofs,`${pid}.md`), ['# Proof points for '+p.name,'',...proofs.map(x=>`- **${x.id}:** ${x.summary}${x.evidence ? ` _(evidence: ${x.evidence})_` : ''}${parseJson(x.metrics_json,[]).length ? ` Metrics: ${parseJson(x.metrics_json,[]).join(', ')}` : ''}`),''].join('\n')); }
 export function createProfile(s, name, opts = {}) {
@@ -94,7 +83,7 @@ export function createProfile(s, name, opts = {}) {
   }
   const proofs = structuredProofs(pid, resume, opts.fromResume || 'profile import').map(proof => ({ ...proof, sourceResumeEntryId: sourceEntries.get(proof.summary) || null }));
   const defaults = defaultPrefs(name);
-  const extracted = resume ? extractResumePreferences(resume, resumeInput?.document || null, proofs.flatMap(proof => proof.skills || [])) : {};
+  const extracted = resume ? extractResumePreferences(resume, resumeInput?.document || null) : {};
   if (resume && extracted.skills.length && defaults.skills.length) {
     extracted.skills = [...new Set([...extracted.skills, ...defaults.skills])].slice(0, 15);
   }

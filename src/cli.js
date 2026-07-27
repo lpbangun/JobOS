@@ -714,7 +714,9 @@ export async function main(argv = process.argv.slice(2)) {
     const name = [subaction, ...rest].filter(Boolean).join(' ');
     if (!name) usage('Missing profile name');
     const r = createProfile(s, name, { fromResume: flags['from-resume'], preferences: flags.preferences });
-    out({ id: r.profile.id, name: r.profile.name, created: r.created, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
+    const proofPointCount = Number(one(s, 'SELECT COUNT(*) AS count FROM proof_points WHERE profile_id=?', [r.profile.id])?.count || 0);
+    const canonicalResumeCreated = Boolean(one(s, 'SELECT 1 AS present FROM profile_resume_revisions WHERE profile_id=? LIMIT 1', [r.profile.id]));
+    out({ id: r.profile.id, name: r.profile.name, created: r.created, proofPointCount, canonicalResumeCreated, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
     return;
   }
   if (group === 'profile' && action === 'network-intent') {

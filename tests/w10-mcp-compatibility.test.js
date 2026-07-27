@@ -63,6 +63,23 @@ test('W10-MCP-COMPAT real stdio client records complete redacted compatibility e
   for (const line of transcriptText.trim().split('\n')) assert.doesNotThrow(() => JSON.parse(line));
 });
 
+test('bare MCP demo self-seeds a temporary workspace and exits cleanly', t => {
+  const parent = mkdtempSync(path.join(tmpdir(), 'jobos-w10-mcp-bare-'));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+
+  const demo = run([path.join(repoRoot, 'scripts/mcp-demo.js')], {
+    cwd: parent,
+    env: { JOBOS_HOME: '', W10_MCP_SECRET: '' }
+  });
+  assert.equal(demo.status, 0, demo.stderr);
+  const summary = JSON.parse(demo.stdout);
+  assert.equal(summary.ok, true);
+  assert.equal(Number.isFinite(summary.calledToolResults.score_job.overall), true);
+  assert.equal(existsSync(summary.workspace), false, 'temporary demo workspace is removed after the run');
+  assert.equal(existsSync(summary.transcript), true, 'the redacted transcript remains available');
+  assert.deepEqual(summary.sentinelScan, { checked: true, leakCount: 0 });
+});
+
 test('W10-MCP-DECISION retains handwritten MCP unless all migration thresholds are met', () => {
   const decision = readFileSync('docs/mcp-compatibility-decision.md', 'utf8');
   const pkg = readFileSync('package.json', 'utf8');

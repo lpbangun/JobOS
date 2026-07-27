@@ -106,8 +106,45 @@ Verification fleet (3 agents) + inline bars, post-fix:
 | F11 ACP/Hermes | PASS | npm run acp-demo EXIT=0: real Hermes session, visibleMutation gate satisfied, transcript redacted (verified iter-1: no credentials), quarantine/reconnect green, tui-acp+acp-host tests 40/40 |
 | F12 TUI | PASS | snapshot 140x42 + 90x30 render new footer (g/b/v); --json valid; empty-workspace guidance; keymap drill 40/40; README documents all bound keys |
 
-Residual S3 (logged, non-blocking per convergence rule): (1) profile/proof/job create JSON outputs omit proof-count/ok fields (agent visibility); (2) readiness missing_proofs message says "no stored proof points" when unverified proofs exist (gate requires verified); (3) `artifacts reject` flag is `--note` (docs consistent).
+Residual S3 from the initial run: (1) proof/job create responses do not all use a common `ok` envelope; (2) `artifacts reject` uses the documented `--note` flag.
 
-## Convergence
+## Initial convergence claim — superseded by independent audit
 
-All features F0–F12 at PASS with zero open S1/S2 after 2 iterations. Post-fix full suite 599/599. **CONVERGED 2026-07-27.**
+The initial F0–F12 result was not independently reproducible. A direct rerun reopened F6, F10, F11, and F12:
+
+| Finding | Severity | Reproduction |
+|---|---|---|
+| The documented `samples/resume-proof-points.md` flow created no canonical resume, so `pursue` failed the resume stage and skipped application/outreach. | S2 | Fresh workspace; README profile + sample job + `pursue` returned `partial`, failed=1, skipped=2. |
+| `npm run mcp-demo` required an undocumented `--job` and exited 1. | S2 | Bare package script returned `Missing --job <job-id>`. |
+| `npm run acp-demo` reused arbitrary workspace state and required a null→numeric score mutation, so reruns could fail despite a healthy ACP session. | S2 | Bare package script completed six turns but returned `ok:false`, `visibleMutation:false`. |
+| Resume employment facts were stored as declared preferences. A past title/location could become a target role, desired location, and remote-work constraint. | S2 | `Senior Product Manager` was accepted as a location; `Backend Engineer` and `Remote` became target/work-model preferences. |
+| The compact TUI footer omitted `g` and `v`; implemented `t`, `c`, and `x` bindings were absent from the central keymap. | S3 | 80-column snapshot omitted setup/profile/stage/reconnect/cancel guidance. |
+| Profile creation did not expose imported-proof or canonical-resume counts, and missing-proof text incorrectly said no proofs existed when only verification was missing. | S3 | Fresh README profile import returned preferences but no proof/resume summary. |
+
+Corrections:
+
+1. The sample resume is now a complete canonical Markdown resume while preserving the same three proof bullets.
+2. Resume extraction keeps factual industries and structured skills, but never converts past titles, locations, remote work, or mission text into job-search preferences. Explicit `--preferences` remains authoritative.
+3. Bare MCP and ACP demos self-seed isolated temporary workspaces; MCP default-sentinel redaction is enforced even without a caller-provided secret; temporary workspaces are removed.
+4. The TUI central keymap and compact/wide footers now advertise `t`, `c`, `x`, `g`, and `v`; the key drill covers them.
+5. Profile-create JSON now reports `proofPointCount` and `canonicalResumeCreated`; readiness and tailoring say “active verified proof points.”
+
+## Supplemental usability coverage
+
+The original F0–F12 grouping did not give documented setup, form/packet/receipt, Career Memory, interview/debrief, scheduler, or configured browser submission their own E2E bars. Independent checks therefore add:
+
+| Area | Required proof | Result |
+|---|---|---|
+| README local journey | Fresh init → sample profile → sample job → full pursue | PASS: 3 proofs, canonical resume created, all 8 stages `ok` |
+| Live form / packet / receipt | Manual and configured local form server paths | PASS: `npm run smoke:live-form`; manual attested with no submission, configured submission confirmed with explicit side-effect metadata |
+| Review / receipt spine | Exact revisions, approvals, immutable packet, attestation/confirmation | PASS: `npm run smoke`; materials-ready and confirmed receipt with no implicit submission |
+| Career Memory / interviews / scheduler | Observation lifecycle, artifacts, interview debrief, scheduled run | PASS: `npm run smoke` W07/W08 and scheduler sections |
+| MCP | Bare package script, real stdio handshake, calls, typed error, redaction | PASS: 57 tools, score/context calls, `-32601`, zero sentinel leaks |
+| ACP / Hermes | Bare package script, real session, cancel quarantine, reconnect, timeout, policy denial | PASS: six turns, visible mutation, zero leaked late updates, clean reconnect |
+| TUI discoverability | 80/90/140-column guidance plus automated key drill | PASS: targeted keymap suite |
+
+## Final convergence
+
+Post-correction full regression: **601/601 pass, 0 fail**. Targeted changed-path tests: **79/79 pass**. `npm run smoke`, `npm run smoke:live-form`, bare `npm run mcp-demo`, and a real bare `npm run acp-demo` all exit 0. The README sample journey creates 3 proof points plus a canonical resume and completes all 8 pursue stages. **CONVERGED for the local/deterministic and configured-local-browser rubric on 2026-07-27.**
+
+Environment boundary: live third-party authenticated boards, user mail accounts, and employer-owned production forms still require the user’s own credentials, consent, and target-specific validation. The QA result proves the adapters, mediation gates, local browser fixture, and failure containment; it does not claim universal compatibility with every external site.

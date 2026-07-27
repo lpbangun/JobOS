@@ -100,6 +100,11 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   tui.state.selectedJobId = job.id;
   tui.refresh({ disk: false });
 
+  const compactScreen = renderTui(tui.model, tui.state, { width: 80, height: 42, color: false });
+  for (const hint of ['t stage', 'c reconnect', 'x cancel', 'g setup', 'v profile']) {
+    assert.match(compactScreen, new RegExp(hint), `compact footer advertises ${hint}`);
+  }
+
   const fire = (token) => {
     const { value, key } = keypressForToken(token);
     assert.doesNotThrow(() => tui.onKeypress(value, key), `token ${token}`);
@@ -120,6 +125,12 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
       fire(token);
       tui.state.mode = 'normal';
       tui.state.input = '';
+      continue;
+    }
+    if (token === 't') {
+      fire(token);
+      assert.equal(tui.state.mode, 'stage');
+      tui.state.mode = 'normal';
       continue;
     }
     if (token === 'i') {

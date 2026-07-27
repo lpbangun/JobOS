@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 import { openStore, run, save } from '../src/db.js';
 import { importNormalized, syncJob } from '../src/jobs.js';
-import { addProof, createProfile } from '../src/profiles.js';
+import { addProof, createProfile, syncProfile } from '../src/profiles.js';
 
 const PROFILE_ID = 'w10-mcp-profile';
 const JOB_ID = 'w10-mcp-job';
@@ -54,6 +54,17 @@ export async function seedMcpDemo(workspace) {
     await withFixedClock(async () => {
       const profile = createProfile(store, 'w10 mcp profile').profile;
       if (profile.id !== PROFILE_ID) throw new Error(`Unexpected deterministic profile ID: ${profile.id}`);
+      const preferences = {
+        ...JSON.parse(profile.preferences_json),
+        targetRoleFamilies: ['Product Manager'],
+        industries: ['software'],
+        locations: ['Remote'],
+        skills: ['product discovery', 'stakeholder leadership', 'product launch'],
+        missionKeywords: ['reliable workflows'],
+        workModel: 'remote'
+      };
+      run(store, 'UPDATE profiles SET preferences_json=? WHERE id=?', [JSON.stringify(preferences), PROFILE_ID]);
+      syncProfile(store, PROFILE_ID);
       addProof(
         store,
         PROFILE_ID,

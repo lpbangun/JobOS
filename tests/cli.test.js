@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { extractResumePreferences } from '../src/profiles.js';
 
 function makeRunner() {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-test-'));
@@ -28,6 +29,23 @@ function resumeDocument(proofPointIds = []) {
     additionalSections: []
   };
 }
+test('resume extraction does not turn employment facts into job-search preferences', () => {
+  const extracted = extractResumePreferences(
+    'Avery Candidate\nSenior Product Manager\navery@example.com\nLed remote teams in healthcare.',
+    {
+      identity: { location: 'Senior Product Manager' },
+      experience: [{ title: 'Backend Engineer', location: 'Remote' }],
+      skills: [{ name: 'Product discovery' }]
+    }
+  );
+  assert.deepEqual(extracted.industries, ['healthcare']);
+  assert.deepEqual(extracted.skills, ['Product discovery']);
+  assert.deepEqual(extracted.locations, []);
+  assert.equal(extracted.workModel, '');
+  assert.deepEqual(extracted.targetRoleFamilies, []);
+  assert.deepEqual(extracted.missionKeywords, []);
+});
+
 
 
 

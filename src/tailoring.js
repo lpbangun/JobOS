@@ -211,7 +211,7 @@ export async function tailor(s, jid, pid, kind, options = {}) {
   const enriched = relevant(job, proofs);
   const chosen = orderedGuidedProofs(enriched.filter(p => p.relevance > 0), memory).slice(0, kind === 'resume' ? 5 : 3);
   const warnings = memoryWarnings(memory);
-  if (!proofs.length) warnings.push('No proof points exist for this profile; draft intentionally avoids unsupported achievement claims.');
+  if (!proofs.length) warnings.push('No active verified proof points exist for this profile; draft intentionally avoids unsupported achievement claims.');
   else if (!chosen.length) warnings.push('No proof points matched job language; add evidence before strengthening this artifact.');
   const proofById = new Map(orderedGuidedProofs(enriched, memory).map(p => [p.id, p]));
   const cfg = llmConfig();
