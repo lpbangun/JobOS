@@ -54,7 +54,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['Q', 'quit'],
     ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
@@ -73,7 +73,7 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
@@ -970,7 +970,7 @@ function footerLines(width) {
   if (width >= 90) {
     return [
       ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
-      ' r review l log · m memory n network o docs q answers · s sources ? system · :reschedule <due> | <reason> · : command Q quit'
+      ' r review l log · m memory n network o docs q answers · s sources g setup b network v profile ? system · : command Q quit'
     ];
   }
   return [
