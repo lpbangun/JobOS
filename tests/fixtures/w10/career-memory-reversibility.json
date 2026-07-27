@@ -1,0 +1,172 @@
+{
+  "asOf": "2026-07-25T12:00:00.000Z",
+  "family": "career-memory-reversibility",
+  "invariants": {
+    "activeOnlyWhileAccepted": true,
+    "immutableHistoryPreserved": true,
+    "inactiveNeverActive": true,
+    "replayIsExact": true,
+    "replayZeroDelta": true,
+    "revokeRestoresBaseline": true,
+    "transitionRows": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "undoRestoresActive": true
+  },
+  "proposalIds": {
+    "active": "memory_proposal_a98a01432834",
+    "inactive": "memory_proposal_b6172ea24966"
+  },
+  "states": {
+    "active": {
+      "citationIds": [
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b",
+        "memory_observation_ffa3f8fb1d93"
+      ],
+      "exclusions": {
+        "budget": {
+          "observations": 0,
+          "rules": 0
+        },
+        "observations": {
+          "irrelevant": 6,
+          "outsideLookback": 0,
+          "privateNotes": 1,
+          "protected": 0,
+          "superseded": 2
+        },
+        "rules": []
+      },
+      "observationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "ruleIds": [
+        "memory_proposal_a98a01432834"
+      ]
+    },
+    "baseline": {
+      "citationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "exclusions": {
+        "budget": {
+          "observations": 0,
+          "rules": 0
+        },
+        "observations": {
+          "irrelevant": 6,
+          "outsideLookback": 0,
+          "privateNotes": 1,
+          "protected": 0,
+          "superseded": 2
+        },
+        "rules": []
+      },
+      "observationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "ruleIds": []
+    },
+    "replay": {
+      "citationIds": [
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b",
+        "memory_observation_ffa3f8fb1d93"
+      ],
+      "exclusions": {
+        "budget": {
+          "observations": 0,
+          "rules": 0
+        },
+        "observations": {
+          "irrelevant": 6,
+          "outsideLookback": 0,
+          "privateNotes": 1,
+          "protected": 0,
+          "superseded": 2
+        },
+        "rules": []
+      },
+      "observationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "ruleIds": [
+        "memory_proposal_a98a01432834"
+      ]
+    },
+    "revoked": {
+      "citationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "exclusions": {
+        "budget": {
+          "observations": 0,
+          "rules": 0
+        },
+        "observations": {
+          "irrelevant": 6,
+          "outsideLookback": 0,
+          "privateNotes": 1,
+          "protected": 0,
+          "superseded": 2
+        },
+        "rules": []
+      },
+      "observationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "ruleIds": []
+    },
+    "undone": {
+      "citationIds": [
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b",
+        "memory_observation_ffa3f8fb1d93"
+      ],
+      "exclusions": {
+        "budget": {
+          "observations": 0,
+          "rules": 0
+        },
+        "observations": {
+          "irrelevant": 6,
+          "outsideLookback": 0,
+          "privateNotes": 1,
+          "protected": 0,
+          "superseded": 2
+        },
+        "rules": []
+      },
+      "observationIds": [
+        "memory_observation_ffa3f8fb1d93",
+        "memory_observation_a94b5323f620",
+        "memory_observation_fc61d1891a7b"
+      ],
+      "ruleIds": [
+        "memory_proposal_a98a01432834"
+      ]
+    }
+  },
+  "transitionIds": {
+    "accepted": "memory_transition_b65186277eef",
+    "replay": "memory_transition_5aa78de90f95",
+    "revoked": "memory_transition_8b7f1ecbf695",
+    "undone": "memory_transition_5aa78de90f95"
+  }
+}

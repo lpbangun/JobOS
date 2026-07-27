@@ -1,0 +1,55 @@
+{
+  "asOf": "2026-07-22T12:00:00.000Z",
+  "count": 2,
+  "expectedSearchIds": [
+    "search_5ef6e969d3d5",
+    "search_f692b1e6cbb8"
+  ],
+  "family": "discovery-partials-liveness",
+  "searches": [
+    {
+      "adapter": "lever",
+      "errorCodes": [
+        "source_backoff"
+      ],
+      "jobs": [],
+      "searchId": "search_5ef6e969d3d5",
+      "searchName": "w10-source-backoff",
+      "status": "failed"
+    },
+    {
+      "adapter": "greenhouse",
+      "errorCodes": [],
+      "jobs": [
+        {
+          "liveness": "active",
+          "outcome": "scored",
+          "source": "greenhouse",
+          "sourceId": "w10-active"
+        },
+        {
+          "liveness": "uncertain",
+          "outcome": "scored",
+          "source": "greenhouse",
+          "sourceId": "w10-uncertain"
+        }
+      ],
+      "searchId": "search_f692b1e6cbb8",
+      "searchName": "w10-source-success",
+      "status": "partial"
+    }
+  ],
+  "status": "partial",
+  "survivingJobSources": [
+    {
+      "jobId": "job_5e2f0f2299ca",
+      "source": "greenhouse",
+      "title": "Active Product Role"
+    },
+    {
+      "jobId": "job_c53b0230a744",
+      "source": "greenhouse",
+      "title": "Uncertain Product Role"
+    }
+  ]
+}
