@@ -237,7 +237,15 @@ The readiness v4 plan is written to `jobos-workspace/jobs/<job-id>/application-r
 
 ### MCP parity
 
-The MCP tool `applications_plan` returns the identical readiness v4 structure. Agents may inspect review/artifact, packet, and secret-safe form evidence. MCP and the embedded ACP guest may invoke form inspection, fill, or configured submission only when the profile/environment-mediated gate and the operation-specific per-run gate are both enabled. They cannot create the trusted human checkpoint. Artifact decisions, contact approval, human answer entry, packet freeze, manual attestation, and receipt confirmation are omitted from the MCP catalog and rejected at the service boundary. The `pursue` workflow includes readiness in dry-run and real execution but never freezes a packet or performs a form action automatically.
+The MCP tool `applications_plan` returns the identical readiness v4 structure. Agents may inspect review/artifact, packet, and secret-safe form evidence. For application forms, MCP and the embedded ACP guest can use only the existing mediated inspection, configured fill, and configured submission path; the profile/environment gate and operation-specific per-run gate must both be enabled for an external action. They cannot create a trusted human checkpoint or perform human-authority mutations: artifact approval or rejection, restricted answer entry, packet freeze, manual attestation, receipt confirmation, contact approval, and Career Memory transitions are omitted from the MCP catalog and rejected at the service boundary. The `pursue` workflow includes readiness in dry-run and real execution but never freezes a packet or performs a form action automatically.
+
+## Career Memory
+
+Career Memory records profile-scoped observations with provenance: source kind, source entity and version, source content hash, reason codes, and a public explanation. Private notes and private observation payloads remain local; private notes are excluded from retrieval, agent-visible projections, workspace mirrors, and generated Career Memory artifacts.
+
+Derived proposals are inert until a trusted local human explicitly accepts them. Only accepted rules may affect later discovery, scoring, tailoring, outreach, or interview-preparation retrieval; pending, rejected, revoked, superseded, and expired proposals have no active effect. Retrieval and transitions enforce profile isolation, so one profile's observations and rules never influence another profile.
+
+Acceptance history is append-only and reversible. `preferences revoke` deactivates an accepted rule with a cited reason, while `preferences undo` reverses the named latest transition and restores the preceding state without deleting the observation, proposal, or transition history. Corrections create attributable superseding observations rather than rewriting prior evidence.
 
 ## Daily automatic discovery
 

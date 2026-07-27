@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-26
+## Current status — 2026-07-27
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -17,6 +17,8 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
 - `jobos apply form inspect|show|assist|checkpoint|submit` provides the narrow packet-bound live-form bridge. Inspection is read-only; fill and configured submit have separate default-off configuration and per-invocation gates; manual submission/attestation remains first-class.
+- W09 guided setup exposes the same seven-step completion contract through CLI and TUI, with explicit profile/job selection and deterministic recovery actions.
+- W08 Career Memory records attributable profile-scoped observations, keeps proposals inert until human acceptance, applies accepted rules only, and preserves append-only revoke/undo history without exposing private notes.
 
 ### Implemented in the ACP host, lean CLI, and people-research passes
 
@@ -48,6 +50,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - The obsolete, unmounted HTTP API implementation is removed; CLI/TUI and MCP remain the supported human and agent surfaces.
 - README and external agent guide consolidated around the current CLI workflow, extension contracts, safety model, installation, recovery, and intentional limitations.
 - Live-form/packet bridge: deterministic semantic form and adapter fingerprints; main/iframe inspection; restricted/legal/unsupported human ownership; exact W01 identity/material and answer-row bindings; readiness v4; packet v2; fill/read-back without persisted values; trusted checkpoints; replay-safe configured submission; honest uncertain outcomes; and bound adapter/manual receipt evidence across CLI, TUI, MCP, and ACP mediation.
+- Shipped application evidence uses immutable packet v2 plus packet-bound receipt states (`none`, `attested`, `confirmed`); ambiguous configured submissions remain `uncertain`, create no receipt, and do not advance tracking.
 - Live-form hardening: exact targets are encrypted under a workspace-private key while public snapshots remain query-secret-safe; Chromium routing pins public DNS, freezes main-frame origin, blocks service workers/WebSockets, and seals before persistence; structural locators use absolute selected-form ordinals; validated confirmations outrank generic login-URL heuristics.
 - Canonical `people`, profile/person affiliations, durable `research_runs`, and run-source joins with an idempotent migration that preserves contact, edge, stakeholder, and outreach-plan references.
 - Identity resolution by canonical profile URL and then exact imported email; same-name records never merge automatically.
@@ -68,21 +71,10 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
-- W09 focused verification on 2026-07-26: `tests/w09-guided-onboarding.test.js` **9/9 passed**; CLI/cleanup/sprint9/TUI-ACP compatibility **30/30 passed**; keymap/W08 surface and consumer compatibility **32/32 passed**; W01/W02/W03/W04 compatibility **84/84 passed**; offline smoke passed. No broad `npm test` was run by the bounded W09 worker.
-- `npm test`: **368/368 passed** on 2026-07-23 after live-form/browser/MCP hardening, including private exact-target migration, public snapshot privacy, pinned protected routing, locator alignment, confirmed login-shaped outcomes, catch-all exact-contact handling, and leadership LaTeX semantics.
-- `npm test`: **265/265 passed** on 2026-07-22, including discovery-integrity retry/budget/isolation/liveness/gate contracts, status-namespace, canonical outreach-due semantics, MCP catalog, removed-API, workflow-help and TUI-command vocabulary, watchlist consolidation, CLI compatibility, and all established CLI, TUI, ACP, MCP, readiness, research, outreach, and workflow checks.
-- `npm run smoke` and `npm run smoke:live-form`: passed on 2026-07-23. The general clean-workspace smoke reaches materials-ready → form-ready → packet/manual receipt confirmation; the real Chromium live-form smoke proves one-submit manual (`externalSideEffects: none`) and configured (`user_configured_form_submission`) paths.
-- W05 targeted acceptance: **52/52 passed** on 2026-07-23 across confidence, migration, role-aware outreach, append-only outcomes, weekly review, CLI/domain tools, W01 proof grounding, W03 source integrity, and post-review safety corrections.
-- `npm run smoke`: passed on 2026-07-23 in a clean temporary workspace through fixture-backed active/expired/uncertain discovery, expired score/pursuit hard stops, scoring, tailoring, application readiness, packet/receipt confirmation, interview, analytics, scheduler, workspace exports, and zero external effects.
-- Real Hermes ACP drill: six turns across pre-cancel, clean recovery, and explicit restart sessions; 12 tool lifecycle events; null-to-58 state mutation; zero post-cancel leaked events; exact recovery tool completion; policy denial; timeout/missing-binary typing; sentinel redaction.
-- External MCP catalog now exposes 41 policy-eligible tools, including secret-safe form inspection and separately gated fill/configured-submit operations. Eight always-denied human mutations—including the form checkpoint—are omitted and still rejected at the service boundary.
-- Raw PTY exercises: populated shell, overlay behavior, live tool progress, cancel quarantine, clean-session recovery, exact post-cancel tool completion, missing-backend degradation, narrow layout, honest empty states, and exit `0`.
-- People-research critic suite `tests/people-research-orchestration.test.js`: **14/14 passed**; companion contact/TUI/integration suites: **25/25 passed**.
-- Application readiness suite `tests/readiness.test.js`: **16/16 passed** covering readiness v4 shape, materials-ready/form-ready transitions, exact review and live-form authority, redaction/job scoping, CLI/MCP equivalence, mirror integrity, duplicate evidence, dry-run purity, packet/receipt next actions, and no false submission claims.
-- Principal offline pursuit E2E completed with all stages and artifact/application outputs using `JOBOS_SEARCH_PROVIDER=none`.
-- Independent people-research convergence gate passed on critic pass 3 with no failures or unmet criteria. It covers migration and identity, onboarding/import privacy, all four scopes, adapter isolation, budgets, cache/resume/cancel/deadline behavior, xAI gates/citations, integrated alumni path ranking, deterministic network-access bands, status launch recommendations, MCP/TUI mediation, exact mirrors, and zero external effects.
-- W03 discovery-integrity critic convergence: iteration 1 found truncation-only status and missing shared run-budget defects; targeted corrections passed the combined W03 suite **25/25**, and iteration 2 returned `CONVERGED` with no residual findings.
-- W02 live-form bridge critic convergence: iteration 1 found legacy CHECK migration, snapshot-ID hashing, restricted-sensitivity auto-fill, file re-hash, uncertain-result, and packet-diff defects; all were corrected with targeted acceptance evidence, and iteration 2 returned `accept` / `ready_for_merge: true` with no remaining blocker or high-severity finding.
+- W10 focused verification on 2026-07-27: `npm run test:w10` passed for golden projections, generated-data containment, tracked-data/static policy, documentation/workflow semantics, and measured MCP compatibility/decision.
+- `npm audit --omit=dev --audit-level=high --json` passed with zero high or critical production advisories. Registry unavailability remains release-blocking inconclusive evidence, never a clean result.
+- `node scripts/release-evidence.js --output .tmp/w10-release-evidence --skip-audit` completed every local check and correctly returned `inconclusive`; the test-only audit skip was not promoted to pass.
+- `npm run release:evidence` passed all required checks, including the clean-temporary-workspace smoke flow. Reproducible no-deploy artifacts are under ignored `.tmp/release-evidence/`.
 
 ## Prior lean-CLI advisor gate (superseded by the ACP finished-product rubric)
 

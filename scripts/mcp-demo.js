@@ -8,6 +8,8 @@ import { selectedJobContext } from '../src/domain-tools.js';
 import { redactSensitive } from '../src/acp.js';
 
 const CLI_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli.js');
+const REQUESTED_PROTOCOL_VERSION = '2024-11-05';
+const FRAME_TYPE = 'jsonl';
 
 function parseArgs(argv) {
   const flags = {};
@@ -145,9 +147,11 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
   let scoreResponse;
   let contextResponse;
   let exit;
+  const typedErrors = [];
+  const demoSentinel = process.env.W10_MCP_SECRET || 'w10-mcp-demo-sentinel';
   try {
     initialize = await client.request('initialize', {
-      protocolVersion: '2024-11-05',
+      protocolVersion: REQUESTED_PROTOCOL_VERSION,
       capabilities: {},
       clientInfo: { name: 'jobos-mcp-demo', version: '0.1.0' }
     });
@@ -161,6 +165,16 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
       name: 'get_job_context',
       arguments: { jobId, profileId: selectedProfileId }
     });
+    try {
+      await client.request('jobos/unsupported-method', { secret: demoSentinel });
+    } catch (error) {
+      const protocolError = error.response?.error;
+      typedErrors.push({
+        type: protocolError?.code === -32601 ? 'method_not_found' : 'protocol_error',
+        code: protocolError?.code ?? null,
+        message: redactSensitive(protocolError?.message || error.message, process.env)
+      });
+    }
   } finally {
     exit = await client.stop();
   }
@@ -173,8 +187,11 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
   const score = parseToolResult(scoreResponse);
   const mediatedContext = parseToolResult(contextResponse);
   const toolNames = (list?.result?.tools || []).map(tool => tool.name);
+  const transcriptBeforeSummary = fs.readFileSync(transcriptPath, 'utf8');
+  const sentinelLeakCount = transcriptBeforeSummary.split(demoSentinel).length - 1;
   const summary = {
     ok: initialize?.result?.serverInfo?.name === 'jobos'
+      && initialize?.result?.protocolVersion === REQUESTED_PROTOCOL_VERSION
       && toolNames.includes('score_job')
       && toolNames.includes('get_job_context')
       && score?.contract === 'jobos.fit-score.v1'
@@ -183,20 +200,40 @@ export async function runMcpDemo({ workspace, profileId, jobId, output = null, t
       && after.context.fit?.contract === score.contract
       && after.context.fit.overall === score.overall
       && after.scoreAudits > before.scoreAudits
+      && typedErrors.some(error => error.code === -32601)
+      && sentinelLeakCount === 0
       && exit?.code === 0,
     workspace: root,
     profileId: selectedProfileId,
     jobId,
+    protocol: {
+      requested: REQUESTED_PROTOCOL_VERSION,
+      offered: initialize?.result?.protocolVersion || null,
+      negotiated: initialize?.result?.protocolVersion || null
+    },
+    frameType: FRAME_TYPE,
+    results: {
+      initialize: initialize?.result?.serverInfo?.name === 'jobos' ? 'passed' : 'failed',
+      list: Array.isArray(list?.result?.tools) ? 'passed' : 'failed',
+      calls: score?.contract === 'jobos.fit-score.v1' && mediatedContext?.fit?.contract === score?.contract ? 'passed' : 'failed'
+    },
     server: initialize?.result?.serverInfo || null,
     protocolVersion: initialize?.result?.protocolVersion || null,
+    catalog: { count: toolNames.length, names: toolNames },
     toolCount: toolNames.length,
     calledTools: ['score_job', 'get_job_context'],
+    calledToolResults: {
+      score_job: { contract: score?.contract || null, overall: score?.overall ?? null },
+      get_job_context: { fitContract: mediatedContext?.fit?.contract || null, overall: mediatedContext?.fit?.overall ?? null }
+    },
+    typedErrors,
+    sentinelScan: { checked: true, leakCount: sentinelLeakCount },
     scoreAuditDelta: after.scoreAudits - before.scoreAudits,
     fitBefore: before.context.fit,
     fitAfter: after.context.fit,
     exit,
     stderr: redactSensitive(client.stderr, process.env),
-    transcript: transcriptPath
+    transcript: redactSensitive(transcriptPath, process.env)
   };
   fs.appendFileSync(transcriptPath, `${JSON.stringify({ timestamp: new Date().toISOString(), type: 'summary', ...summary })}\n`, { mode: 0o600 });
   if (!summary.ok) throw Object.assign(new Error(`MCP demo did not meet the protocol/state bar; inspect ${transcriptPath}`), { summary });

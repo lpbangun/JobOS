@@ -1,0 +1,133 @@
+{
+  "asOf": "2026-07-22T12:00:00.000Z",
+  "byteStableRepeat": true,
+  "expiredGate": {
+    "code": "job_expired",
+    "persistedFitUnchanged": true
+  },
+  "family": "score-stability",
+  "score": {
+    "baseOverall": null,
+    "constraints": [],
+    "contract": "jobos.fit-score.v1",
+    "dimensions": {
+      "compensation": {
+        "evidenceRefs": [
+          {
+            "field": "salary",
+            "id": "w10-product-manager",
+            "kind": "profile_preference"
+          },
+          {
+            "field": "compensation",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          }
+        ],
+        "reason": "Candidate salary preference or posting compensation evidence is missing.",
+        "score": null,
+        "status": "unknown",
+        "weight": 8
+      },
+      "domainFit": {
+        "evidenceRefs": [
+          {
+            "field": "description",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          }
+        ],
+        "reason": "No domain preference or active verified domain proof is available.",
+        "score": null,
+        "status": "unknown",
+        "weight": 18
+      },
+      "locationWorkModel": {
+        "evidenceRefs": [
+          {
+            "field": "location",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          }
+        ],
+        "reason": "Location or work-model evidence is missing on the candidate or posting side.",
+        "score": null,
+        "status": "unknown",
+        "weight": 12
+      },
+      "missionInterest": {
+        "evidenceRefs": [
+          {
+            "field": "description",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          }
+        ],
+        "reason": "Mission/value preference or posting mission evidence is missing.",
+        "score": null,
+        "status": "unknown",
+        "weight": 14
+      },
+      "networkAccess": {
+        "evidenceRefs": [],
+        "reason": "No completed people-research run exists for this job and profile.",
+        "score": null,
+        "status": "unknown",
+        "weight": 6
+      },
+      "roleFit": {
+        "evidenceRefs": [
+          {
+            "field": "title",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          },
+          {
+            "field": "targetRoleFamilies",
+            "id": "w10-product-manager",
+            "kind": "profile_preference"
+          },
+          {
+            "field": "skills",
+            "id": "w10-product-manager",
+            "kind": "profile_preference"
+          }
+        ],
+        "reason": "Role fit compares the posting title and structured requirements with declared role preferences.",
+        "score": 50,
+        "status": "scored",
+        "weight": 28
+      },
+      "seniority": {
+        "evidenceRefs": [
+          {
+            "field": "title",
+            "id": "job_a1962ff1a9b6",
+            "kind": "job_field"
+          },
+          {
+            "field": "targetRoleFamilies",
+            "id": "w10-product-manager",
+            "kind": "profile_preference"
+          }
+        ],
+        "reason": "Seniority compares explicit level language in the posting with declared target role families and any active verified level evidence.",
+        "score": 75,
+        "status": "scored",
+        "weight": 14
+      }
+    },
+    "evidenceCoverage": 42,
+    "jobId": "job_a1962ff1a9b6",
+    "mode": "deterministic-degraded",
+    "overall": null,
+    "postingRisks": [],
+    "profileId": "w10-product-manager",
+    "reasoning": "Deterministic degraded scoring finalized explicit preferences, structured requirements, active verified proofs, and local evidence without hidden boosts or penalties.",
+    "scoreStatus": "insufficient_evidence"
+  },
+  "uncertainGate": {
+    "fitUnchanged": true,
+    "status": "uncertain"
+  }
+}

@@ -1,0 +1,201 @@
+{
+  "asOf": "2026-07-25T12:00:00.000Z",
+  "family": "career-memory-provenance",
+  "projection": {
+    "contentHash": "9e6e755409122199ab08cfecfa7fd68aada50f43a2a00b6597bcecd01a56100b",
+    "id": "memory_projection_fbcd808e6ef9",
+    "revision": 1,
+    "sourceStateHash": "0ef4434e2fceceb98f293bf91318b5a8fa1d55206b6e27c91b6d433983c74173",
+    "sources": [
+      {
+        "source_hash": "ec2017d5496abcafbc99601b6c234858fa3fa479fccf64a3823040ddf74e2cfe",
+        "source_id": "alpha#/name",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/companyStages",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/dealbreakers",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/industries",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/locations",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/missionKeywords",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "22243eaf9a5a9632309c6a5aa56d8e5d7e34033d1872ea0a9df07d05e5c33fdd",
+        "source_id": "alpha#/preferences/salary",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4263bb71f5c15adcc7b44b39db6cce5faede745ffd31e647bfa4ee87ea6e10d5",
+        "source_id": "alpha#/preferences/searchStrategy",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "15070794f9a7cc24f7e107fc5a4b92426f82cc61ad1cb74d37a80a11437d03b3",
+        "source_id": "alpha#/preferences/skills",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "959b44ebcdbdad67c406764cfe03008689f5663f3e9a9f24e2a8ef770ac28e78",
+        "source_id": "alpha#/preferences/targetRoleFamilies",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "source_id": "alpha#/preferences/values",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+        "source_id": "alpha#/preferences/workModel",
+        "source_kind": "profile_field",
+        "source_version_id": "2026-07-24T10:50:57.280Z"
+      },
+      {
+        "source_hash": "9959ef2e9c72c7cc6ad788a6f068c444a4393773c9390975bbb794ce32386271",
+        "source_id": "proof_beb0fc0ba022",
+        "source_kind": "proof_point",
+        "source_version_id": "2026-07-24T10:50:57.266Z"
+      },
+      {
+        "source_hash": "3b9b43648fb9c48d5e83de184b59df15a9fb3ecc8e04c90047aff1dae7dbfc02",
+        "source_id": "memory_proposal_c90a0f0a30bd",
+        "source_kind": "accepted_rule",
+        "source_version_id": "memory_transition_539bf2001c3f"
+      },
+      {
+        "source_hash": "d5c134069a45dcc9c155202958f7278812e25bcd618dd2591468a8daae5546b7",
+        "source_id": "interview_debrief_33e06b44f92f:2",
+        "source_kind": "observation",
+        "source_version_id": "interview_debrief_revision_19fff4f4acc0"
+      },
+      {
+        "source_hash": "cd1d7fc6bc1b1946d8d16197aea2d7fe9c06920ccb14a274faae59c35295618d",
+        "source_id": "memory_observation_8ab6b308c753",
+        "source_kind": "observation",
+        "source_version_id": "audit_5d138a45275e"
+      },
+      {
+        "source_hash": "86559ca6f3e95b844eadf92cb9ad2cf563ea25c6ca5ea8b22c246dbd01955a98",
+        "source_id": "memory_observation_b1c6db606778",
+        "source_kind": "observation",
+        "source_version_id": "audit_afb433f9c1f3"
+      },
+      {
+        "source_hash": "4059c8815a3779cce8a18d3a98f05911fb3048c9cc9cc339fccb03f3310baf3b",
+        "source_id": "memory_observation_ba51d9d99fdd",
+        "source_kind": "observation",
+        "source_version_id": "audit_4fa4d83022ca"
+      },
+      {
+        "source_hash": "abae906de9d6b692cc6736bd4bb81a11f266b3bee704de5f4d43ab5be8773149",
+        "source_id": "outcome_99ed9258c882",
+        "source_kind": "observation",
+        "source_version_id": "outcome_99ed9258c882"
+      },
+      {
+        "source_hash": "803bf034e82bc799286f9f8eb9d6c6532c51fe2b6fca0db982f76853f693e742",
+        "source_id": "rcpt_7bbd96d53b1c",
+        "source_kind": "observation",
+        "source_version_id": "rcpt_7bbd96d53b1c"
+      },
+      {
+        "source_hash": "39ce0ec2f999f24b27478cca12cec8fe9ade166a5e49e0cbd2c41a41a1dcd8ae",
+        "source_id": "status_6a1d6357275c",
+        "source_kind": "observation",
+        "source_version_id": "status_6a1d6357275c"
+      },
+      {
+        "source_hash": "5e45996f0a07772798a97513a46e60292edfcc6d030a177952f1834b19d8e589",
+        "source_id": "status_6d3999143a56",
+        "source_kind": "observation",
+        "source_version_id": "status_6d3999143a56"
+      },
+      {
+        "source_hash": "6739f9606e4ba2a57095af2b3e5595ff2362d22b32f8ca2ab150de46e099a2ae",
+        "source_id": "status_e552846abad8",
+        "source_kind": "observation",
+        "source_version_id": "status_e552846abad8"
+      }
+    ]
+  },
+  "retrieval": {
+    "citationIds": [
+      "memory_observation_8ab6b308c753",
+      "memory_observation_b1c6db606778",
+      "memory_observation_ba51d9d99fdd"
+    ],
+    "privateNotesPolicy": "excluded",
+    "ruleIds": [
+      "memory_proposal_c90a0f0a30bd"
+    ],
+    "schema": "jobos.career-memory-retrieval.v1"
+  },
+  "rule": {
+    "domain": "search",
+    "evidence": [
+      {
+        "evidenceHash": "cd1d7fc6bc1b1946d8d16197aea2d7fe9c06920ccb14a274faae59c35295618d",
+        "observationId": "memory_observation_8ab6b308c753",
+        "sourceEntityId": "job_w10_provenance_0",
+        "sourceVersionId": "audit_5d138a45275e"
+      },
+      {
+        "evidenceHash": "86559ca6f3e95b844eadf92cb9ad2cf563ea25c6ca5ea8b22c246dbd01955a98",
+        "observationId": "memory_observation_b1c6db606778",
+        "sourceEntityId": "job_w10_provenance_2",
+        "sourceVersionId": "audit_afb433f9c1f3"
+      },
+      {
+        "evidenceHash": "4059c8815a3779cce8a18d3a98f05911fb3048c9cc9cc339fccb03f3310baf3b",
+        "observationId": "memory_observation_ba51d9d99fdd",
+        "sourceEntityId": "job_w10_provenance_1",
+        "sourceVersionId": "audit_4fa4d83022ca"
+      }
+    ],
+    "evidenceHash": "a8defc4f4dd447848ad4dba87cc2d5fce97a2aff8928378e64d91a74893277f9",
+    "id": "memory_proposal_c90a0f0a30bd",
+    "proposalHash": "bb38e01b89921109509a4560186c849e86e2259ab9da8a55e0dc646209e86480",
+    "ruleType": "role_family",
+    "scope": "search",
+    "status": "accepted"
+  },
+  "surfaces": {
+    "cliSchema": "jobos.career-memory-retrieval.v1",
+    "domainSchema": "jobos.career-memory-retrieval.v1",
+    "mirrorFiles": 3,
+    "privateDataFree": true
+  },
+  "unknownPayload": {
+    "errorCode": "memory_unknown_key",
+    "zeroDelta": true
+  }
+}
