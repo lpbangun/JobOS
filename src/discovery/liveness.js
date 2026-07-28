@@ -127,7 +127,7 @@ function isGenericListingRedirect(requestedUrl, finalUrl, redirects) {
     if (from.hostname.toLowerCase() !== to.hostname.toLowerCase()) return false;
     const fromPath = from.pathname.replace(/\/+$/, '');
     const toPath = to.pathname.replace(/\/+$/, '');
-    if (!fromPath || !toPath) return false;
+    if (!fromPath) return false;
     // The final path must be shorter or equal (generic parent) and not contain the
     // original trailing posting identity segment.
     const fromSegments = fromPath.split('/').filter(Boolean);

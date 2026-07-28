@@ -489,7 +489,7 @@ function referenceAllowlists(job, profile, proofs) {
 function providerError(error, fallbackType = 'provider_error') {
   const message = String(error?.message || error || 'Provider scoring failed')
     .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
-    .replace(/(?:api[_ -]?key|authorization)\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/(api[_ -]?key|authorization)\s*[:=]\s*\S+/gi, '$1=[redacted]')
     .slice(0, 300);
   return { type: String(error?.type || fallbackType), ...(error?.code ? { code: String(error.code) } : {}), message };
 }

@@ -1249,11 +1249,11 @@ export class JobosTui {
       }
       if (!event.pressed || event.button !== 0 || this.state.overlay) continue;
       const { width, height } = this.dimensions();
-      if (event.y <= (width < 90 ? 2 : 4)) {
+      if (event.y >= 1 && event.y <= (width < 90 ? 1 : 4)) {
         const count = this.model.priority?.length || 0;
         if (count) {
           this.state.stripIndex = width < 100
-            ? Math.min(count - 1, Math.max(0, event.y - 2))
+            ? Math.min(count - 1, Math.max(0, event.y - 1))
             : Math.min(count - 1, Math.floor((event.x - 1) / Math.max(1, width / count)));
           this.state.status = `Priority selected: ${this.model.priority[this.state.stripIndex].kind} · Enter jumps`;
           this.render();
@@ -3511,7 +3511,7 @@ export class JobosTui {
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
     if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
-    if (!this.state.overlay && this.state.focusTarget === 'agent') {
+    if (!this.state.overlay && this.state.focusTarget === 'agent' && this.state.mode === 'normal') {
       if (key.name === 'escape' || key.name === 'tab') return this.toggleAgentFocus();
       if (key.name === 'up' || key.name === 'pageup' || value === 'k') return this.scrollAgent(key.name === 'pageup' ? 10 : 1);
       if (key.name === 'down' || key.name === 'pagedown' || value === 'j') return this.scrollAgent(key.name === 'pagedown' ? -10 : -1);

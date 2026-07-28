@@ -11,6 +11,7 @@ import {
 } from './career-memory-observations.js';
 import {
   ARTIFACT_FEEDBACK_INPUT_SCHEMA,
+  canonicalJson,
   normalizeArtifactFeedbackInput,
   normalizeRfc3339,
 } from './career-memory-contract.js';
@@ -380,7 +381,7 @@ function recordArtifactReviewObservation(s, row, auditEvent, eventType, feedback
     sourceSchema: ARTIFACT_FEEDBACK_INPUT_SCHEMA,
     sourceEntity: artifactSourceEntity(row, { id: versionId }),
     occurredAt: normalizeRfc3339(occurredAt, 'occurredAt'),
-    actor: reviewedBy,
+    actor: 'user',
     source: reviewedBy,
     reasonCodes: feedback.reasonCodes,
     signals: feedback.signals,
@@ -393,11 +394,11 @@ function recordArtifactReviewObservation(s, row, auditEvent, eventType, feedback
 }
 
 function observationFeedbackMatches(existing, feedback, decision) {
-  return JSON.stringify(parseJson(existing.reason_codes_json, [])) === JSON.stringify(feedback.reasonCodes)
-    && JSON.stringify(parseJson(existing.signal_json, [])) === JSON.stringify(feedback.signals)
+  return canonicalJson(parseJson(existing.reason_codes_json, [])) === canonicalJson(feedback.reasonCodes)
+    && canonicalJson(parseJson(existing.signal_json, [])) === canonicalJson(feedback.signals)
     && (existing.public_explanation || '') === feedback.publicExplanation
     && (existing.private_note || '') === feedback.privateNote
-    && JSON.stringify(parseJson(existing.payload_json, {})) === JSON.stringify({ decision });
+    && canonicalJson(parseJson(existing.payload_json, {})) === canonicalJson({ decision });
 }
 
 function reviewObservationMatches(existing, row, event, eventType, feedback, reviewedBy) {
@@ -408,7 +409,7 @@ function reviewObservationMatches(existing, row, event, eventType, feedback, rev
     && existing.source_version_id === event?.id
     && Number(existing.source_revision) === Number(row.revision)
     && existing.source_content_hash === row.content_hash
-    && existing.actor === reviewedBy
+    && existing.actor === 'user'
     && existing.source === reviewedBy
     && observationFeedbackMatches(existing, feedback, REVIEW_DECISION_BY_EVENT[eventType]);
 }
@@ -574,7 +575,7 @@ function recordArtifactEditObservation(s, baseRow, newArtifact, editEvent, feedb
       contentHash: newArtifact.contentHash,
     },
     occurredAt: normalizeRfc3339(editEvent.createdAt, 'occurredAt'),
-    actor: source,
+    actor: 'user',
     source,
     reasonCodes: feedback.reasonCodes,
     signals: feedback.signals,
@@ -604,7 +605,7 @@ function replayedArtifactEdit(s, baseRow, normalizedContent, feedback, source) {
     && existing.source_entity_type === 'artifact'
     && Number(existing.source_revision) === Number(existingRow.revision)
     && existing.source_content_hash === existingRow.content_hash
-    && existing.actor === source
+    && existing.actor === 'user'
     && existing.source === source
     && editPayload.previousArtifactId === baseRow.id
     && observationFeedbackMatches(existing, feedback, EDIT_DECISION);
