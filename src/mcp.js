@@ -1,37 +1,22 @@
-import { callDomainTool, DOMAIN_TOOLS } from './domain-tools.js';
+import { callDomainTool } from './domain-tools.js';
 import { reload } from './db.js';
+import { AGENT_DOMAIN_TOOLS } from './capabilities.js';
 
-// MCP agents must only be offered operations they can actually invoke. These
-// human-gated mutations remain available through the trusted CLI/TUI paths.
-const MCP_DENY = new Set([
-  'approve_artifact',
-  'reject_artifact',
-  'approve_contact',
-  'answers_add',
-  'create_application_packet',
-  'attest_application_submitted',
-  'confirm_application_receipt',
-  'checkpoint_application_form',
-  'verify_interview_story',
-  'retire_interview_story',
-  'add_interview_question_source',
-  'record_interview_debrief',
-  'correct_interview_debrief',
-  'record_job_feedback',
-  'correct_memory_observation',
-  'undo_memory_observation',
-  'accept_memory_proposal',
-  'reject_memory_proposal',
-  'revoke_memory_proposal',
-  'undo_memory_transition',
-]);
-const tools = DOMAIN_TOOLS.filter(t => !MCP_DENY.has(t.name));
+// MCP agents are offered only operations allowed by the shared capability
+// policy. Human-only operations remain callable through trusted CLI/TUI paths.
+const tools = AGENT_DOMAIN_TOOLS;
+const agentToolNames = new Set(tools.map(tool => tool.name));
 
 function result(value) {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
 }
 
 async function callTool(s, name, args = {}) {
+  if (!agentToolNames.has(name)) {
+    const error = new Error(`Tool is not available to MCP agents: ${name || '(missing name)'}`);
+    error.code = 'mcp_tool_not_available';
+    throw error;
+  }
   return result(await callDomainTool(s, name, args, { source: 'mcp' }));
 }
 
@@ -181,8 +166,13 @@ async function handleLine(s, line, respond) {
     if (msg.method === 'notifications/initialized') return;
     if (msg.method === 'tools/list') { respond({ jsonrpc: '2.0', id: msg.id, result: { tools } }); return; }
     if (msg.method === 'tools/call') {
-      reload(s);
       const { name, arguments: args } = msg.params || {};
+      if (!agentToolNames.has(name)) {
+        const error = new Error(`Tool is not available to MCP agents: ${name || '(missing name)'}`);
+        error.code = 'mcp_tool_not_available';
+        throw error;
+      }
+      reload(s);
       respond({ jsonrpc: '2.0', id: msg.id, result: await callTool(s, name, args || {}) });
       return;
     }

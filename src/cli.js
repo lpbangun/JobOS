@@ -28,6 +28,7 @@ import { addAnswer, listAnswers } from './answers.js';
 import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
 import { callDomainTool } from './domain-tools.js';
+import { domainCapabilityCatalog } from './capabilities.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
 import { preflightResumeArtifact } from './artifacts.js';
 import { getMemoryObservation } from './career-memory-observations.js';
@@ -301,6 +302,13 @@ function registryJson() {
     },
     globalFlags,
     exitCodes: { success: 0, runtimeError: 1, usageError: 2 },
+    interaction: {
+      naturalLanguage: 'Use the embedded Hermes ACP pane; intent is routed to agent-eligible MCP tools.',
+      slashSyntax: '/<domain_tool> <json-object>',
+      friendlyCommandSyntax: ':<command>',
+      persistence: 'SQLite, workspace mirrors, Career Memory, and per-profile Hermes ACP session IDs persist under the selected workspace.'
+    },
+    domainTools: domainCapabilityCatalog(),
     commands: commandRegistry.map(c => ({
       name: c.name,
       path: c.path,
@@ -339,6 +347,8 @@ JobOS is the local-first host and source of truth for job state. The TUI is the 
 - \`jobos mcp\` exposes the same \`domain-tools\` semantics to external agents.
 - \`--agent <name>\` / \`JOBOS_AGENT\` select the separate noninteractive batch generator; explicit failures never silently fall back.
 - JobOS reloads SQLite after guest tools complete and rejects stale concurrent writers.
+- Free-form requests in the embedded pane are routed against the complete agent-eligible MCP catalog. In the TUI, \`/<domain_tool> <json-object>\` invokes any domain function through the same facade; \`:...\` remains the friendly host-command surface.
+- SQLite, workspace mirrors, Career Memory, and the per-profile Hermes ACP session ID persist between launches. Human-only decisions remain typed CLI/TUI handoffs and are not exposed as MCP tools.
 
 ## Global Rules
 

@@ -4,9 +4,9 @@ import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
 import { readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
-import { callDomainTool, selectedJobContext } from './domain-tools.js';
+import { callDomainTool, DOMAIN_TOOLS, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
-import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
+import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
 import { addProof, createProfile, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
 import { importResume, replaceResume } from './resumes.js';
 import { importText } from './jobs.js';
@@ -54,7 +54,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'], ['t', 'stage'], ['c', 'reconnect'], ['x', 'cancel'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['Q', 'quit'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['/', 'slash'], ['Q', 'quit'],
     ['Tab', 'strip'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
@@ -73,7 +73,7 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
@@ -970,7 +970,7 @@ function footerLines(width) {
   if (width >= 120) {
     return [
       ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · t stage',
-      ' a agent i prompt c reconnect x cancel · r review l log m memory n network o docs q answers · s sources g setup b network v profile ? system · : command Q quit'
+      ' a agent i prompt c reconnect x cancel · r review l log m memory n network o docs q answers · s sources g setup b network v profile ? system · : command / tool Q quit'
     ];
   }
   if (width >= 90) {
@@ -978,7 +978,7 @@ function footerLines(width) {
       ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview',
       ' p pursue · z score · d daily · t stage · a agent · i prompt',
       ' c reconnect · x cancel · r review · l log · m memory · n network · o docs · q answers',
-      ' s sources · g setup · b build-network · v profile · ? system · : command · Q quit'
+      ' s sources · g setup · b build-network · v profile · ? system · : command · / tool · Q quit'
     ];
   }
   return [
@@ -987,7 +987,7 @@ function footerLines(width) {
     ' p pursue · z score · d daily · a agent · i prompt',
     ' t stage · c reconnect · x cancel · g setup · v profile',
     ' r review · l log · m memory · n network · o docs · q answers',
-    ' s sources · ? system · b build-network · : command · Q quit'
+    ' s sources · ? system · b net · : cmd · / tool · Q quit'
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
@@ -1044,7 +1044,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
+    const labels = { command: state.commandPrefix || ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -1082,6 +1082,7 @@ export function defaultTuiState() {
     setupProofId: null,
     packetDetail: null,
     mode: 'normal',
+    commandPrefix: ':',
     input: '',
     status: 'starting JobOS host',
     error: null,
@@ -1115,6 +1116,7 @@ export class JobosTui {
     this.shouldConnectAgent = connectAgent;
     this.color = Boolean(color);
     this.client = null;
+    this.sessionPersistence = Promise.resolve();
     this.refreshTimer = null;
     this.boundKeypress = (value, key) => this.onKeypress(value, key);
     this.boundResize = () => this.render();
@@ -1397,10 +1399,23 @@ export class JobosTui {
         this.render();
       });
       this.client.on('event', event => this.onAgentEvent(event));
-      const connected = await this.client.connect({ mcpServers: [jobosMcpServer(this.store.root)] });
+      await this.sessionPersistence;
+      const mcpServers = [jobosMcpServer(this.store.root)];
+      const persistedSessionId = await readPersistedAcpSession(this.store.root, this.model.profileId);
+      let resumed = Boolean(persistedSessionId);
+      let connected;
+      try {
+        connected = await this.client.connect({ mcpServers, sessionId: persistedSessionId });
+      } catch (error) {
+        if (!persistedSessionId) throw error;
+        resumed = false;
+        await this.persistAgentSession(null);
+        connected = await this.client.connect({ mcpServers });
+      }
       this.state.sessionId = connected.session.sessionId;
+      await this.persistAgentSession(this.state.sessionId);
       this.state.agentState = 'ready';
-      this.state.status = `Hermes ACP ready · session ${this.state.sessionId.slice(0, 8)} · JobOS tools mediated`;
+      this.state.status = `Hermes ACP ${resumed ? 'resumed' : 'ready'} · session ${this.state.sessionId.slice(0, 8)} · JobOS tools mediated`;
       this.state.error = null;
     } catch (error) {
 
@@ -1434,11 +1449,13 @@ export class JobosTui {
       this.addMessage('tool', `blocked by JobOS host policy: ${event.toolCall?.title || event.method || 'permission request'}`);
       this.state.status = 'guest terminal/filesystem permission denied';
     } else if (event.type === 'session_quarantined') {
+      void this.persistAgentSession(null).catch(() => {});
       this.state.status = `${event.reason || 'cancelled'} ACP session quarantined · next prompt starts a clean guest`;
     } else if (event.type === 'session_recovery_started') {
       this.state.status = `restarting quarantined ACP session · JobOS state remains authoritative`;
     } else if (event.type === 'session_recovered') {
       this.state.sessionId = event.sessionId;
+      void this.persistAgentSession(event.sessionId).catch(() => {});
       this.state.status = `clean ACP session ${String(event.sessionId || '').slice(0, 8)} ready`;
     } else if (event.type === 'process_exit' && !event.intentional) {
       this.addMessage('tool', 'Hermes ACP exited. Press c to reconnect; JobOS state is intact.');
@@ -1447,6 +1464,17 @@ export class JobosTui {
       this.state.error = event.message || event.error?.message || 'ACP protocol error';
     }
     this.render();
+  }
+
+  persistAgentSession(sessionId) {
+    this.sessionPersistence = this.sessionPersistence
+      .catch(() => {})
+      .then(() => writePersistedAcpSession(this.store.root, this.model.profileId, sessionId));
+    return this.sessionPersistence.catch(error => {
+      this.state.error = error.message;
+      this.render();
+      throw error;
+    });
   }
 
   async promptAgent(text) {
@@ -1692,12 +1720,28 @@ export class JobosTui {
   }
 
   executeCommand(value) {
-    const trimmed = String(value || '').trim();
+    const raw = String(value || '').trim();
+    const slash = raw.startsWith('/');
+    const trimmed = raw.replace(/^[:/]/, '').trim();
     const [command] = trimmed.split(/\s+/);
     const argText = trimmed.slice((command || '').length).trim();
     this.state.mode = 'normal';
     this.state.input = '';
     if (!command) return this.render();
+    if (slash && DOMAIN_TOOLS.some(tool => tool.name === command)) {
+      let args = {};
+      if (argText) {
+        try {
+          args = JSON.parse(argText);
+          if (!args || typeof args !== 'object' || Array.isArray(args)) throw Error('expected an object');
+        } catch (error) {
+          this.state.error = error.message;
+          this.state.status = `Usage: /${command} <json-object>`;
+          return this.render();
+        }
+      }
+      return void this.runDomainSlashCommand(command, args);
+    }
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
@@ -1733,8 +1777,33 @@ export class JobosTui {
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
     this.state.error = `Unknown command: ${trimmed}`;
-    this.state.status = 'Commands: pursue score daily network memory packet packet create form attest receipt answer add interviews prep story-verify story-retire debrief debrief-correct weekly due reschedule review log docs answers system profile agent refresh reconnect quit';
+    this.state.status = 'Use : for friendly host commands or /<domain_tool> <json-object> for every callable function. Run jobos agent-guide --json for the full catalog.';
     this.render();
+  }
+
+  async runDomainSlashCommand(name, suppliedArgs) {
+    if (this.state.busy) return;
+    const tool = DOMAIN_TOOLS.find(item => item.name === name);
+    if (!tool) return;
+    const args = { ...suppliedArgs };
+    if (tool.inputSchema?.properties?.profileId && args.profileId === undefined && this.model.profileId) args.profileId = this.model.profileId;
+    if (tool.inputSchema?.properties?.jobId && args.jobId === undefined && this.state.selectedJobId) args.jobId = this.state.selectedJobId;
+    const before = this.artifactSnapshot();
+    this.state.busy = name;
+    this.state.error = null;
+    this.state.status = `${name} running`;
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, name, args, { source: 'tui' });
+      this.state.status = `${name} complete · ${Array.isArray(result) ? `${result.length} result(s)` : 'authoritative state refreshed'}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${name} failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.refresh({ disk: false });
+      this.noteArtifactChanges(before, this.artifactSnapshot());
+    }
   }
 
   executeMemoryCommand(argText) {
@@ -3188,7 +3257,7 @@ export class JobosTui {
       this.state.mode = 'normal';
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
-      else if (mode === 'command') this.executeCommand(text);
+      else if (mode === 'command') this.executeCommand(`${this.state.commandPrefix || ':'}${text}`);
       else if (mode === 'build-network-field' && this.state.networkDraft) {
         const editKey = this.state.networkDraft._editingKey;
         if (editKey) this.state.networkDraft[editKey] = text;
@@ -3337,6 +3406,12 @@ export class JobosTui {
       this.render();
     } else if (value === ':') {
       this.state.mode = 'command';
+      this.state.commandPrefix = ':';
+      this.state.input = '';
+      this.render();
+    } else if (value === '/') {
+      this.state.mode = 'command';
+      this.state.commandPrefix = '/';
       this.state.input = '';
       this.render();
     } else if (value === 'i') {
@@ -3362,6 +3437,7 @@ export class JobosTui {
     else if (value === 'c') void this.connectAgent();
     else if (value === 'x' && this.client?.state === 'working') {
       this.client.cancel();
+      void this.persistAgentSession(null).catch(() => {});
       this.state.status = 'cancelling agent turn';
       this.render();
     } else if (key.name === 'tab') this.cycleStripFocus();
@@ -3407,6 +3483,7 @@ export class JobosTui {
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     if (this.client) await this.client.stop();
+    await this.sessionPersistence.catch(() => {});
     this.stdout.write(`${ESC}?25h${ESC}?1049l`);
     this.resolveStop?.();
   }

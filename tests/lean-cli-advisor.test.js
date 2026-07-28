@@ -206,6 +206,11 @@ test('agent-guide --json returns complete registry with new commands', () => {
   assert.ok(names.includes('agents list'), 'registry should include agents list');
   assert.ok(names.includes('browser status'), 'registry should include browser status');
   assert.ok(names.includes('network paths'), 'registry should include network paths');
+  assert.ok(Array.isArray(registry.domainTools));
+  assert.equal(registry.domainTools.length > 50, true);
+  assert.equal(registry.interaction.slashSyntax, '/<domain_tool> <json-object>');
+  assert.equal(registry.domainTools.find(tool => tool.name === 'score_job').agentEligible, true);
+  assert.equal(registry.domainTools.find(tool => tool.name === 'approve_artifact').agentEligible, false);
   const rawDiscovery = registry.commands.find(command => command.name === 'discover run-all');
   assert.equal(rawDiscovery.relatedWorkflow, 'daily');
   assert.match(rawDiscovery.summary, /Advanced raw execution/);

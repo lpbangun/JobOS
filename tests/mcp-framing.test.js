@@ -119,3 +119,16 @@ test('MCP accepts spec-valid multi-header Content-Length frames without weakenin
   assert.equal(JSON.parse(dispatched[0]).id, 7);
   assert.equal(sent.length, 0, 'no parse error must be emitted for a valid multi-header frame');
 });
+
+test('MCP rejects unadvertised and human-only tools before domain dispatch', async () => {
+  for (const name of ['approve_artifact', 'not_a_jobos_tool']) {
+    const input = new PassThrough();
+    const sent = [];
+    const session = startMcp({}, { input, send: message => sent.push(message) });
+    input.end(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } })}\n`);
+    await session.completed;
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].error.code, -32000);
+    assert.match(sent[0].error.message, /mcp_tool_not_available/);
+  }
+});

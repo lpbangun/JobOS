@@ -54,7 +54,9 @@ npm run jobos -- tui --profile pm-edtech --snapshot --width 140 --height 42
 npm run jobos -- tui --profile pm-edtech --json
 ```
 
-The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn; `1`–`7` filter the pipeline (today, all, high, review, materials-ready, applied, interview); Tab moves the strip; Enter jumps to a job. `i` prompts the agent; `a` explicitly toggles its pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, and `?` open network, documents, answers, discovery, and system surfaces; `g` opens setup, `b` builds the network map, `m` opens memory, and `v` opens the profile overlay. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `t` opens the selected job's application-stage picker; selecting `applied` records only that the user applied elsewhere. `:` opens the command bar; `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+The shell shows header counts, due/interview/new/failure priorities, rich job cards, selected-job fit/proofs/path/artifacts/stages, and a live Hermes ACP pane. `j`/`k` moves selection without waiting for an agent turn; `1`–`7` filter the pipeline (today, all, high, review, materials-ready, applied, interview); Tab moves the strip; Enter jumps to a job. `i` accepts free-form natural-language requests and routes them through the complete agent-eligible MCP catalog; `a` explicitly toggles the pane; Escape closes transient input or overlays but never hides the agent. `r` and `l` open review and audit-log overlays; `n`, `o`, `q`, `s`, and `?` open network, documents, answers, discovery, and system surfaces; `g` opens setup, `b` builds the network map, `m` opens memory, and `v` opens the profile overlay. `p`, `z`, and `d` run pursue, score, and daily through the shared domain facade. `t` opens the selected job's application-stage picker; selecting `applied` records only that the user applied elsewhere. `:` opens friendly host commands. `/` invokes any domain function as `/<domain_tool> <json-object>` through the same facade, including typed trusted-human commands that are intentionally absent from MCP. `x` cancels a live turn; `c` reconnects ACP; uppercase `Q` exits. After cancel or timeout, late guest updates are quarantined; the next prompt starts a clean Hermes process/session before accepting new output.
+
+SQLite, workspace mirrors, Career Memory, and the current per-profile Hermes ACP session ID persist under the selected workspace. A normal relaunch resumes that guest session with `session/load`; a cancelled, timed-out, stale, or rejected session is discarded and replaced safely. JobOS does not copy provider credentials or raw chat transcripts into its workspace mirror.
 
 Review and document surfaces keep artifact decisions human-gated. In review, Enter opens the selected draft; `A`, `R`, and `B` approve, reject with required feedback, or return it to draft. In documents, `E` round-trips through `$VISUAL`/`$EDITOR` and creates a new draft version only when content changes; `V` shows the immediate predecessor diff; `I` shows evidence and warnings; `/`, `n`/`N`, arrows, and PageUp/PageDown search and scroll. Markdown and diffs are sanitized before terminal rendering, and editor paths are confined to the workspace. Agent-created artifacts open automatically when safe; active typing, confirmations, or editor ownership defer the open until the blocker clears.
 
@@ -476,6 +478,28 @@ Generic `stdin-json` contract:
 This batch process must exit `0` and write one JSON object to stdout. Missing executables, timeouts, non-zero exits, malformed/oversized output, and failed connection tests return typed `agent_error`; explicit agent selection never silently falls back to another provider. `--agent` overrides `JOBOS_AGENT` for batch workflow generation. Without either, existing HTTP LLM configuration remains available; without any provider, deterministic degraded mode remains.
 
 External agents can run `jobos mcp`. The server accepts standard Content-Length framing and ACP-session JSONL framing, and exposes `daily_discovery`, `pursue_job`, `applications_plan`, `answers_match`, selection/review/discovery reads, and the lower-level scoring, research, networking, tailoring, application, and scheduler tools through the same `domain-tools` facade.
+
+Use a project/workspace-specific MCP registration so Hermes, Codex, and Claude Code all reach the same canonical state. Replace both absolute paths before running these commands:
+
+```bash
+export JOBOS_CLI=/absolute/path/to/jobos/src/cli.js
+export JOBOS_HOME=/absolute/path/to/jobos-workspace-root
+
+# Hermes external client (the embedded TUI path remains Hermes ACP).
+hermes mcp add jobos --command node --args "$JOBOS_CLI" mcp --workspace "$JOBOS_HOME"
+hermes mcp test jobos
+
+# Codex external client. Codex app-server is still a separate, unwired
+# embedded adapter; external MCP is the complete JobOS tool door.
+codex mcp add jobos -- node "$JOBOS_CLI" mcp --workspace "$JOBOS_HOME"
+codex mcp list
+
+# Claude Code external client, stored in project scope.
+claude mcp add --scope project jobos -- node "$JOBOS_CLI" mcp --workspace "$JOBOS_HOME"
+claude mcp list
+```
+
+`jobos agent-guide --json` returns both the complete CLI registry and the domain capability catalog. Each domain entry identifies its slash command, MCP/ACP eligibility, and trusted-human mediation requirement. This gives external agents an honest handoff for review, restricted input, packet freeze, checkpoint, attestation, receipt, interview verification/debrief, and Career Memory lifecycle decisions instead of advertising tools policy will always reject.
 
 The repository includes a real external-client drill—not a tool-list unit test. It initializes `jobos mcp`, discovers the live tool catalog, calls `score_job` and `get_job_context`, closes the server, and verifies the same stored score:
 

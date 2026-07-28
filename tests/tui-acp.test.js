@@ -262,7 +262,7 @@ test('narrow terminals keep safety state, controls, and all three product panes 
   assert.match(screen, /JOBS · today/);
   assert.match(screen, /SELECTED JOB/);
   assert.match(screen, /AGENT/);
-  assert.match(screen, /s sources · \? system · b build-network · : command · Q quit/);
+  assert.match(screen, /s sources · \? system · b net · : cmd · \/ tool · Q quit/);
   assert.equal(screen.split('\n').length, 24);
 });
 

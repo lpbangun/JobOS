@@ -17,6 +17,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
+      # --ignore-scripts skips Playwright's postinstall; install Chromium explicitly for live-form tests.
+      - run: npx playwright install --with-deps chromium
       - run: npm run test:w10
       - run: npm test
       - run: npm audit --omit=dev --audit-level=high

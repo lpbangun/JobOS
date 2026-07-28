@@ -12,6 +12,7 @@ JobOS is a local-first CLI for job discovery, networking, and application prepar
 - JSON errors have `{ "ok": false, "error": { "code", "type", "message" } }`.
 - Select a registered local agent with `--agent <name>` or `JOBOS_AGENT`; the flag wins. Explicit agent failures never fall back silently.
 - SQLite is canonical. Use CLI/MCP writes instead of hand-editing runtime mirrors.
+- `jobos agent-guide --json` includes `domainTools`, where every function has an MCP/ACP eligibility flag, trusted-human mediation policy, input schema, and `/<domain_tool> <json-object>` TUI slash command.
 
 ## Safety
 
@@ -49,6 +50,12 @@ jobos mcp
 ```
 
 Generic agents receive one protocol-v1 JSON request on stdin and must emit exactly one JSON object on stdout. MCP exposes `daily_discovery`, `pursue_job`, and `answers_match` plus lower-level domain tools. Authenticated browser state stays only in `.jobos/browser/`; it is credential material and never part of the workspace mirror.
+
+Hermes, Codex, and Claude Code connect to the same external `jobos mcp` stdio door. The exact project-scoped setup commands are maintained in README “Pluggable agents.” Hermes additionally has the certified embedded ACP path. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation.
+
+In the embedded pane, use normal language (“score this role,” “show due follow-ups,” “draft interview prep”). The host prompt supplies the complete agent-eligible tool catalog and typed handoffs for human-only decisions. Direct TUI invocation uses `/<domain_tool> <json-object>`; friendly host navigation remains under `:...`.
+
+Domain state, mirrors, Career Memory, and a private per-profile Hermes ACP session ID persist under the workspace. JobOS resumes a valid session on relaunch and replaces stale or quarantined sessions; it does not mirror provider credentials or raw chat transcripts.
 
 ## Agent-readable files
 

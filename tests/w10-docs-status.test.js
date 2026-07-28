@@ -54,6 +54,7 @@ test('W10-DOCS-04 build status separates shipped W08/W09 behavior from intention
 test('W10-DOCS-05 quality workflow runs no-deploy W10 gates on Node 22 and always uploads evidence', () => {
   assert.match(workflow, /node-version:\s*22/);
   assert.match(workflow, /run:\s*npm ci --ignore-scripts/);
+  assert.match(workflow, /run:\s*npx playwright install --with-deps chromium/);
   assert.match(workflow, /run:\s*npm run test:w10/);
   assert.match(workflow, /run:\s*npm audit --omit=dev --audit-level=high/);
   assert.match(workflow, /run:\s*npm run release:evidence/);
