@@ -1,0 +1,21 @@
+[
+  {
+    "id": "lever-rich-1",
+    "text": "Senior Product Manager",
+    "hostedUrl": "https://jobs.lever.co/acme/lever-rich-1",
+    "categories": {
+      "location": "New York, NY",
+      "commitment": "Full-time",
+      "team": "Growth"
+    },
+    "workplaceType": "hybrid",
+    "salaryRange": {
+      "min": 160000,
+      "max": 200000,
+      "currency": "USD",
+      "interval": "year"
+    },
+    "createdAt": 1784548800000,
+    "descriptionPlain": "Lead product strategy and experimentation."
+  }
+]

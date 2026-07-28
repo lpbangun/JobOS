@@ -1,6 +1,7 @@
 import { all, one } from './db.js';
 import { runAllSearches } from './discovery.js';
 import { dedupeJobs } from './jobs.js';
+import { assertJobLivenessGate, resolveJobLiveness } from './jobs.js';
 import { score } from './scoring.js';
 import { researchCompany, listJobStakeholders } from './research.js';
 import { createOutreachPlan } from './research/contacts.js';
@@ -10,6 +11,7 @@ import { tailor } from './tailoring.js';
 import { appCreate } from './tracking.js';
 import { draftOutreach } from './outreach.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
+import { evaluateSearchGuidance } from './career-memory-retrieval.js';
 
 const pursuitStages = [
   'score',
@@ -71,7 +73,7 @@ function selectedStages(stage) {
 function compactResult(value) {
   if (value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.slice(0, 20);
-  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application', 'readiness', 'questions', 'factCount', 'reasoning', 'dimensions', 'generatedAt', 'unmatched'];
+  const keep = ['id', 'jobId', 'profileId', 'path', 'yamlPath', 'status', 'mode', 'overall', 'count', 'matched', 'blocked', 'recommended', 'stakeholderId', 'contactPointId', 'relationshipEdgeId', 'channel', 'pathStrength', 'pathCount', 'paths', 'warnings', 'errors', 'counts', 'runs', 'jobs', 'draft', 'plan', 'application', 'readiness', 'questions', 'factCount', 'reasoning', 'dimensions', 'generatedAt', 'unmatched', 'postingLiveness'];
   return Object.fromEntries(keep.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 }
 
@@ -123,11 +125,19 @@ export async function runDaily(s, { profileId }) {
   const discovery = await runAllSearches(s, { profileId });
   const dedupe = dedupeJobs(s, { apply: true });
   const runs = discovery.runs || [];
-  const jobs = runs.flatMap(run => run.jobs || []).sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || String(a.company || '').localeCompare(String(b.company || '')));
+  const jobs = runs.flatMap(run => run.jobs || []).map(job => {
+    const memoryGuidance = evaluateSearchGuidance(s, { profileId, jobId: job.id });
+    return {
+      ...job,
+      memoryGuidance,
+      guidedScore: Math.max(0, Math.min(100, Number(job.score || 0) + memoryGuidance.adjustment))
+    };
+  }).sort((a, b) => Number(b.guidedScore || 0) - Number(a.guidedScore || 0) || String(a.company || '').localeCompare(String(b.company || '')));
   const failures = runs.filter(run => run.status !== 'succeeded' || (run.errors || []).length).map(run => ({ searchId: run.searchId, searchName: run.searchName, adapter: run.adapter, status: run.status, errors: run.errors || [], metadata: run.metadata || null }));
+  const status = ['succeeded', 'partial', 'failed'].includes(discovery.status) ? discovery.status : (failures.length ? 'partial' : 'succeeded');
   return {
-    ok: failures.length === 0,
-    status: failures.length ? (jobs.length ? 'partial' : 'failed') : 'succeeded',
+    ok: status === 'succeeded',
+    status,
     profileId,
     searched: runs.length,
     imported: runs.reduce((sum, run) => sum + Number(run.counts?.imported || 0), 0),
@@ -148,9 +158,13 @@ export async function runPursuit(s, {
   profileId,
   stage = null,
   dryRun = false,
-  stageTimeoutMs = 30000
+  stageTimeoutMs = 30000,
+  checkLiveness,
+  now: nowFn
 }) {
   const job = validateProfileJob(s, jobId, profileId);
+  const liveness = await resolveJobLiveness(s, jobId, { dryRun, checkLiveness, now: nowFn });
+  assertJobLivenessGate(liveness, 'enter pursuit');
   const stagesToRun = selectedStages(stage);
   if (dryRun) {
     return {
@@ -159,6 +173,8 @@ export async function runPursuit(s, {
       jobId,
       profileId,
       stages: stagesToRun.map(name => ({ stage: name, dependencies: stageDependencies[name] || [] })),
+      postingLiveness: liveness.handoff,
+      warnings: liveness.warning ? [liveness.warning] : [],
       readiness: compileApplicationReadiness(s, { jobId, profileId })
     };
   }
@@ -167,7 +183,7 @@ export async function runPursuit(s, {
   const byName = new Map();
   let readiness = null;
   const operations = {
-    score: () => score(s, jobId, profileId),
+    score: () => score(s, jobId, profileId, { checkLiveness, now: nowFn }),
     company: () => researchCompany(s, jobId),
     'people-research': async signal => {
       const request = {
@@ -189,7 +205,7 @@ export async function runPursuit(s, {
       const status = preflight.readyForReview ? 'materials-ready' : 'researching';
       const notes = preflight.readyForReview ? 'Readiness compiler: ready for human review' : `Readiness compiler: blocked by ${preflight.blockers.map(item => item.code).join(', ')}`;
       const application = !existing || shouldAdvanceApplication(existing.status, status)
-        ? appCreate(s, jobId, status, notes)
+        ? appCreate(s, jobId, status, notes, { actor: 'system', source: 'workflow' })
         : existing;
       const applicationStatusChanged = !existing || application.status !== existing.status;
       readiness = planApplication(s, {
@@ -247,6 +263,8 @@ export async function runPursuit(s, {
     profileId,
     failed: failed.length,
     skipped: skipped.length,
+    postingLiveness: liveness.handoff,
+    warnings: liveness.warning ? [liveness.warning] : [],
     stages: results,
     readiness
   };

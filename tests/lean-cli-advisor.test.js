@@ -46,6 +46,41 @@ function makeRunner({ extraEnv = {} } = {}) {
   return { root, env, jobos, out, raw };
 }
 
+function completePursuitResume() {
+  const verified = { verificationStatus: 'verified' };
+  return {
+    schemaVersion: 1,
+    identity: { name: 'PM Candidate', email: 'pm@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], ...verified },
+    summary: { id: 'summary_main', text: 'Product leader focused on educator research, product strategy, and measurable workflow improvements.', proofPointIds: [], ...verified },
+    experience: [{
+      id: 'experience_acme', employer: 'Acme Learning', title: 'Product Manager', location: 'Remote',
+      dateSource: { startText: '2021-01', endText: 'Present' }, startDate: '2021-01', endDate: null, ...verified,
+      bullets: [
+        { id: 'bullet_research', text: 'Led discovery with educators and operations teams to prioritize product strategy.', proofPointIds: [], ...verified },
+        { id: 'bullet_launch', text: 'Shipped a cross-functional product launch with engineering and design partners.', proofPointIds: [], ...verified },
+        { id: 'bullet_metric', text: 'Improved a learning workflow that reduced manual review time by 30%.', proofPointIds: [], ...verified }
+      ]
+    }],
+    projects: [],
+    education: [{ id: 'education_state', institution: 'State University', degree: 'BS', field: 'Information Systems', location: '', dateSource: { endText: '2020' }, startDate: null, endDate: '2020', ...verified }],
+    credentials: [{ id: 'credential_cspo', name: 'CSPO', issuer: 'Scrum Alliance', date: '2022', ...verified }],
+    skills: [{ id: 'skill_strategy', name: 'Product Strategy', category: 'Product', ...verified }, { id: 'skill_research', name: 'User Research', category: 'Product', ...verified }],
+    additionalSections: []
+  };
+}
+
+function createPursuitProfile(jobos, root) {
+  const resume = fixtureFile(root, 'resume.json', JSON.stringify(completePursuitResume(), null, 2));
+  const profile = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  assert.ok(profile.proofPointCount >= 3);
+  assert.equal(profile.canonicalResumeCreated, true);
+  const profileMirror = readFileSync(path.join(root, 'jobos-workspace', 'profiles', `${profile.id}.yaml`), 'utf8');
+  const proofIds = [...profileMirror.matchAll(/id:\s*(proof_[a-f0-9]+)/g)].map(match => match[1]);
+  assert.ok(proofIds.length >= 3);
+  for (const proofId of proofIds) jobos(['proof', 'verify', proofId]);
+  return profile;
+}
+
 function fixtureFile(root, name, content) {
   const p = path.join(root, name);
   writeFileSync(p, content, 'utf8');
@@ -146,6 +181,9 @@ test('root help is concise and shows Setup / Workflows / Extend structure', () =
   assert.ok(help.includes('daily'), 'help should mention daily');
   assert.ok(help.includes('pursue'), 'help should mention pursue');
   assert.ok(help.includes('network'), 'help should mention network');
+  assert.ok(help.includes('agents connect'), 'help should expose the agent connection journey');
+  assert.ok(help.includes('agents doctor'), 'help should expose agent diagnostics');
+  assert.match(help, /Run `jobos` to open the primary terminal product\./);
   const lines = help.split('\n').length;
   assert.ok(lines < 45, `help should be concise (got ${lines} lines)`);
 });
@@ -170,6 +208,14 @@ test('agent-guide --json returns complete registry with new commands', () => {
   assert.ok(names.includes('agents list'), 'registry should include agents list');
   assert.ok(names.includes('browser status'), 'registry should include browser status');
   assert.ok(names.includes('network paths'), 'registry should include network paths');
+  assert.ok(Array.isArray(registry.domainTools));
+  assert.equal(registry.domainTools.length > 50, true);
+  assert.equal(registry.interaction.slashSyntax, '/<domain_tool> <json-object>');
+  assert.equal(registry.domainTools.find(tool => tool.name === 'score_job').agentEligible, true);
+  assert.equal(registry.domainTools.find(tool => tool.name === 'approve_artifact').agentEligible, false);
+  const rawDiscovery = registry.commands.find(command => command.name === 'discover run-all');
+  assert.equal(rawDiscovery.relatedWorkflow, 'daily');
+  assert.match(rawDiscovery.summary, /Advanced raw execution/);
 });
 
 test('clean init returns user_configured policy', () => {
@@ -390,8 +436,7 @@ test('pursue dry-run returns full stage dependency graph', () => {
 
 test('pursue --stage application runs with declared dependencies', () => {
   const { root, jobos } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', '- Built a thing.\n');
-  const initP = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  const initP = createPursuitProfile(jobos, root);
   const job = fixtureFile(root, 'job.md', '# Senior PM at Acme Corp\nRemote.');
   const impP = JSON.parse(jobos(['jobs', 'import-text', '--profile', initP.id, '--file', job]).stdout);
   const result = JSON.parse(jobos(['pursue', impP.id, '--stage', 'application', '--profile', initP.id], { timeoutMs: 120_000 }).stdout);
@@ -405,8 +450,7 @@ test('pursue --stage application runs with declared dependencies', () => {
 
 test('pursue full E2E: all stages ok, artifacts written', () => {
   const { root, jobos } = makeRunner();
-  const resume = fixtureFile(root, 'resume.md', '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch improving activation.\n');
-  const initP = JSON.parse(jobos(['profile', 'create', 'PM', '--from-resume', resume]).stdout);
+  const initP = createPursuitProfile(jobos, root);
   const job = fixtureFile(root, 'job.md', '# Senior Product Manager at Acme Corp\nRemote. Lead product strategy for EdTech platform.');
   const impP = JSON.parse(jobos(['jobs', 'import-text', '--profile', initP.id, '--file', job]).stdout);
   const result = JSON.parse(jobos(['pursue', impP.id, '--profile', initP.id], { timeoutMs: 180_000 }).stdout);
@@ -537,7 +581,7 @@ test('browser status reports unavailable with recovery on headless VPS', () => {
   const status = out(['browser', 'status']);
   assert.ok(typeof status.available === 'boolean');
   assert.ok(Array.isArray(status.recovery));
-  assert.ok(status.recovery.length > 0, 'recovery instructions should exist');
+  if (!status.available) assert.ok(status.recovery.length > 0, 'unavailable browser status should include recovery instructions');
   assert.equal(status.browser, 'chromium');
 });
 
@@ -787,10 +831,11 @@ test('MCP answers_match tool returns structured match result', async () => {
   const originalWrite = process.stdout.write.bind(process.stdout);
   const captureWrite = (chunk) => { output += chunk; return true; };
   process.stdout.write = captureWrite;
+  let mcpSession;
   try {
     const input = new Readable({ read() { this.push(framed); this.push(null); } });
-    startMcp(s, { input });
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    mcpSession = startMcp(s, { input });
+    await mcpSession.completed;
     process.stdout.write = originalWrite;
     // Parse the response(s) from output stream
     const responses = output.split('\r\n\r\n').filter(Boolean).map(chunk => {
@@ -806,9 +851,9 @@ test('MCP answers_match tool returns structured match result', async () => {
     const content = callResult.result.content[0].text;
     const parsed = JSON.parse(content);
     assert.equal(parsed.profileId, 'pm');
-  } catch (e) {
+  } finally {
+    mcpSession?.close();
     process.stdout.write = originalWrite;
-    throw e;
   }
 });
 
@@ -829,7 +874,12 @@ test('concurrent writer: lock file cleaned up after write, revision increments',
 test('score works with matching profile', () => {
   const { out, root } = makeRunner();
   const resume = fixtureFile(root, 'resume.md', '- Built a thing.\n');
-  out(['profile', 'create', 'PM', '--from-resume', resume]);
+  const preferences = fixtureFile(root, 'preferences.json', JSON.stringify({
+    targetRoleFamilies: ['Senior Product Manager'],
+    industries: ['product'],
+    missionKeywords: ['product', 'strategy']
+  }));
+  out(['profile', 'create', 'PM', '--from-resume', resume, '--preferences', preferences]);
   const job = fixtureFile(root, 'job.md', '# Senior Product Manager at Acme Corp\nRemote. Lead product strategy.');
   const imported = out(['jobs', 'import-text', '--profile', 'pm', '--file', job]);
   const result = out(['score', imported.id, '--profile', 'pm']);

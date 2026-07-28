@@ -395,9 +395,7 @@ export function saveSourceObservation(s, observation) {
     observation.contentHash || '',
     JSON.stringify(observation.metadata || {})
   ];
-  if (existing) {
-    run(s, `UPDATE source_observations SET company_id=?,job_id=?,url=?,canonical_url=?,title=?,snippet=?,source_type=?,provider=?,query=?,trust=?,fetched_at=?,content_hash=?,metadata_json=? WHERE id=?`, [...params.slice(1), observation.id]);
-  } else {
+  if (!existing) {
     run(s, 'INSERT INTO source_observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', params);
   }
   return observation.id;

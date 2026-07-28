@@ -1,0 +1,10 @@
+{
+  "name": "non-retryable-statuses",
+  "description": "W03-HTTP-04: one queue per non-retryable status. Index 0 is the non-retryable status; index 1 is a 200 trap that must remain unconsumed. Test clones the template per status, substituting index0.status.",
+  "url": "https://example.com/never-200",
+  "statuses": [400, 401, 403, 404, 410, 500, 502],
+  "template": [
+    { "status": "<non-retryable>", "headers": {}, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"trap\":true}", "ok": true }
+  ]
+}

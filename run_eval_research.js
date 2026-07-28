@@ -218,43 +218,19 @@ function createLlmServer() {
           return jsonResponse(res, { choices: [{ message: { content: JSON.stringify(payload) } }] });
         }
         if (schema === 'jobos_outreach_draft') {
-        const job = parseJsonSection(user, 'JOB:\n', '\n\nPROFILE:') || {};
-        const profile = parseJsonSection(user, 'PROFILE:\n', '\n\nSTAKEHOLDER:') || {};
-        const stakeholder = parseJsonSection(user, 'STAKEHOLDER:\n', '\n\nGOAL:') || {};
-        const goal = parseSection(user, 'GOAL:\n', '\n\nALLOWED_EVIDENCE:') || 'informational';
-        const evidence = parseJsonSection(user, 'ALLOWED_EVIDENCE:\n') || [];
-        const stakeholderEvidence = evidence.find(e => e.type === 'stakeholder');
-        const companyEvidence = evidence.find(e => e.type === 'company_fact');
-        const proofEvidence = evidence.find(e => e.type === 'profile_proof');
-        const warm = /warm/i.test(profile.communicationStyle || '');
-        const direct = /direct|metrics/i.test(profile.communicationStyle || '');
-        const reflective = /thoughtful|collaborative/i.test(profile.communicationStyle || '');
-        const toneLine = warm ? 'I hope your week is going well.' : direct ? 'I will keep this brief.' : reflective ? 'I am comparing the role with where I can contribute thoughtfully.' : 'I wanted to reach out with a specific question.';
-        const focusLine = direct
-          ? 'The fit I am testing is operational rigor, cleaner handoffs, and measurable execution.'
-          : reflective
-            ? 'The fit I am testing is clinic workflow empathy, careful rollout planning, and cross-functional trust.'
-            : 'The fit I am testing is educator discovery, learning workflow depth, and evidence-backed product judgment.';
-        const ask = goal === 'referral' ? 'would you suggest a thoughtful referral path or another appropriate next step?' : 'would you be open to a short learning conversation?';
-        const message = `Hi ${String(stakeholder.name || 'there').split(/\s+/)[0]},
-
-${toneLine} I am exploring the ${job.title} role at ${job.company}. I noticed ${stakeholderEvidence?.summary || stakeholder.summary}. I also noted ${companyEvidence?.summary || `${job.company} has source-backed context`}. My relevant background is ${proofEvidence?.summary || 'stored in JobOS proof points'}. ${focusLine}
-
-If appropriate, ${ask}
-
-Thanks,
-${profile.name}`;
-        const payload = {
-          subject: `${goal === 'referral' ? 'Referral question' : 'Question'} about ${job.company}`,
-          message,
-          evidence: [
-            stakeholderEvidence?.sourceUrl ? { sourceUrl: stakeholderEvidence.sourceUrl } : null,
-            companyEvidence?.sourceUrl ? { sourceUrl: companyEvidence.sourceUrl } : null,
-            proofEvidence?.id ? { id: proofEvidence.id } : null
-          ].filter(Boolean),
-          quality: { specificity: 9, personalization: 9, askClarity: 9, lengthDiscipline: wordCount(message) <= 150 ? 10 : 8, toneMatch: 9 },
-          warnings: []
-        };
+          const strategy = parseJsonSection(user, 'ROLE_STRATEGY:\n', '\n\nJOB:') || {};
+          const evidence = parseJsonSection(user, 'ALLOWED_EVIDENCE:\n') || [];
+          const stakeholderEvidence = evidence.find(e => e.type === 'stakeholder');
+          const companyEvidence = evidence.find(e => e.type === 'company_fact');
+          const proofEvidence = evidence.find(e => e.type === 'profile_proof');
+          const payload = {
+            strategyClass: strategy.class || 'unknown',
+            evidence: [
+              stakeholderEvidence?.sourceUrl ? { sourceUrl: stakeholderEvidence.sourceUrl } : null,
+              companyEvidence?.sourceUrl ? { sourceUrl: companyEvidence.sourceUrl } : null,
+              proofEvidence?.id ? { id: proofEvidence.id } : null,
+            ].filter(Boolean),
+          };
           return jsonResponse(res, { choices: [{ message: { content: JSON.stringify(payload) } }] });
         }
         jsonResponse(res, { choices: [{ message: { content: '{}' } }] });
@@ -359,7 +335,7 @@ function scoreOutreachDraft({ content, evidence, profile, goal }) {
   const hasProof = evidence.some(e => e.type === 'profile_proof');
   const specificity = hasStakeholderOrCompany && hasProof ? 10 : hasStakeholderOrCompany ? 8 : 5;
   const askClarity = goal === 'referral'
-    ? (/referral path|next step/i.test(content) ? 10 : 5)
+    ? (/not presume a referral|appropriate routing/i.test(content) ? 10 : 5)
     : (/short learning conversation/i.test(content) ? 10 : 5);
   const lengthDiscipline = wordCount(draftMessage) <= 170 ? 10 : 8;
   const toneMatch = /warm/i.test(profile.style)
@@ -491,7 +467,11 @@ async function main() {
     const dissimilarities = [];
     for (const drafts of outreachByGoal.values()) {
       for (let i = 0; i < drafts.length; i++) {
-        for (let j = i + 1; j < drafts.length; j++) dissimilarities.push(1 - jaccardSimilarity(drafts[i].content, drafts[j].content));
+        for (let j = i + 1; j < drafts.length; j++) {
+          const left = drafts[i].content.match(/## Draft message\n([\s\S]*?)\n## Evidence used/)?.[1] || drafts[i].content;
+          const right = drafts[j].content.match(/## Draft message\n([\s\S]*?)\n## Evidence used/)?.[1] || drafts[j].content;
+          dissimilarities.push(1 - jaccardSimilarity(left, right));
+        }
       }
     }
     const dissimilarity = average(dissimilarities);

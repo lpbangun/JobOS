@@ -1,0 +1,77 @@
+{
+  "asOf": "2026-07-22T12:00:00.000Z",
+  "cases": {
+    "catchAll": {
+      "catchAll": "detected",
+      "doNotUse": false,
+      "domainMatch": "match",
+      "evidenceTier": "A",
+      "freshness": "fresh",
+      "usabilityReason": "Human-approved, non-suppressed contact has qualifying non-stale evidence.",
+      "usable": true,
+      "warnings": [
+        "Catch-all domain detected; SMTP acceptance cannot verify this mailbox or identity."
+      ]
+    },
+    "generated": {
+      "catchAll": "unknown",
+      "doNotUse": false,
+      "domainMatch": "match",
+      "evidenceTier": "C",
+      "freshness": "fresh",
+      "usabilityReason": "Human-approved, non-suppressed contact has qualifying non-stale evidence.",
+      "usable": true,
+      "warnings": [
+        "Generated email remains a pattern hypothesis."
+      ]
+    },
+    "stale": {
+      "catchAll": "unknown",
+      "doNotUse": false,
+      "domainMatch": "match",
+      "evidenceTier": "D",
+      "freshness": "stale",
+      "usabilityReason": "Evidence is stale and requires fresh verification.",
+      "usable": false,
+      "warnings": [
+        "Contact evidence is stale and is not ready for outreach."
+      ]
+    },
+    "supported": {
+      "catchAll": "unknown",
+      "doNotUse": false,
+      "domainMatch": "match",
+      "evidenceTier": "A",
+      "freshness": "fresh",
+      "usabilityReason": "Human-approved, non-suppressed contact has qualifying non-stale evidence.",
+      "usable": true,
+      "warnings": []
+    },
+    "suppressed": {
+      "catchAll": "unknown",
+      "doNotUse": true,
+      "domainMatch": "match",
+      "evidenceTier": "D",
+      "freshness": "unknown",
+      "usabilityReason": "Contact is suppressed; suppression always wins.",
+      "usable": false,
+      "warnings": [
+        "Contact evidence freshness is unknown.",
+        "Contact is suppressed; suppression overrides approval and all confidence signals."
+      ]
+    },
+    "unrelatedDomain": {
+      "catchAll": "unknown",
+      "doNotUse": false,
+      "domainMatch": "mismatch",
+      "evidenceTier": "D",
+      "freshness": "fresh",
+      "usabilityReason": "Tier D evidence is a weak hypothesis and is not outreach-ready.",
+      "usable": false,
+      "warnings": [
+        "Contact domain is unrelated to the company-controlled domain."
+      ]
+    }
+  },
+  "family": "contact-tiering"
+}

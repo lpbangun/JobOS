@@ -14,6 +14,7 @@ import { callDomainTool } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runMcpDemo } from '../scripts/mcp-demo.js';
 import { createArtifact } from '../src/artifacts.js';
+import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 function workspace() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-tui-test-'));
@@ -25,10 +26,11 @@ async function seededWorkspace(t, { jobs = 2, draft = true } = {}) {
   const store = await openStore({ workspace: root });
   const profile = createProfile(store, 'PM EdTech').profile;
   const proof = addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio case study', ['product', 'educator'], ['30%']);
+  createCompleteResumeFixture(store, profile, proof);
   const imported = [];
   for (let index = 0; index < jobs; index++) {
     const file = path.join(root, `job-${index}.md`);
-    writeFileSync(file, `Title: Product Manager ${index + 1}\nCompany: Learning Co ${index + 1}\nLocation: Remote\n\nLead educator discovery and launch a learning platform. Own product activation and cross-functional delivery.`);
+    writeFileSync(file, `Title: Product Manager ${index + 1}\nCompany: Learning Co ${index + 1}\nLocation: Remote\n\n## Requirements\n- Must lead educator discovery and launch a learning platform that improves activation.`);
     imported.push(importText(store, { profileId: profile.id, filePath: file }).job);
   }
   await callDomainTool(store, 'score_job', { jobId: imported[0].id, profileId: profile.id }, { source: 'tui' });
@@ -53,7 +55,7 @@ test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agen
   const screen = renderTui(model, state, { width: 150, height: 46, color: false });
 
   assert.match(screen, /JOBOS · PM EdTech/);
-  assert.match(screen, /DUE/);
+  assert.match(screen, /ACTION/);
   assert.match(screen, /INTERVIEW/);
   assert.match(screen, /NEW/);
   assert.match(screen, /FAILURE/);
@@ -217,11 +219,18 @@ test('TUI refresh observes an agent-side database mutation and shared capabiliti
   const agentStore = await openStore({ workspace: root });
   await callDomainTool(agentStore, 'score_job', { jobId: jobs[1].id, profileId: profile.id }, { source: 'acp' });
   tui.refresh();
-  assert.equal(typeof tui.model.jobs.find(job => job.id === jobs[1].id).fitScore, 'number');
+  const scoredJob = tui.model.jobs.find(job => job.id === jobs[1].id);
+  assert.equal(scoredJob.fit.contract, 'jobos.fit-score.v1');
 
   const externalTools = new Set(mcpToolNames());
   for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) assert.ok(externalTools.has(tool), `${tool} is missing from external MCP`);
   for (const tool of ['list_jobs', 'get_job_context', 'review_queue', 'discovery_health']) assert.ok(externalTools.has(tool));
+  for (const tool of ['list_interview_stories', 'get_interview_story', 'draft_interview_story', 'interview_prep', 'list_interview_debriefs', 'list_interview_observations']) {
+    assert.ok(externalTools.has(tool), `${tool} must be available to the ACP guest through its MCP catalog`);
+  }
+  for (const tool of ['verify_interview_story', 'retire_interview_story', 'add_interview_question_source', 'record_interview_debrief', 'correct_interview_debrief']) {
+    assert.equal(externalTools.has(tool), false, `${tool} must remain a direct trusted human surface`);
+  }
 });
 
 test('first-run and no-job states are honest, actionable, and do not invent content', async t => {
@@ -245,16 +254,64 @@ test('first-run and no-job states are honest, actionable, and do not invent cont
   assert.match(screen, /daily discovery/);
 });
 
-test('narrow terminals keep safety state, controls, and all three product panes reachable', async t => {
+test('compact terminals keep context reachable and switch to a focused chat page', async t => {
   const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  const screen = renderTui(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' }, { width: 60, height: 24, color: false });
-  assert.match(screen, /FX:OFF/);
-  assert.match(screen, /JOBS · today/);
-  assert.match(screen, /SELECTED JOB/);
-  assert.match(screen, /AGENT/);
-  assert.match(screen, /s sources · \? system · b build-network · : command · Q quit/);
-  assert.equal(screen.split('\n').length, 24);
+  const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
+  const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
+  assert.match(dashboard, /FX:OFF/);
+  assert.match(dashboard, /JOBS · today/);
+  assert.match(dashboard, /SELECTED JOB/);
+  assert.doesNotMatch(dashboard, /┌ AGENT/);
+  assert.match(dashboard, /Tab chat/);
+  assert.equal(dashboard.split('\n').length, 24);
+
+  const chat = renderTui(model, { ...state, focusTarget: 'agent' }, { width: 60, height: 24, color: false });
+  assert.match(chat, /AGENT · FOCUSED/);
+  assert.match(chat, /Hermes ACP · ready/);
+  assert.match(chat, /Press i to prompt/);
+  assert.doesNotMatch(chat, /┌ SELECTED JOB/);
+  assert.match(chat, /Tab\/Esc dashboard/);
+  assert.equal(chat.split('\n').length, 24);
+});
+
+test('focused chat owns most wide-terminal real estate and supports scrollback', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
+  const messages = Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: `message-${index}` }));
+  const state = {
+    ...defaultTuiState(),
+    profileId: profile.id,
+    selectedJobId: jobs[0].id,
+    agentState: 'ready',
+    focusTarget: 'agent',
+    agentScroll: 5,
+    messages
+  };
+  const screen = renderTui(model, state, { width: 140, height: 34, color: false });
+  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('AGENT · FOCUSED'));
+  assert.ok(panelHeader, 'focused chat includes selected-job context and agent panels');
+  assert.ok(panelHeader.indexOf('┌ AGENT') <= 38, 'agent panel begins within the first 27% of the terminal');
+  assert.match(screen, /message-14/);
+  assert.doesNotMatch(screen, /message-19/);
+  assert.match(screen, /scroll ↑5/);
+});
+
+test('optional mouse clicks select jobs and switch the compact page', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 2, draft: false });
+  const io = streams();
+  io.stdout.columns = 100;
+  io.stdout.rows = 42;
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: false, mouse: true, color: false });
+  tui.render();
+  const secondJob = tui.lastFrame.sections.jobs.hits.find(hit => hit.id === jobs[1].id);
+  assert.ok(secondJob, 'second job has a visible mouse target');
+  tui.onMouseData(`\u001b[<0;10;${secondJob.y + 1}M`);
+  assert.equal(tui.state.selectedJobId, jobs[1].id);
+  const footer = tui.lastFrame.sections.footer;
+  const tabRow = footer.lines.findIndex(line => line.includes('Tab'));
+  tui.onMouseData(`\u001b[<0;10;${footer.y + tabRow + 1}M`);
+  assert.equal(tui.state.focusTarget, 'agent');
 });
 
 test('model exposes network setup state, affiliation counts, and safe xAI display', async t => {

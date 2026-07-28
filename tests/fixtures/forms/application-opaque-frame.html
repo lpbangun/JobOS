@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Opaque Frame Host</title>
+  <meta name="fixture" content="application-opaque-frame">
+</head>
+<body>
+  <!--
+    application-opaque-frame.html
+    Host document whose application form lives entirely inside an
+    opaque/inaccessible frame. The iframe is sandboxed without
+    allow-scripts/allow-same-origin and has no reachable content, so Playwright
+    cannot enumerate its content. A required field is declared as living in
+    that frame.
+
+    This is the WF06 "inaccessible/opaque/sandboxed required form content"
+    case (form_frame_unsupported): the adapter must never claim form-ready.
+  -->
+  <header>
+    <h1>Apply to Example Co</h1>
+  </header>
+
+  <main id="main">
+    <section id="search" aria-label="Job search">
+      <h2>Search open roles</h2>
+      <form id="search-form" name="search-form" data-form="search" aria-label="Job search form" action="/search" method="get">
+        <label for="search-keywords">Keywords</label>
+        <input id="search-keywords" name="q" type="text">
+        <button id="search-submit" type="submit" data-submit="search">Search</button>
+      </form>
+    </section>
+
+    <section id="apply-opaque" aria-label="Apply in opaque frame">
+      <h2>Apply</h2>
+      <p>The application form below is embedded in an inaccessible frame.</p>
+      <!--
+        Sandboxed with no allow-same-origin and no allow-scripts: frame content
+        cannot be traversed/addressed by Playwright. src is intentionally a
+        blank data URL so there is no reachable content.
+      -->
+      <iframe
+        id="opaque-application-iframe"
+        name="opaque-application-iframe"
+        title="Opaque application form frame"
+        sandbox=""
+        src="about:blank"
+        width="100%"
+        height="480"
+        data-frame="opaque"></iframe>
+
+      <!-- A required declaration that the resume lives in the opaque frame. -->
+      <form id="opaque-declaration" name="opaque-declaration" data-form="opaque-declaration" aria-label="Opaque application declaration" action="/submit/application" method="post">
+        <p class="field">
+          <input type="hidden" name="resume_frame" value="opaque-application-iframe" required>
+        </p>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

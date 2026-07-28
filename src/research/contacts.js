@@ -14,6 +14,7 @@ import {
   nameFromEmailLocal,
 } from './sources.js';
 import { resolvePerson } from './people.js';
+import { projectContactConfidenceV2 as buildContactConfidence } from '../contact-confidence.js';
 
 const disposableDomains = new Set([
   '10minutemail.com', 'guerrillamail.com', 'mailinator.com', 'tempmail.com', 'yopmail.com'
@@ -22,6 +23,7 @@ export const TIER_RANK = Object.freeze({A: 6, B: 5, U: 4, C: 3, E: 2, D: 1});
 
 
 const smtpProbeLastByDomain = new Map();
+export { CONTACT_CONFIDENCE_MODEL, CONTACT_CONFIDENCE_SCHEMA } from '../contact-confidence.js';
 
 function normalizeConfidence(value, fallback = 'medium') {
   const v = String(value || '').toLowerCase();
@@ -89,6 +91,7 @@ function rowToContact(row) {
     value: row.value,
     normalizedValue: row.normalized_value,
     evidenceTier: row.evidence_tier,
+    rawEvidenceTier: row.evidence_tier,
     verificationStatus: row.verification_status,
     confidence: row.confidence,
     sourceObservationIds: parseJson(row.source_observation_ids_json, []),
@@ -114,6 +117,24 @@ function rowToPattern(row) {
     updatedAt: row.updated_at
   } : null;
 }
+export function projectContactConfidenceV2(s, contact, options = {}) {
+  return buildContactConfidence(s, contact, options);
+}
+
+function projectedContact(s, contact, options = {}) {
+  if (!contact) return null;
+  const contactConfidence = buildContactConfidence(s, contact, options);
+  return {
+    ...contact,
+    rawEvidenceTier: contact.evidenceTier,
+    evidenceTier: contactConfidence.evidenceTier,
+    tierReason: contactConfidence.tierReason,
+    contactConfidence,
+    usable: contactConfidence.usable,
+    usabilityReason: contactConfidence.usabilityReason,
+    warnings: contactConfidence.warnings
+  };
+}
 
 export function listPersonCandidates(s, { jobId = null, companyId = null } = {}) {
   if (jobId) return all(s, 'SELECT * FROM person_candidates WHERE job_id=? ORDER BY updated_at DESC, name', [jobId]).map(rowToCandidate);
@@ -121,7 +142,7 @@ export function listPersonCandidates(s, { jobId = null, companyId = null } = {})
   return all(s, 'SELECT * FROM person_candidates ORDER BY updated_at DESC, name').map(rowToCandidate);
 }
 
-export function listContactPoints(s, { jobId = null, stakeholderId = null, companyId = null } = {}) {
+export function listContactPoints(s, { jobId = null, stakeholderId = null, companyId = null, nowDate = new Date() } = {}) {
   const confidenceOrder = { high: 3, medium: 2, low: 1 };
   let contacts;
   if (stakeholderId) {
@@ -133,9 +154,9 @@ export function listContactPoints(s, { jobId = null, stakeholderId = null, compa
     if (!job?.company_id) return [];
     contacts = all(s, 'SELECT * FROM contact_points WHERE company_id=?', [job.company_id]).map(rowToContact);
   } else {
-    return all(s, 'SELECT * FROM contact_points ORDER BY updated_at DESC').map(rowToContact);
+    contacts = all(s, 'SELECT * FROM contact_points ORDER BY updated_at DESC').map(rowToContact);
   }
-  return contacts.sort((a, b) =>
+  return contacts.map(contact => projectedContact(s, contact, { nowDate })).sort((a, b) =>
     (TIER_RANK[b.evidenceTier] || 0) - (TIER_RANK[a.evidenceTier] || 0)
     || (confidenceOrder[b.confidence] || 0) - (confidenceOrder[a.confidence] || 0)
     || b.updatedAt.localeCompare(a.updatedAt)
@@ -271,30 +292,56 @@ function upsertPattern(s, { companyId, domain, pattern, supportSources, supportC
 }
 
 
-function companyDomains(job, company, observations = []) {
+function companyDomains(job, company) {
   const domains = new Set();
-  for (const raw of [company?.website, job?.url]) {
-    const host = hostForUrl(raw);
-    if (host) domains.add(host);
-  }
-  for (const obs of observations) {
-    const meta = obs.metadata || {};
-    for (const email of meta.emails || []) {
-      const domain = emailDomain(email);
-      const host = hostForUrl(obs.url);
-      if (domain && host && (host === domain || host.endsWith(`.${domain}`))) domains.add(domain);
-    }
-  }
-  return [...domains];
+  const declared = String(company?.domain || '').trim().toLowerCase();
+  if (declared && declared.includes('.')) domains.add(declared);
+  const websiteHost = hostForUrl(company?.website);
+  if (websiteHost) domains.add(websiteHost);
+  return [...domains].sort();
 }
 
-function tierForEmailObservation(email, observation, domains) {
+function tierForEmailObservation(email, observation, domains, companyId, nowAt, { generic = false, hasIndependentAssociation = false } = {}) {
   const domain = emailDomain(email);
   const host = hostForUrl(observation.url);
-  const sameDomain = domains.includes(domain) || host === domain || host.endsWith(`.${domain}`);
-  if (sameDomain && observation.sourceType === 'page_fetch') return 'A';
-  if (sameDomain && observation.sourceType === 'web_search') return 'B';
-  return 'B';
+  const companyDomainMatch = domains.some(expected => domain === expected || domain.endsWith(`.${expected}`));
+  const companyControlled = observation.companyId === companyId
+    && domains.some(expected => host === expected || host.endsWith(`.${expected}`));
+  const fetched = Date.parse(observation.fetchedAt || '');
+  const current = Date.parse(nowAt || '');
+  const nonStale = Number.isFinite(fetched) && Number.isFinite(current) && current - fetched <= 90 * 86_400_000;
+  if (!companyDomainMatch || observation.companyId !== companyId || !nonStale) return 'D';
+  if (companyControlled && observation.sourceType === 'page_fetch' && !generic) return 'A';
+  if ((observation.sourceType === 'web_search' || observation.sourceType === 'profile_search') && hasIndependentAssociation) return 'B';
+  return 'D';
+}
+
+function hasIndependentCompanyAssociation(s, personId, stakeholderId, companyId, excludeSourceId, additionalExcludes = []) {
+  const exclude = new Set([excludeSourceId, ...additionalExcludes].filter(Boolean));
+  if (stakeholderId) {
+    const stakeholder = one(s, 'SELECT company_id,links_json FROM stakeholders WHERE id=?', [stakeholderId]);
+    if (stakeholder?.company_id === companyId) {
+      const links = parseJson(stakeholder.links_json, []);
+      if (links.length) {
+        const linkPlaceholders = links.map(() => '?').join(',');
+        const independentIds = all(s, `SELECT id FROM source_observations WHERE company_id=? AND url IN (${linkPlaceholders})`, [companyId, ...links])
+          .map(row => row.id)
+          .filter(id => !exclude.has(id));
+        if (independentIds.length) return true;
+      }
+    }
+  }
+  if (personId && companyId) {
+    const candidates = all(s, 'SELECT source_observation_ids_json FROM person_candidates WHERE person_id=? AND company_id=?', [personId, companyId]);
+    const candidateIds = [...new Set(candidates.flatMap(c => parseJson(c.source_observation_ids_json, [])))]
+      .filter(sid => sid && !exclude.has(sid));
+    if (candidateIds.length) {
+      const placeholders = candidateIds.map(() => '?').join(',');
+      const real = all(s, `SELECT id FROM source_observations WHERE company_id=? AND id IN (${placeholders})`, [companyId, ...candidateIds]);
+      if (real.length) return true;
+    }
+  }
+  return false;
 }
 
 function confidenceForTier(tier, generic = false) {
@@ -466,6 +513,23 @@ async function smtpProbe(email, domainChecks, { env = process.env, timeoutMs = 8
     socket.on('timeout', () => { try { socket.end(); } catch {} resolve({ status: 'smtp_inconclusive' }); });
   });
 }
+function catchAllCheck(email, { env = process.env } = {}) {
+  if (!env.JOBOS_CATCH_ALL_FIXTURE_JSON) return { status: 'unknown', method: null, evidence: null };
+  try {
+    const fixture = JSON.parse(env.JOBOS_CATCH_ALL_FIXTURE_JSON);
+    const raw = fixture[email] ?? fixture[emailDomain(email)];
+    const value = typeof raw === 'string' ? { status: raw } : (raw || {});
+    const status = ['detected', 'not_detected'].includes(value.status) ? value.status : 'unknown';
+    return {
+      status,
+      method: 'fixture',
+      evidence: value.evidence || null,
+      fixture: true
+    };
+  } catch {
+    return { status: 'unknown', method: 'fixture', evidence: 'invalid_fixture_json', fixture: true };
+  }
+}
 
 
 function observationEmailContexts(observation) {
@@ -514,7 +578,7 @@ function syncContacts(s, jobId) {
   const patterns = job.company_id ? listEmailPatterns(s, { companyId: job.company_id }) : [];
   const relYaml = path.join('jobs', jobId, 'research', 'contacts.yaml');
   writeYaml(path.join(s.p.ws, relYaml), {
-    version: 1,
+    version: 2,
     policy: {
       autoSend: 'disabled',
       approvalRequired: 'human_approval_required',
@@ -535,8 +599,10 @@ function renderSources(ids) {
 
 function renderContactWorksheet({ job, contacts, candidates, patterns, generatedAt }) {
   const contactRows = contacts.length ? contacts.map(contact => {
+    const projection = contact.contactConfidence;
     const approval = contact.humanApproved ? 'approved' : 'needs human review';
-    return `- **${contact.value}** (${contact.type})\n  - Tier: ${contact.evidenceTier}\n  - Verification: ${contact.verificationStatus}\n  - Confidence: ${contact.confidence}\n  - Approval: ${approval}\n${renderSources(contact.sourceObservationIds)}`;
+    const warnings = projection.warnings.length ? projection.warnings.map(warning => `  - Warning: ${warning}`).join('\n') : '  - Warnings: none';
+    return `- **${contact.value}** (${contact.type})\n  - Tier: ${projection.evidenceTier} (derived; raw historical tier: ${projection.rawEvidenceTier || 'unknown'})\n  - Tier reason: ${projection.tierReason}\n  - Public observation: ${projection.signals.publicObservation.state}\n  - Company-domain alignment: ${projection.signals.companyDomain.matchState}\n  - Pattern support: ${projection.signals.pattern.supportState}\n  - DNS: MX ${projection.signals.dns.mx}; NS ${projection.signals.dns.ns}; SPF ${projection.signals.dns.spf}; DMARC ${projection.signals.dns.dmarc}\n  - SMTP: ${projection.signals.smtp.state} (not identity proof)\n  - Catch-all: ${projection.signals.catchAll.state}\n  - Freshness: ${projection.signals.freshness.state}${projection.signals.freshness.ageDays == null ? '' : ` (${projection.signals.freshness.ageDays} days)`}\n  - Approval: ${approval}; suppression: ${projection.doNotUse ? 'do not use' : 'not suppressed'}\n  - Usable: ${projection.usable ? 'yes' : 'no'} — ${projection.usabilityReason}\n${warnings}\n${renderSources(contact.sourceObservationIds)}`;
   }).join('\n') : '- No contacts discovered yet.';
   const candidateRows = candidates.length ? candidates.map(candidate => `- **${candidate.name}** — ${candidate.role || 'role unknown'}\n  - Relevance: ${candidate.relevance}\n  - Confidence: ${candidate.confidence}\n  - Status: ${candidate.status}\n${renderSources(candidate.sourceObservationIds)}`).join('\n') : '- No person candidates staged yet.';
   const patternRows = patterns.length ? patterns.map(pattern => `- ${pattern.domain}: \`${pattern.pattern}\` (${pattern.supportCount} source-backed example(s), ${pattern.confidence})`).join('\n') : '- No source-backed email patterns inferred.';
@@ -556,10 +622,10 @@ ${patternRows}
 ${candidateRows}
 
 ## Evidence tiers
-- A: exact public email on a company-controlled page.
-- B: exact public email on a credible third-party or search-indexed public source.
+- A: exact named or role inbox observed on a company-controlled same-domain page, with company-domain match and non-stale evidence.
+- B: exact public contact on a credible third-party source, with independently supported person-company association, company-domain match, and non-stale evidence.
 - U: user-imported contact from network CSV import (unverified).
-- C: source-backed person plus company email pattern with multiple public examples.
+- C: generated candidate on a matching company domain, backed by at least two distinct non-stale exact public examples from at least two real qualifying source observations.
 - D: weak pattern/domain hypothesis, usually DNS-only or single-example support.
 - E: profile URL or role relevance without an email.
 
@@ -607,7 +673,7 @@ export async function verifyObservationContacts(s, {
   const company = resolvedCompanyId ? one(s, 'SELECT * FROM companies WHERE id=?', [resolvedCompanyId]) : null;
   const observations = observationRowsById(s, observationIds);
   const domainJob = job || { id: runId, company_id: resolvedCompanyId, url: '' };
-  const domains = companyDomains(domainJob, company, observations);
+  const domains = companyDomains(domainJob, company);
   const at = now();
   const contactIds = [];
   const exactEmails = new Set();
@@ -646,9 +712,20 @@ export async function verifyObservationContacts(s, {
       const linkedStakeholder = person
         ? stakeholderRows.find(row => row.person_id === person.id)
         : null;
-      const tier = tierForEmailObservation(ctx.email, observation, domains);
+      let existingSourceIds = [];
+      if (person) {
+        const contactType = generic ? 'generic_inbox' : 'email';
+        const normalizedContactValue = normalizeContactValue(contactType, ctx.email);
+        const existingContact = one(s, 'SELECT source_observation_ids_json FROM contact_points WHERE person_id=? AND type=? AND normalized_value=? ORDER BY created_at LIMIT 1', [person.id, contactType, normalizedContactValue]);
+        existingSourceIds = parseJson(existingContact?.source_observation_ids_json, []);
+      }
+      const hasIndependentAssociation = person
+        ? hasIndependentCompanyAssociation(s, person.id, linkedStakeholder?.id || null, resolvedCompanyId, observation.id, existingSourceIds)
+        : false;
+      const tier = tierForEmailObservation(ctx.email, observation, domains, resolvedCompanyId, at, { generic, hasIndependentAssociation });
       const domainCheck = await domainCheckFor(ctx.email);
       const smtp = await smtpProbe(ctx.email, domainCheck.checks, { env });
+      const catchAll = catchAllCheck(ctx.email, { env });
       const contact = upsertContactPoint(s, {
         companyId: resolvedCompanyId,
         personId: person?.id || null,
@@ -659,7 +736,7 @@ export async function verifyObservationContacts(s, {
         verificationStatus: tier === 'A' || tier === 'B' ? 'exact_public' : domainCheck.status,
         confidence: confidenceForTier(tier, generic),
         sourceObservationIds: [observation.id],
-        checks: { exactPublic: true, sourceUrl: observation.url, dns: domainCheck, smtp },
+        checks: { exactPublic: true, sourceUrl: observation.url, dns: domainCheck, smtp, catchAll },
         originResearchRunId: runId
       }, at);
       if (contact?.id) contactIds.push(contact.id);
@@ -669,11 +746,17 @@ export async function verifyObservationContacts(s, {
   if (job && resolvedCompanyId) {
     const patternSupport = new Map();
     for (const observation of observations) {
+      if (observation.companyId !== resolvedCompanyId) continue;
+      const fetched = Date.parse(observation.fetchedAt || '');
+      if (!Number.isFinite(fetched) || Date.parse(at) - fetched > 90 * 86_400_000) continue;
+      if (!['page_fetch', 'web_search', 'profile_search', 'x_search'].includes(observation.sourceType)
+        || !/public|source|company|search/i.test(observation.trust || '')) continue;
       for (const ctx of observationEmailContexts(observation)) {
         if (!ctx.name || ctx.generic || isGenericInbox(ctx.email)) continue;
         const pattern = patternForNameEmail(ctx.name, ctx.email);
         if (!pattern) continue;
         const domain = emailDomain(ctx.email);
+        if (!domains.includes(domain)) continue;
         const key = `${domain}:${pattern}`;
         if (!patternSupport.has(key)) patternSupport.set(key, { domain, pattern, sourceIds: new Set(), examples: new Set() });
         patternSupport.get(key).sourceIds.add(observation.id);
@@ -696,10 +779,11 @@ export async function verifyObservationContacts(s, {
       .map(contact => contact.normalizedValue));
     for (const pattern of patterns) {
       const dnsCheck = domainChecks.get(pattern.domain) || await verifyEmailDomain(pattern.domain, { resolver, env });
+      const catchAll = catchAllCheck(`fixture@${pattern.domain}`, { env });
       for (const candidate of candidateRowsForGeneration(s, job.id)) {
         const guessed = generateFromPattern(candidate.name, pattern.domain, pattern.pattern);
         if (!guessed || existingEmailValues.has(guessed)) continue;
-        const tier = pattern.supportCount >= 2 ? 'C' : 'D';
+        const tier = pattern.supportCount >= 2 && pattern.supportSources.length >= 2 ? 'C' : 'D';
         const sourceIds = [...new Set([...(candidate.sourceObservationIds || []), ...pattern.supportSources])];
         const contact = upsertContactPoint(s, {
           companyId: resolvedCompanyId,
@@ -711,7 +795,7 @@ export async function verifyObservationContacts(s, {
           verificationStatus: tier === 'C' ? 'pattern_candidate' : dnsCheck.status,
           confidence: tier === 'C' && dnsCheck.checks.mxPresent ? 'medium' : 'low',
           sourceObservationIds: sourceIds,
-          checks: { pattern: pattern.pattern, supportCount: pattern.supportCount, dns: dnsCheck, generated: true },
+          checks: { pattern: pattern.pattern, supportCount: pattern.supportCount, dns: dnsCheck, catchAll, generated: true },
           originResearchRunId: runId
         }, at);
         if (contact?.id) contactIds.push(contact.id);
@@ -732,7 +816,7 @@ export function approveContact(s, { contactId }) {
   const job = row.company_id ? one(s, 'SELECT id FROM jobs WHERE company_id=? ORDER BY updated_at DESC LIMIT 1', [row.company_id]) : null;
   if (job) syncContacts(s, job.id);
   save(s);
-  return { ...rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [contactId])), note: 'Contact approved for human-reviewed use; JobOS did not send outreach.' };
+  return { ...projectedContact(s, rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [contactId]))), note: 'Contact approved for human-reviewed use; JobOS did not send outreach.' };
 }
 
 export function suppressContact(s, { contactId, reason = '' }) {
@@ -744,7 +828,7 @@ export function suppressContact(s, { contactId, reason = '' }) {
   const job = row.company_id ? one(s, 'SELECT id FROM jobs WHERE company_id=? ORDER BY updated_at DESC LIMIT 1', [row.company_id]) : null;
   if (job) syncContacts(s, job.id);
   save(s);
-  return { ...rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [contactId])), note: 'Contact suppressed locally; no external action was taken.' };
+  return { ...projectedContact(s, rowToContact(one(s, 'SELECT * FROM contact_points WHERE id=?', [contactId]))), note: 'Contact suppressed locally; no external action was taken.' };
 }
 
 export function promoteStakeholder(s, { candidateId: cid }) {
@@ -769,18 +853,22 @@ export function promoteStakeholder(s, { candidateId: cid }) {
 
 export function contactSummaryForPlan(contact) {
   if (!contact) return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: ['No contact point selected.'] };
-  if (contact.doNotUse) return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: ['Selected contact is suppressed.'] };
-  if (contact.type === 'profile_url') return { channel: 'linkedin_manual', pathStrength: contact.evidenceTier === 'E' ? 'medium' : 'low', warnings: ['Manual profile outreach only. JobOS will not fetch or send LinkedIn messages.'] };
-  if (contact.type === 'generic_inbox') return { channel: 'generic_inbox', pathStrength: contact.humanApproved ? 'medium' : 'low', warnings: contact.humanApproved ? [] : ['Generic inbox requires human review before use.'] };
+  const projectionWarnings = contact.contactConfidence?.warnings || contact.warnings || [];
+  if (contact.doNotUse) return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: ['Selected contact is suppressed.', ...projectionWarnings] };
+  if (!contact.usable && contact.contactConfidence) {
+    return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: [contact.usabilityReason, ...projectionWarnings] };
+  }
+  if (contact.type === 'profile_url') return { channel: 'linkedin_manual', pathStrength: contact.evidenceTier === 'E' ? 'medium' : 'low', warnings: ['Manual profile outreach only. JobOS will not fetch or send LinkedIn messages.', ...projectionWarnings] };
+  if (contact.type === 'generic_inbox') return { channel: 'generic_inbox', pathStrength: contact.humanApproved ? 'medium' : 'low', warnings: [...(contact.humanApproved ? [] : ['Generic inbox requires human review before use.']), ...projectionWarnings] };
   if (contact.type === 'email') {
     const guessed = ['C', 'D'].includes(contact.evidenceTier);
-    const warnings = [];
+    const warnings = [...projectionWarnings];
     if (!contact.humanApproved) warnings.push('Email contact is not human-approved yet.');
     if (guessed) warnings.push('Email is a pattern candidate, not a verified mailbox.');
-    const strength = contact.humanApproved && contact.evidenceTier === 'A' ? 'high' : contact.humanApproved ? 'medium' : 'low';
-    return { channel: 'email', pathStrength: strength, warnings };
+    const strength = contact.humanApproved && contact.evidenceTier === 'A' ? 'high' : contact.humanApproved && contact.evidenceTier !== 'D' ? 'medium' : 'low';
+    return { channel: 'email', pathStrength: strength, warnings: [...new Set(warnings)] };
   }
-  return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: ['Unsupported contact type.'] };
+  return { channel: 'no_safe_path', pathStrength: 'blocked', warnings: ['Unsupported contact type.', ...projectionWarnings] };
 }
 
 export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, goal = 'informational' }) {
@@ -795,7 +883,7 @@ export function createOutreachPlan(s, { jobId, profileId, stakeholderId = null, 
     const tierScore = tier => TIER_RANK[tier] || 0;
     return Number(b.humanApproved) - Number(a.humanApproved) || tierScore(b.evidenceTier) - tierScore(a.evidenceTier);
   });
-  const approved = sorted.filter(c => c.humanApproved && !c.doNotUse);
+  const approved = sorted.filter(c => c.humanApproved && !c.doNotUse && c.usable);
   const selected = approved[0] || null;
   const stakeholderRows = all(s, 'SELECT id,name,person_id FROM stakeholders WHERE job_id=?', [jobId]);
   const candidates = listPersonCandidates(s, { jobId });

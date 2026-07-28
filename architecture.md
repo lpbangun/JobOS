@@ -11,10 +11,10 @@ Add a local-first, headless-capable research and outreach intelligence layer to 
 The existing worktree already provides strong foundations:
 
 - `src/research.js`: company dossiers, stakeholder search, source filtering, LLM synthesis with unsupported-claim dropping, user-pasted stakeholder records.
-- `src/outreach.js`: evidence-grounded outreach drafts, local outreach threads, human-sent recording, follow-up task scheduling, due follow-up listing.
+- `src/outreach.js`: evidence-grounded outreach drafts, local outreach threads, human-sent recording, follow-up task scheduling, and an enriched thread view over the canonical due follow-up task set.
 - `src/search.js`: provider chain for DuckDuckGo HTML, Brave, and SearXNG.
 - `src/db.js`: SQLite schema with `companies`, `jobs`, `stakeholders`, `artifacts`, `outreach_threads`, `tasks`, `automation_runs`, and `audit_log`.
-- `src/api.js` and `src/mcp.js`: existing API/MCP surfaces for outreach drafting and lifecycle operations.
+- `src/mcp.js`: agent-facing MCP surface for outreach drafting and lifecycle operations; trusted CLI/TUI paths handle human review.
 - `run_eval_research.js`: local fake-search/fake-LLM harness proving source-grounded research and human-gated outreach behavior.
 
 The proposed architecture extends these modules rather than replacing them.
@@ -25,7 +25,7 @@ The proposed architecture extends these modules rather than replacing them.
 2. Evidence first. Every fact, person, contact point, and outreach angle must trace to source observations.
 3. Confidence is explicit. Use clear tiers such as exact public email, pattern candidate, DNS-valid domain, unverified mailbox, source-backed stakeholder.
 4. Human gates stay hard. JobOS never sends email, LinkedIn messages, connection requests, applications, or follow-ups.
-5. Headless by default. CLI/API/MCP must work in a server, CI, or SSH environment without browser automation. A next iteration may add an optional user-GUI-browser connector for user-authorized sessions.
+5. Headless by default. CLI and MCP must work in a server, CI, or SSH environment without browser automation. A next iteration may add an optional user-GUI-browser connector for user-authorized sessions.
 6. Local-first privacy. Store cache, evidence, contacts, drafts, graph edges, and audit entries in the selected workspace.
 7. Contact discovery is the primary product goal. This system is for personal use: finding real contacts at real companies. The architecture prioritizes contact extraction, email pattern inference, and verification depth over generic company research. Fetching public web pages with `fetch()` + cheerio is standard crawling, not browser automation. Recording a public LinkedIn profile URL from search results is not scraping — the page is not fetched and no automated actions are taken.
 
@@ -185,7 +185,7 @@ updated_at TEXT NOT NULL
 Promotion:
 
 - `research stakeholders` can write candidates to `person_candidates`.
-- `research promote-stakeholder --candidate <id>` or an API/dashboard action promotes to `stakeholders`.
+- `research promote-stakeholder --candidate <id>` promotes a candidate to `stakeholders`.
 - Current direct upsert behavior can remain for MVP compatibility.
 
 ### 5. Contact Discovery Engine
@@ -245,14 +245,13 @@ Persistence and verification policy:
 - SMTP mailbox probing is available behind `JOBOS_SMTP_PROBE=true` env flag, rate-limited (1 per domain per 30s), and audited. It checks RCPT TO acceptance without sending data.
 - "Verified" means exact public evidence or user approval, not merely MX presence.
 
-CLI/API shape:
+CLI/MCP shape:
 
 - `jobos research contacts --job <job-id> --json`
 - `jobos research contacts --stakeholder <stakeholder-id> --json`
 - `jobos research approve-contact --contact <contact-id> --json`
 - `jobos research approve-contact --worksheet-candidate <candidate-id> --json`
-- API: `GET /api/research/contacts?jobId=...`, `POST /api/research/contacts/:id/approve`
-- MCP: `discover_contacts`, `approve_contact`
+- MCP exposes contact context and outreach planning; contact approval remains limited to trusted CLI/TUI paths.
 
 ### 6. Network Graph Mapper
 
@@ -279,11 +278,10 @@ Sources:
 - User-imported relationship files in `jobos-workspace/network/*.yaml`.
 - Public bios, event pages, GitHub orgs, VC portfolio pages, company customer pages.
 
-CLI/API shape:
+CLI/MCP shape:
 
 - `jobos network import --file <csv|yaml> --json`
 - `jobos research network --job <job-id> --json`
-- API: `POST /api/research/network {"jobId":"..."}`
 - MCP: `map_reachable_network`
 
 Output:
@@ -436,7 +434,7 @@ Default safeguards:
 
 ## MVP Scope
 
-MVP should fit the existing single-user, local-first CLI and dashboard. Contact discovery is the primary goal — the implementation order below reflects that priority.
+MVP should fit the existing single-user, local-first CLI, TUI, MCP, and workspace surfaces. Contact discovery is the primary goal — the implementation order below reflects that priority.
 
 1. Add `source_observations`, `person_candidates`, `contact_points`, `email_patterns`, and `relationship_edges` tables with migrations.
 2. Implement page fetcher + email extractor in `src/research/sources.js`: fetch company /team, /about, /press, /contact pages, extract `mailto:` anchors and plain-text emails. This is the highest-leverage component.
@@ -447,7 +445,7 @@ MVP should fit the existing single-user, local-first CLI and dashboard. Contact 
 7. Refactor `research company` and `research stakeholders` to store reusable source observations.
 8. Add user-imported network CSV and `research network` command.
 9. Add `outreach plan` command that ranks safe paths and feeds existing `outreach draft`.
-10. Add dashboard contact views for candidate review, confidence labels, approval, and suppression.
+10. Add TUI contact views for candidate review, confidence labels, approval, and suppression.
 11. Add GitHub org adapter for public member discovery.
 12. Add Wayback Machine CDX adapter for archived team pages.
 13. Add GDELT DOC API adapter for company news/event signals.
@@ -466,10 +464,10 @@ Out of MVP:
 
 - Additional public ATS adapters such as Ashby and Workable.
 - Per-company source cache with freshness policies and diffing.
-- Dashboard views for stakeholder map and network path ladder beyond the MVP contact review view.
+- TUI views for stakeholder map and network path ladder beyond the MVP contact review view.
 - Local LLM or embedding-based dedupe for person/company aliases.
 - Bring-your-own paid or agentic search/enrichment adapter behind the same evidence/confidence interface, disabled by default and retained only when evaluations prove better results.
-- Optional user-GUI-browser connector for explicitly authorized sessions, separated from headless CLI/API/MCP behavior.
+- Optional user-GUI-browser connector for explicitly authorized sessions, separated from headless CLI/MCP behavior.
 - Team/multi-profile mode with encrypted local store if JobOS expands beyond single-user local operation.
 
 ## Recommended Implementation Order
@@ -508,7 +506,7 @@ Contact discovery is the primary goal — the order below front-loads the highes
 
 ### Phase 5: Integration
 
-19. **API/MCP/dashboard exposure** — only after CLI behavior and eval coverage are stable.
+19. **MCP/TUI exposure** — only after CLI behavior and eval coverage are stable.
 20. **Eval expansion** — hard assertions for no-send, no-private-scrape, no unsupported contact claims, confidence labels, and headless deterministic runs.
 
 ## Test Strategy
@@ -592,7 +590,7 @@ Scores use 1-5, where 5 means the criterion is strongly satisfied in the final d
 
 ### Functionality and Integration
 
-1. Fits current modules: builds on `research.js`, `outreach.js`, `search.js`, DB, API/MCP, and eval harness.
+1. Fits current modules: builds on `research.js`, `outreach.js`, `search.js`, DB, MCP, and eval harness.
 2. Data model clarity: proposes concrete tables, fields, confidence labels, and workspace mirrors.
 3. Flow completeness: covers company dossier, stakeholder discovery, contact discovery, network mapping, outreach planning, and follow-ups.
 4. Testability: includes deterministic headless test/eval strategy.
@@ -626,7 +624,7 @@ Findings:
 
 Revisions made:
 
-- Added evidence tiers A-E, contact confidence model, table schemas, CLI/API/MCP proposals, and relationship edge types.
+- Added evidence tiers A-E, contact confidence model, table schemas, CLI/MCP proposals, and relationship edge types.
 
 Remaining gaps after cycle 1:
 
@@ -653,7 +651,7 @@ Revisions made:
 
 Remaining gaps after cycle 2:
 
-- User decisions remained around persistent guessed contacts, opt-out defaults, relationship import format, and dashboard priority.
+- User decisions remained around persistent guessed contacts, opt-out defaults, relationship import format, and TUI priority.
 
 ### Cycle 3
 
@@ -677,7 +675,7 @@ Remaining gaps after cycle 3:
 
 Findings:
 
-- Product decisions now allow user-authorized private-account sources, optional agentic search providers, worksheet-only guessed email candidates, advanced-flag SMTP probing, CSV relationship import, no default opt-out sentence, and first-loop dashboard contact views.
+- Product decisions now allow user-authorized private-account sources, optional agentic search providers, worksheet-only guessed email candidates, advanced-flag SMTP probing, CSV relationship import, no default opt-out sentence, and first-loop TUI contact views.
 - The architecture still preserves human-gated external actions: research and drafting can be staged, but JobOS does not send or submit.
 
 Remaining gaps after cycle 4:

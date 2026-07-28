@@ -42,24 +42,39 @@ test('status history preserves stages reached for analytics after terminal outco
   dbSave(staleStore);
   const funnel = JSON.parse(run(['analytics', 'funnel', '--profile', profile.id, '--since', '1', '--json']));
   assert.equal(funnel.byStage.find(s => s.stage === 'rejected')?.count, 1);
-  assert.equal(funnel.totals.interviews, 1, 'interview reached should remain counted after rejection');
-  assert.ok(funnel.bySource.some(s => s.interviews === 1), 'source breakdown should include in-window status changes for older applications');
-  assert.ok(funnel.byRoleFamily.some(s => s.interviews === 1), 'role-family breakdown should include in-window status changes for older applications');
-  assert.equal(funnel.totals.staleActive, 1, 'stale active applications should be counted even when older than the analytics window');
+  assert.equal(funnel.totals.interviews, 1, 'observed interview history should remain counted after rejection');
+  assert.ok(funnel.bySource.some(s => s.interviews === 1), 'source breakdown should include the observed applied cohort');
+  assert.ok(funnel.byRoleFamily.some(s => s.interviews === 1), 'role-family breakdown should include the observed applied cohort');
+  assert.equal(funnel.totals.staleActive, 1, 'stale active applications should be counted from labeled current inventory');
   assert.ok(funnel.stageReached.some(s => s.stage === 'interview' && s.count === 1));
-  const state = JSON.parse(run(['tasks', 'due', '--json']));
+  assert.equal(funnel.basis.conversion, 'observed_events_only');
+  assert.equal(funnel.lifecycle.schema, 'jobos.lifecycle-analytics.v1');
+  assert.equal(funnel.lifecycle.denominators.appliedCohort, 1);
+  const state = JSON.parse(run(['tasks', 'due', '--profile', profile.id, '--json']));
   assert.ok(Array.isArray(state));
 });
 
 test('deterministic eval scoring cases stay within declared ranges', () => {
   const { run } = makeRunner();
   run(['init', '--json']);
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--json']));
+  const defaultPreferences = path.join(process.cwd(), 'tests/eval/profiles/remote-only.json');
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'), '--preferences', defaultPreferences, '--json']));
+  const profiles = new Map([['default', profile]]);
   const cases = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/eval/scoring-cases.json'), 'utf8'));
   const results = [];
   for (const c of cases) {
-    const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'tests/eval', c.file), '--json']));
-    const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
+    const profileKey = c.profile || 'default';
+    if (!profiles.has(profileKey)) {
+      profiles.set(profileKey, JSON.parse(run([
+        'profile', 'create', `PM ${c.id}`,
+        '--from-resume', path.join(process.cwd(), 'tests/eval/profile-proof-points.md'),
+        '--preferences', path.join(process.cwd(), 'tests/eval', profileKey),
+        '--json'
+      ])));
+    }
+    const caseProfile = profiles.get(profileKey);
+    const job = JSON.parse(run(['jobs', 'import-text', '--profile', caseProfile.id, '--file', path.join(process.cwd(), 'tests/eval', c.file), '--json']));
+    const score = JSON.parse(run(['score', job.id, '--profile', caseProfile.id, '--json']));
     results.push(`${c.id}: ${score.overall} expected ${c.expectedRange.join('-')}`);
     assert.ok(score.overall >= c.expectedRange[0] && score.overall <= c.expectedRange[1], results.join('\n'));
   }

@@ -16,6 +16,18 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      # --ignore-scripts skips Playwright's postinstall; install Chromium explicitly for live-form tests.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:w10
       - run: npm test
-      - run: npm run smoke
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run release:evidence
+      - name: Upload W10 release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w10-release-evidence
+          path: .tmp/release-evidence
+          if-no-files-found: warn
+          retention-days: 14

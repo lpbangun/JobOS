@@ -1,29 +1,39 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { all, audit, one, openStore, save } from './db.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { all, audit, one, openStore, reload, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
-import { createProfile, addProof, setNetworkIntent } from './profiles.js';
+import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
+import { getResume, importResume, replaceResume, validateResumeDocument } from './resumes.js';
+import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
-import { appCreate, appUpdate, due, recommendResearch } from './tracking.js';
+import { appCreate, appUpdate, due, openTasks, recommendResearch, taskView } from './tracking.js';
+import { rescheduleApplicationNextAction } from './lifecycle.js';
 import { addStakeholder, researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
-import { funnel, renderFunnelMarkdown, weekly } from './analytics.js';
-import { prepInterview } from './interview.js';
+import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
+import { lifecycleAnalytics, renderLifecycleAnalyticsMarkdown } from './lifecycle-analytics.js';
+import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
+import { createInterviewQuestionSource, createInterviewStory, correctInterviewDebrief, editInterviewStory, getInterviewDebrief, getInterviewStory, InterviewError, listInterviewDebriefs, listInterviewObservations, listInterviewQuestionSources, listInterviewStories, prepInterview, recordInterviewDebrief, retireInterviewStory, verifyInterviewStory } from './interview.js';
 import { startMcp } from './mcp.js';
-import { addWatchlist, configFromFlags, createSearch, listSearches, listWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
+import { configFromFlags, createCompanySearch, createSearch, listSearches, listWatchlist, migrateLegacyWatchlist, runAllSearches, runSavedSearch } from './discovery.js';
 import { createAutomation, listAutomations, setAutomationEnabled } from './scheduler/store.js';
 import { recentRuns, runAutomation, runAutomationByName, runDueAutomations, schedulerStatus, startScheduler } from './scheduler/core.js';
 import { addAnswer, listAnswers } from './answers.js';
 import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
+import { connectAgentClient, doctorAgents } from './agent-setup.js';
 import { callDomainTool } from './domain-tools.js';
+import { domainCapabilityCatalog } from './capabilities.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
+import { preflightResumeArtifact } from './artifacts.js';
+import { getMemoryObservation } from './career-memory-observations.js';
+import { inspectOnboardingStatus } from './onboarding.js';
 
 const globalFlags = [
   '--workspace <dir>',
@@ -46,34 +56,67 @@ function cmd(pathParts, usage, summary, opts = {}) {
     flags: opts.flags || [],
     tests: opts.tests || ['tests/sprint9-frontend.test.js'],
     category: opts.category || 'advanced',
+    audience: opts.audience || 'all',
+    relatedWorkflow: opts.relatedWorkflow || null,
+    workflowStage: opts.workflowStage || null,
+    runsDependencies: opts.runsDependencies ?? null,
+    deprecated: opts.deprecated || null,
   };
 }
 
 export const commandRegistry = [
   cmd(['init'], 'jobos init [--json]', 'Create or verify the local database and agent-readable workspace.'),
+  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--mouse] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>', '--mouse'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup', 'status'], 'jobos setup status [--profile <profile-id>] [--job <job-id>] [--json]', 'Inspect the read-only guided setup projection and optional capability status.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup', 'next'], 'jobos setup next [--profile <profile-id>] [--job <job-id>] [--json]', 'Return the next canonical or optional guided setup action without writing.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
-  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the locked data-bound terminal product shell with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
+  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--mouse] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the primary data-bound terminal product with an embedded ACP agent pane.', { flags: ['--agent off', '--mouse', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
-  cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage <name>] [--dry-run] [--json]', 'Run integrated fit, research, networking, application preparation, and outreach planning.', { flags: ['--stage <name>', '--stage-timeout <ms>', '--dry-run'], category: 'workflow' }),
+  cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
   cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
+  cmd(['profile', 'brief'], 'jobos profile brief --profile <id> [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the deterministic cited career brief.'),
+  cmd(['profile', 'voice-guide'], 'jobos profile voice-guide --profile <id> [--artifact-type <type>] [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the proof-safe voice and positioning guide.'),
+  cmd(['resume', 'import'], 'jobos resume import --profile <profile-id> --file <path> [--json]', 'Import a complete resume into a versioned canonical source record.', { flags: ['--profile <profile-id>', '--file <path>'] }),
+  cmd(['resume', 'show'], 'jobos resume show --profile <profile-id> [--revision <n>] [--json]', 'Inspect the current or historical canonical resume revision.', { flags: ['--profile <profile-id>', '--revision <n>'] }),
+  cmd(['resume', 'validate'], 'jobos resume validate --profile <profile-id> [--json]', 'Validate the current canonical resume and expose correctable fields.', { flags: ['--profile <profile-id>'] }),
+  cmd(['resume', 'coverage'], 'jobos resume coverage --job <job-id> --profile <profile-id> [--json]', 'Show transparent requirement coverage from active verified evidence.', { flags: ['--job <job-id>', '--profile <profile-id>'] }),
+  cmd(['resume', 'preflight'], 'jobos resume preflight --artifact <artifact-id> [--json]', 'Recheck semantic, exact-revision, and requested render eligibility without mutating review state.', { flags: ['--artifact <artifact-id>'] }),
+  cmd(['resume', 'replace'], 'jobos resume replace --profile <profile-id> --file <json-or-yaml> [--json]', 'Create a corrected canonical resume revision without rewriting history.', { flags: ['--profile <profile-id>', '--file <path>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
+  cmd(['proof', 'verify'], 'jobos proof verify <proof-id> [--json]', 'Verify a stored proof point for generated factual claims.'),
+  cmd(['proof', 'retire'], 'jobos proof retire <proof-id> --reason <text> [--json]', 'Retire a proof point while preserving its lineage.', { flags: ['--reason <text>'] }),
+  cmd(['proof', 'replace'], 'jobos proof replace <proof-id> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Supersede a proof point with a corrected active revision.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
   cmd(['answers', 'add'], 'jobos answers add --profile <profile-id> --category <category> --question <text> --answer <text> [--sensitivity personal] [--json]', 'Store a verified reusable application answer locally.', { flags: ['--category <category>', '--question <text>', '--answer <text>', '--sensitivity <class>', '--reuse <scope>', '--status <status>', '--source <ref>', '--employer <name>'] }),
   cmd(['answers', 'list'], 'jobos answers list --profile <profile-id> [--category <category>] [--json]', 'List local answers with sensitive values redacted.', { flags: ['--category <category>', '--status <status>'] }),
   cmd(['answers', 'match'], 'jobos answers match --profile <profile-id> --questions <json-file> [--employer <name>] [--json]', 'Match verified non-sensitive answers to application questions.', { flags: ['--questions <json-file>', '--employer <name>'] }),
+  cmd(['feedback', 'job'], 'jobos feedback job <job-id> --profile <id> --file <job-feedback.json> [--validate-only] --json', 'Record direct structured job feedback or validate it without writes.'),
+  cmd(['feedback', 'observations'], 'jobos feedback observations --profile <id> [--since <days>] [--type <csv>] [--history] --json', 'List profile-scoped observations without private-note text.'),
+  cmd(['feedback', 'observations', 'show'], 'jobos feedback observations show <observation-id> --profile <id> [--include-private-note] --json', 'Show one observation; private notes require this explicit trusted CLI flag.'),
+  cmd(['feedback', 'observations', 'correct'], 'jobos feedback observations correct <observation-id> --profile <id> --file <replacement.json> --reason <text> [--validate-only] --json', 'Append a complete direct-human observation correction.'),
+  cmd(['feedback', 'observations', 'undo'], 'jobos feedback observations undo <observation-id> --profile <id> --reference <id> --reason <text> --json', 'Undo the current observation correction.'),
+  cmd(['preferences', 'proposals'], 'jobos preferences proposals --profile <id> [--status <csv>] [--domain search|writing] [--scope <scope>] --json', 'List immutable career-memory proposals and transition history.'),
+  cmd(['preferences', 'propose'], 'jobos preferences propose --profile <id> --file <proposal.json> [--validate-only] --json', 'Create an inactive cited proposal or validate it without writes.'),
+  cmd(['preferences', 'derive'], 'jobos preferences derive --profile <id> [--as-of <rfc3339>] [--dry-run] --json', 'Deterministically derive inactive proposals.'),
+  cmd(['preferences', 'accept'], 'jobos preferences accept <proposal-id> --profile <id> --reference <id> [--reason <text>] --json', 'Accept an eligible proposal through trusted human input.'),
+  cmd(['preferences', 'reject'], 'jobos preferences reject <proposal-id> --profile <id> --reference <id> --reason <text> --json', 'Reject an inactive proposal.'),
+  cmd(['preferences', 'revoke'], 'jobos preferences revoke <proposal-id> --profile <id> --reference <id> --reason <text> --json', 'Revoke accepted guidance immediately.'),
+  cmd(['preferences', 'undo'], 'jobos preferences undo <transition-id> --profile <id> --reference <id> --reason <text> --json', 'Apply the frozen inverse of a current reversible transition.'),
+  cmd(['memory', 'retrieve'], 'jobos memory retrieve --profile <id> --consumer discovery|scoring|tailoring|outreach|interview_prep [--job <id>] [--artifact-type <type>] [--as-of <rfc3339>] --json', 'Retrieve bounded accepted guidance with private notes excluded.'),
   cmd(['jobs', 'import-text'], 'jobos jobs import-text --profile <profile> --file <path> [--json]', 'Import a job description from a local text or Markdown file.', { flags: ['--file <path>'] }),
   cmd(['jobs', 'import-url'], 'jobos jobs import-url <url> --profile <profile> [--json]', 'Import a human-provided public job URL.'),
   cmd(['jobs', 'list'], 'jobos jobs list [--json]', 'List imported jobs.'),
   cmd(['jobs', 'dedupe'], 'jobos jobs dedupe [--apply] [--json]', 'Find likely duplicate jobs and optionally apply local dedupe updates.', { flags: ['--apply'] }),
-  cmd(['searches', 'create'], 'jobos searches create <name> --profile <profile> --adapter greenhouse|lever|ashby|career-page|portfolio [--board-token token|--company handle|--url URL] [--keywords a,b] [--location remote] [--json]', 'Create a routed public-source discovery search.', { flags: ['--adapter <id>', '--board-token <token>', '--company <handle>', '--handle <handle>', '--url <url>', '--max-companies <n>', '--keywords a,b', '--location <text>', '--min-fit <n>'] }),
+  cmd(['searches', 'create'], 'jobos searches create <name> --profile <profile> --adapter greenhouse|lever|ashby|career-page|portfolio [--board-token token|--company handle|--url URL] [--keywords a,b] [--location remote] [--posted-within-days <n>] [--remote-only] [--employment-types <csv>] [--json]', 'Create a routed public-source discovery search.', { flags: ['--adapter <id>', '--board-token <token>', '--company <handle>', '--handle <handle>', '--url <url>', '--max-companies <n>', '--keywords a,b', '--location <text>', '--posted-within-days <n>', '--remote-only', '--employment-types <csv>', '--min-fit <n>'] }),
   cmd(['searches', 'list'], 'jobos searches list [--json]', 'List saved discovery searches.'),
-  cmd(['watchlist', 'add'], 'jobos watchlist add --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Add a company to the local discovery watchlist.'),
-  cmd(['watchlist', 'list'], 'jobos watchlist list [--json]', 'List watchlist companies.'),
+  cmd(['searches', 'migrate-watchlist'], 'jobos searches migrate-watchlist --profile <profile> [--min-fit <n>] [--json]', 'Migrate legacy profile-less watchlist rows into executable saved searches for one profile.', { flags: ['--profile <profile>', '--min-fit <n>'] }),
+  cmd(['watchlist', 'add'], 'jobos watchlist add --profile <profile> --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Deprecated alias: create an executable company saved-search preset.', { deprecated: 'Use searches create with a company/ATS target.', relatedWorkflow: 'daily' }),
+  cmd(['watchlist', 'list'], 'jobos watchlist list [--json]', 'Compatibility view of legacy watchlist rows and canonical company-search presets.', { deprecated: 'Use searches list.' }),
   cmd(['discover', 'run'], 'jobos discover run --search <name-or-id> [--json]', 'Run one saved discovery search and queue results for review.'),
-  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Run all saved discovery searches, optionally scoped to a profile.'),
-  cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Score one job against a profile.'),
-  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded tailored resume draft.', { output: 'object-or-markdown' }),
-  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Create an evidence-grounded cover letter draft.', { output: 'object-or-markdown' }),
+  cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
+  cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
+  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf] [--output markdown] [--json]', 'Advanced standalone resume operation; creates a complete proof-grounded tailored resume draft with optional local PDF rendering without pursue dependencies.', { flags: ['--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
+  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
   cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
@@ -85,9 +128,14 @@ export const commandRegistry = [
   cmd(['apply', 'packet', 'show'], 'jobos apply packet show <packet-id> [--json]', 'Show one application packet with artifact hashes, redacted answers, identity, readiness snapshot, currency, receipt state, and secret-safe receipt metadata.', { category: 'workflow' }),
   cmd(['apply', 'packet', 'list'], 'jobos apply packet list (--job <job-id> | --profile <profile-id>) [--json]', 'List application packets for a job/profile with derived currency and receipt state.', { flags: ['--job <job-id>', '--profile <profile-id>'], category: 'workflow' }),
   cmd(['apply', 'packet', 'diff'], 'jobos apply packet diff <packet-a> <packet-b> [--json]', 'Diff two application packets by their canonical projections.', { category: 'workflow' }),
+  cmd(['apply', 'form', 'inspect'], 'jobos apply form inspect --job <job-id> --profile <profile-id> --url <https-url> [--browser-profile <name>] [--adapter-hash <sha256>] [--json]', 'Inspect a live employer form read-only and persist a secret-safe form snapshot.', { flags: ['--job <job-id>', '--profile <profile-id>', '--url <https-url>', '--browser-profile <name>', '--adapter-hash <sha256>'], category: 'workflow' }),
+  cmd(['apply', 'form', 'show'], 'jobos apply form show <snapshot-id> [--json]', 'Show one persisted secret-safe live-form snapshot.', { category: 'workflow' }),
+  cmd(['apply', 'form', 'assist'], 'jobos apply form assist <packet-id> [--browser-profile <name>] --allow-side-effects [--json]', 'Fill exact safe packet-bound fields, read them back, and pause before submission.', { flags: ['--browser-profile <name>', '--allow-side-effects'], category: 'workflow' }),
+  cmd(['apply', 'form', 'checkpoint'], 'jobos apply form checkpoint <packet-id> --fill-run <fill-run-id> [--confirm-fields <field-key,...>] [--json]', 'Accept the trusted human checkpoint after reviewing read-back and every manual field.', { flags: ['--fill-run <fill-run-id>', '--confirm-fields <field-key,...>'], category: 'workflow' }),
+  cmd(['apply', 'form', 'submit'], 'jobos apply form submit <packet-id> --checkpoint <checkpoint-id> [--browser-profile <name>] --allow-submit [--json]', 'Perform one exact configured submission after all packet, form, checkpoint, and policy gates pass.', { flags: ['--checkpoint <checkpoint-id>', '--browser-profile <name>', '--allow-submit'], category: 'workflow' }),
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
-  cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Create a source-backed company research worksheet.'),
+  cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Advanced standalone company-research operation; runs without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'company', runsDependencies: false }),
   cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
   cmd(['research', 'runs', 'get'], 'jobos research runs get <run-id> [--json]', 'Read a durable people-research run.'),
   cmd(['research', 'runs', 'resume'], 'jobos research runs resume <run-id> [--json]', 'Resume a paused_retryable people-research run.'),
@@ -100,14 +148,32 @@ export const commandRegistry = [
   cmd(['network', 'contacts'], 'jobos network contacts --job <job-id> [--json]', 'List ranked source-backed contacts for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'list'], 'jobos network list [--json]', 'List imported relationship edges.', { category: 'workflow' }),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
-  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Draft human-reviewed outreach without sending it.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'] }),
+  cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Advanced standalone outreach drafting operation; does not run pursue dependencies or send anything.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'], relatedWorkflow: 'pursue', workflowStage: 'outreach', runsDependencies: false }),
   cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a reviewable outreach path from discovered contacts, network edges, and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
   cmd(['outreach', 'mark-sent'], 'jobos outreach mark-sent --artifact <artifact-id> --channel <email|linkedin|other> [--notes text] [--json]', 'Record that a human sent an outreach draft outside JobOS.', { flags: ['--artifact <artifact-id>', '--channel <email|linkedin|other>', '--notes <text>'] }),
   cmd(['outreach', 'schedule-followup'], 'jobos outreach schedule-followup --thread <thread-id> --after <days> [--json]', 'Create a local follow-up task for an outreach thread.', { flags: ['--thread <thread-id>', '--after <days>'] }),
-  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'List due outreach follow-up tasks without sending anything.'),
-  cmd(['interview', 'prep'], 'jobos interview prep --application <application-id> --stage <stage> [--output markdown] [--json]', 'Create an interview prep packet.', { output: 'object-or-markdown' }),
+  cmd(['outreach', 'due'], 'jobos outreach due [--json]', 'Show the outreach-thread context for due follow-up tasks; use tasks due --type followup --created-by outreach as the canonical filtered query.'),
+  cmd(['outreach', 'outcome', 'record'], 'jobos outreach outcome record --thread <id> --profile <profile-id> --type <type> --occurred-at <rfc3339> [--window-end <rfc3339>] [--channel <channel>] [--note <text>] [--reference <id>] [--supersedes <outcome-id>] [--correction-reason <text>] [--json]', 'Record an explicit local append-only outreach outcome observation; does not infer or cause an external action.', { flags: ['--thread <thread-id>', '--profile <profile-id>', '--type <outcome-type>', '--occurred-at <rfc3339>', '--window-end <rfc3339>', '--channel <channel>', '--note <text>', '--reference <id>', '--supersedes <outcome-id>', '--correction-reason <text>'] }),
+  cmd(['outreach', 'outcomes'], 'jobos outreach outcomes --profile <profile-id> [--since <days>] [--json]', 'List profile-scoped outreach outcome observations and correction history.', { flags: ['--profile <profile-id>', '--since <days>'] }),
+  cmd(['interview', 'stories', 'create'], 'jobos interview stories create --profile <id> --file <story.json> --json', 'Create an attributed interview story draft.', { flags: ['--profile <id>', '--file <story.json>'] }),
+  cmd(['interview', 'stories', 'edit'], 'jobos interview stories edit <story-id> --profile <id> --file <story.json> --json', 'Append an attributed interview story draft revision.', { flags: ['--profile <id>', '--file <story.json>'] }),
+  cmd(['interview', 'stories', 'verify'], 'jobos interview stories verify <story-id> --profile <id> --revision <n> --confirm-fields <csv> --json', 'Verify an exact interview story revision with direct human confirmation.', { flags: ['--profile <id>', '--revision <n>', '--confirm-fields <csv>'] }),
+  cmd(['interview', 'stories', 'retire'], 'jobos interview stories retire <story-id> --profile <id> --reason <text> --json', 'Retire an interview story while preserving its revision history.', { flags: ['--profile <id>', '--reason <text>'] }),
+  cmd(['interview', 'stories', 'list'], 'jobos interview stories list --profile <id> [--history] --json', 'List profile-owned interview stories.', { flags: ['--profile <id>', '--history'] }),
+  cmd(['interview', 'stories', 'show'], 'jobos interview stories show <story-id> --profile <id> [--revision <n>] --json', 'Show a profile-owned interview story or exact revision.', { flags: ['--profile <id>', '--revision <n>'] }),
+  cmd(['interview', 'questions', 'add'], 'jobos interview questions add --profile <id> --application <id> --file <question.json> --json', 'Record a directly sourced interview question.', { flags: ['--profile <id>', '--application <id>', '--file <question.json>'] }),
+  cmd(['interview', 'questions', 'list'], 'jobos interview questions list --profile <id> --application <id> [--stage <stage>] [--audience <audience>] --json', 'List profile- and application-owned sourced interview questions.', { flags: ['--profile <id>', '--application <id>', '--stage <stage>', '--audience <audience>'] }),
+  cmd(['interview', 'prep'], 'jobos interview prep --application <id> --stage <stage> [--audience <audience>] [--output markdown] --json', 'Create an interview prep packet.', { output: 'object-or-markdown', flags: ['--application <id>', '--stage <stage>', '--audience <audience>', '--output markdown'] }),
+  cmd(['interview', 'debrief', 'record'], 'jobos interview debrief record --profile <id> --application <id> --file <debrief.json> --json', 'Record an attributed interview debrief observation.', { flags: ['--profile <id>', '--application <id>', '--file <debrief.json>'] }),
+  cmd(['interview', 'debrief', 'correct'], 'jobos interview debrief correct <debrief-id> --profile <id> --file <debrief.json> --reason <text> --json', 'Append a correction to an interview debrief.', { flags: ['--profile <id>', '--file <debrief.json>', '--reason <text>'] }),
+  cmd(['interview', 'debriefs'], 'jobos interview debriefs --profile <id> [--application <id>] [--history] --json', 'List full local interview debriefs.', { flags: ['--profile <id>', '--application <id>', '--history'] }),
+  cmd(['interview', 'observations'], 'jobos interview observations --profile <id> [--since <positive integer>] --json', 'List private-note-free attributed interview observations.', { flags: ['--profile <id>', '--since <positive integer>'] }),
   cmd(['analytics', 'funnel'], 'jobos analytics funnel --profile <profile> [--since 30] [--output markdown] [--json]', 'Report funnel analytics for a profile.', { output: 'object-or-markdown' }),
-  cmd(['tasks', 'due'], 'jobos tasks due [--watch] [--interval N] [--max-iterations N] [--json]', 'List due tasks, optionally watching on an interval.', { output: 'array-or-jsonl' }),
+  cmd(['analytics', 'lifecycle'], 'jobos analytics lifecycle --profile <profile> [--since 30] [--output markdown] [--json]', 'Report observed lifecycle analytics for one profile.', { output: 'object-or-markdown', flags: ['--profile <profile-id>', '--since <days>', '--output markdown'] }),
+  cmd(['analytics', 'resume-feedback'], 'jobos analytics resume-feedback --profile <profile> [--json]', 'Report recurring proof gaps and uncertainty-gated coverage outcome observations.'),
+  cmd(['tasks', 'list'], 'jobos tasks list (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--json]', 'List one profile task inbox or global operational tasks.', { flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>'] }),
+  cmd(['tasks', 'due'], 'jobos tasks due (--profile <profile-id> | --global) [--type <type>] [--created-by <source>] [--watch] [--interval N] [--max-iterations N] [--json]', 'Canonical scoped query for open tasks with an elapsed non-null due time.', { output: 'array-or-jsonl', flags: ['--profile <profile-id>', '--global', '--type <type>', '--created-by <source>', '--watch', '--interval <seconds>', '--max-iterations <n>'] }),
+  cmd(['tasks', 'reschedule'], 'jobos tasks reschedule <task-id> --profile <profile-id> --due <rfc3339> --reason <text> [--json]', 'Manually reschedule one open lifecycle action while preserving its policy schedule.', { flags: ['--profile <profile-id>', '--due <rfc3339>', '--reason <text>'] }),
   cmd(['review', 'weekly'], 'jobos review weekly --profile <profile> [--output markdown] [--json]', 'Generate a weekly review export.', { output: 'object-or-markdown' }),
   cmd(['automation', 'create'], 'jobos automation create <name> --action <action-id> --schedule "0 7 * * 1-5" [--profile <profile>] [--enabled] [--json]', 'Create or update a scheduler automation.'),
   cmd(['automation', 'list'], 'jobos automation list [--json]', 'List configured automations.'),
@@ -118,9 +184,11 @@ export const commandRegistry = [
   cmd(['scheduler', 'start'], 'jobos scheduler start [--interval 60] [--json]', 'Start the long-running local scheduler loop.', { output: 'jsonl-or-log' }),
   cmd(['scheduler', 'status'], 'jobos scheduler status [--json]', 'Show scheduler lock, automation, and recent run state.'),
   cmd(['runs', 'list'], 'jobos runs list [--limit 25] [--json]', 'List recent automation runs.'),
-  cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Repeatedly run due scheduler automations with JSONL loop events.', { output: 'jsonl' }),
-  cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Repeatedly run one named automation through scheduler machinery.', { output: 'jsonl' }),
-  cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Repeatedly run one scheduler action through an ephemeral automation.', { output: 'jsonl' }),
+  cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run due scheduler automations with bounded JSONL events.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one persisted named automation.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one ephemeral scheduler action.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['agents', 'connect'], 'jobos agents connect <hermes|codex|claude> [--dry-run] [--json]', 'Detect an agent and register this JobOS workspace through MCP.', { flags: ['--dry-run'], category: 'extend' }),
+  cmd(['agents', 'doctor'], 'jobos agents doctor [hermes|codex|claude] [--json]', 'Diagnose Node, workspace, embedded ACP, external MCP, and batch-agent readiness.', { category: 'extend' }),
   cmd(['agents', 'add'], 'jobos agents add <name> --command <executable> [--args <json>] [--transport stdin-json|prompt-arg] [--json]', 'Register a local Codex, Hermes, or compatible agent.', { flags: ['--command <executable>', '--args <json>', '--transport <type>'], category: 'extend' }),
   cmd(['agents', 'list'], 'jobos agents list [--json]', 'List configured and suggested local agents with availability.', { category: 'extend' }),
   cmd(['agents', 'test'], 'jobos agents test <name> [--json]', 'Check one agent executable and structured JSON protocol.', { category: 'extend' }),
@@ -174,17 +242,20 @@ function commandFor(parts) {
 }
 
 function renderRootHelp({ allCommands = false } = {}) {
-  const primaryNames = new Set(['init', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
+  const primaryNames = new Set(['init', 'setup', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents connect', 'agents doctor']);
   const primary = commandRegistry.filter(command => primaryNames.has(command.name));
   const section = (title, names) => `${title}:\n${names.map(command => `  ${command.usage}\n      ${command.summary}`).join('\n')}`;
-  const setup = primary.filter(command => ['init', 'profile create'].includes(command.name));
+  const setup = primary.filter(command => ['init', 'setup', 'profile create'].includes(command.name));
   const workflows = primary.filter(command => ['tui', 'daily', 'pursue', 'jobs list', 'network paths'].includes(command.name));
-  const extend = primary.filter(command => ['agents list', 'browser status'].includes(command.name));
+  const extend = primary.filter(command => ['agents connect', 'agents doctor'].includes(command.name));
   const advanced = allCommands ? `\n\nAdvanced commands:\n${commandRegistry.filter(command => !primaryNames.has(command.name)).map(command => `  ${command.usage}`).join('\n')}` : '\n\nRun "jobos help --all" for every low-level command.';
-  return `JobOS — local-first agent-native terminal product and composable CLI
+  return `JobOS — local-first, agent-native job search
 
 Usage:
+  jobos
   jobos <command> [flags]
+
+Run \`jobos\` to open the primary terminal product. Use \`daily\` and \`pursue\` for scripted workflows.
 
 ${section('Setup', setup)}
 
@@ -193,9 +264,9 @@ ${section('Workflows', workflows)}
 ${section('Extend', extend)}${advanced}
 
 Global flags:
-  ${globalFlags.join('\n  ')}
+  ${globalFlags.join(' · ')}
 
-Run \"jobos <command> --help\" for command-specific help.`;
+Run "jobos <command> --help" for command-specific help.`;
 }
 
 function renderCommandHelp(parts) {
@@ -235,6 +306,13 @@ function registryJson() {
     },
     globalFlags,
     exitCodes: { success: 0, runtimeError: 1, usageError: 2 },
+    interaction: {
+      naturalLanguage: 'Use the embedded Hermes ACP pane; intent is routed to agent-eligible MCP tools.',
+      slashSyntax: '/<domain_tool> <json-object>',
+      friendlyCommandSyntax: ':<command>',
+      persistence: 'SQLite, workspace mirrors, Career Memory, and per-profile Hermes ACP session IDs persist under the selected workspace.'
+    },
+    domainTools: domainCapabilityCatalog(),
     commands: commandRegistry.map(c => ({
       name: c.name,
       path: c.path,
@@ -244,13 +322,24 @@ function registryJson() {
       output: c.output,
       flags: c.flags,
       category: c.category,
+      audience: c.audience,
+      relatedWorkflow: c.relatedWorkflow,
+      workflowStage: c.workflowStage,
+      runsDependencies: c.runsDependencies,
+      deprecated: c.deprecated,
       tests: c.tests
     }))
   };
 }
 
 function renderAgentGuide() {
-  const commands = commandRegistry.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n');
+  const categoryOrder = ['workflow', 'advanced', 'agent-stream', 'extend'];
+  const commands = categoryOrder.map(category => {
+    const items = commandRegistry.filter(command => command.category === category);
+    if (!items.length) return '';
+    const heading = category === 'workflow' ? 'Primary workflows' : category === 'agent-stream' ? 'Agent streaming primitives' : category === 'extend' ? 'Extension surfaces' : 'Advanced standalone operations';
+    return `### ${heading}\n\n${items.map(c => `- \`${c.usage}\`: ${c.summary} Output: ${c.output}.`).join('\n')}`;
+  }).filter(Boolean).join('\n\n');
   return `# JobOS Agent Guide
 
 JobOS is the local-first host and source of truth for job state. The TUI is the primary interactive product: it launches a real Hermes ACP guest session and mediates JobOS MCP tools. The CLI and external \`jobos mcp\` server remain first-class automation doors. Core workflows may discover, score, research, draft, and stage actions. External effects are disabled by default.
@@ -262,6 +351,8 @@ JobOS is the local-first host and source of truth for job state. The TUI is the 
 - \`jobos mcp\` exposes the same \`domain-tools\` semantics to external agents.
 - \`--agent <name>\` / \`JOBOS_AGENT\` select the separate noninteractive batch generator; explicit failures never silently fall back.
 - JobOS reloads SQLite after guest tools complete and rejects stale concurrent writers.
+- Free-form requests in the embedded pane are routed against the complete agent-eligible MCP catalog. In the TUI, \`/<domain_tool> <json-object>\` invokes any domain function through the same facade; \`:...\` remains the friendly host-command surface.
+- SQLite, workspace mirrors, Career Memory, and the per-profile Hermes ACP session ID persist between launches. Human-only decisions remain typed CLI/TUI handoffs and are not exposed as MCP tools.
 
 ## Global Rules
 
@@ -273,6 +364,8 @@ JobOS is the local-first host and source of truth for job state. The TUI is the 
 - Never infer restricted answers, print browser cookies, bypass CAPTCHA, or claim an external action succeeded without its configured tool's result.
 
 ## Commands
+
+Prefer \`daily\` and \`pursue\` for complete workflows. Use advanced standalone operations when intentionally refreshing one operation without its pursuit dependencies. Streaming primitives are intended for agents and test harnesses; human background automation should use \`scheduler start\` or \`scheduler run-once\`.
 
 ${commands}
 
@@ -342,6 +435,39 @@ function numberFlag(flags, name, fallback, { min = 0 } = {}) {
   return n;
 }
 
+function positiveIntegerFlag(flags, name) {
+  const raw = requireFlag(flags, name);
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) usage(`Invalid --${name}: ${raw}`);
+  return value;
+}
+
+function structuredJsonFile(flags, label) {
+  const file = String(requireFlag(flags, 'file', `--file <${label}>`));
+  let value;
+  try {
+    value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    usage(`Invalid JSON file ${file}: ${error.message}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    usage(`Invalid JSON file ${file}: expected an object`);
+  }
+  return value;
+}
+
+function cliDebriefPayload(value) {
+  const fieldProvenance = value.fieldProvenance && typeof value.fieldProvenance === 'object'
+    ? Object.fromEntries(Object.entries(value.fieldProvenance).map(([field, entry]) => [
+      field,
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? { ...entry, source: 'cli' }
+        : entry,
+    ]))
+    : value.fieldProvenance;
+  return { ...value, source: 'cli', fieldProvenance };
+}
+
 function parseConfig(flags) {
   if (!flags.config) return {};
   try {
@@ -351,15 +477,57 @@ function parseConfig(flags) {
   }
 }
 
-function dueTasks(s) {
-  return due(s).map(t => ({
-    id: t.id,
-    title: t.title,
-    dueAt: t.due_at,
-    priority: t.priority,
-    status: t.status,
-    jobId: t.job_id
-  }));
+function publicTasks(rows) {
+  const nowDate = new Date();
+  return rows.map(row => taskView(row, { nowDate }));
+}
+
+function taskFilters(flags) {
+  const profileId = flags.profile && flags.profile !== true ? String(flags.profile) : null;
+  const global = flags.global === true;
+  if (Boolean(profileId) === global) usage('Task commands require exactly one scope: --profile <profile-id> or --global');
+  return {
+    profileId,
+    global,
+    type: flags.type ? String(flags.type) : null,
+    createdBy: flags['created-by'] ? String(flags['created-by']) : null
+  };
+}
+
+function watchlistProfile(s, flags) {
+  if (flags.profile) return String(flags.profile);
+  const profiles = all(s, 'SELECT id FROM profiles ORDER BY created_at');
+  if (profiles.length === 1) return profiles[0].id;
+  usage(profiles.length
+    ? 'Missing --profile <profile-id>; legacy watchlists were not profile-scoped'
+    : 'Missing --profile <profile-id>; create a profile first');
+}
+
+function compatibilityWatchlist(s) {
+  const legacy = listWatchlist(s).map(item => ({ ...item, legacy: true }));
+  const canonical = listSearches(s)
+    .filter(search => search.config?.preset === 'company-watch')
+    .map(search => ({
+      id: search.id,
+      searchId: search.id,
+      company: search.config.companyLabel || search.name,
+      adapter: search.adapter,
+      handle: search.config.boardToken || search.config.handle || '',
+      notes: search.config.notes || '',
+      profileId: search.profileId,
+      legacy: false
+    }));
+  const targetKey = item => [item.company, item.adapter, item.handle].map(value => String(value || '').trim().toLowerCase()).join('|');
+  const canonicalTargets = new Set(canonical.map(targetKey));
+  return [...canonical, ...legacy.filter(item => !canonicalTargets.has(targetKey(item)))];
+}
+
+function dueTasks(s, flags = {}) {
+  return publicTasks(due(s, taskFilters(flags)));
+}
+
+function inboxTasks(s, flags = {}) {
+  return publicTasks(openTasks(s, taskFilters(flags)));
 }
 
 function sleep(ms, isStopped) {
@@ -457,7 +625,9 @@ function normalizedError(e) {
 export async function main(argv = process.argv.slice(2)) {
   const parsed = parse(argv);
   const flags = parsed.flags;
-  const [group, action, subaction, ...rest] = parsed._;
+  let [group, action, subaction, ...rest] = parsed._;
+  const interactiveDefault = !group && !flags.help && !flags.json && process.stdin.isTTY && process.stdout.isTTY;
+  if (interactiveDefault) group = 'tui';
 
   if (!group || group === 'help' || flags.help) {
     const parts = group === 'help' ? parsed._.slice(1) : parsed._;
@@ -485,6 +655,37 @@ export async function main(argv = process.argv.slice(2)) {
     else text(renderAgentGuide());
     return;
   }
+  if (group === 'setup') {
+    if (action && !['status', 'next'].includes(action)) usage(`Unknown setup command: ${action}`);
+    const setupOptions = {
+      profileId: flags.profile ? String(flags.profile) : null,
+      jobId: flags.job ? String(flags.job) : null,
+      includeCapabilities: true
+    };
+    if (flags.json || action) {
+      const status = await inspectOnboardingStatus(s, setupOptions);
+      out(action === 'next' ? {
+        schema: status.schema,
+        profileId: status.profileId,
+        jobId: status.jobId,
+        state: status.state,
+        nextAction: status.nextAction,
+        policy: status.policy
+      } : status);
+      return;
+    }
+    const { startTui } = await import('./tui.js');
+    const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
+    await startTui(s, {
+      profileId: setupOptions.profileId,
+      selectedJobId: setupOptions.jobId,
+      initialOverlay: 'setup',
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
+      mouse
+    });
+    return;
+  }
   if (group === 'tui') {
     const [
       { buildTuiModel },
@@ -506,9 +707,11 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
     await startTui(s, {
       profileId,
-      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
+      mouse
     });
     return;
   }
@@ -531,7 +734,9 @@ export async function main(argv = process.argv.slice(2)) {
     const name = [subaction, ...rest].filter(Boolean).join(' ');
     if (!name) usage('Missing profile name');
     const r = createProfile(s, name, { fromResume: flags['from-resume'], preferences: flags.preferences });
-    out({ id: r.profile.id, name: r.profile.name, created: r.created, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
+    const proofPointCount = Number(one(s, 'SELECT COUNT(*) AS count FROM proof_points WHERE profile_id=?', [r.profile.id])?.count || 0);
+    const canonicalResumeCreated = Boolean(one(s, 'SELECT 1 AS present FROM profile_resume_revisions WHERE profile_id=? LIMIT 1', [r.profile.id]));
+    out({ id: r.profile.id, name: r.profile.name, created: r.created, proofPointCount, canonicalResumeCreated, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
     return;
   }
   if (group === 'profile' && action === 'network-intent') {
@@ -545,10 +750,84 @@ export async function main(argv = process.argv.slice(2)) {
     out(setNetworkIntent(s, { profileId: needProfile(flags), intent: data.intent, affiliations: data.affiliations }));
     return;
   }
+  if (group === 'profile' && ['brief', 'voice-guide'].includes(action)) {
+    const args = {
+      profileId: needProfile(flags),
+      revision: flags.revision == null ? null : numberFlag(flags, 'revision', null, { min: 1 }),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+      refresh: flags.refresh === true,
+    };
+    const result = action === 'brief'
+      ? await callDomainTool(s, 'get_career_brief', args, { source: 'cli' })
+      : await callDomainTool(s, 'get_voice_positioning_guide', {
+        ...args,
+        artifactType: flags['artifact-type'] ? String(flags['artifact-type']) : null,
+      }, { source: 'cli' });
+    out(result);
+    return;
+  }
+  if (group === 'resume' && action === 'import') {
+    const row = importResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'show') {
+    const revision = flags.revision == null ? null : numberFlag(flags, 'revision', null, { min: 1 });
+    const row = getResume(s, needProfile(flags), revision);
+    if (!row) throw Error(`Resume revision not found${revision == null ? '' : `: ${revision}`}`);
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, sourceTextHash: row.source_text_hash, verificationStatus: row.verification_status, supersedesResumeId: row.supersedes_resume_id || null, isCurrent: Boolean(row.is_current), document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'validate') {
+    const row = getResume(s, needProfile(flags));
+    if (!row) out({ valid: false, schemaVersion: 1, blockers: [{ code: 'resume_source_missing', message: 'No canonical resume revision exists.' }], warnings: [] });
+    else out({ resumeId: row.id, revision: row.revision, ...validateResumeDocument(row.document) });
+    return;
+  }
+  if (group === 'resume' && action === 'preflight') {
+    out(preflightResumeArtifact(s, String(requireFlag(flags, 'artifact', '--artifact <artifact-id>'))));
+    return;
+  }
+  if (group === 'resume' && action === 'replace') {
+    const row = replaceResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <json-or-yaml>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, supersedesResumeId: row.supersedes_resume_id, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    return;
+  }
+  if (group === 'resume' && action === 'coverage') {
+    const profileId = needProfile(flags);
+    const jobId = String(requireFlag(flags, 'job'));
+    const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
+    if (!job) throw Error(`Unknown job: ${jobId}`);
+    if (job.profile_id !== profileId) throw Object.assign(new Error(`Job ${jobId} belongs to profile ${job.profile_id}, not ${profileId}`), { code: 'profile_job_mismatch', type: 'validation' });
+    const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified'", [profileId]);
+    out({ jobId, profileId, requirements: inventoryForJob(job), coverage: buildRequirementCoverage(inventoryForJob(job), proofs) });
+    return;
+  }
   if (group === 'proof' && action === 'add') {
     const summary = requireFlag(flags, 'summary');
     const p = addProof(s, needProfile(flags), String(summary), flags.evidence ? String(flags.evidence) : '', flags.skills ? splitCsv(flags.skills) : []);
     out({ id: p.id, profileId: p.profile_id, summary: p.summary });
+    return;
+  }
+  if (group === 'proof' && action === 'verify') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = verifyProof(s, String(proofId));
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, verificationStatus: proof.verification_status });
+    return;
+  }
+  if (group === 'proof' && action === 'retire') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = retireProof(s, String(proofId), String(requireFlag(flags, 'reason')));
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, retiredAt: proof.retired_at, retirementReason: proof.retirement_reason });
+    return;
+  }
+  if (group === 'proof' && action === 'replace') {
+    const proofId = subaction || rest[0];
+    if (!proofId) usage('Missing proof id');
+    const proof = supersedeProof(s, String(proofId), { summary: String(requireFlag(flags, 'summary')), evidence: flags.evidence ? String(flags.evidence) : '', skills: flags.skills ? splitCsv(flags.skills) : [] });
+    out({ id: proof.id, profileId: proof.profile_id, status: proof.status, verificationStatus: proof.verification_status, supersedesProofPointId: proof.supersedes_proof_point_id });
     return;
   }
   if (group === 'answers' && action === 'add') {
@@ -578,6 +857,99 @@ export async function main(argv = process.argv.slice(2)) {
       usage(`Invalid --questions JSON file: ${e.message}`);
     }
     out(await callDomainTool(s, 'answers_match', { profileId: needProfile(flags), questions, employer: flags.employer ? String(flags.employer) : '' }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'job') {
+    if (!subaction) usage('Missing job id');
+    out(await callDomainTool(s, 'record_job_feedback', {
+      profileId: needProfile(flags), jobId: String(subaction),
+      feedback: structuredJsonFile(flags, 'job-feedback.json'),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && !subaction) {
+    out(await callDomainTool(s, 'list_memory_observations', {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? 365 : numberFlag(flags, 'since', 365, { min: 0 }),
+      types: flags.type ? splitCsv(flags.type) : null,
+      includeHistory: flags.history === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'show') {
+    if (!rest[0]) usage('Missing observation id');
+    out(getMemoryObservation(s, {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      includePrivateNote: flags['include-private-note'] === true,
+    }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'correct') {
+    if (!rest[0]) usage('Missing observation id');
+    out(await callDomainTool(s, 'correct_memory_observation', {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      replacement: structuredJsonFile(flags, 'replacement.json'),
+      reason: String(requireFlag(flags, 'reason')),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'feedback' && action === 'observations' && subaction === 'undo') {
+    if (!rest[0]) usage('Missing observation id');
+    out(await callDomainTool(s, 'undo_memory_observation', {
+      profileId: needProfile(flags), observationId: String(rest[0]),
+      referenceId: String(requireFlag(flags, 'reference')), reason: String(requireFlag(flags, 'reason')),
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'proposals') {
+    out(await callDomainTool(s, 'list_memory_proposals', {
+      profileId: needProfile(flags), statuses: flags.status ? splitCsv(flags.status) : null,
+      domain: flags.domain ? String(flags.domain) : null,
+      scope: flags.scope ? String(flags.scope) : null, includeEvidence: true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'propose') {
+    out(await callDomainTool(s, 'create_memory_proposal', {
+      profileId: needProfile(flags), proposal: structuredJsonFile(flags, 'proposal.json'),
+      validateOnly: flags['validate-only'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'derive') {
+    out(await callDomainTool(s, 'derive_memory_proposals', {
+      profileId: needProfile(flags), asOf: flags['as-of'] ? String(flags['as-of']) : null,
+      dryRun: flags['dry-run'] === true,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && ['accept', 'reject', 'revoke'].includes(action)) {
+    if (!subaction) usage('Missing proposal id');
+    const reason = flags.reason ? String(flags.reason) : '';
+    if (action !== 'accept' && !reason) usage(`Missing --reason for preferences ${action}`);
+    out(await callDomainTool(s, `${action}_memory_proposal`, {
+      profileId: needProfile(flags), proposalId: String(subaction),
+      referenceId: String(requireFlag(flags, 'reference')), reason,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'preferences' && action === 'undo') {
+    if (!subaction) usage('Missing transition id');
+    out(await callDomainTool(s, 'undo_memory_transition', {
+      profileId: needProfile(flags), transitionId: String(subaction),
+      referenceId: String(requireFlag(flags, 'reference')), reason: String(requireFlag(flags, 'reason')),
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'memory' && action === 'retrieve') {
+    out(await callDomainTool(s, 'retrieve_career_memory', {
+      profileId: needProfile(flags), consumer: String(requireFlag(flags, 'consumer')),
+      jobId: flags.job ? String(flags.job) : null,
+      artifactType: flags['artifact-type'] ? String(flags['artifact-type']) : null,
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'jobs' && action === 'import-text') {
@@ -612,16 +984,36 @@ export async function main(argv = process.argv.slice(2)) {
     out(listSearches(s));
     return;
   }
+  if (group === 'searches' && action === 'migrate-watchlist') {
+    out(migrateLegacyWatchlist(s, {
+      profileId: needProfile(flags),
+      minFit: flags['min-fit'] ? Number(flags['min-fit']) : 70
+    }));
+    return;
+  }
   if (group === 'watchlist' && action === 'add') {
     const company = flags.company ? String(flags.company) : [subaction, ...rest].filter(Boolean).join(' ');
     if (!company) usage('Missing --company <company>');
     const handle = flags['board-token'] || flags.handle || '';
-    const item = addWatchlist(s, { company, adapter: String(flags.adapter || ''), handle: String(handle), notes: flags.notes ? String(flags.notes) : '' });
-    out(item);
+    const item = createCompanySearch(s, {
+      company,
+      profileId: watchlistProfile(s, flags),
+      adapter: String(flags.adapter || ''),
+      handle: String(handle),
+      notes: flags.notes ? String(flags.notes) : '',
+      minFit: flags['min-fit'] ? Number(flags['min-fit']) : 70
+    });
+    out({
+      ...item,
+      company,
+      handle: String(handle),
+      deprecated: true,
+      replacement: 'searches create'
+    });
     return;
   }
   if (group === 'watchlist' && action === 'list') {
-    out(listWatchlist(s));
+    out(compatibilityWatchlist(s));
     return;
   }
   if (group === 'discover' && action === 'run') {
@@ -641,7 +1033,13 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'tailor' && action === 'resume') {
     const jobId = requireFlag(flags, 'job');
-    const r = await tailor(s, jobId, needProfile(flags), 'resume');
+    const layout = flags.layout ? String(flags.layout) : null;
+    const pageSize = flags['page-size'] ? String(flags['page-size']).toLowerCase() : 'letter';
+    const format = flags.format ? String(flags.format).toLowerCase() : 'markdown';
+    if (layout && !['professional', 'technical', 'leadership'].includes(layout)) usage('Invalid --layout; expected professional, technical, or leadership');
+    if (!['letter', 'a4'].includes(pageSize)) usage('Invalid --page-size; expected letter or a4');
+    if (!['markdown', 'pdf'].includes(format)) usage('Invalid --format; expected markdown or pdf');
+    const r = await tailor(s, jobId, needProfile(flags), 'resume', { layoutProfileId: layout, pageSize, pageLimit: numberFlag(flags, 'page-limit', 2, { min: 1 }), format });
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
     return;
@@ -695,17 +1093,64 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'applications' && action === 'create') {
     if (!flags.job || !flags.status) usage('Missing --job or --status');
-    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '');
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
+    const a = appCreate(s, flags.job, String(flags.status), flags.notes ? String(flags.notes) : '', { actor: 'user', source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, nextAction: a.nextAction, researchRecommendation: a.researchRecommendation });
     return;
   }
   if (group === 'applications' && action === 'update') {
     if (!subaction || !flags.status) usage('Missing application id or --status');
-    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null);
-    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, researchRecommendation: recommendResearch(s, { jobId: a.job_id, profileId: a.profile_id, status: a.status }) });
+    const a = appUpdate(s, subaction, String(flags.status), flags.notes ? String(flags.notes) : null, { actor: 'user', source: 'cli' });
+    out({ id: a.id, jobId: a.job_id, profileId: a.profile_id, status: a.status, nextAction: a.nextAction, researchRecommendation: a.researchRecommendation });
     return;
   }
   if (group === 'apply') {
+    if (action === 'form' && subaction === 'inspect') {
+      out(await callDomainTool(s, 'inspect_application_form', {
+        jobId: String(requireFlag(flags, 'job')),
+        profileId: String(requireFlag(flags, 'profile')),
+        url: String(requireFlag(flags, 'url')),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'show') {
+      if (!rest[0]) usage('Missing snapshot id');
+      out(await callDomainTool(s, 'application_form_show', {
+        snapshotId: String(rest[0])
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'assist') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'assist_application_form', {
+        packetId: String(rest[0]),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        allowSideEffects: flags['allow-side-effects'] === true,
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'checkpoint') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'checkpoint_application_form', {
+        packetId: String(rest[0]),
+        fillRunId: String(requireFlag(flags, 'fill-run')),
+        confirmedFieldKeys: flags['confirm-fields'] ? String(flags['confirm-fields']).split(',').map(value => value.trim()).filter(Boolean) : []
+      }, { source: 'cli' }));
+      return;
+    }
+    if (action === 'form' && subaction === 'submit') {
+      if (!rest[0]) usage('Missing packet id');
+      out(await callDomainTool(s, 'submit_application_form', {
+        packetId: String(rest[0]),
+        checkpointId: String(requireFlag(flags, 'checkpoint')),
+        browserProfile: flags['browser-profile'] ? String(flags['browser-profile']) : 'default',
+        allowSubmit: flags['allow-submit'] === true,
+        expectedAdapterHash: flags['adapter-hash'] ? String(flags['adapter-hash']) : null
+      }, { source: 'cli' }));
+      return;
+    }
     if (action === 'packet' && subaction === 'create') {
       out(await callDomainTool(s, 'create_application_packet', {
         jobId: String(requireFlag(flags, 'job')),
@@ -756,7 +1201,7 @@ export async function main(argv = process.argv.slice(2)) {
       }, { source: 'cli' }));
       return;
     }
-    usage('Unknown apply command. Try: jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
+    usage('Unknown apply command. Try: jobos apply form inspect/show, jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
   }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');
@@ -858,9 +1303,34 @@ export async function main(argv = process.argv.slice(2)) {
     out(promoteStakeholder(s, { candidateId: String(requireFlag(flags, 'candidate')) }));
     return;
   }
+  if (group === 'outreach' && action === 'outcome' && subaction === 'record') {
+    out(recordOutreachOutcome(s, {
+      threadId: String(requireFlag(flags, 'thread', '--thread <thread-id>')),
+      profileId: needProfile(flags),
+      type: String(requireFlag(flags, 'type', '--type <outcome-type>')),
+      occurredAt: String(requireFlag(flags, 'occurred-at', '--occurred-at <rfc3339>')),
+      windowEndAt: flags['window-end'] ? String(flags['window-end']) : null,
+      channel: flags.channel ? String(flags.channel) : null,
+      note: flags.note ? String(flags.note) : '',
+      referenceId: flags.reference ? String(flags.reference) : '',
+      supersedesOutcomeId: flags.supersedes ? String(flags.supersedes) : null,
+      correctionReason: flags['correction-reason'] ? String(flags['correction-reason']) : '',
+      actor: 'user',
+      source: 'cli'
+    }));
+    return;
+  }
+  if (group === 'outreach' && action === 'outcomes') {
+    out(listOutreachOutcomes(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? null : Number(flags.since),
+      includeNotes: true
+    }));
+    return;
+  }
   if (group === 'outreach' && action === 'draft') {
     if (!flags.plan && (!flags.job || !flags.stakeholder)) usage('Missing --job/--stakeholder or --plan');
-    const r = await draftOutreach(s, { jobId: flags.job ? String(flags.job) : null, profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : 'informational', planId: flags.plan ? String(flags.plan) : null, contactId: flags.contact ? String(flags.contact) : null });
+    const r = await draftOutreach(s, { jobId: flags.job ? String(flags.job) : null, profileId: needProfile(flags), stakeholderId: flags.stakeholder ? String(flags.stakeholder) : null, goal: flags.goal ? String(flags.goal) : null, planId: flags.plan ? String(flags.plan) : null, contactId: flags.contact ? String(flags.contact) : null });
     out(r);
     return;
   }
@@ -886,11 +1356,165 @@ export async function main(argv = process.argv.slice(2)) {
     out(outreachDue(s));
     return;
   }
+  if (group === 'interview' && action === 'stories' && subaction === 'create') {
+    const payload = structuredJsonFile(flags, 'story.json');
+    out(createInterviewStory(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      storyId: undefined,
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'edit') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    const payload = structuredJsonFile(flags, 'story.json');
+    out(editInterviewStory(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'verify') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    out(verifyInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      revision: positiveIntegerFlag(flags, 'revision'),
+      confirmedFields: splitCsv(String(requireFlag(flags, 'confirm-fields', '--confirm-fields <csv>'))),
+      actor: 'user',
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'retire') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    out(retireInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+      actor: 'user',
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'list') {
+    out(listInterviewStories(s, {
+      profileId: needProfile(flags),
+      includeHistory: Boolean(flags.history),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'stories' && subaction === 'show') {
+    const storyId = rest[0];
+    if (!storyId) usage('Missing <story-id>');
+    const revisionNumber = flags.revision == null ? null : positiveIntegerFlag(flags, 'revision');
+    const story = getInterviewStory(s, {
+      profileId: needProfile(flags),
+      storyId: String(storyId),
+      includeHistory: revisionNumber != null,
+    });
+    if (revisionNumber == null) {
+      out(story);
+      return;
+    }
+    const revision = story.history.find(item => item.revision === revisionNumber);
+    if (!revision) {
+      throw new InterviewError(
+        'interview_story_revision_unknown',
+        `Unknown revision ${revisionNumber} for interview story ${story.id}.`,
+      );
+    }
+    out(revision);
+    return;
+  }
+  if (group === 'interview' && action === 'questions' && subaction === 'add') {
+    const payload = structuredJsonFile(flags, 'question.json');
+    out(createInterviewQuestionSource(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      jobId: undefined,
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      source: 'cli',
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'questions' && subaction === 'list') {
+    out(listInterviewQuestionSources(s, {
+      profileId: needProfile(flags),
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      stage: flags.stage ? String(flags.stage) : null,
+      audience: flags.audience ? String(flags.audience) : null,
+    }));
+    return;
+  }
   if (group === 'interview' && action === 'prep') {
     const applicationId = requireFlag(flags, 'application');
-    const r = await prepInterview(s, String(applicationId), flags.stage ? String(flags.stage) : 'interview');
+    const r = await prepInterview(
+      s,
+      String(applicationId),
+      flags.stage ? String(flags.stage) : 'interview',
+      { audience: flags.audience ? String(flags.audience) : undefined },
+    );
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
+    return;
+  }
+  if (group === 'interview' && action === 'debrief' && subaction === 'record') {
+    const payload = cliDebriefPayload(structuredJsonFile(flags, 'debrief.json'));
+    out(recordInterviewDebrief(s, {
+      ...payload,
+      profileId: needProfile(flags),
+      jobId: undefined,
+      applicationId: String(requireFlag(flags, 'application', '--application <id>')),
+      debriefId: undefined,
+      targetRevision: undefined,
+      reason: undefined,
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'debrief' && subaction === 'correct') {
+    const debriefId = rest[0];
+    if (!debriefId) usage('Missing <debrief-id>');
+    const profileId = needProfile(flags);
+    const current = getInterviewDebrief(s, {
+      profileId,
+      debriefId: String(debriefId),
+      includeHistory: false,
+    });
+    const payload = cliDebriefPayload(structuredJsonFile(flags, 'debrief.json'));
+    out(correctInterviewDebrief(s, {
+      ...payload,
+      profileId,
+      debriefId: current.id,
+      jobId: current.jobId,
+      applicationId: current.applicationId,
+      interviewStage: current.interviewStage,
+      audience: current.audience,
+      referenceId: current.referenceId,
+      targetRevision: current.currentRevision.revision,
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'debriefs') {
+    out(listInterviewDebriefs(s, {
+      profileId: needProfile(flags),
+      applicationId: flags.application ? String(flags.application) : null,
+      includeHistory: Boolean(flags.history),
+    }));
+    return;
+  }
+  if (group === 'interview' && action === 'observations') {
+    out(listInterviewObservations(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? null : positiveIntegerFlag(flags, 'since'),
+    }));
     return;
   }
   if (group === 'analytics' && action === 'funnel') {
@@ -899,12 +1523,45 @@ export async function main(argv = process.argv.slice(2)) {
     else out(r);
     return;
   }
+  if (group === 'analytics' && action === 'lifecycle') {
+    const result = lifecycleAnalytics(s, {
+      profileId: needProfile(flags),
+      sinceDays: flags.since == null ? 30 : Number(flags.since),
+    });
+    if (flags.output === 'markdown' && !flags.json) text(renderLifecycleAnalyticsMarkdown(result));
+    else out(result);
+    return;
+  }
+  if (group === 'analytics' && action === 'resume-feedback') {
+    out(resumeFeedback(s, needProfile(flags)));
+    return;
+  }
+  if (group === 'tasks' && action === 'list') {
+    out(inboxTasks(s, flags));
+    return;
+  }
   if (group === 'tasks' && action === 'due') {
     if (flags.watch) {
-      await repeat({ flags, s, eventType: 'watch.iteration', targetType: 'tasks', target: 'due', run: () => ({ tasks: dueTasks(s), checkedAt: new Date().toISOString() }) });
+      await repeat({ flags, s, eventType: 'watch.iteration', targetType: 'tasks', target: 'due', run: () => {
+        reload(s);
+        return { tasks: dueTasks(s, flags), checkedAt: new Date().toISOString() };
+      } });
     } else {
-      out(dueTasks(s));
+      out(dueTasks(s, flags));
     }
+    return;
+  }
+  if (group === 'tasks' && action === 'reschedule') {
+    if (!subaction) usage('Missing task ID');
+    if (flags.global) usage('tasks reschedule requires --profile <profile-id>; --global is not supported');
+    out(rescheduleApplicationNextAction(s, {
+      taskId: String(subaction),
+      profileId: needProfile(flags),
+      dueAt: String(requireFlag(flags, 'due', '--due <rfc3339>')),
+      reason: String(requireFlag(flags, 'reason', '--reason <text>')),
+      actor: 'user',
+      source: 'cli',
+    }));
     return;
   }
   if (group === 'review' && action === 'weekly') {
@@ -986,6 +1643,25 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     usage('Missing loop target: scheduler, automation, or action');
+  }
+  if (group === 'agents' && action === 'connect') {
+    if (!subaction) usage('Missing client: hermes, codex, or claude');
+    out(await connectAgentClient(String(subaction), {
+      workspace: s.root,
+      cliPath: fileURLToPath(import.meta.url),
+      dryRun: Boolean(flags['dry-run']),
+      timeoutMs: flags.timeout ? numberFlag(flags, 'timeout', 10_000, { min: 1000 }) : undefined
+    }));
+    return;
+  }
+  if (group === 'agents' && action === 'doctor') {
+    out(await doctorAgents({
+      workspace: s.root,
+      cliPath: fileURLToPath(import.meta.url),
+      client: subaction ? String(subaction).toLowerCase() : 'all',
+      timeoutMs: flags.timeout ? numberFlag(flags, 'timeout', 5_000, { min: 1000 }) : undefined
+    }));
+    return;
   }
   if (group === 'agents' && action === 'add') {
     if (!subaction) usage('Missing agent name');
@@ -1089,7 +1765,7 @@ export async function main(argv = process.argv.slice(2)) {
   usage(`Unknown command: ${argv.join(' ')}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   main().catch(e => {
     const wantsJson = process.argv.includes('--json');
     const payload = normalizedError(e);

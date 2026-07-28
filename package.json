@@ -1,18 +1,53 @@
 {
-  "name": "jobos-local-first-mvp",
+  "name": "jobos",
   "version": "0.1.0",
-  "description": "Local-first agent-native terminal product for job discovery, networking, applications, and review",
+  "description": "Local-first, agent-native terminal operating system for job search and applications",
   "type": "module",
+  "license": "MIT",
+  "author": "JobOS contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lpbangun/JobOS.git"
+  },
+  "homepage": "https://github.com/lpbangun/JobOS#readme",
+  "bugs": {
+    "url": "https://github.com/lpbangun/JobOS/issues"
+  },
+  "keywords": [
+    "job-search",
+    "career",
+    "terminal",
+    "local-first",
+    "mcp",
+    "agent"
+  ],
+  "files": [
+    "src/",
+    "docs/jobos-tui.svg",
+    "docs/AGENT_GUIDE.md",
+    "docs/CONFIGURATION.md",
+    "docs/SAFETY_AND_STATE.md",
+    "docs/mcp-compatibility-decision.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "jobos": "./src/cli.js"
   },
   "scripts": {
     "jobos": "node src/cli.js",
     "tui": "node src/cli.js tui",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
     "smoke": "node scripts/smoke.js",
+    "smoke:live-form": "node scripts/smoke-live-form.js",
     "acp-demo": "node scripts/acp-demo.js",
-    "mcp-demo": "node scripts/mcp-demo.js"
+    "mcp-demo": "node scripts/mcp-demo.js",
+    "check:release-security": "node scripts/check-release-security.js --format json",
+    "test:w10": "node --test --test-concurrency=1 tests/w10-golden.test.js tests/w10-security-release.test.js tests/w10-docs-status.test.js tests/w10-mcp-compatibility.test.js",
+    "release:evidence": "node scripts/release-evidence.js"
   },
   "dependencies": {
     "@langchain/core": "1.2.3",
@@ -39,5 +74,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
   }
 }

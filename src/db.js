@@ -11,19 +11,351 @@ const require = createRequire(import.meta.url);
 let SQL;
 const lockSleep = new Int32Array(new SharedArrayBuffer(4));
 
+const interviewSchema = `CREATE TABLE IF NOT EXISTS interview_stories (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE TABLE IF NOT EXISTS interview_story_revisions (
+  id TEXT PRIMARY KEY,
+  story_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  state TEXT NOT NULL CHECK(state IN ('draft_needs_verification','verified','retired')),
+  change_kind TEXT NOT NULL CHECK(change_kind IN ('create','edit','verify','retire')),
+  title TEXT NOT NULL,
+  situation TEXT NOT NULL,
+  task TEXT NOT NULL,
+  action TEXT NOT NULL,
+  result TEXT NOT NULL,
+  reflection TEXT NOT NULL,
+  competency_tags_json TEXT NOT NULL,
+  audience_tags_json TEXT NOT NULL,
+  field_provenance_json TEXT NOT NULL,
+  confirmed_fields_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  supersedes_revision_id TEXT,
+  change_reason TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  verified_at TEXT,
+  UNIQUE(story_id, revision),
+  UNIQUE(id, story_id, profile_id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_revision_id) REFERENCES interview_story_revisions(id)
+);
+CREATE TABLE IF NOT EXISTS interview_story_field_evidence (
+  revision_id TEXT NOT NULL,
+  story_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  field_name TEXT NOT NULL CHECK(field_name IN ('situation','task','action','result')),
+  proof_point_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  proof_snapshot_json TEXT NOT NULL,
+  linked_at TEXT NOT NULL,
+  PRIMARY KEY(revision_id, field_name, proof_point_id),
+  FOREIGN KEY(revision_id, story_id, profile_id) REFERENCES interview_story_revisions(id, story_id, profile_id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(proof_point_id) REFERENCES proof_points(id)
+);
+CREATE TABLE IF NOT EXISTS interview_question_sources (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  question_text TEXT NOT NULL,
+  normalized_text TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('user_provided','recruiter_provided','interviewer_provided')),
+  source_ref TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  supersedes_source_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(supersedes_source_id) REFERENCES interview_question_sources(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS interview_question_sources_root_reference_idx
+  ON interview_question_sources(profile_id, source_ref)
+  WHERE source_ref != '' AND supersedes_source_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS interview_question_sources_one_correction_idx
+  ON interview_question_sources(supersedes_source_id)
+  WHERE supersedes_source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS interview_question_sources_reference_chain_idx
+  ON interview_question_sources(profile_id, source_ref, created_at, id)
+  WHERE source_ref != '';
+CREATE TABLE IF NOT EXISTS interview_pack_items (
+  artifact_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  question_id TEXT NOT NULL,
+  question_origin TEXT NOT NULL CHECK(question_origin IN ('sourced','inferred')),
+  question_text TEXT NOT NULL,
+  question_source_json TEXT NOT NULL,
+  coverage_status TEXT NOT NULL CHECK(coverage_status IN ('covered','gap')),
+  story_id TEXT,
+  story_revision_id TEXT,
+  match_score INTEGER NOT NULL,
+  match_reasons_json TEXT NOT NULL,
+  alternative_matches_json TEXT NOT NULL,
+  PRIMARY KEY(artifact_id, position),
+  UNIQUE(artifact_id, question_id),
+  CHECK(
+    (coverage_status='covered' AND story_id IS NOT NULL AND story_revision_id IS NOT NULL)
+    OR (coverage_status='gap' AND story_id IS NULL AND story_revision_id IS NULL)
+  ),
+  FOREIGN KEY(artifact_id) REFERENCES artifacts(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id),
+  FOREIGN KEY(story_id, profile_id) REFERENCES interview_stories(id, profile_id),
+  FOREIGN KEY(story_revision_id, story_id, profile_id) REFERENCES interview_story_revisions(id, story_id, profile_id)
+);
+CREATE TABLE IF NOT EXISTS interview_debriefs (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  interview_stage TEXT NOT NULL CHECK(interview_stage IN ('recruiter-screen','interview','hiring-manager','onsite','final','offer')),
+  audience TEXT NOT NULL CHECK(audience IN ('recruiter','hiring_manager','peer_panel','executive','unknown')),
+  reference_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(application_id) REFERENCES applications(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS interview_debriefs_profile_reference_idx
+  ON interview_debriefs(profile_id, reference_id)
+  WHERE reference_id != '';
+CREATE TABLE IF NOT EXISTS interview_debrief_revisions (
+  id TEXT PRIMARY KEY,
+  debrief_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  observed_questions_json TEXT NOT NULL,
+  observed_outcome_json TEXT NOT NULL,
+  proof_gaps_json TEXT NOT NULL,
+  story_uses_json TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  field_provenance_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  supersedes_revision_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  UNIQUE(debrief_id, revision),
+  UNIQUE(id, debrief_id, profile_id),
+  FOREIGN KEY(debrief_id, profile_id) REFERENCES interview_debriefs(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_revision_id) REFERENCES interview_debrief_revisions(id)
+);`;
+
+const w08CareerMemorySchema = `CREATE TABLE IF NOT EXISTS career_memory_observations (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  event_type TEXT NOT NULL CHECK(event_type IN (
+    'job_saved','job_skipped','job_applied',
+    'artifact_approved','artifact_rejected','artifact_edited'
+  )),
+  source_schema TEXT NOT NULL,
+  source_entity_type TEXT NOT NULL CHECK(source_entity_type IN ('job','application','artifact')),
+  source_entity_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL,
+  source_revision INTEGER CHECK(source_revision IS NULL OR source_revision > 0),
+  source_content_hash TEXT NOT NULL DEFAULT '',
+  occurred_at TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
+  reason_codes_json TEXT NOT NULL DEFAULT '[]',
+  signal_json TEXT NOT NULL DEFAULT '[]',
+  public_explanation TEXT NOT NULL DEFAULT '',
+  private_note TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  reference_id TEXT NOT NULL,
+  supersedes_observation_id TEXT,
+  undoes_observation_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  observation_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(profile_id, reference_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_observation_id, profile_id)
+    REFERENCES career_memory_observations(id, profile_id),
+  FOREIGN KEY(undoes_observation_id, profile_id)
+    REFERENCES career_memory_observations(id, profile_id),
+  CHECK(supersedes_observation_id IS NULL OR correction_reason != '')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS career_memory_observations_one_successor_idx
+  ON career_memory_observations(supersedes_observation_id)
+  WHERE supersedes_observation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS career_memory_observations_profile_time_idx
+  ON career_memory_observations(profile_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS career_memory_observations_source_idx
+  ON career_memory_observations(profile_id, source_schema, source_entity_type, source_entity_id, source_version_id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposals (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  domain TEXT NOT NULL CHECK(domain IN ('search','writing')),
+  scope TEXT NOT NULL CHECK(scope IN ('search','resume','cover_letter','outreach','interview_prep','writing_global')),
+  rule_type TEXT NOT NULL CHECK(rule_type IN (
+    'role_family','seniority','company_stage','industry','mission','location',
+    'work_model','compensation','skill','timing','trust_risk',
+    'tone','length','opening','closing','avoid_term','avoid_claim',
+    'positioning_priority','approved_exemplar'
+  )),
+  value_json TEXT NOT NULL,
+  rule_key TEXT NOT NULL,
+  conflict_key TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  confidence_milli INTEGER NOT NULL CHECK(confidence_milli BETWEEN 0 AND 1000),
+  confidence_band TEXT NOT NULL CHECK(confidence_band IN ('low','medium','high')),
+  conflict_state TEXT NOT NULL CHECK(conflict_state IN ('none','present')),
+  evidence_hash TEXT NOT NULL,
+  evidence_fresh_until TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp','deterministic')),
+  proposal_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  CHECK((domain='search' AND scope='search') OR (domain='writing' AND scope!='search')),
+  CHECK(NOT (rule_type='approved_exemplar' AND scope='writing_global'))
+);
+CREATE INDEX IF NOT EXISTS career_memory_proposals_profile_rule_idx
+  ON career_memory_proposals(profile_id, domain, scope, conflict_key, created_at, id);
+CREATE INDEX IF NOT EXISTS career_memory_proposals_profile_fresh_idx
+  ON career_memory_proposals(profile_id, evidence_fresh_until, id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposal_evidence (
+  proposal_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  observation_schema TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  source_entity_type TEXT NOT NULL,
+  source_entity_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  polarity TEXT NOT NULL CHECK(polarity IN ('support','conflict')),
+  weight INTEGER NOT NULL CHECK(weight IN (1,2)),
+  evidence_hash TEXT NOT NULL,
+  PRIMARY KEY(proposal_id, position),
+  UNIQUE(proposal_id, observation_schema, observation_id),
+  FOREIGN KEY(proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS career_memory_proposal_evidence_source_idx
+  ON career_memory_proposal_evidence(profile_id, observation_schema, observation_id);
+
+CREATE TABLE IF NOT EXISTS career_memory_proposal_transitions (
+  id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  from_status TEXT CHECK(from_status IS NULL OR from_status IN ('proposed','accepted','rejected','superseded','revoked')),
+  to_status TEXT NOT NULL CHECK(to_status IN ('proposed','accepted','rejected','superseded','revoked')),
+  reason TEXT NOT NULL DEFAULT '',
+  reference_id TEXT NOT NULL,
+  replacement_proposal_id TEXT,
+  undoes_transition_id TEXT,
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp','deterministic')),
+  occurred_at TEXT NOT NULL,
+  transition_hash TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(id, proposal_id, profile_id),
+  UNIQUE(proposal_id, sequence),
+  UNIQUE(profile_id, reference_id),
+  FOREIGN KEY(proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(replacement_proposal_id, profile_id)
+    REFERENCES career_memory_proposals(id, profile_id),
+  FOREIGN KEY(undoes_transition_id, profile_id)
+    REFERENCES career_memory_proposal_transitions(id, profile_id),
+  CHECK((sequence=1 AND from_status IS NULL AND to_status='proposed') OR sequence>1)
+);
+CREATE INDEX IF NOT EXISTS career_memory_transitions_resolve_idx
+  ON career_memory_proposal_transitions(profile_id, proposal_id, sequence DESC);
+
+CREATE TABLE IF NOT EXISTS career_memory_projection_revisions (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  projection_type TEXT NOT NULL CHECK(projection_type IN ('career_brief','voice_positioning_guide')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+  as_of TEXT NOT NULL,
+  source_state_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(id, profile_id),
+  UNIQUE(profile_id, projection_type, revision),
+  UNIQUE(profile_id, projection_type, source_state_hash),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS career_memory_projection_current_idx
+  ON career_memory_projection_revisions(profile_id, projection_type, revision DESC);
+
+CREATE TABLE IF NOT EXISTS career_memory_projection_sources (
+  projection_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  source_kind TEXT NOT NULL CHECK(source_kind IN (
+    'profile_field','proof_point','saved_search','accepted_rule','observation','artifact_revision'
+  )),
+  source_id TEXT NOT NULL,
+  source_version_id TEXT NOT NULL DEFAULT '',
+  source_hash TEXT NOT NULL,
+  PRIMARY KEY(projection_id, position),
+  UNIQUE(projection_id, source_kind, source_id, source_version_id),
+  FOREIGN KEY(projection_id, profile_id)
+    REFERENCES career_memory_projection_revisions(id, profile_id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);`;
+
+function migrateW08CareerMemory(db) {
+  db.run(w08CareerMemorySchema);
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W08 career-memory migration left foreign-key violations');
+}
+
 const schema = `PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, preferences_json TEXT NOT NULL, resume_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS proof_points (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', metrics_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'manual', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id));
+CREATE TABLE IF NOT EXISTS proof_points (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', metrics_json TEXT NOT NULL DEFAULT '[]', source TEXT NOT NULL DEFAULT 'manual', metadata_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','retired','needs_verification')), verification_status TEXT NOT NULL DEFAULT 'verified' CHECK(verification_status IN ('verified','unverified','rejected')), source_resume_entry_id TEXT, supersedes_proof_point_id TEXT, updated_at TEXT NOT NULL, retired_at TEXT, retirement_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_proof_point_id) REFERENCES proof_points(id));
 CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL, website TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '[]', domain TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]', source_confidence TEXT NOT NULL DEFAULT 'low', identity_sources_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, company_id TEXT, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', description TEXT NOT NULL, requirements_json TEXT NOT NULL DEFAULT '[]', compensation TEXT NOT NULL DEFAULT '', work_model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'imported', fit_score INTEGER, score_json TEXT, high_fit INTEGER NOT NULL DEFAULT 0, posted_date TEXT NOT NULL DEFAULT '', dedupe_key TEXT NOT NULL DEFAULT '', source_history_json TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT, last_seen_at TEXT, reposted INTEGER NOT NULL DEFAULT 0, discovery_run_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,url), FOREIGN KEY(profile_id) REFERENCES profiles(id));
+CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, company_id TEXT, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'manual', description TEXT NOT NULL, requirements_json TEXT NOT NULL DEFAULT '[]', compensation TEXT NOT NULL DEFAULT '', compensation_json TEXT NOT NULL DEFAULT '{}', work_model TEXT NOT NULL DEFAULT '', employment_types_json TEXT NOT NULL DEFAULT '[]', department TEXT NOT NULL DEFAULT '', source_native_json TEXT NOT NULL DEFAULT '{}', liveness_status TEXT NOT NULL DEFAULT 'uncertain', liveness_checked_at TEXT, liveness_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'imported', fit_score INTEGER, score_json TEXT, high_fit INTEGER NOT NULL DEFAULT 0, posted_date TEXT NOT NULL DEFAULT '', dedupe_key TEXT NOT NULL DEFAULT '', source_history_json TEXT NOT NULL DEFAULT '[]', first_seen_at TEXT, last_seen_at TEXT, reposted INTEGER NOT NULL DEFAULT 0, discovery_run_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,url), FOREIGN KEY(profile_id) REFERENCES profiles(id));
 CREATE TABLE IF NOT EXISTS saved_searches (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, profile_id TEXT NOT NULL, adapter TEXT NOT NULL, config_json TEXT NOT NULL DEFAULT '{}', min_fit INTEGER NOT NULL DEFAULT 70, last_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES profiles(id));
 CREATE TABLE IF NOT EXISTS company_watchlist (id TEXT PRIMARY KEY, company TEXT NOT NULL, adapter TEXT NOT NULL, handle TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(company,adapter,handle));
 CREATE TABLE IF NOT EXISTS stakeholders (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', links_json TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', outreach_status TEXT NOT NULL DEFAULT 'not_contacted', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, status TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', confirmation_url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(job_id,profile_id));
-CREATE TABLE IF NOT EXISTS status_changes (id TEXT PRIMARY KEY, application_id TEXT NOT NULL, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS status_changes (id TEXT PRIMARY KEY, application_id TEXT NOT NULL, job_id TEXT NOT NULL, profile_id TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, actor TEXT NOT NULL DEFAULT 'unknown_legacy', source TEXT NOT NULL DEFAULT 'legacy', source_event_id TEXT);
 CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, type TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', warnings_json TEXT NOT NULL DEFAULT '[]', approval_status TEXT NOT NULL DEFAULT 'draft_needs_human_review' CHECK(approval_status IN ('draft_needs_human_review','approved','rejected')), created_at TEXT NOT NULL, series_key TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), supersedes_artifact_id TEXT, content_hash TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT, review_note TEXT NOT NULL DEFAULT '', UNIQUE(series_key,revision), FOREIGN KEY(supersedes_artifact_id) REFERENCES artifacts(id));
-CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS profile_resume_revisions (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), schema_version INTEGER NOT NULL, source_text TEXT NOT NULL DEFAULT '', source_text_hash TEXT NOT NULL, document_json TEXT NOT NULL, verification_status TEXT NOT NULL CHECK(verification_status IN ('verified','needs_verification','rejected')), supersedes_resume_id TEXT, is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0,1)), created_at TEXT NOT NULL, reviewed_at TEXT, UNIQUE(profile_id,revision), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_resume_id) REFERENCES profile_resume_revisions(id));
+CREATE UNIQUE INDEX IF NOT EXISTS profile_resume_current_idx ON profile_resume_revisions(profile_id) WHERE is_current=1;
+CREATE TABLE IF NOT EXISTS artifact_resume_documents (artifact_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, source_resume_revision_id TEXT NOT NULL, document_json TEXT NOT NULL, coverage_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}', layout_profile_json TEXT NOT NULL DEFAULT '{}', render_manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(artifact_id) REFERENCES artifacts(id), FOREIGN KEY(source_resume_revision_id) REFERENCES profile_resume_revisions(id));
+CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -31,7 +363,7 @@ CREATE TABLE IF NOT EXISTS email_patterns (id TEXT PRIMARY KEY, company_id TEXT 
 CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id));
-CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, profile_id TEXT, action_kind TEXT NOT NULL DEFAULT 'general' CHECK(action_kind IN ('general','application_next_action')), action_code TEXT, stage TEXT, source_event_type TEXT, source_event_id TEXT, waiting_since TEXT, policy_due_at TEXT, urgent_at TEXT, schedule_source TEXT NOT NULL DEFAULT 'legacy' CHECK(schedule_source IN ('legacy','policy','manual')), manual_rescheduled_at TEXT, manual_reschedule_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(application_id) REFERENCES applications(id));
 CREATE TABLE IF NOT EXISTS automations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, action_id TEXT NOT NULL, schedule TEXT NOT NULL, profile_id TEXT, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', last_run_at TEXT, last_status TEXT NOT NULL DEFAULT 'never_run', consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_runs (id TEXT PRIMARY KEY, trigger_name TEXT NOT NULL, inputs_json TEXT NOT NULL DEFAULT '{}', outputs_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, external_side_effects TEXT NOT NULL DEFAULT 'none', created_at TEXT NOT NULL, automation_id TEXT, action_id TEXT, trigger_type TEXT NOT NULL DEFAULT 'manual', started_at TEXT, finished_at TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT, counts_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS people (id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL, primary_profile_url TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]', identity_confidence TEXT NOT NULL DEFAULT 'low', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -48,8 +380,12 @@ CREATE TABLE IF NOT EXISTS application_packets (
   attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
   revision INTEGER NOT NULL CHECK(revision > 0),
   content_hash TEXT NOT NULL,
-  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create = 'approved'),
+  readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create IN ('approved','form-ready')),
   readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+  packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2)),
+  form_snapshot_id TEXT,
+  form_fingerprint TEXT,
+  form_binding_json TEXT,
   resume_artifact_id TEXT NOT NULL,
   resume_content_hash TEXT NOT NULL,
   cover_artifact_id TEXT,
@@ -85,16 +421,326 @@ CREATE TABLE IF NOT EXISTS application_receipts (
   evidence_hash TEXT NOT NULL DEFAULT '',
   note TEXT NOT NULL DEFAULT '',
   receipt_hash TEXT NOT NULL UNIQUE,
-  source TEXT NOT NULL CHECK(source IN ('cli','tui')),
-  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'),
+  source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp')),
+  external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+  evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2)),
+  form_fingerprint TEXT,
+  checkpoint_id TEXT,
+  checkpoint_hash TEXT,
+  submission_attempt_id TEXT,
+  submission_actor TEXT NOT NULL DEFAULT 'human' CHECK(submission_actor IN ('human','configured_adapter')),
+  adapter_json TEXT,
+  confirmation_origin TEXT,
+  confirmation_path TEXT,
+  policy_json TEXT NOT NULL DEFAULT '{}',
   UNIQUE(packet_id, type),
   FOREIGN KEY(packet_id) REFERENCES application_packets(id),
   FOREIGN KEY(application_id) REFERENCES applications(id)
 );
 CREATE INDEX IF NOT EXISTS application_receipts_application_idx
-  ON application_receipts(application_id, recorded_at, id);`;
+  ON application_receipts(application_id, recorded_at, id);
+CREATE TABLE IF NOT EXISTS form_snapshots (
+  id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL CHECK(version = 1),
+  job_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  requested_origin TEXT NOT NULL,
+  requested_path TEXT NOT NULL,
+  final_origin TEXT NOT NULL,
+  final_path TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  adapter_protocol_version INTEGER NOT NULL CHECK(adapter_protocol_version = 1),
+  adapter_source_hash TEXT NOT NULL,
+  selection_json TEXT NOT NULL,
+  field_map_json TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  target_binding TEXT,
+  target_ciphertext TEXT,
+  target_iv TEXT,
+  target_tag TEXT,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id)
+);
+CREATE INDEX IF NOT EXISTS form_snapshots_target_idx
+  ON form_snapshots(job_id, profile_id, captured_at, id);
+CREATE TABLE IF NOT EXISTS form_fill_runs (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  form_fingerprint TEXT NOT NULL,
+  adapter_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('checkpoint-required','diverged','failed')),
+  readback_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id)
+);
+CREATE TABLE IF NOT EXISTS human_checkpoints (
+  id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL,
+  fill_run_id TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL UNIQUE,
+  confirmation_json TEXT NOT NULL,
+  accepted_at TEXT NOT NULL,
+  accepted_by_source TEXT NOT NULL CHECK(accepted_by_source IN ('cli','tui')),
+  UNIQUE(packet_id,fill_run_id),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(fill_run_id) REFERENCES form_fill_runs(id)
+);
+CREATE TABLE IF NOT EXISTS form_submission_attempts (
+  id TEXT PRIMARY KEY,
+  submission_key TEXT NOT NULL UNIQUE,
+  packet_id TEXT NOT NULL,
+  packet_hash TEXT NOT NULL,
+  form_fingerprint TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  checkpoint_hash TEXT NOT NULL,
+  adapter_json TEXT NOT NULL,
+  invoked_by TEXT NOT NULL CHECK(invoked_by IN ('cli','tui','mcp','acp')),
+  configuration_source TEXT NOT NULL CHECK(configuration_source IN ('profile','environment')),
+  status TEXT NOT NULL CHECK(status IN ('armed','confirmed','uncertain','failed-before-submit')),
+  outcome_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+  FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+  FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id)
+);${interviewSchema}${w08CareerMemorySchema}`;
+
+function tableDefinition(db, name) {
+  return String(dbRows(db, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", [name])[0]?.sql || '');
+}
+
+function migrateW02Constraints(db) {
+  const packetDefinition = tableDefinition(db, 'application_packets');
+  const receiptDefinition = tableDefinition(db, 'application_receipts');
+  const rebuildPackets = packetDefinition && !packetDefinition.includes("'form-ready'");
+  const rebuildReceipts = receiptDefinition
+    && (!receiptDefinition.includes("'user_configured_form_submission'") || !receiptDefinition.includes("'mcp'"));
+  if (!rebuildPackets && !rebuildReceipts) return;
+
+  db.run('PRAGMA foreign_keys=OFF');
+  try {
+    db.run('BEGIN');
+    if (rebuildPackets) {
+      db.run(`CREATE TABLE application_packets_w02 (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+        revision INTEGER NOT NULL CHECK(revision > 0),
+        content_hash TEXT NOT NULL,
+        readiness_status_at_create TEXT NOT NULL CHECK(readiness_status_at_create IN ('approved','form-ready')),
+        readiness_version INTEGER NOT NULL CHECK(readiness_version >= 3),
+        packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2)),
+        form_snapshot_id TEXT,
+        form_fingerprint TEXT,
+        form_binding_json TEXT,
+        resume_artifact_id TEXT NOT NULL,
+        resume_content_hash TEXT NOT NULL,
+        cover_artifact_id TEXT,
+        cover_content_hash TEXT,
+        answers_json TEXT NOT NULL DEFAULT '[]',
+        identity_json TEXT NOT NULL DEFAULT '{}',
+        materials_json TEXT NOT NULL DEFAULT '{}',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        created_by_source TEXT NOT NULL CHECK(created_by_source IN ('cli','tui')),
+        supersedes_packet_id TEXT,
+        UNIQUE(job_id, profile_id, attempt_number, revision),
+        CHECK((cover_artifact_id IS NULL AND cover_content_hash IS NULL) OR (cover_artifact_id IS NOT NULL AND cover_content_hash IS NOT NULL)),
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(profile_id) REFERENCES profiles(id),
+        FOREIGN KEY(application_id) REFERENCES applications(id),
+        FOREIGN KEY(resume_artifact_id) REFERENCES artifacts(id),
+        FOREIGN KEY(cover_artifact_id) REFERENCES artifacts(id),
+        FOREIGN KEY(supersedes_packet_id) REFERENCES application_packets_w02(id)
+      )`);
+      db.run(`INSERT INTO application_packets_w02 (
+        id,job_id,profile_id,application_id,attempt_number,revision,content_hash,
+        readiness_status_at_create,readiness_version,packet_version,form_snapshot_id,
+        form_fingerprint,form_binding_json,resume_artifact_id,resume_content_hash,
+        cover_artifact_id,cover_content_hash,answers_json,identity_json,materials_json,
+        blockers_json,warnings_json,created_at,created_by_source,supersedes_packet_id
+      ) SELECT
+        id,job_id,profile_id,application_id,attempt_number,revision,content_hash,
+        readiness_status_at_create,readiness_version,packet_version,form_snapshot_id,
+        form_fingerprint,form_binding_json,resume_artifact_id,resume_content_hash,
+        cover_artifact_id,cover_content_hash,answers_json,identity_json,materials_json,
+        blockers_json,warnings_json,created_at,created_by_source,supersedes_packet_id
+      FROM application_packets`);
+      db.run('DROP TABLE application_packets');
+      db.run('ALTER TABLE application_packets_w02 RENAME TO application_packets');
+      db.run('CREATE INDEX application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)');
+      db.run('CREATE INDEX application_packets_form_idx ON application_packets(form_fingerprint,packet_version)');
+    }
+    if (rebuildReceipts) {
+      db.run(`CREATE TABLE application_receipts_w02 (
+        id TEXT PRIMARY KEY,
+        packet_id TEXT NOT NULL,
+        application_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')),
+        submitted_at TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        external_reference TEXT NOT NULL DEFAULT '',
+        evidence_path TEXT NOT NULL DEFAULT '',
+        evidence_hash TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        receipt_hash TEXT NOT NULL UNIQUE,
+        source TEXT NOT NULL CHECK(source IN ('cli','tui','mcp','acp')),
+        external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect IN ('none','user_configured_form_submission')),
+        evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2)),
+        form_fingerprint TEXT,
+        checkpoint_id TEXT,
+        checkpoint_hash TEXT,
+        submission_attempt_id TEXT,
+        submission_actor TEXT NOT NULL DEFAULT 'human' CHECK(submission_actor IN ('human','configured_adapter')),
+        adapter_json TEXT,
+        confirmation_origin TEXT,
+        confirmation_path TEXT,
+        policy_json TEXT NOT NULL DEFAULT '{}',
+        UNIQUE(packet_id, type),
+        FOREIGN KEY(packet_id) REFERENCES application_packets(id),
+        FOREIGN KEY(application_id) REFERENCES applications(id)
+      )`);
+      db.run(`INSERT INTO application_receipts_w02 (
+        id,packet_id,application_id,type,submitted_at,recorded_at,external_reference,
+        evidence_path,evidence_hash,note,receipt_hash,source,external_side_effect,
+        evidence_version,form_fingerprint,checkpoint_id,checkpoint_hash,
+        submission_attempt_id,submission_actor,adapter_json,confirmation_origin,
+        confirmation_path,policy_json
+      ) SELECT
+        id,packet_id,application_id,type,submitted_at,recorded_at,external_reference,
+        evidence_path,evidence_hash,note,receipt_hash,source,external_side_effect,
+        evidence_version,form_fingerprint,checkpoint_id,checkpoint_hash,
+        submission_attempt_id,COALESCE(submission_actor,'human'),adapter_json,
+        confirmation_origin,confirmation_path,policy_json
+      FROM application_receipts`);
+      db.run('DROP TABLE application_receipts');
+      db.run('ALTER TABLE application_receipts_w02 RENAME TO application_receipts');
+      db.run('CREATE INDEX application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)');
+    }
+    db.run('COMMIT');
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw error;
+  } finally {
+    db.run('PRAGMA foreign_keys=ON');
+  }
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W02 packet/receipt migration left foreign-key violations');
+}
+function migrateW06Tasks(db) {
+  const taskDefinition = tableDefinition(db, 'tasks');
+  if (!taskDefinition) return;
+  if (taskDefinition.includes('action_kind')) {
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_current_application_action_idx ON tasks(application_id) WHERE action_kind='application_next_action' AND status='open'");
+    db.run('CREATE INDEX IF NOT EXISTS tasks_profile_status_due_idx ON tasks(profile_id,status,due_at)');
+    db.run('CREATE INDEX IF NOT EXISTS tasks_application_action_status_idx ON tasks(application_id,action_kind,status)');
+    return;
+  }
+
+  db.run('PRAGMA foreign_keys=OFF');
+  try {
+    db.run('BEGIN');
+    db.run(`CREATE TABLE tasks_w06 (
+      id TEXT PRIMARY KEY,
+      job_id TEXT,
+      application_id TEXT,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'review',
+      due_at TEXT,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_by TEXT NOT NULL DEFAULT 'system',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      profile_id TEXT,
+      action_kind TEXT NOT NULL DEFAULT 'general' CHECK(action_kind IN ('general','application_next_action')),
+      action_code TEXT,
+      stage TEXT,
+      source_event_type TEXT,
+      source_event_id TEXT,
+      waiting_since TEXT,
+      policy_due_at TEXT,
+      urgent_at TEXT,
+      schedule_source TEXT NOT NULL DEFAULT 'legacy' CHECK(schedule_source IN ('legacy','policy','manual')),
+      manual_rescheduled_at TEXT,
+      manual_reschedule_reason TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY(profile_id) REFERENCES profiles(id),
+      FOREIGN KEY(job_id) REFERENCES jobs(id),
+      FOREIGN KEY(application_id) REFERENCES applications(id)
+    )`);
+    db.run(`INSERT INTO tasks_w06 (
+      id,job_id,application_id,title,description,type,due_at,priority,status,created_by,
+      created_at,updated_at,profile_id,action_kind,action_code,stage,source_event_type,
+      source_event_id,waiting_since,policy_due_at,urgent_at,schedule_source,
+      manual_rescheduled_at,manual_reschedule_reason
+    ) SELECT
+      tasks.id,tasks.job_id,tasks.application_id,tasks.title,tasks.description,tasks.type,
+      tasks.due_at,tasks.priority,tasks.status,tasks.created_by,tasks.created_at,tasks.updated_at,
+      COALESCE(
+        (SELECT applications.profile_id FROM applications WHERE applications.id=tasks.application_id),
+        (SELECT jobs.profile_id FROM jobs WHERE jobs.id=tasks.job_id),
+        (SELECT outreach_threads.profile_id FROM outreach_threads
+          WHERE outreach_threads.followup_task_id=tasks.id
+          ORDER BY outreach_threads.id LIMIT 1)
+      ),
+      'general',NULL,NULL,NULL,NULL,NULL,NULL,NULL,'legacy',NULL,''
+    FROM tasks`);
+    db.run('DROP TABLE tasks');
+    db.run('ALTER TABLE tasks_w06 RENAME TO tasks');
+    db.run("CREATE UNIQUE INDEX tasks_one_current_application_action_idx ON tasks(application_id) WHERE action_kind='application_next_action' AND status='open'");
+    db.run('CREATE INDEX tasks_profile_status_due_idx ON tasks(profile_id,status,due_at)');
+    db.run('CREATE INDEX tasks_application_action_status_idx ON tasks(application_id,action_kind,status)');
+    db.run('COMMIT');
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw error;
+  } finally {
+    db.run('PRAGMA foreign_keys=ON');
+  }
+  const violations = dbRows(db, 'PRAGMA foreign_key_check');
+  if (violations.length) throw new Error('W06 task migration left foreign-key violations');
+}
+
+const outreachOutcomesSchema = `CREATE TABLE IF NOT EXISTS outreach_outcomes (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  job_id TEXT,
+  stakeholder_id TEXT,
+  contact_point_id TEXT,
+  role_class TEXT NOT NULL,
+  contact_tier TEXT NOT NULL DEFAULT '',
+  contact_path TEXT NOT NULL DEFAULT '',
+  channel TEXT NOT NULL,
+  outcome_type TEXT NOT NULL CHECK(outcome_type IN ('reply_positive','reply_neutral','reply_negative','meeting_booked','no_response','bounced','declined')),
+  occurred_at TEXT NOT NULL,
+  window_end_at TEXT,
+  recorded_at TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
+  reference_id TEXT NOT NULL DEFAULT '',
+  supersedes_outcome_id TEXT,
+  correction_reason TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY(thread_id) REFERENCES outreach_threads(id),
+  FOREIGN KEY(profile_id) REFERENCES profiles(id),
+  FOREIGN KEY(supersedes_outcome_id) REFERENCES outreach_outcomes(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS outreach_outcomes_profile_reference_idx
+  ON outreach_outcomes(profile_id, reference_id) WHERE reference_id != '';
+CREATE INDEX IF NOT EXISTS outreach_outcomes_profile_time_idx
+  ON outreach_outcomes(profile_id, occurred_at, id);
+CREATE INDEX IF NOT EXISTS outreach_outcomes_thread_idx
+  ON outreach_outcomes(thread_id, recorded_at, id);`;
 
 function migrate(db){
+  db.run(interviewSchema);
   for (const sql of [
     "ALTER TABLE proof_points ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE proof_points ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
@@ -111,6 +757,13 @@ function migrate(db){
     "ALTER TABLE jobs ADD COLUMN last_seen_at TEXT",
     "ALTER TABLE jobs ADD COLUMN reposted INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN discovery_run_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN compensation_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE jobs ADD COLUMN employment_types_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE jobs ADD COLUMN department TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN source_native_json TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE jobs ADD COLUMN liveness_status TEXT NOT NULL DEFAULT 'uncertain'",
+    "ALTER TABLE jobs ADD COLUMN liveness_checked_at TEXT",
+    "ALTER TABLE jobs ADD COLUMN liveness_json TEXT NOT NULL DEFAULT '{}'",
     "ALTER TABLE automation_runs ADD COLUMN automation_id TEXT",
     "ALTER TABLE automation_runs ADD COLUMN action_id TEXT",
     "ALTER TABLE automation_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual'",
@@ -126,7 +779,18 @@ function migrate(db){
     "ALTER TABLE artifacts ADD COLUMN reviewed_at TEXT",
     "ALTER TABLE artifacts ADD COLUMN reviewed_by TEXT",
     "ALTER TABLE artifacts ADD COLUMN review_note TEXT NOT NULL DEFAULT ''",
-    "CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "ALTER TABLE proof_points ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','retired','needs_verification'))",
+    "ALTER TABLE proof_points ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'verified' CHECK(verification_status IN ('verified','unverified','rejected'))",
+    "ALTER TABLE proof_points ADD COLUMN source_resume_entry_id TEXT",
+    "ALTER TABLE proof_points ADD COLUMN supersedes_proof_point_id TEXT",
+    "ALTER TABLE proof_points ADD COLUMN updated_at TEXT",
+    "ALTER TABLE proof_points ADD COLUMN retired_at TEXT",
+    "ALTER TABLE proof_points ADD COLUMN retirement_reason TEXT NOT NULL DEFAULT ''",
+    "UPDATE proof_points SET updated_at=COALESCE(updated_at,created_at)",
+    "CREATE TABLE IF NOT EXISTS profile_resume_revisions (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), schema_version INTEGER NOT NULL, source_text TEXT NOT NULL DEFAULT '', source_text_hash TEXT NOT NULL, document_json TEXT NOT NULL, verification_status TEXT NOT NULL CHECK(verification_status IN ('verified','needs_verification','rejected')), supersedes_resume_id TEXT, is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0,1)), created_at TEXT NOT NULL, reviewed_at TEXT, UNIQUE(profile_id,revision), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_resume_id) REFERENCES profile_resume_revisions(id))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS profile_resume_current_idx ON profile_resume_revisions(profile_id) WHERE is_current=1",
+    "CREATE TABLE IF NOT EXISTS artifact_resume_documents (artifact_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, source_resume_revision_id TEXT NOT NULL, document_json TEXT NOT NULL, coverage_json TEXT NOT NULL DEFAULT '{}', validation_json TEXT NOT NULL DEFAULT '{}', layout_profile_json TEXT NOT NULL DEFAULT '{}', render_manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(artifact_id) REFERENCES artifacts(id), FOREIGN KEY(source_resume_revision_id) REFERENCES profile_resume_revisions(id))",
+    "CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}')",
     "CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
@@ -138,6 +802,30 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS application_packets_target_idx ON application_packets(job_id, profile_id, attempt_number DESC, revision DESC)",
     "CREATE TABLE IF NOT EXISTS application_receipts (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, application_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('user_attestation','adapter_receipt','imported_evidence')), submitted_at TEXT NOT NULL, recorded_at TEXT NOT NULL, external_reference TEXT NOT NULL DEFAULT '', evidence_path TEXT NOT NULL DEFAULT '', evidence_hash TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', receipt_hash TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK(source IN ('cli','tui')), external_side_effect TEXT NOT NULL DEFAULT 'none' CHECK(external_side_effect = 'none'), UNIQUE(packet_id, type), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(application_id) REFERENCES applications(id))",
     "CREATE INDEX IF NOT EXISTS application_receipts_application_idx ON application_receipts(application_id, recorded_at, id)",
+    "ALTER TABLE application_packets ADD COLUMN packet_version INTEGER NOT NULL DEFAULT 1 CHECK(packet_version IN (1,2))",
+    "ALTER TABLE application_packets ADD COLUMN form_snapshot_id TEXT",
+    "ALTER TABLE application_packets ADD COLUMN form_fingerprint TEXT",
+    "ALTER TABLE application_packets ADD COLUMN form_binding_json TEXT",
+    "CREATE INDEX IF NOT EXISTS application_packets_form_idx ON application_packets(form_fingerprint,packet_version)",
+    "ALTER TABLE application_receipts ADD COLUMN evidence_version INTEGER NOT NULL DEFAULT 1 CHECK(evidence_version IN (1,2))",
+    "ALTER TABLE application_receipts ADD COLUMN form_fingerprint TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN checkpoint_id TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN checkpoint_hash TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN submission_attempt_id TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN submission_actor TEXT NOT NULL DEFAULT 'human'",
+    "ALTER TABLE application_receipts ADD COLUMN adapter_json TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN confirmation_origin TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN confirmation_path TEXT",
+    "ALTER TABLE application_receipts ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'",
+    "CREATE TABLE IF NOT EXISTS form_snapshots (id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK(version = 1), job_id TEXT NOT NULL, profile_id TEXT NOT NULL, captured_at TEXT NOT NULL, requested_origin TEXT NOT NULL, requested_path TEXT NOT NULL, final_origin TEXT NOT NULL, final_path TEXT NOT NULL, adapter_id TEXT NOT NULL, adapter_protocol_version INTEGER NOT NULL CHECK(adapter_protocol_version = 1), adapter_source_hash TEXT NOT NULL, selection_json TEXT NOT NULL, field_map_json TEXT NOT NULL, fingerprint TEXT NOT NULL, warnings_json TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(profile_id) REFERENCES profiles(id))",
+    "ALTER TABLE form_snapshots ADD COLUMN target_binding TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_ciphertext TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_iv TEXT",
+    "ALTER TABLE form_snapshots ADD COLUMN target_tag TEXT",
+    "CREATE INDEX IF NOT EXISTS form_snapshots_target_idx ON form_snapshots(job_id, profile_id, captured_at, id)",
+    "CREATE TABLE IF NOT EXISTS form_fill_runs (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, form_fingerprint TEXT NOT NULL, adapter_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('checkpoint-required','diverged','failed')), readback_json TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(packet_id) REFERENCES application_packets(id))",
+    "CREATE TABLE IF NOT EXISTS human_checkpoints (id TEXT PRIMARY KEY, packet_id TEXT NOT NULL, fill_run_id TEXT NOT NULL, checkpoint_hash TEXT NOT NULL UNIQUE, confirmation_json TEXT NOT NULL, accepted_at TEXT NOT NULL, accepted_by_source TEXT NOT NULL CHECK(accepted_by_source IN ('cli','tui')), UNIQUE(packet_id,fill_run_id), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(fill_run_id) REFERENCES form_fill_runs(id))",
+    "CREATE TABLE IF NOT EXISTS form_submission_attempts (id TEXT PRIMARY KEY, submission_key TEXT NOT NULL UNIQUE, packet_id TEXT NOT NULL, packet_hash TEXT NOT NULL, form_fingerprint TEXT NOT NULL, checkpoint_id TEXT NOT NULL, checkpoint_hash TEXT NOT NULL, adapter_json TEXT NOT NULL, invoked_by TEXT NOT NULL CHECK(invoked_by IN ('cli','tui','mcp','acp')), configuration_source TEXT NOT NULL CHECK(configuration_source IN ('profile','environment')), status TEXT NOT NULL CHECK(status IN ('armed','confirmed','uncertain','failed-before-submit')), outcome_json TEXT NOT NULL DEFAULT '{}', started_at TEXT NOT NULL, completed_at TEXT, external_side_effect TEXT NOT NULL CHECK(external_side_effect IN ('none','user_configured_form_submission')), FOREIGN KEY(packet_id) REFERENCES application_packets(id), FOREIGN KEY(checkpoint_id) REFERENCES human_checkpoints(id))",
     "ALTER TABLE person_candidates ADD COLUMN person_id TEXT",
     "ALTER TABLE person_candidates ADD COLUMN research_run_id TEXT",
     "ALTER TABLE stakeholders ADD COLUMN person_id TEXT",
@@ -151,12 +839,31 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS idx_person_candidates_run ON person_candidates(research_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_stakeholders_person ON stakeholders(person_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
-    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)"
+    "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)",
+    "ALTER TABLE outreach_threads ADD COLUMN contact_point_id TEXT",
+    "ALTER TABLE status_changes ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown_legacy'",
+    "ALTER TABLE status_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",
+    "ALTER TABLE status_changes ADD COLUMN source_event_id TEXT",
+    "CREATE TABLE IF NOT EXISTS outreach_outcomes (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, profile_id TEXT NOT NULL, job_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, role_class TEXT NOT NULL, contact_tier TEXT NOT NULL DEFAULT '', contact_path TEXT NOT NULL DEFAULT '', channel TEXT NOT NULL, outcome_type TEXT NOT NULL CHECK(outcome_type IN ('reply_positive','reply_neutral','reply_negative','meeting_booked','no_response','bounced','declined')), occurred_at TEXT NOT NULL, window_end_at TEXT, recorded_at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL, source TEXT NOT NULL, reference_id TEXT NOT NULL DEFAULT '', supersedes_outcome_id TEXT, correction_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(thread_id) REFERENCES outreach_threads(id), FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(supersedes_outcome_id) REFERENCES outreach_outcomes(id))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS outreach_outcomes_profile_reference_idx ON outreach_outcomes(profile_id, reference_id) WHERE reference_id != ''",
+    "CREATE INDEX IF NOT EXISTS outreach_outcomes_profile_time_idx ON outreach_outcomes(profile_id, occurred_at, id)",
+    "CREATE INDEX IF NOT EXISTS outreach_outcomes_thread_idx ON outreach_outcomes(thread_id, recorded_at, id)"
   ]) {
     try { db.run(sql); } catch (e) {
       const message = String(e?.message || e);
       if (!/duplicate column name/i.test(message) && !/already exists/i.test(message)) throw e;
     }
+  }
+  migrateW02Constraints(db);
+  migrateW06Tasks(db);
+  migrateW08CareerMemory(db);
+  const backfillKey = 'migration_resume_import_backfill';
+  const check = db.prepare('SELECT value FROM meta WHERE key=?', [backfillKey]);
+  let alreadyBackfilled = false;
+  try { while (check.step()) alreadyBackfilled = true; } finally { check.free(); }
+  if (!alreadyBackfilled) {
+    db.run("UPDATE proof_points SET verification_status='unverified' WHERE source='resume_import' AND verification_status='verified'");
+    db.run('INSERT INTO meta (key, value) VALUES (?, ?)', [backfillKey, 'done']);
   }
 }
 function dbRows(db, sql, params = []) {
@@ -470,6 +1177,7 @@ function loadAuthoritativeStore(s) {
   migrateArtifacts(s.db);
   migratePolicyPreferences(s.db);
   seedDefaultAutomations(s);
+  s.db.run('PRAGMA foreign_keys=ON');
   s.baseRevision = revisionOf(s.db);
   return s;
 }
@@ -499,6 +1207,7 @@ function persistLocked(s) {
       try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
     } catch {}
     s.baseRevision = next;
+    s.db.run('PRAGMA foreign_keys=ON');
   } finally {
     if (temp) try { fs.unlinkSync(temp); } catch {}
   }
@@ -523,14 +1232,23 @@ export async function openStore(flags={}) {
   let previousSchemaVersion = '0';
   try { previousSchemaVersion = String(db.exec("SELECT value FROM meta WHERE key='schema_version'")[0]?.values?.[0]?.[0] || '0'); } catch {}
   db.run(schema);
+  db.run(outreachOutcomesSchema);
   migrate(db);
   migrateArtifacts(db);
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','8']);
+  db.run('PRAGMA foreign_keys=ON');
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','15']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
+  const { backfillLifecycleActions } = await import('./lifecycle.js');
+  const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '8') save(store);
+  if (!existed || previousSchemaVersion !== '15' || affectedJobIds.length) save(store);
+  db.run('PRAGMA foreign_keys=ON');
+  if (affectedJobIds.length) {
+    const { syncJob } = await import('./jobs.js');
+    for (const jobId of affectedJobIds) syncJob(store, jobId);
+  }
   return store;
 }
 

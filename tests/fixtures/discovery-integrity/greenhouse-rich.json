@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "id": 301,
+      "title": "Platform Product Manager",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/301",
+      "location": { "name": "Remote — US" },
+      "updated_at": "2026-07-20T12:00:00Z",
+      "content": "<p>Lead platform discovery and delivery.</p>",
+      "departments": [{ "id": 7, "name": "Product" }],
+      "metadata": [
+        { "name": "Employment Type", "value": "Full-time" },
+        { "name": "Workplace Type", "value": "Remote" }
+      ],
+      "pay_input_ranges": [
+        { "min_cents": 15000000, "max_cents": 19000000, "currency_type": "USD", "title": "Annual salary" }
+      ]
+    }
+  ]
+}

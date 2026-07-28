@@ -1,0 +1,11 @@
+{
+  "name": "redirect-private",
+  "description": "W03-HTTP-05: redirect target is a private IP. The follow-up fetch must never be issued; safe transport rejects non-public targets before fetch.",
+  "url": "https://example.com/careers/jobs/99",
+  "lookup": {
+    "example.com": ["8.8.8.8"]
+  },
+  "responses": [
+    { "status": 302, "headers": { "location": "http://10.0.0.5/jobs" }, "body": "", "ok": false }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "redirect-public",
+  "description": "W03-HTTP-05: positive public-redirect sequence. Initial direct URL 302s to a different public host that 200s. Both hops reachable; lookup must permit both.",
+  "url": "https://example.com/careers/jobs/99",
+  "lookup": {
+    "example.com": ["8.8.8.8"],
+    "careers.example.org": ["1.1.1.1"]
+  },
+  "responses": [
+    { "status": 302, "headers": { "location": "https://careers.example.org/jobs/99" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "text/html" }, "body": "<!DOCTYPE html><html><body><h1>Senior Engineer</h1><a href=\"/apply?job=99\">Apply now</a></body></html>", "ok": true }
+  ]
+}

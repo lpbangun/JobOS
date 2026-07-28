@@ -1,0 +1,68 @@
+{
+  "alpha": {
+    "observationIds": [
+      "memory_observation_ca6e4916788d",
+      "memory_observation_1c743dc0855e",
+      "memory_observation_0b42010886f3"
+    ],
+    "profileId": "alpha",
+    "projectionId": "memory_projection_e432a9cdb5fb",
+    "projectionSourceIds": [
+      "alpha#/name",
+      "alpha#/preferences/companyStages",
+      "alpha#/preferences/dealbreakers",
+      "alpha#/preferences/industries",
+      "alpha#/preferences/locations",
+      "alpha#/preferences/missionKeywords",
+      "alpha#/preferences/salary",
+      "alpha#/preferences/searchStrategy",
+      "alpha#/preferences/skills",
+      "alpha#/preferences/targetRoleFamilies",
+      "alpha#/preferences/values",
+      "alpha#/preferences/workModel",
+      "proof_beb0fc0ba022",
+      "memory_proposal_53fd68974f92",
+      "interview_debrief_33e06b44f92f:2",
+      "memory_observation_0b42010886f3",
+      "memory_observation_1c743dc0855e",
+      "memory_observation_ca6e4916788d",
+      "outcome_99ed9258c882",
+      "rcpt_7bbd96d53b1c",
+      "status_6a1d6357275c",
+      "status_6d3999143a56",
+      "status_e552846abad8"
+    ],
+    "ruleIds": [
+      "memory_proposal_53fd68974f92"
+    ]
+  },
+  "asOf": "2026-07-25T12:00:00.000Z",
+  "beta": {
+    "observationIds": [
+      "memory_observation_01add209c0b2",
+      "memory_observation_4f990c8e7e6b",
+      "memory_observation_dbda38713761"
+    ],
+    "ruleId": "memory_proposal_031548822cad"
+  },
+  "crossProfile": {
+    "counts": {
+      "audit_log": 56,
+      "career_memory_observations": 6,
+      "career_memory_projection_revisions": 1,
+      "career_memory_projection_sources": 23,
+      "career_memory_proposal_evidence": 6,
+      "career_memory_proposal_transitions": 4,
+      "career_memory_proposals": 2
+    },
+    "errorCode": "memory_evidence_profile_mismatch",
+    "zeroDelta": true
+  },
+  "family": "career-memory-isolation",
+  "surfaces": {
+    "alphaMirrorPrivateDataFree": true,
+    "cliSchema": "jobos.career-memory-retrieval.v1",
+    "domainSchema": "jobos.career-memory-retrieval.v1",
+    "noBetaDataInAlpha": true
+  }
+}

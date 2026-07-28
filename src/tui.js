@@ -2,17 +2,24 @@ import stripAnsiText from 'strip-ansi';
 import stringWidth from 'string-width';
 import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
+import { readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
-import { callDomainTool, selectedJobContext } from './domain-tools.js';
+import { callDomainTool, DOMAIN_TOOLS, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
-import { AcpClient, agentBackendCatalog, jobosMcpServer } from './acp.js';
-import { setNetworkIntent } from './profiles.js';
+import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
+import { addProof, createProfile, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
+import { importResume, replaceResume } from './resumes.js';
+import { importText } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
+import { rescheduleApplicationNextAction } from './lifecycle.js';
 import { reviewArtifact, ingestEditedArtifact } from './artifacts.js';
 import { readinessPacketSummary } from './packets.js';
 import { updateJobStatus } from './jobs.js';
+import { getInterviewDebrief } from './interview.js';
+import { transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
+import { refreshMemoryProjection } from './career-memory-projections.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -32,6 +39,7 @@ const COLORS = {
   inverse: `${ESC}7m`
 };
 export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
+const TASK_FILTERS = ['all', 'followup', 'review'];
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
   pursue: 'pursue_job',
@@ -44,17 +52,19 @@ export const TUI_KEYMAP = Object.freeze({
   global: Object.freeze([
     ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
-    ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'],
-    ['r', 'review'], ['l', 'log'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['?', 'system'], ['b', 'build-network'], [':', 'command'], ['Q', 'quit'],
-    ['Tab', 'strip'], ['Enter', 'jump']
+    ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'], ['t', 'stage'], ['c', 'reconnect'], ['x', 'cancel'],
+    ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['/', 'slash'], ['Q', 'quit'],
+    ['Tab', 'focus-chat'], ['←/→', 'priority'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'run'], ['Esc', 'close']]),
+  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
   network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
-  due: Object.freeze([['j/k', 'select'], ['Enter', 'jump'], ['Esc', 'close']]),
-  stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']])
+  due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
+  stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
+  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']]),
+  setup: Object.freeze([['j/k', 'step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
 });
 
 /**
@@ -63,13 +73,15 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 'r', 'l', 'n', 'o', 'q', 's', '?', 'b', ':', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', 'h', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'left', 'right', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
   network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
-  due: Object.freeze(['j', 'k', 'return', 'escape']),
-  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape'])
+  due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
+  stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
+  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape']),
+  setup: Object.freeze(['j', 'k', 'return', 'c', 'r', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -110,6 +122,20 @@ export function keypressForToken(token) {
   return { value: token, key: { name: token.length === 1 ? token.toLowerCase() : token } };
 }
 
+export function parseSgrMouse(value) {
+  const events = [];
+  const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+  for (const match of String(value || '').matchAll(pattern)) {
+    events.push({
+      button: Number(match[1]),
+      x: Math.max(0, Number(match[2]) - 1),
+      y: Math.max(0, Number(match[3]) - 1),
+      pressed: match[4] === 'M'
+    });
+  }
+  return events;
+}
+
 function redraftCliHint(artifact, profileId) {
   const jobId = artifact?.jobId || artifact?.job_id || '<job-id>';
   const profile = profileId || '<profile-id>';
@@ -120,6 +146,19 @@ function redraftCliHint(artifact, profileId) {
 function stripAnsi(value) {
   return stripAnsiText(String(value ?? ''));
 }
+function readStructuredJsonFile(file) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`Invalid JSON file ${file}: ${error.message}`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid JSON file ${file}: expected an object`);
+  }
+  return value;
+}
+
 
 function crop(value, width) {
   const text = String(value ?? '').replace(/[\r\n]+/g, ' ');
@@ -181,6 +220,13 @@ function mergeColumns(columns, widths, color, separator = '│') {
   return output;
 }
 
+function fitLabel(fit) {
+  if (!fit) return 'unscored';
+  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy unknown' : `legacy ${fit.overall}/100`;
+  if (fit.overall == null) return 'unknown';
+  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' review' : ''}`;
+}
+
 function filteredJobs(model, filter) {
   if (filter === 'all') return model.jobs;
   if (filter === 'today') return model.jobs.filter(job => job.next || ['new', 'imported', 'interview'].includes(job.stage));
@@ -193,7 +239,7 @@ function packetCtaLine(row) {
   const currency = row?.currency || 'none';
   const receiptState = row?.receiptState || 'none';
   if (currency !== 'current') return 'next :packet create — freeze a packet from the approved materials';
-  if (receiptState === 'none') return 'next submit externally, then :attest <rfc3339> (or :attest for now)';
+  if (receiptState === 'none') return `next :form assist ${row?.id || '<packet-id>'} (configured fill), or submit manually; configured submit requires a read-back checkpoint`;
   if (receiptState === 'attested') return 'next :receipt <external-reference> once the site confirms receipt';
   return 'receipt confirmed · follow-ups only (outreach, interview prep)';
 }
@@ -261,6 +307,12 @@ function headerLine(model, state, width, color) {
 
 function priorityLines(model, state, width, color) {
   const focused = state.stripIndex || 0;
+  if (width < 90) {
+    const item = model.priority[focused] || model.priority[0];
+    if (!item) return [];
+    const prefix = `[${focused + 1}/${model.priority.length}] ${item.kind.toUpperCase()}`;
+    return [paint(fit(`▶ ${prefix} · ${item.text} · ←/→`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color)];
+  }
   if (width < 100) {
     return model.priority.map((item, index) => paint(fit(`${index === focused ? '▶' : ' '}[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
   }
@@ -292,10 +344,10 @@ function listPanel(model, state, width, height, color) {
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
     for (const job of jobs.slice(start, start + maxCards)) {
       const selected = job.id === selectedId;
-      const fitScore = job.fitScore == null ? '—' : String(job.fitScore);
+      const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
       body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · ${job.stage}`, width - 4));
+      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · posting:${job.postingLiveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
     }
@@ -303,74 +355,125 @@ function listPanel(model, state, width, height, color) {
   return panel(`JOBS · ${state.filter}`, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
+function fitDimensionLines(fit, width) {
+  if (!fit?.dimensions) return ['No fit dimensions are stored.'];
+  const summary = Object.entries(fit.dimensions).map(([key, dimension]) => {
+    const value = dimension.status === 'unknown' ? 'unknown' : `${dimension.score}/100`;
+    return `${key}: ${value}`;
+  }).join(' · ');
+  return wrap(summary, width).slice(0, 3);
+}
+
+function constraintLine(fit, width) {
+  if (!fit?.constraints?.length) return crop('CANDIDATE CONSTRAINTS · none recorded', width);
+  const summary = fit.constraints.map(value => `${value.kind}/${value.status}: ${value.reason}`).join(' · ');
+  return crop(`CANDIDATE CONSTRAINTS · ${summary}`, width);
+}
+
+function postingStatusLines(item, width) {
+  const posting = item.postingLiveness;
+  const status = posting
+    ? `${posting.status} · ${posting.reasonCodes?.join(', ') || 'no reason codes'}`
+    : 'uncertain · no posting-liveness handoff';
+  const risks = item.fit?.postingRisks?.length
+    ? item.fit.postingRisks.map(value => {
+        const label = value.code.replace(/^posting_risk_/, '').replaceAll('_', ' ');
+        return crop(`${label} (${value.status}): ${value.reason}`, width);
+      })
+    : [];
+  return [crop(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width), ...risks];
+}
+
 function detailPanel(model, width, height, color) {
   const item = model.selected;
   if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'JobOS will show real local state here after import.'], width, color);
-  const fitScore = item.fit?.overall ?? '—';
-  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.confidence || 'confidence —'}` : 'not scored';
+  const fitScore = fitLabel(item.fit);
+  const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.scoreStatus} · coverage ${item.fit.evidenceCoverage ?? '—'}%` : 'not scored';
   const next = item.next[0];
+  const compensation = item.job.compensation?.text || 'compensation —';
+  const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(',') : 'type —';
   const proofs = item.proofs.length ? item.proofs.map(proof => `${proof.id} ${proof.summary}`) : ['No matched proof IDs yet'];
   const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No artifacts — pursue to stage drafts'];
   const stages = item.stages.map(stage => `${stage.name}:${stage.state}`).join('  ');
   const lines = [
     paint(`${item.job.title}`, 'green', color),
     `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    '',
-    paint(`FIT ${fitScore}/100 · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
+    `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
+    paint(`FIT ${fitScore} · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    paint('FIT DIMENSIONS', 'cyan', color),
+    ...fitDimensionLines(item.fit, width - 4),
+    paint(constraintLine(item.fit, width - 4), 'cyan', color),
+    ...postingStatusLines(item, width - 4).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
     ...wrap(item.narrative, width - 4).slice(0, 3),
-    '',
     ...readinessLines(item.readiness, width - 4, color),
-    '',
     ...policyLines(item.policy, width - 4, color),
-    '',
     paint('NEXT', 'cyan', color),
-    next ? `${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
-    '',
+    next ? `${next.state ? `${next.state.toUpperCase()} · ` : ''}${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
     paint('PROOFS', 'cyan', color),
     ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PATH', 'cyan', color),
     item.path ? `${item.path.strength} · ${item.path.channel || 'channel —'} · ${JSON.stringify(item.path.reasoning)}` : 'No warm path yet',
-    '',
     paint('ARTIFACTS', 'cyan', color),
     ...artifacts.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    '',
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
-    '',
     ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);
 }
 
 function agentPanel(model, state, width, height, color) {
-  const lines = [
+  const header = [
     paint(`Hermes ACP · ${state.agentState}${state.sessionId ? ` · ${state.sessionId.slice(0, 8)}` : ''}`, state.agentState === 'ready' ? 'green' : (state.agentState === 'failed' || state.agentState === 'crashed' ? 'bad' : 'warn'), color),
     paint(`Context: ${model.selectedJobId || 'no job'} · tools: JobOS MCP · terminal/fs denied`, 'muted', color),
     ''
   ];
-  const messages = state.messages.slice(-10);
-  for (const message of messages) {
+  if (state.agentState === 'offline' || !state.agentOn) header.splice(1, 0, 'agent off');
+  const history = [];
+  for (const message of state.messages.slice(-80)) {
     const label = message.role === 'user' ? 'you' : (message.role === 'tool' ? 'tool' : 'hermes');
-    lines.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
-    lines.push(...wrap(message.text, width - 4).slice(-4));
+    history.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
+    history.push(...wrap(message.text, width - 4));
   }
-  if (state.agentState === 'offline' || !state.agentOn) lines.splice(1, 0, 'agent off');
-  if (!messages.length) lines.push('Agent pane is on by default.', 'Press i to prompt. Press a to toggle.', 'Press c to reconnect after a failure.');
-  if (state.mode === 'agent') lines.push('', paint(`> ${state.input}█`, 'green', color));
-  else if (state.agentState === 'working') lines.push('', paint('working · navigation remains active · x cancels', 'warn', color));
-  return panel('AGENT', lines.slice(Math.max(0, lines.length - (height - 2))), width, color);
+  if (!history.length) history.push('Agent pane is on by default.', 'Press i to prompt. Tab expands chat.', 'Press c to reconnect after a failure.');
+  const composer = [];
+  if (state.mode === 'agent') composer.push('', paint(`> ${state.input}█`, 'green', color));
+  else if (state.agentState === 'working') composer.push('', paint('working · navigation remains active · x cancels', 'warn', color));
+  const room = Math.max(1, height - 2 - header.length - composer.length);
+  const maxScroll = Math.max(0, history.length - room);
+  const scroll = Math.min(maxScroll, Math.max(0, state.agentScroll || 0));
+  const end = history.length - scroll;
+  const visible = history.slice(Math.max(0, end - room), end);
+  const body = [...header, ...visible, ...composer];
+  while (body.length < Math.max(1, height - 2)) body.push('');
+  return panel(`${state.focusTarget === 'agent' ? 'AGENT · FOCUSED' : 'AGENT'}${scroll ? ` · scroll ↑${scroll}` : ''}`, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
 function overlayItems(model, state) {
+  if (state.overlay === 'setup') return model.onboarding?.steps || [];
+  if (state.overlay === 'setup-action-picker') return state.setupActionItems || [];
+  if (state.overlay === 'setup-profile-picker') return model.profiles || [];
+  if (state.overlay === 'setup-job-picker') return model.jobs || [];
   if (state.overlay === 'review') return model.review;
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
   if (state.overlay === 'log') return model.log;
   if (state.overlay === 'network') return networkOverlayItems(model);
-  if (state.overlay === 'due') return model.dueTasks || [];
+  if (state.overlay === 'due') return dueOverlayTasks(model, state);
   if (state.overlay === 'build-network') return buildNetworkItems(model, state);
+  if (state.overlay === 'memory') {
+    if (state.memoryView === 'proposals') return model.memory?.proposals || [];
+    if (state.memoryView === 'observations') return model.memory?.observations || [];
+  }
   return [];
+}
+
+function dueOverlayTasks(model, state) {
+  const tasks = model.dueTasks || [];
+  return state.taskFilter && state.taskFilter !== 'all'
+    ? tasks.filter(task => task.type === state.taskFilter)
+    : tasks;
 }
 // Network overlay rows: discovered contact points first (human-gated via A/X),
 // then person candidates (promotable via P). Suppressed values are already
@@ -595,12 +698,145 @@ function overlayPanel(model, state, width, height, color) {
   const selected = model.selected;
   let title = String(state.overlay || 'overlay').toUpperCase();
   let body = [];
-  if (state.overlay === 'review') {
+  if (state.overlay === 'setup') {
+    const setup = model.onboarding;
+    title = `GUIDED SETUP · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} REQUIRED`;
+    const items = setup?.steps || [];
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 10));
+    body = visible.items.map((item, offset) => {
+      const selectedStep = visible.start + offset === state.overlayIndex;
+      return `${selectedStep ? '▶' : ' '} ${item.required ? 'required' : 'optional'} · ${item.id} · ${item.status} · ${item.summary}`;
+    });
+    const focused = items[state.overlayIndex];
+    if (focused) {
+      body.push('', `FOCUS · ${focused.id}`);
+      body.push(...focused.blockers.map(item => `blocker ${item.code} · ${item.message}`));
+      if (focused.actions[0]) body.push(...focused.actions.map(action => `action ${action.label} · ${action.command}`));
+    }
+    body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+  } else if (state.overlay === 'setup-action-picker') {
+    title = `GUIDED SETUP · SELECT ${state.setupActionStepId || 'ACTION'}`;
+    const items = state.setupActionItems || [];
+    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label} · ${item.command}`);
+    body.push('', 'j/k select · Enter runs the selected guided action · Esc returns to setup');
+  } else if (state.overlay === 'setup-profile-picker') {
+    title = 'GUIDED SETUP · SELECT PROFILE';
+    body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+  } else if (state.overlay === 'setup-job-picker') {
+    title = 'GUIDED SETUP · SELECT JOB';
+    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company} · ${item.id}`);
+    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+  } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
       body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.approvalStatus} · ${item.jobId || 'no job'}`);
     } else body = ['Review queue empty.', 'Drafts stay human-gated.'];
     body.push('', keyHints('review'));
+  } else if (state.overlay === 'interviews') {
+    const interviews = model.interviews || {};
+    const counts = interviews.counts || {};
+    const application = interviews.selectedApplication;
+    const pack = application?.pack;
+    const debriefs = application?.debriefs?.items || [];
+    const stories = interviews.stories || [];
+    title = `INTERVIEWS · ${(model.profile?.name || 'NO PROFILE').toUpperCase()}`;
+    body = [
+      `stories ${counts.stories || 0} · verified ${counts.verified || 0} · stale ${counts.stale || 0} · draft/ineligible ${counts.draftIneligible || 0}`,
+      `debriefs ${counts.debriefs || 0} · current revisions ${counts.currentDebriefRevisions || 0}`,
+      application
+        ? `selected application ${application.applicationId} · job ${application.jobId}`
+        : 'selected application none',
+      pack
+        ? `pack ${pack.stage}/${pack.audience} · covered ${pack.coveredCount} · gaps ${pack.gapCount} · items ${pack.itemCount}`
+        : 'pack none · run :prep <stage> [audience]',
+      '',
+      `STORIES (${stories.length})`
+    ];
+    body.push(...stories.map(story => {
+      const revision = story.currentRevision;
+      return `${revision.title} · ${story.id} · r${revision.revision} · ${revision.state}/${story.eligibility}`;
+    }));
+    const story = stories[0]?.currentRevision;
+    if (story) {
+      body.push(
+        '',
+        `STORY DETAIL · ${story.title}`,
+        `S ${story.situation}`,
+        `T ${story.task}`,
+        `A ${story.action}`,
+        `R ${story.result}`,
+        `Reflection ${story.reflection}`
+      );
+    }
+    body.push('', `SELECTED APPLICATION DEBRIEFS (${debriefs.length})`);
+    if (debriefs.length) {
+      body.push(...debriefs.map(debrief => (
+        `${debrief.id} · r${debrief.currentRevision.revision} · ${debrief.interviewStage}/${debrief.audience} · outcome ${debrief.currentRevision.observedOutcome.type}`
+      )));
+      const debrief = debriefs[0].currentRevision;
+      body.push(`DEBRIEF DETAIL · ${debrief.notes || 'no private notes'} · ${debrief.observedQuestions.length} observed questions`);
+    } else {
+      body.push('No debrief recorded for the selected application.');
+    }
+    body.push(
+      '',
+      ':interviews',
+      ':prep <stage> [audience]',
+      ':story-verify <story-id> <revision> | <confirmed-fields-csv>',
+      ':story-retire <story-id> | <reason>',
+      ':debrief <json-file>',
+      ':debrief-correct <debrief-id> | <json-file> | <reason>',
+      'Esc closes'
+    );
+  } else if (state.overlay === 'memory') {
+    const memory = model.memory || {};
+    const view = state.memoryView || 'observations';
+    const labels = { observations: 'OBSERVATIONS', proposals: 'PROPOSALS', 'career-brief': 'CAREER BRIEF', 'voice-guide': 'VOICE GUIDE' };
+    title = `CAREER MEMORY · ${labels[view]}`;
+    body = [
+      `Profile: ${memory.profileId || 'none'} · observations ${memory.counts?.observations || 0} · proposals ${memory.counts?.proposals || 0} · active ${memory.counts?.active || 0}`,
+      '1 observations · 2 proposals · 3 career brief · 4 voice guide',
+      '',
+    ];
+    if (view === 'observations') {
+      const rows = memory.observations || [];
+      const visible = visibleWindow(rows, state.overlayIndex, Math.max(3, height - 8));
+      body.push(...visible.items.map((item, offset) => {
+        const source = item.sourceEntity || {};
+        return `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.eventType} · ${item.id} · ${source.type || 'source'}:${source.id || '—'}@${source.versionId || '—'} · private:${item.hasPrivateNote ? 'yes' : 'no'}`;
+      }));
+      if (!rows.length) body.push('No current observations for this profile.');
+    } else if (view === 'proposals') {
+      const rows = memory.proposals || [];
+      const visible = visibleWindow(rows, state.overlayIndex, Math.max(3, height - 9));
+      body.push(...visible.items.flatMap((item, offset) => [
+        `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.id} · ${item.status} · ${item.confidenceBand}/${item.confidenceMilli} · conflict:${item.conflictState} · ${item.stale ? 'stale' : 'fresh'}`,
+        `  ${item.domain}/${item.scope}/${item.ruleType} · ${item.active ? 'active' : `inactive:${item.inactiveReason}`}`,
+        `  evidence ${(item.evidence || []).map(evidence => `${evidence.observationSchema}:${evidence.observationId}@${evidence.sourceEntity?.versionId || '—'}`).join(', ') || 'none'}`,
+      ]));
+      if (!rows.length) body.push('No proposals for this profile.');
+      body.push('', ':memory accept <proposal-id>', ':memory reject <proposal-id> | <reason>', ':memory revoke <proposal-id> | <reason>', ':memory undo <transition-id> | <reason>');
+    } else if (view === 'career-brief') {
+      const brief = memory.careerBrief;
+      body.push(
+        `source state ${brief?.sourceStateHash || '—'} · revision ${brief?.revision ?? 'live'}`,
+        `targets ${JSON.stringify(brief?.canonicalTargets || {})}`,
+        `active guidance ${(brief?.activeGuidance || []).map(item => item.ruleId).join(', ') || 'none'}`,
+        `citations ${(brief?.citations || []).length}`,
+        ...(brief?.citations || []).slice(0, 4).map(citation => `  ${citation.sourceKind}:${citation.sourceId}@${citation.sourceVersionId || '—'}`),
+      );
+    } else {
+      const guide = memory.voiceGuide;
+      body.push(
+        `source state ${guide?.sourceStateHash || '—'} · revision ${guide?.revision ?? 'live'}`,
+        `baseline ${JSON.stringify(guide?.baseline || {})}`,
+        `active rules ${(guide?.activeRuleIds || []).join(', ') || 'none'}`,
+        `citations ${(guide?.citations || []).length} · proofs remain factual authority`,
+        ...(guide?.citations || []).slice(0, 4).map(citation => `  ${citation.sourceKind}:${citation.sourceId}@${citation.sourceVersionId || '—'}`),
+      );
+    }
+    body.push('', `${keyHints('memory')} · :memory refresh`);
   } else if (state.overlay === 'log') {
     if (model.log.length) {
       const visible = visibleWindow(model.log, state.overlayIndex, Math.max(3, height - 9));
@@ -659,21 +895,15 @@ function overlayPanel(model, state, width, height, color) {
       body.push('', ':answer add [category] | <exact question> | <your answer>');
     }
   } else if (state.overlay === 'due') {
-    title = 'DUE · tasks & outreach';
-    const tasks = model.dueTasks || [];
+    title = 'DUE · tasks';
+    const tasks = dueOverlayTasks(model, state);
+    body = [`Filter: ${TASK_FILTERS.map((filter, index) => `${index + 1} ${filter === state.taskFilter ? `[${filter}]` : filter}`).join(' · ')}`];
     if (tasks.length) {
-      body = [`TASKS (${tasks.length}):`];
+      body.push(`TASKS (${tasks.length}):`);
       const visible = visibleWindow(tasks, state.overlayIndex, Math.max(3, height - 10));
-      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${task.dueAt ? String(task.dueAt).slice(0, 10) : 'no date'} · ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
+      body.push(...visible.items.map((task, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${String(task.dueAt).slice(0, 10)} · [${task.type || 'task'}/${task.source || 'system'}] ${task.title}${task.jobId ? ` · ${task.jobId}` : ' · no job'}`));
     } else {
-      body = ['No open tasks.'];
-    }
-    const outreach = model.outreachDue || [];
-    if (outreach.length) {
-      body.push('', `OUTREACH FOLLOW-UPS (${outreach.length}):`);
-      body.push(...outreach.slice(0, 6).map(item => ` ${item.dueAt ? String(item.dueAt).slice(0, 10) : 'no date'} · ${item.stakeholderName || 'stakeholder'} · ${item.company || item.jobTitle || 'no job'}`));
-    } else {
-      body.push('', 'No outreach follow-ups due.');
+      body.push('No tasks due for this filter.');
     }
     body.push('', keyHints('due'), 'Enter jumps to the selected task’s job');
   } else if (state.overlay === 'discovery') {
@@ -683,7 +913,7 @@ function overlayPanel(model, state, width, height, color) {
       ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
       '',
       'NEW JOB REVIEW',
-      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · fit ${item.fitScore ?? '—'}${item.highFit ? ' · high' : ''}`)
+      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · posting ${item.postingLiveness?.status || 'uncertain'} · fit ${fitLabel(item.fit)}${item.highFit ? ' · high' : ''}`)
     ];
     if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
     if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');
@@ -694,6 +924,9 @@ function overlayPanel(model, state, width, height, color) {
       'browser · optional/unavailable is honest on headless VPS',
       `side-effects · ${model.policy.sideEffects}`,
       `drafts · ${model.policy.drafts}`,
+      '',
+      'PRIMARY CONTROLS',
+      ...wrap(keyHints('global'), width - 4),
       '',
       'c reconnect ACP · x cancel turn · Esc closes'
     ];
@@ -742,7 +975,7 @@ function overlayPanel(model, state, width, height, color) {
         ':packet create',
         `CLI parity: jobos apply packet create --job ${selected?.job.id || '<job-id>'} --profile ${model.profileId || '<profile-id>'} --json`,
         '',
-        'Then submit externally, :attest <rfc3339>, and :receipt <reference> once confirmed.'
+        'Then inspect/fill/checkpoint with :form, submit manually or through separately configured :form submit, and record receipt evidence.'
       ];
     } else {
       const row = detail && !detail.empty ? detail : meta;
@@ -756,7 +989,7 @@ function overlayPanel(model, state, width, height, color) {
         row.applicationId ? `application ${row.applicationId}` : '',
         '',
         packetCtaLine(row),
-        'Esc closes · :packet refreshes · :packet create / :attest / :receipt run the trusted human mutations'
+        'Esc closes · :form inspect/assist/checkpoint/submit runs the packet-bound bridge · :attest/:receipt record manual evidence'
       ].filter(Boolean);
     }
     body.push('', 'Esc closes');
@@ -764,30 +997,55 @@ function overlayPanel(model, state, width, height, color) {
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
-function footerLines(width) {
+function footerLines(width, state) {
+  if (state.focusTarget === 'agent') {
+    if (width >= 90) {
+      return [
+        ' CHAT FOCUSED · ↑/↓ or j/k scroll · i type · x cancel · c reconnect · Tab/Esc dashboard · ? system · Q quit'
+      ];
+    }
+    return [
+      ' CHAT · ↑/↓ scroll · i type · x cancel',
+      ' Tab/Esc dashboard · c reconnect · Q quit'
+    ];
+  }
+  if (width >= 120) {
+    return [
+      ' j/k jobs · ←/→ priority · Enter jump · Tab focus chat · i prompt · p pursue · d discover',
+      ' r review · o documents · g setup · ? all controls · Q quit'
+    ];
+  }
   if (width >= 90) {
     return [
-      ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · a agent i prompt',
-      ' r review l log · n network o docs q answers · s sources ? system · b build-network : command Q quit'
+      ' j/k jobs · ←/→ priority · Enter jump · Tab chat · i prompt · p pursue · d discover',
+      ' r review · o docs · g setup · ? controls · Q quit'
     ];
   }
   return [
-    ' j/k select · 1 today · 2 all · 3 high',
-    ' 4 review · 5 materials-ready · 6 applied · 7 interview',
-    ' p pursue · z score · d daily · a agent · i prompt',
-    ' r review · l log · n network · o docs · q answers',
-    ' s sources · ? system · b build-network · : command · Q quit'
+    ' j/k jobs · ←/→ priority · Enter jump',
+    ' Tab chat · i prompt · p pursue · d discover',
+    ' r review · o docs · g setup · ? help · Q quit'
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
-  const safeWidth = Math.max(60, width);
-  const safeHeight = Math.max(20, height);
-  const footers = footerLines(safeWidth);
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason']);
+  const measuredWidth = Math.max(1, Math.floor(Number(width) || 140));
+  const measuredHeight = Math.max(1, Math.floor(Number(height) || 42));
+  if (measuredWidth < 60 || measuredHeight < 20) {
+    const resize = [
+      'JobOS needs a larger terminal.',
+      `Current: ${measuredWidth}×${measuredHeight} · minimum: 60×20`,
+      'Resize the window; your workspace is unchanged.'
+    ];
+    return resize.slice(0, measuredHeight).map(line => fit(line, measuredWidth)).join('\n');
+  }
+  const safeWidth = measuredWidth;
+  const safeHeight = measuredHeight;
+  const footers = footerLines(safeWidth, state);
+  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
-  const bodyHeight = Math.max(9, safeHeight - lines.length - trailingRows);
+  const bodyHeight = Math.max(4, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
     const sideWidth = Math.max(38, Math.floor(safeWidth * 0.36));
     const docsWidth = safeWidth - sideWidth - 1;
@@ -801,38 +1059,53 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.overlay) {
     lines.push(...overlayPanel(model, state, safeWidth, bodyHeight, color));
   } else if (safeWidth >= 116 && state.agentOn) {
-    const listWidth = Math.max(30, Math.floor(safeWidth * 0.27));
-    const agentWidth = Math.max(32, Math.floor(safeWidth * 0.27));
-    const detailWidth = safeWidth - listWidth - agentWidth - 2;
-    lines.push(...mergeColumns([
-      listPanel(model, state, listWidth, bodyHeight, color),
-      detailPanel(model, detailWidth, bodyHeight, color),
-      agentPanel(model, state, agentWidth, bodyHeight, color)
-    ], [listWidth, detailWidth, agentWidth], color));
+    if (state.focusTarget === 'agent') {
+      const contextWidth = Math.max(28, Math.floor(safeWidth * 0.22));
+      const agentWidth = safeWidth - contextWidth - 1;
+      lines.push(...mergeColumns([
+        detailPanel(model, contextWidth, bodyHeight, color),
+        agentPanel(model, state, agentWidth, bodyHeight, color)
+      ], [contextWidth, agentWidth], color));
+    } else {
+      const listWidth = Math.max(30, Math.floor(safeWidth * 0.27));
+      const agentWidth = Math.max(32, Math.floor(safeWidth * 0.27));
+      const detailWidth = safeWidth - listWidth - agentWidth - 2;
+      lines.push(...mergeColumns([
+        listPanel(model, state, listWidth, bodyHeight, color),
+        detailPanel(model, detailWidth, bodyHeight, color),
+        agentPanel(model, state, agentWidth, bodyHeight, color)
+      ], [listWidth, detailWidth, agentWidth], color));
+    }
   } else if (safeWidth >= 90) {
-    const agentHeight = state.agentOn ? Math.max(3, Math.floor(bodyHeight * 0.32)) : 0;
-    const topHeight = bodyHeight - agentHeight;
-    const listWidth = Math.max(32, Math.floor(safeWidth * 0.36));
-    const detailWidth = safeWidth - listWidth - 1;
-    lines.push(...mergeColumns([
-      listPanel(model, state, listWidth, topHeight, color),
-      detailPanel(model, detailWidth, topHeight, color)
-    ], [listWidth, detailWidth], color));
-    if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    if (state.agentOn && state.focusTarget === 'agent') {
+      const contextHeight = Math.max(5, Math.floor(bodyHeight * 0.24));
+      lines.push(...detailPanel(model, safeWidth, contextHeight, color));
+      lines.push(...agentPanel(model, state, safeWidth, bodyHeight - contextHeight, color));
+    } else {
+      const agentHeight = state.agentOn ? Math.max(4, Math.floor(bodyHeight * 0.32)) : 0;
+      const topHeight = bodyHeight - agentHeight;
+      const listWidth = Math.max(32, Math.floor(safeWidth * 0.36));
+      const detailWidth = safeWidth - listWidth - 1;
+      lines.push(...mergeColumns([
+        listPanel(model, state, listWidth, topHeight, color),
+        detailPanel(model, detailWidth, topHeight, color)
+      ], [listWidth, detailWidth], color));
+      if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    }
+  } else if (state.agentOn && state.focusTarget === 'agent') {
+    lines.push(...agentPanel(model, state, safeWidth, bodyHeight, color));
   } else {
-    const listHeight = Math.max(3, Math.floor(bodyHeight * 0.3));
-    const agentHeight = state.agentOn ? Math.max(3, Math.floor(bodyHeight * 0.3)) : 0;
-    const detailHeight = bodyHeight - listHeight - agentHeight;
+    const listHeight = Math.max(4, Math.floor(bodyHeight * 0.36));
     lines.push(...listPanel(model, state, safeWidth, listHeight, color));
-    lines.push(...detailPanel(model, safeWidth, detailHeight, color));
-    if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    lines.push(...detailPanel(model, safeWidth, bodyHeight - listHeight, color));
   }
   if (state.pendingConfirm) {
-    lines.push(paint(fit('Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
+    const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
+    lines.push(paint(fit(guided ? 'Guided trusted action · y/Enter confirm · n/Esc cancel' : 'Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
+    const labels = { command: state.commandPrefix || ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
     lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
@@ -851,6 +1124,7 @@ export function defaultTuiState() {
     sessionId: null,
     overlay: null,
     overlayIndex: 0,
+    taskFilter: 'all',
     docsScroll: 0,
     docsDiffScroll: 0,
     docsQuery: '',
@@ -858,21 +1132,27 @@ export function defaultTuiState() {
     docsView: 'document',
     docsEvidenceExpanded: false,
     focusTarget: 'shell',
+    agentScroll: 0,
     pendingAutoOpenArtifactId: null,
     editorActive: false,
     stageIndex: 0,
     stripIndex: 0,
     pendingConfirm: null,
     pendingSuppressContactId: null,
+    setupActionItems: [],
+    setupActionStepId: null,
+    setupProofId: null,
     packetDetail: null,
     mode: 'normal',
+    commandPrefix: ':',
     input: '',
     status: 'starting JobOS host',
     error: null,
     busy: null,
     messages: [],
     catalog: [],
-    networkDraft: null
+    networkDraft: null,
+    memoryView: 'observations'
   };
 }
 
@@ -881,20 +1161,29 @@ export class JobosTui {
     stdin = process.stdin,
     stdout = process.stdout,
     profileId = null,
+    selectedJobId = null,
+    initialOverlay = null,
     connectAgent = true,
-    color = stdout.isTTY
+    mouse = false,
+    color = stdout.isTTY,
+    now = () => new Date()
   } = {}) {
     this.store = store;
     this.stdin = stdin;
     this.stdout = stdout;
-    this.state = { ...defaultTuiState(), profileId };
-    this.model = buildTuiModel(store, { profileId });
-    this.state.selectedJobId = this.model.selectedJobId;
+    this.now = now;
+    this.state = { ...defaultTuiState(), profileId, setupProfileId: profileId, setupJobId: selectedJobId };
+    this.model = buildTuiModel(store, { profileId, selectedJobId, at: this.now().toISOString() });
+    this.state.selectedJobId = selectedJobId || this.model.selectedJobId;
+    this.state.overlay = initialOverlay || (this.model.empty.noProfile ? 'setup' : null);
     this.shouldConnectAgent = connectAgent;
+    this.mouseEnabled = Boolean(mouse);
     this.color = Boolean(color);
     this.client = null;
+    this.sessionPersistence = Promise.resolve();
     this.refreshTimer = null;
     this.boundKeypress = (value, key) => this.onKeypress(value, key);
+    this.boundMouseData = chunk => this.onMouseData(chunk);
     this.boundResize = () => this.render();
     this.stopped = false;
     this.notedArtifactIds = new Set();
@@ -926,9 +1215,95 @@ export class JobosTui {
     };
   }
 
+  toggleAgentFocus() {
+    if (this.state.overlay) return false;
+    if (this.state.focusTarget === 'agent') {
+      this.state.focusTarget = 'shell';
+      this.state.status = 'Dashboard focus restored.';
+    } else {
+      this.state.agentOn = true;
+      this.state.focusTarget = 'agent';
+      this.state.status = 'Chat focused · Tab or Esc returns to the dashboard.';
+      if (!this.client && this.shouldConnectAgent) void this.connectAgent();
+    }
+    this.render();
+    return true;
+  }
+
+  scrollAgent(delta) {
+    this.state.agentScroll = Math.max(0, (this.state.agentScroll || 0) + delta);
+    this.state.status = this.state.agentScroll ? `Chat history · ${this.state.agentScroll} lines from latest` : 'Chat history · latest';
+    this.render();
+    return true;
+  }
+
+  onMouseData(chunk) {
+    for (const event of parseSgrMouse(chunk)) {
+      if (event.button === 64) {
+        if (this.state.focusTarget === 'agent') this.scrollAgent(3);
+        continue;
+      }
+      if (event.button === 65) {
+        if (this.state.focusTarget === 'agent') this.scrollAgent(-3);
+        continue;
+      }
+      if (!event.pressed || event.button !== 0 || this.state.overlay) continue;
+      const { width, height } = this.dimensions();
+      if (event.y >= 1 && event.y <= (width < 90 ? 1 : 4)) {
+        const count = this.model.priority?.length || 0;
+        if (count) {
+          this.state.stripIndex = width < 100
+            ? Math.min(count - 1, Math.max(0, event.y - 1))
+            : Math.min(count - 1, Math.floor((event.x - 1) / Math.max(1, width / count)));
+          this.state.status = `Priority selected: ${this.model.priority[this.state.stripIndex].kind} · Enter jumps`;
+          this.render();
+        }
+        continue;
+      }
+      const frame = this.lastFrame;
+      if (frame?.sections.footer && event.y >= frame.sections.footer.y) {
+        const footerIndex = event.y - frame.sections.footer.y;
+        const footer = frame.sections.footer.lines[footerIndex] || '';
+        if (footer.includes('Tab')) this.toggleAgentFocus();
+        continue;
+      }
+      const jobHit = frame?.sections.jobs?.hits?.find((hit, index, hits) => {
+        const nextY = hits[index + 1]?.y ?? frame.sections.jobs.bottom;
+        return event.y >= hit.y && event.y < nextY;
+      });
+      if (jobHit && this.state.focusTarget !== 'agent') {
+        this.selectJobInMainList(jobHit.id, `Selected ${jobHit.title}.`);
+        continue;
+      }
+      const agentHit = this.state.focusTarget === 'agent'
+        || (width >= 116 && event.x > Math.floor(width * 0.72))
+        || (width >= 90 && width < 116 && event.y > Math.floor(height * 0.58));
+      if (agentHit && this.state.agentOn && this.state.focusTarget !== 'agent') this.toggleAgentFocus();
+    }
+  }
+
   render() {
     if (this.stopped || this.state.editorActive) return;
     const screen = renderTui(this.model, this.state, this.dimensions());
+    const dimensions = this.dimensions();
+    const plain = stripAnsiText(screen).split('\n');
+    const jobsY = plain.findIndex(line => line.includes('┌ JOBS ·'));
+    const jobsBottom = jobsY < 0 ? -1 : plain.findIndex((line, index) => index > jobsY && line.startsWith('└'));
+    const jobs = filteredJobs(this.model, this.state.filter);
+    const hits = jobsY < 0 ? [] : jobs.map(job => ({
+      id: job.id,
+      title: job.title,
+      y: plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(job.title))
+    })).filter(hit => hit.y >= 0);
+    const footers = footerLines(dimensions.width, this.state);
+    this.lastFrame = {
+      width: dimensions.width,
+      height: dimensions.height,
+      sections: {
+        jobs: jobsY < 0 ? null : { y: jobsY, bottom: jobsBottom < 0 ? dimensions.height : jobsBottom, hits },
+        footer: { y: Math.max(0, plain.length - footers.length), lines: footers }
+      }
+    };
     this.stdout.write(`${ESC}H${ESC}2J${screen}`);
   }
 
@@ -941,12 +1316,17 @@ export class JobosTui {
     const previousReviewIndex = Math.max(0, previousModel?.review?.findIndex(item => item.id === previousArtifactId) ?? 0);
     const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
+    const setupSurface = ['setup', 'setup-profile-picker', 'setup-job-picker'].includes(this.state.overlay)
+      || this.state.mode === 'setup-calibration';
     this.model = buildTuiModel(this.store, {
-      profileId: this.state.profileId,
-      selectedJobId: this.state.selectedJobId
+      profileId: setupSurface ? this.state.setupProfileId : this.state.profileId,
+      selectedJobId: setupSurface ? this.state.setupJobId : this.state.selectedJobId,
+      at: this.now().toISOString()
     });
-    this.state.profileId = this.model.profileId;
-    this.state.selectedJobId = this.model.selectedJobId;
+    if (!setupSurface) {
+      this.state.profileId = this.model.profileId;
+      this.state.selectedJobId = this.model.selectedJobId;
+    }
 
     const docs = this.model.selected?.docs || [];
     const shouldClampArtifact = Boolean(this.state.selectedArtifactId) || this.state.overlay === 'review' || this.state.overlay === 'docs';
@@ -1101,10 +1481,27 @@ export class JobosTui {
       this.state.networkDraft = seedNetworkDraft(this.model);
       this.state.status = 'build-network editor · Enter edits fields · Esc closes';
     } else {
+      if (name === 'memory') this.state.memoryView = 'observations';
       if (name === 'docs') this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
       this.state.status = `${name} overlay · Esc closes`;
     }
     this.render();
+  }
+
+  openSetupOverlay() {
+    const shellProfileId = this.model.profiles.some(profile => profile.id === this.state.profileId) ? this.state.profileId : null;
+    if (shellProfileId) this.state.setupProfileId = shellProfileId;
+    else if (this.model.profiles.length === 1) this.state.setupProfileId = this.model.profiles[0].id;
+    const selectedJob = this.model.jobs.find(job => job.id === this.state.selectedJobId);
+    this.state.setupJobId = selectedJob && this.state.setupProfileId === this.state.profileId ? selectedJob.id : null;
+    this.state.overlay = 'setup';
+    this.state.overlayIndex = 0;
+    this.state.mode = 'normal';
+    this.state.input = '';
+    this.refresh({ disk: false });
+    this.state.status = 'setup overlay · recomputed from canonical state · Esc closes';
+    this.render();
+    return true;
   }
 
   closeTransient() {
@@ -1153,10 +1550,23 @@ export class JobosTui {
         this.render();
       });
       this.client.on('event', event => this.onAgentEvent(event));
-      const connected = await this.client.connect({ mcpServers: [jobosMcpServer(this.store.root)] });
+      await this.sessionPersistence;
+      const mcpServers = [jobosMcpServer(this.store.root)];
+      const persistedSessionId = await readPersistedAcpSession(this.store.root, this.model.profileId);
+      let resumed = Boolean(persistedSessionId);
+      let connected;
+      try {
+        connected = await this.client.connect({ mcpServers, sessionId: persistedSessionId });
+      } catch (error) {
+        if (!persistedSessionId) throw error;
+        resumed = false;
+        await this.persistAgentSession(null);
+        connected = await this.client.connect({ mcpServers });
+      }
       this.state.sessionId = connected.session.sessionId;
+      await this.persistAgentSession(this.state.sessionId);
       this.state.agentState = 'ready';
-      this.state.status = `Hermes ACP ready · session ${this.state.sessionId.slice(0, 8)} · JobOS tools mediated`;
+      this.state.status = `Hermes ACP ${resumed ? 'resumed' : 'ready'} · session ${this.state.sessionId.slice(0, 8)} · JobOS tools mediated`;
       this.state.error = null;
     } catch (error) {
 
@@ -1190,11 +1600,13 @@ export class JobosTui {
       this.addMessage('tool', `blocked by JobOS host policy: ${event.toolCall?.title || event.method || 'permission request'}`);
       this.state.status = 'guest terminal/filesystem permission denied';
     } else if (event.type === 'session_quarantined') {
+      void this.persistAgentSession(null).catch(() => {});
       this.state.status = `${event.reason || 'cancelled'} ACP session quarantined · next prompt starts a clean guest`;
     } else if (event.type === 'session_recovery_started') {
       this.state.status = `restarting quarantined ACP session · JobOS state remains authoritative`;
     } else if (event.type === 'session_recovered') {
       this.state.sessionId = event.sessionId;
+      void this.persistAgentSession(event.sessionId).catch(() => {});
       this.state.status = `clean ACP session ${String(event.sessionId || '').slice(0, 8)} ready`;
     } else if (event.type === 'process_exit' && !event.intentional) {
       this.addMessage('tool', 'Hermes ACP exited. Press c to reconnect; JobOS state is intact.');
@@ -1205,6 +1617,17 @@ export class JobosTui {
     this.render();
   }
 
+  persistAgentSession(sessionId) {
+    this.sessionPersistence = this.sessionPersistence
+      .catch(() => {})
+      .then(() => writePersistedAcpSession(this.store.root, this.model.profileId, sessionId));
+    return this.sessionPersistence.catch(error => {
+      this.state.error = error.message;
+      this.render();
+      throw error;
+    });
+  }
+
   async promptAgent(text) {
     if (!this.client || this.client.state !== 'ready') {
       this.state.status = 'Agent is not ready. Press c to connect.';
@@ -1213,7 +1636,7 @@ export class JobosTui {
       return;
     }
     const jobId = this.state.selectedJobId;
-    const context = jobId ? selectedJobContext(this.store, jobId) : null;
+    const context = jobId ? selectedJobContext(this.store, jobId, this.model.profileId) : null;
     const before = this.artifactSnapshot();
     this.state.busy = 'agent';
     this.state.status = `agent working on ${jobId || 'workspace'} · navigation stays active`;
@@ -1448,27 +1871,53 @@ export class JobosTui {
   }
 
   executeCommand(value) {
-    const trimmed = String(value || '').trim();
+    const raw = String(value || '').trim();
+    const slash = raw.startsWith('/');
+    const trimmed = raw.replace(/^[:/]/, '').trim();
     const [command] = trimmed.split(/\s+/);
     const argText = trimmed.slice((command || '').length).trim();
     this.state.mode = 'normal';
     this.state.input = '';
     if (!command) return this.render();
+    if (slash && DOMAIN_TOOLS.some(tool => tool.name === command)) {
+      let args = {};
+      if (argText) {
+        try {
+          args = JSON.parse(argText);
+          if (!args || typeof args !== 'object' || Array.isArray(args)) throw Error('expected an object');
+        } catch (error) {
+          this.state.error = error.message;
+          this.state.status = `Usage: /${command} <json-object>`;
+          return this.render();
+        }
+      }
+      return void this.runDomainSlashCommand(command, args);
+    }
     const actions = { pursue: 'pursue', score: 'score', daily: 'daily', network: 'network' };
     if (actions[command]) return void this.runAction(actions[command]);
     if (command === 'review' || command === 'log' || command === 'docs' || command === 'answers' || command === 'system' || command === 'profile' || command === 'due') return this.openOverlay(command);
-    if (command === 'build-network') return this.openOverlay('build-network');
-    if (command === 'packet' || command === 'packet-show' || command === 'show-packet') {
-      const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
-      if (command === 'packet' && (sub === 'create' || sub === 'freeze')) return void this.packetMutate('create');
-      return void this.showPacketSummary();
+    if (command === 'memory') {
+      if (!argText) return this.openOverlay('memory');
+      return this.executeMemoryCommand(argText);
     }
-    if (command === 'freeze') return void this.packetMutate('create');
+    if (command === 'interviews') return this.openOverlay('interviews');
+    if (command === 'build-network') return this.openOverlay('build-network');
+    if (command === 'packet') {
+      const sub = trimmed.split(/\s+/)[1]?.toLowerCase();
+      if (!sub) return void this.showPacketSummary();
+      if (sub === 'create') return void this.packetMutate('create');
+    }
+    if (command === 'form') return void this.formAction(argText);
     if (command === 'attest') return void this.packetMutate('attest', argText);
-    if (command === 'receipt' || command === 'confirm') return void this.packetMutate('receipt', argText);
+    if (command === 'receipt') return void this.packetMutate('receipt', argText);
     if (command === 'answer') return void this.answerAdd(argText);
     if (command === 'prep') return void this.runPrep(argText);
+    if (command === 'story-verify') return void this.verifyInterviewStory(argText);
+    if (command === 'story-retire') return void this.retireInterviewStory(argText);
+    if (command === 'debrief') return void this.recordInterviewDebrief(argText);
+    if (command === 'debrief-correct') return void this.correctInterviewDebrief(argText);
     if (command === 'weekly') return void this.runWeeklyReview();
+    if (command === 'reschedule') return void this.rescheduleSelectedAction(argText);
     if (command === 'agent') {
       this.state.agentOn = !this.state.agentOn;
       this.state.status = `agent ${this.state.agentOn ? 'on' : 'off'}`;
@@ -1478,16 +1927,116 @@ export class JobosTui {
     if (command === 'refresh') return this.refresh();
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
-    this.state.error = `Unknown command: ${command}`;
-    this.state.status = 'Commands: pursue score daily network packet packet create attest receipt answer add prep weekly due review log docs answers system profile agent refresh reconnect quit';
+    this.state.error = `Unknown command: ${trimmed}`;
+    this.state.status = 'Use : for friendly host commands or /<domain_tool> <json-object> for every callable function. Run jobos agent-guide --json for the full catalog.';
     this.render();
   }
 
-  cycleStripFocus() {
+  async runDomainSlashCommand(name, suppliedArgs) {
+    if (this.state.busy) return;
+    const tool = DOMAIN_TOOLS.find(item => item.name === name);
+    if (!tool) return;
+    const args = { ...suppliedArgs };
+    if (tool.inputSchema?.properties?.profileId && args.profileId === undefined && this.model.profileId) args.profileId = this.model.profileId;
+    if (tool.inputSchema?.properties?.jobId && args.jobId === undefined && this.state.selectedJobId) args.jobId = this.state.selectedJobId;
+    const before = this.artifactSnapshot();
+    this.state.busy = name;
+    this.state.error = null;
+    this.state.status = `${name} running`;
+    this.render();
+    try {
+      const result = await callDomainTool(this.store, name, args, { source: 'tui' });
+      this.state.status = `${name} complete · ${Array.isArray(result) ? `${result.length} result(s)` : 'authoritative state refreshed'}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${name} failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.refresh({ disk: false });
+      this.noteArtifactChanges(before, this.artifactSnapshot());
+    }
+  }
+
+  executeMemoryCommand(argText) {
+    const text = String(argText || '').trim();
+    const parts = text.split('|').map(part => part.trim());
+    const [head, reasonPart = ''] = parts;
+    const [action, target, ...extra] = head.split(/\s+/).filter(Boolean);
+    const reason = reasonPart.trim();
+    const usage = 'Usage: :memory accept <proposal-id> | :memory reject|revoke <proposal-id> | <reason> | :memory undo <transition-id> | <reason> | :memory refresh';
+    if (action === 'refresh' && !target) return this.refreshMemoryWorkspace();
+    if (parts.length > 2 || !['accept', 'reject', 'revoke', 'undo'].includes(action) || !target || extra.length
+      || (['reject', 'revoke', 'undo'].includes(action) && !reason)) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (this.state.setupCalibrationReview && ['accept', 'reject'].includes(action)) {
+      this.state.pendingConfirm = { kind: 'setup-memory-transition', argText: text };
+      this.state.status = `Confirm explicit calibration proposal ${action}: ${target}? (y/n)`;
+      this.render();
+      return;
+    }
+    const profileId = this.model.profileId;
+    if (!profileId || this.state.busy) return;
+    const count = Number(one(this.store, 'SELECT COUNT(*) AS count FROM career_memory_proposal_transitions WHERE profile_id=?', [profileId])?.count || 0);
+    const referenceId = `tui-memory:${profileId}:${action}:${target}:${count + 1}`;
+    try {
+      const result = action === 'undo'
+        ? undoMemoryTransition(this.store, {
+            profileId,
+            transitionId: target,
+            reason,
+            referenceId,
+            actor: 'user',
+            source: 'tui',
+            nowDate: this.now(),
+          })
+        : transitionMemoryProposal(this.store, {
+            profileId,
+            proposalId: target,
+            action,
+            reason,
+            referenceId,
+            actor: 'user',
+            source: 'tui',
+            nowDate: this.now(),
+          });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.overlay = 'memory';
+      this.state.memoryView = 'proposals';
+      this.state.status = `Memory ${action} complete · ${result.toStatus} · ${target}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Memory ${action} failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  refreshMemoryWorkspace() {
+    const profileId = this.model.profileId;
+    if (!profileId || this.state.busy) return;
+    try {
+      const asOf = this.now();
+      refreshMemoryProjection(this.store, { profileId, projectionType: 'career_brief', asOf, actor: 'user', source: 'tui' });
+      refreshMemoryProjection(this.store, { profileId, projectionType: 'voice_positioning_guide', asOf, actor: 'user', source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.overlay = 'memory';
+      this.state.status = 'Career Memory projections refreshed deterministically.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Memory refresh failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  cycleStripFocus(delta = 1) {
     const items = this.model.priority || [];
     if (!items.length) return;
-    this.state.stripIndex = ((this.state.stripIndex || 0) + 1) % items.length;
-    this.state.status = `Strip focus: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
+    this.state.stripIndex = ((this.state.stripIndex || 0) + delta + items.length) % items.length;
+    this.state.status = `Priority: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
     this.render();
   }
 
@@ -1517,28 +2066,247 @@ export class JobosTui {
     this.render();
   }
 
-  async runPrep(argText) {
-    const jobId = this.state.selectedJobId;
-    if (!jobId) {
-      this.state.status = 'Select a job before running interview prep.';
+  rescheduleSelectedAction(argText) {
+    const usage = 'Usage: :reschedule <RFC3339> | <reason>';
+    const separator = String(argText || '').indexOf('|');
+    const dueAt = separator >= 0 ? argText.slice(0, separator).trim() : '';
+    const reason = separator >= 0 ? argText.slice(separator + 1).trim() : '';
+    const action = this.model.selected?.nextAction;
+    if (!dueAt || !reason) {
+      this.state.status = usage;
       this.render();
       return;
     }
-    const app = one(this.store, 'SELECT id FROM applications WHERE job_id=? ORDER BY created_at DESC LIMIT 1', [jobId]);
-    if (!app) {
-      this.state.status = 'No application record for this job — create one first (pursue or jobos apply create).';
+    if (!action || !this.model.profileId) {
+      this.state.status = 'Selected job has no open W06 action to reschedule.';
+      this.render();
+      return;
+    }
+    try {
+      const result = rescheduleApplicationNextAction(this.store, {
+        taskId: action.id,
+        profileId: this.model.profileId,
+        dueAt,
+        reason,
+        actor: 'user',
+        source: 'tui',
+      });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Rescheduled ${result.title} · ${result.dueAt} · ${result.manualRescheduleReason}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Reschedule failed: ${error.message}`;
+    }
+    this.render();
+  }
+
+  selectedInterviewApplication() {
+    const application = this.model.interviews?.selectedApplication;
+    if (!application
+      || application.profileId !== this.model.profileId
+      || application.jobId !== this.state.selectedJobId) {
+      return null;
+    }
+    return application;
+  }
+
+  async verifyInterviewStory(argText) {
+    const usage = 'Usage: :story-verify <story-id> <revision> | <confirmed-fields-csv>';
+    const separator = String(argText || '').indexOf('|');
+    const target = separator >= 0 ? argText.slice(0, separator).trim().split(/\s+/) : [];
+    const confirmedFields = separator >= 0
+      ? argText.slice(separator + 1).split(',').map(field => field.trim()).filter(Boolean)
+      : [];
+    const revision = Number(target[1]);
+    if (target.length !== 2 || !Number.isInteger(revision) || revision < 1) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (!this.model.profileId || this.state.busy) return;
+    this.state.busy = 'story-verify';
+    try {
+      const result = await callDomainTool(this.store, 'verify_interview_story', {
+        profileId: this.model.profileId,
+        storyId: target[0],
+        revision,
+        confirmedFields,
+        actor: 'user'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Story verified · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Story verification failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async retireInterviewStory(argText) {
+    const usage = 'Usage: :story-retire <story-id> | <reason>';
+    const separator = String(argText || '').indexOf('|');
+    const storyId = separator >= 0 ? argText.slice(0, separator).trim() : '';
+    const reason = separator >= 0 ? argText.slice(separator + 1).trim() : '';
+    if (!storyId || storyId.includes(' ') || !reason) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    if (!this.model.profileId || this.state.busy) return;
+    this.state.busy = 'story-retire';
+    try {
+      const result = await callDomainTool(this.store, 'retire_interview_story', {
+        profileId: this.model.profileId,
+        storyId,
+        reason,
+        actor: 'user'
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Story retired · ${result.id} · ${reason}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Story retirement failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async recordInterviewDebrief(argText) {
+    const usage = 'Usage: :debrief <json-file>';
+    const file = String(argText || '').trim();
+    if (!file) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = 'Select a profile-owned application before recording a debrief.';
       this.render();
       return;
     }
     if (this.state.busy) return;
+    this.state.busy = 'debrief-record';
+    try {
+      const payload = readStructuredJsonFile(file);
+      const result = await callDomainTool(this.store, 'record_interview_debrief', {
+        ...payload,
+        profileId: application.profileId,
+        jobId: undefined,
+        applicationId: application.applicationId,
+        debriefId: undefined,
+        targetRevision: undefined,
+        reason: undefined
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Debrief recorded · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message.startsWith('Invalid JSON file')
+        ? error.message
+        : `Debrief failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async correctInterviewDebrief(argText) {
+    const usage = 'Usage: :debrief-correct <debrief-id> | <json-file> | <reason>';
+    const parts = String(argText || '').split('|').map(part => part.trim());
+    if (parts.length !== 3 || parts.some(part => !part)) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = 'Select a profile-owned application before correcting a debrief.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'debrief-correct';
+    try {
+      const [debriefId, file, reason] = parts;
+      const payload = readStructuredJsonFile(file);
+      let current;
+      try {
+        current = getInterviewDebrief(this.store, {
+          profileId: application.profileId,
+          debriefId,
+          includeHistory: false
+        });
+      } catch {
+        throw new Error('Interview debrief does not belong to the selected profile/application.');
+      }
+      if (current.applicationId !== application.applicationId || current.jobId !== application.jobId) {
+        throw new Error('Interview debrief does not belong to the selected profile/application.');
+      }
+      const result = await callDomainTool(this.store, 'correct_interview_debrief', {
+        ...payload,
+        profileId: application.profileId,
+        debriefId: current.id,
+        jobId: current.jobId,
+        applicationId: current.applicationId,
+        interviewStage: current.interviewStage,
+        audience: current.audience,
+        referenceId: current.referenceId,
+        targetRevision: current.currentRevision.revision,
+        reason
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = `Debrief corrected · ${result.id} r${result.currentRevision.revision}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message.startsWith('Invalid JSON file')
+        ? error.message
+        : `Debrief correction failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
+  async runPrep(argText) {
+    const args = String(argText || '').trim().split(/\s+/).filter(Boolean);
+    const usage = 'Usage: :prep <stage> [audience]';
+    if (args.length > 2) {
+      this.state.status = usage;
+      this.render();
+      return;
+    }
+    const application = this.selectedInterviewApplication();
+    if (!application) {
+      this.state.status = this.state.selectedJobId
+        ? 'No application record for this job — create one first (pursue or jobos apply create).'
+        : 'Select a job before running interview prep.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    const stage = args[0] || 'interview';
+    const audience = args[1] || undefined;
     this.state.busy = 'interview-prep';
     this.state.status = 'Interview prep running…';
     this.render();
     try {
-      const result = await callDomainTool(this.store, 'interview_prep', { applicationId: app.id, stage: argText || 'interview' }, { source: 'tui' });
+      const result = await callDomainTool(this.store, 'interview_prep', {
+        applicationId: application.applicationId,
+        stage,
+        audience
+      }, { source: 'tui' });
       this.state.error = null;
       this.refresh({ disk: false });
-      this.state.status = `Interview prep draft created (${result.stage || 'interview'}) · review with r`;
+      this.state.status = `Interview prep draft created (${result.stage} · ${result.audience}) · review with r`;
     } catch (error) {
       this.state.error = error.message;
       this.state.status = `Interview prep failed: ${error.message}`;
@@ -1614,6 +2382,67 @@ export class JobosTui {
     }
   }
 
+  async formAction(argText = '') {
+    if (this.state.busy) return;
+    const [action, first, second, third] = String(argText || '').trim().split(/\s+/);
+    const jobId = this.state.selectedJobId;
+    const profileId = this.model.profileId;
+    const usage = 'Usage: :form inspect <url> | :form assist <packet-id> [browser-profile] | :form checkpoint <packet-id> <fill-run-id> [field-key,...] | :form submit <packet-id> <checkpoint-id> [browser-profile]';
+    if (!jobId || !profileId) {
+      this.state.error = 'No job/profile selected';
+      this.state.status = 'Select a job and profile before form actions.';
+      return this.render();
+    }
+    if (!['inspect', 'assist', 'checkpoint', 'submit'].includes(action)
+      || !first
+      || (['checkpoint', 'submit'].includes(action) && !second)) {
+      this.state.error = 'Invalid form command';
+      this.state.status = usage;
+      return this.render();
+    }
+    this.state.busy = `form_${action}`;
+    this.state.error = null;
+    this.state.status = `Running form ${action}…`;
+    this.render();
+    try {
+      let result;
+      if (action === 'inspect') {
+        result = await callDomainTool(this.store, 'inspect_application_form', { jobId, profileId, url: first, browserProfile: 'default' }, { source: 'tui' });
+      } else if (action === 'assist') {
+        result = await callDomainTool(this.store, 'assist_application_form', { packetId: first, browserProfile: second || 'default', allowSideEffects: true }, { source: 'tui' });
+      } else if (action === 'checkpoint') {
+        result = await callDomainTool(this.store, 'checkpoint_application_form', {
+          packetId: first,
+          fillRunId: second,
+          confirmedFieldKeys: third ? third.split(',').map(value => value.trim()).filter(Boolean) : []
+        }, { source: 'tui' });
+      } else {
+        result = await callDomainTool(this.store, 'submit_application_form', {
+          packetId: first,
+          checkpointId: second,
+          browserProfile: third || 'default',
+          allowSubmit: true
+        }, { source: 'tui' });
+      }
+      this.refresh({ disk: false });
+      this.state.status = action === 'inspect'
+        ? `form inspected · snapshot ${result.snapshotId}`
+        : action === 'assist'
+          ? `form filled and read back · run ${result.fillRunId} · checkpoint required`
+          : action === 'checkpoint'
+            ? `human checkpoint accepted · ${result.checkpointId}`
+            : result.status === 'confirmed'
+              ? `configured submission confirmed · receipt ${result.receipt?.id || 'recorded'}`
+              : `configured submission outcome uncertain · do not retry automatically`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `form ${action} failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   async packetMutate(kind, argText = '') {
     if (this.state.busy) return;
     const jobId = this.state.selectedJobId;
@@ -1654,7 +2483,7 @@ export class JobosTui {
       }
       this.refresh({ disk: false });
       if (this.state.overlay === 'packet') await this.showPacketSummary();
-      this.state.status = kind === 'create' ? `${done} · next: submit externally, then :attest <rfc3339>`
+      this.state.status = kind === 'create' ? `${done} · next: :form assist ${readinessPacketSummary(this.store, { jobId, profileId }).currentPacketId} or submit manually`
         : kind === 'attest' ? `${done} · next: :receipt <external-reference> once the site confirms`
           : `${done} · application loop complete locally`;
     } catch (error) {
@@ -1913,9 +2742,9 @@ export class JobosTui {
       if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
       const application = one(this.store, 'SELECT id FROM applications WHERE job_id=? AND profile_id=?', [this.state.selectedJobId, this.model.profileId]);
       if (application) {
-        appUpdate(this.store, application.id, status, note || undefined);
+        appUpdate(this.store, application.id, status, note || undefined, { actor: 'user', source: 'tui' });
       } else {
-        appCreate(this.store, this.state.selectedJobId, status, note || undefined);
+        appCreate(this.store, this.state.selectedJobId, status, note || undefined, { actor: 'user', source: 'tui' });
       }
       this.state.error = null;
       this.refresh({ disk: false });
@@ -2004,7 +2833,7 @@ export class JobosTui {
     const wasRaw = Boolean(this.stdin.isRaw);
     const wasPaused = this.stdin.isPaused?.() ?? true;
     this.state.editorActive = true;
-    this.stdout.write(`${ESC}?25h${ESC}?1049l`);
+    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?25h${ESC}?1049l`);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     let editorReadCount = 0;
@@ -2042,7 +2871,7 @@ export class JobosTui {
       this.state.status = `Editor failed: ${error.message}`;
       return { error: error.message };
     } finally {
-      this.stdout.write(`${ESC}?1049h${ESC}?25l`);
+      this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
       if (this.stdin.isTTY) this.stdin.setRawMode(wasRaw);
       if (!wasPaused) this.stdin.resume?.();
       this.state.editorActive = false;
@@ -2106,8 +2935,79 @@ export class JobosTui {
   }
 
   onOverlayKey(value, key) {
+    if (this.state.overlay === 'setup-action-picker') {
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        const stepId = this.state.setupActionStepId;
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+      } else if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
+        this.state.overlay = 'setup';
+        return this.openSetupAction(step, items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
+    if (this.state.overlay === 'setup-profile-picker' || this.state.overlay === 'setup-job-picker') {
+      const picker = this.state.overlay;
+      const items = overlayItems(this.model, this.state);
+      if (key.name === 'escape') {
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === (picker === 'setup-profile-picker' ? 'profile' : 'decision'));
+        this.render();
+        return true;
+      }
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+        if (picker === 'setup-profile-picker') {
+          this.state.setupProfileId = items[this.state.overlayIndex].id;
+          this.state.profileId = items[this.state.overlayIndex].id;
+          this.state.setupJobId = null;
+          this.state.selectedJobId = null;
+        } else {
+          this.state.setupJobId = items[this.state.overlayIndex].id;
+          this.state.selectedJobId = items[this.state.overlayIndex].id;
+        }
+        const stepId = picker === 'setup-profile-picker' ? 'profile' : 'decision';
+        this.state.overlay = 'setup';
+        this.refresh({ disk: false });
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
+        this.state.status = `${stepId} selected explicitly · setup recomputed`;
+        this.render();
+        return true;
+      }
+      this.render();
+      return true;
+    }
     if (key.name === 'escape') return this.closeTransient();
+    if (this.state.overlay === 'setup') {
+      const items = this.model.onboarding?.steps || [];
+      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
+      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      else if (value === 'r') {
+        this.refresh();
+        this.state.status = 'setup recomputed from canonical SQLite state';
+        return true;
+      } else if (value === 'c') {
+        return this.openSetupCorrection(items[this.state.overlayIndex]);
+      } else if (key.name === 'return' || key.name === 'enter') {
+        return this.openSetupAction(items[this.state.overlayIndex]);
+      }
+      this.render();
+      return true;
+    }
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
+    if (this.state.overlay === 'memory' && ['1', '2', '3', '4'].includes(value)) {
+      this.state.memoryView = ['observations', 'proposals', 'career-brief', 'voice-guide'][Number(value) - 1];
+      this.state.overlayIndex = 0;
+      this.state.status = `Career Memory · ${this.state.memoryView}`;
+      this.render();
+      return true;
+    }
     if (this.state.overlay === 'discovery') {
       if (key.name === 'return' || key.name === 'enter') return this.openDiscoverySelection();
       if (value === 'j') return this.moveDiscoverySelection(1);
@@ -2126,6 +3026,13 @@ export class JobosTui {
     if (value === 'q') return this.openOverlay('answers');
     if (value === 's') return this.openOverlay('discovery');
     if (value === '?') return this.openOverlay('system');
+    if (this.state.overlay === 'due' && ['1', '2', '3'].includes(value)) {
+      this.state.taskFilter = TASK_FILTERS[Number(value) - 1];
+      this.state.overlayIndex = 0;
+      this.state.status = `Due task filter: ${this.state.taskFilter}`;
+      this.render();
+      return true;
+    }
     if (this.state.overlay === 'review') {
       if (value === 'A') return this.reviewCurrentArtifact('approved');
       if (value === 'R') return this.beginReject();
@@ -2166,7 +3073,7 @@ export class JobosTui {
       this.openReviewDocument();
       return true;
     } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'due') {
-      const task = (this.model.dueTasks || [])[this.state.overlayIndex];
+      const task = items[this.state.overlayIndex];
       if (task?.jobId) this.selectJobInMainList(task.jobId, 'Due task · job now selected in the main list.');
       else {
         this.state.status = 'This task has no linked job.';
@@ -2182,6 +3089,231 @@ export class JobosTui {
     }
     this.render();
     return true;
+  }
+
+  openSetupCorrection(item) {
+    const actionId = item?.actions?.[0]?.id;
+    if (['resume', 'proofs', 'intake'].includes(item?.id) || (item?.id === 'profile' && actionId === 'create_profile')) {
+      return this.openSetupAction(item);
+    }
+    const overlays = {
+      profile: 'setup-profile-picker',
+      intake: 'discovery',
+      source: 'discovery',
+      materials: 'review',
+      calibration: 'memory',
+      network: 'build-network',
+      provider: 'system',
+      browser: 'system'
+    };
+    const target = overlays[item?.id];
+    if (target) return this.openOverlay(target);
+    this.state.status = item?.actions?.[0]?.command
+      ? `Correction is human-owned · ${item.actions[0].command}`
+      : `No correction is needed for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
+  }
+
+  openSetupAction(item, selectedAction = null) {
+    const action = selectedAction || item?.actions?.[0];
+    const actionId = action?.id;
+    if (!actionId) {
+      this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.render();
+      return true;
+    }
+    if (!selectedAction && item.actions.length > 1) {
+      this.state.overlay = 'setup-action-picker';
+      this.state.overlayIndex = 0;
+      this.state.setupActionItems = item.actions;
+      this.state.setupActionStepId = item.id;
+      this.state.status = `Select a ${item.id} recovery action.`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'select_profile') return this.openOverlay('setup-profile-picker');
+    if (actionId === 'select_job' || actionId === 'select_current_job') return this.openOverlay('setup-job-picker');
+    if (actionId === 'record_calibration') {
+      this.state.mode = 'setup-calibration';
+      this.state.input = '';
+      this.state.status = 'Enter feedback JSON with jobId, decision, reasonCodes, optional signals/explanations · Enter previews';
+      this.render();
+      return true;
+    }
+    if (actionId === 'derive_calibration') {
+      this.state.pendingConfirm = { kind: 'setup-calibration-derive' };
+      this.state.status = 'Derive inactive proposals from current attributed observations? (y/n)';
+      this.render();
+      return true;
+    }
+    if (actionId === 'review_calibration') {
+      this.openOverlay('memory');
+      this.state.memoryView = 'proposals';
+      this.state.setupCalibrationReview = true;
+      return true;
+    }
+    if (actionId === 'verify_proof') {
+      const proofId = String(action.command).match(/proof verify\s+(\S+)/)?.[1];
+      this.state.pendingConfirm = { kind: 'setup-proof-verify', proofId };
+      this.state.status = `Verify proof ${proofId} as a trusted human? (y/n)`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'score_job' || actionId === 'pursue_job') {
+      this.state.pendingConfirm = { kind: 'setup-domain-action', action: actionId === 'score_job' ? 'score' : 'pursue' };
+      this.state.status = `Confirm ${actionId === 'score_job' ? 'deterministic scoring' : 'pursuit and local draft creation'}? (y/n)`;
+      this.render();
+      return true;
+    }
+    if (actionId === 'create_profile') {
+      this.state.mode = 'setup-profile';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter the canonical profile name · Enter saves · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (['import_resume', 'replace_resume', 'import_local_job'].includes(actionId)) {
+      this.state.mode = 'setup-file';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.status = 'Enter a local file path · validation runs before setup advances · Esc cancels';
+      this.render();
+      return true;
+    }
+    if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
+      const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
+      this.state.mode = 'setup-proof';
+      this.state.input = '';
+      this.state.setupFormAction = actionId;
+      this.state.setupProofId = proofId;
+      this.state.status = actionId === 'retire_proof'
+        ? 'Enter the retirement reason · Enter retires this canonical proof · Esc cancels'
+        : actionId === 'replace_proof'
+          ? 'Enter replacement proof summary | evidence · Enter supersedes the canonical proof · Esc cancels'
+          : 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
+      this.render();
+      return true;
+    }
+    this.state.status = action?.command ? `This action is human-owned · ${action.command}` : `No guided action is available for ${item?.id || 'this step'}.`;
+    this.render();
+    return true;
+  }
+
+  commitSetupForm() {
+    const actionId = this.state.setupFormAction;
+    const input = this.state.input.trim();
+    if (!input) {
+      this.state.error = 'Input is required';
+      this.state.status = 'Setup input is required; no canonical state was changed.';
+      this.render();
+      return true;
+    }
+    try {
+      if (actionId === 'create_profile') {
+        const result = createProfile(this.store, input);
+        this.state.setupProfileId = result.profile.id;
+        this.state.profileId = result.profile.id;
+      } else if (actionId === 'import_resume' || actionId === 'replace_resume') {
+        const owner = actionId === 'replace_resume' ? replaceResume : importResume;
+        owner(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+      } else if (actionId === 'add_proof') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        if (!summary) throw new Error('Proof summary is required.');
+        addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
+      } else if (actionId === 'replace_proof') {
+        const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
+        supersedeProof(this.store, this.state.setupProofId, { summary, evidence: evidenceParts.join(' | ') });
+      } else if (actionId === 'retire_proof') {
+        retireProof(this.store, this.state.setupProofId, input);
+      } else if (actionId === 'import_local_job') {
+        const result = importText(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
+        this.state.setupJobId = result.job.id;
+        this.state.selectedJobId = result.job.id;
+      }
+      this.state.mode = 'normal';
+      this.state.input = '';
+      this.state.setupFormAction = null;
+      this.state.setupProofId = null;
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      const nextStepId = this.model.onboarding.nextAction
+        ? this.model.onboarding.steps.find(item => item.actions.some(candidate => candidate.id === this.model.onboarding.nextAction.id))?.id
+        : null;
+      const nextIndex = this.model.onboarding.steps.findIndex(item => item.id === nextStepId);
+      if (nextIndex >= 0) this.state.overlayIndex = nextIndex;
+      this.state.status = `${actionId} complete · setup recomputed from canonical state`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `${actionId} failed: ${error.message} · correct the input and retry`;
+      this.render();
+    }
+    return true;
+  }
+
+  async previewSetupCalibration() {
+    try {
+      const parsed = JSON.parse(this.state.input);
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      const jobId = String(parsed.jobId || this.state.setupJobId || '');
+      const sequence = Number(one(this.store, 'SELECT COUNT(*) AS count FROM career_memory_observations WHERE profile_id=?', [profileId])?.count || 0) + 1;
+      const feedback = {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: parsed.decision,
+        reasonCodes: parsed.reasonCodes,
+        signals: parsed.signals || [],
+        publicExplanation: parsed.publicExplanation || '',
+        privateNote: parsed.privateNote || '',
+        referenceId: `tui-setup-calibration:${profileId}:${jobId}:${sequence}`,
+        occurredAt: this.now().toISOString()
+      };
+      await callDomainTool(this.store, 'record_job_feedback', { profileId, jobId, feedback, validateOnly: true }, { source: 'tui' });
+      this.state.pendingConfirm = { kind: 'setup-calibration-feedback', profileId, jobId, feedback };
+      this.state.mode = 'normal';
+      this.state.error = null;
+      this.state.status = `Preview · job ${jobId} · ${feedback.decision} · reasons ${feedback.reasonCodes.join(',')} · private note ${feedback.privateNote ? 'present' : 'absent'} · confirm? (y/n)`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration preview failed: ${error.message} · correct the JSON and retry`;
+    }
+    this.render();
+  }
+
+  async commitSetupCalibration(confirm) {
+    try {
+      await callDomainTool(this.store, 'record_job_feedback', {
+        profileId: confirm.profileId, jobId: confirm.jobId, feedback: confirm.feedback, validateOnly: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration feedback recorded · proposal derivation remains explicit';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration recording failed: ${error.message}`;
+      this.render();
+    }
+  }
+
+  async deriveSetupCalibration() {
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      await callDomainTool(this.store, 'derive_memory_proposals', {
+        profileId, asOf: this.now().toISOString(), dryRun: false
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.state.overlay = 'setup';
+      this.refresh({ disk: false });
+      this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+      this.state.status = 'Calibration proposals derived · inactive until explicitly accepted; review to accept or reject';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Calibration derivation failed: ${error.message}`;
+      this.render();
+    }
   }
 
   onBuildNetworkKey(value, key, items) {
@@ -2241,6 +3373,11 @@ export class JobosTui {
     if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
+      if (['setup-profile', 'setup-file', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (mode === 'setup-calibration') {
+        void this.previewSetupCalibration();
+        return true;
+      }
       if (mode === 'review-note') {
         void this.submitReviewNote();
         return true;
@@ -2271,7 +3408,7 @@ export class JobosTui {
       this.state.mode = 'normal';
       this.state.input = '';
       if (mode === 'agent' && text) void this.promptAgent(text);
-      else if (mode === 'command') this.executeCommand(text);
+      else if (mode === 'command') this.executeCommand(`${this.state.commandPrefix || ':'}${text}`);
       else if (mode === 'build-network-field' && this.state.networkDraft) {
         const editKey = this.state.networkDraft._editingKey;
         if (editKey) this.state.networkDraft[editKey] = text;
@@ -2301,6 +3438,40 @@ export class JobosTui {
       this.state.pendingConfirm = null;
       this.state.mode = 'normal';
       this.state.input = '';
+      if (confirm.kind === 'setup-domain-action') {
+        void this.runAction(confirm.action);
+        return true;
+      }
+      if (confirm.kind === 'setup-calibration-feedback') {
+        void this.commitSetupCalibration(confirm);
+        return true;
+      }
+      if (confirm.kind === 'setup-calibration-derive') {
+        void this.deriveSetupCalibration();
+        return true;
+      }
+      if (confirm.kind === 'setup-proof-verify') {
+        try {
+          verifyProof(this.store, confirm.proofId);
+          this.state.overlay = 'setup';
+          this.refresh({ disk: false });
+          this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'proofs');
+          this.state.error = null;
+          this.state.status = `Proof ${confirm.proofId} verified · setup recomputed`;
+        } catch (error) {
+          this.state.error = error.message;
+          this.state.status = `Proof verification failed: ${error.message}`;
+          this.render();
+        }
+        return true;
+      }
+      if (confirm.kind === 'setup-memory-transition') {
+        const guided = this.state.setupCalibrationReview;
+        this.state.setupCalibrationReview = false;
+        this.executeMemoryCommand(confirm.argText);
+        this.state.setupCalibrationReview = guided;
+        return true;
+      }
       if (confirm.kind === 'editor-with-note' || confirm.next === 'editor') void this.openArtifactEditor();
       else this.applyPendingAutoOpen();
       this.state.status = confirm.kind === 'editor-with-note' ? 'Feedback discarded; opening editor.' : 'Feedback discarded.';
@@ -2340,6 +3511,11 @@ export class JobosTui {
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
     if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
+    if (!this.state.overlay && this.state.focusTarget === 'agent' && this.state.mode === 'normal') {
+      if (key.name === 'escape' || key.name === 'tab') return this.toggleAgentFocus();
+      if (key.name === 'up' || key.name === 'pageup' || value === 'k') return this.scrollAgent(key.name === 'pageup' ? 10 : 1);
+      if (key.name === 'down' || key.name === 'pagedown' || value === 'j') return this.scrollAgent(key.name === 'pagedown' ? -10 : -1);
+    }
     if (this.state.overlay === 'docs' && key.ctrl && key.name === 'a') {
       if (this.dimensions().width >= 116) {
         this.state.focusTarget = this.state.focusTarget === 'viewer' ? 'shell' : 'viewer';
@@ -2356,7 +3532,7 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration'].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);
@@ -2370,7 +3546,8 @@ export class JobosTui {
     }
     if (this.state.overlay) return this.onOverlayKey(value, key);
     if (key.name === 'escape') return this.closeTransient();
-    if (value === 'j') this.moveSelection(1);
+    if (value === 'h') this.cycleStripFocus(-1);
+    else if (value === 'j') this.moveSelection(1);
     else if (value === 'k') this.moveSelection(-1);
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
     else if (value === '2') { this.state.filter = 'all'; this.refresh({ disk: false }); }
@@ -2386,16 +3563,25 @@ export class JobosTui {
       this.render();
     } else if (value === ':') {
       this.state.mode = 'command';
+      this.state.commandPrefix = ':';
+      this.state.input = '';
+      this.render();
+    } else if (value === '/') {
+      this.state.mode = 'command';
+      this.state.commandPrefix = '/';
       this.state.input = '';
       this.render();
     } else if (value === 'i') {
       this.state.agentOn = true;
+      this.state.focusTarget = 'agent';
+      this.state.agentScroll = 0;
       this.state.mode = 'agent';
       this.state.input = '';
       this.render();
     } else if (value === 't') this.beginStage();
     else if (value === 'r') this.openOverlay('review');
     else if (value === 'l') this.openOverlay('log');
+    else if (value === 'm') this.openOverlay('memory');
     else if (value === 'n') this.openOverlay('network');
     else if (value === 'o') this.openDocuments();
     else if (value === 'q') this.openOverlay('answers');
@@ -2406,15 +3592,16 @@ export class JobosTui {
     else if (value === 'p') void this.runAction('pursue');
     else if (value === 'z') void this.runAction('score');
     else if (value === 'd') void this.runAction('daily');
-    else if (value === 'g') {
-      this.state.status = 'state refreshed from disk';
-      this.refresh();
-    } else if (value === 'c') void this.connectAgent();
+    else if (value === 'g') this.openSetupOverlay();
+    else if (value === 'c') void this.connectAgent();
     else if (value === 'x' && this.client?.state === 'working') {
       this.client.cancel();
+      void this.persistAgentSession(null).catch(() => {});
       this.state.status = 'cancelling agent turn';
       this.render();
-    } else if (key.name === 'tab') this.cycleStripFocus();
+    } else if (key.name === 'tab') this.toggleAgentFocus();
+    else if (key.name === 'left') this.cycleStripFocus(-1);
+    else if (key.name === 'right') this.cycleStripFocus(1);
     else if (key.name === 'return' || key.name === 'enter') this.jumpToStripJob();
     return true;
   }
@@ -2425,8 +3612,9 @@ export class JobosTui {
     this.stdin.setRawMode(true);
     this.stdin.resume();
     this.stdin.on('keypress', this.boundKeypress);
+    if (this.mouseEnabled) this.stdin.on('data', this.boundMouseData);
     this.stdout.on('resize', this.boundResize);
-    this.stdout.write(`${ESC}?1049h${ESC}?25l`);
+    this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
     this.render();
     this.refreshTimer = setInterval(() => {
       if (!this.state.busy && !this.state.editorActive) {
@@ -2453,11 +3641,13 @@ export class JobosTui {
     this.stopped = true;
     clearInterval(this.refreshTimer);
     this.stdin.off('keypress', this.boundKeypress);
+    if (this.mouseEnabled) this.stdin.off('data', this.boundMouseData);
     this.stdout.off('resize', this.boundResize);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     if (this.client) await this.client.stop();
-    this.stdout.write(`${ESC}?25h${ESC}?1049l`);
+    await this.sessionPersistence.catch(() => {});
+    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?25h${ESC}?1049l`);
     this.resolveStop?.();
   }
 }

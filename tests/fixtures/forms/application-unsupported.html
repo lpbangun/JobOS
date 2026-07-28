@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Example Co (Unsupported Controls)</title>
+  <meta name="fixture" content="application-unsupported">
+</head>
+<body>
+  <!--
+    application-unsupported.html
+    Adds controls that the W02 DOM adapter must classify as unsupported and
+    route to an explicit human fallback, never silently auto-fill:
+      - a contenteditable "rich notes" region (no native control);
+      - a custom multi-select widget built from divs/buttons (no native option elements);
+      - an explicit visible human fallback notice and action.
+
+    These exercise WF06: unsupported required controls remain explicit and
+    cannot silently pass readiness.
+  -->
+  <header>
+    <h1>Apply to Example Co</h1>
+  </header>
+
+  <main id="main">
+    <form id="application-form" name="application-form" data-form="application-unsupported" aria-label="Job application form" action="/submit/application" method="post" enctype="multipart/form-data">
+
+      <fieldset>
+        <legend>Identity &amp; contact</legend>
+        <div class="field">
+          <label for="full-name">Full name</label>
+          <input id="full-name" name="full_name" type="text" required>
+        </div>
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Unsupported — rich notes</legend>
+        <!-- contenteditable is not a supported control for auto-fill. -->
+        <div class="field">
+          <span class="label">Rich notes (formatted)</span>
+          <div
+            id="rich-notes"
+            class="contenteditable"
+            role="textbox"
+            aria-multiline="true"
+            aria-label="Rich notes"
+            contenteditable="true"
+            data-control="contenteditable"></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Unsupported — custom multi-select</legend>
+        <!-- A custom widget: not a native <select multiple>; options are buttons. -->
+        <div class="field" data-control="custom-multiselect" aria-label="Select skills">
+          <span class="label">Select all applicable skills (required)</span>
+          <div id="skills-widget" class="custom-multiselect" role="group" aria-label="Skills">
+            <button type="button" class="skill-chip" data-skill="javascript" aria-pressed="false">JavaScript</button>
+            <button type="button" class="skill-chip" data-skill="python" aria-pressed="false">Python</button>
+            <button type="button" class="skill-chip" data-skill="design" aria-pressed="false">Design</button>
+            <button type="button" class="skill-chip" data-skill="management" aria-pressed="false">Management</button>
+          </div>
+          <input type="hidden" name="skills" id="skills-hidden" required>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Documents</legend>
+        <div class="field">
+          <label for="resume-file">Resume (PDF)</label>
+          <input id="resume-file" name="resume_file" type="file" accept=".pdf,application/pdf" required>
+        </div>
+      </fieldset>
+
+      <fieldset class="restricted">
+        <legend>Restricted (human action)</legend>
+        <div class="field">
+          <span class="label">Work authorization (required)</span>
+          <label><input type="radio" name="work_authorization" value="authorized" required> Authorized</label>
+          <label><input type="radio" name="work_authorization" value="sponsorship"> Need sponsorship</label>
+        </div>
+      </fieldset>
+
+      <!-- Visible human fallback notice for unsupported controls. -->
+      <aside class="human-fallback" data-human-fallback role="note">
+        <p>The rich-notes and skills fields cannot be filled automatically.
+        Please complete them manually before submitting.</p>
+      </aside>
+
+      <div class="actions">
+        <button id="save-draft" type="button" data-action="save-draft">Save draft</button>
+        <button id="submit-application" type="submit" data-submit="application-unsupported">Submit application</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

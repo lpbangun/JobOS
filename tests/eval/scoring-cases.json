@@ -1,32 +1,96 @@
 [
   {
     "id": "good-fit-curriculum-pm",
+    "label": "direct-fit",
+    "rankGroup": "direct",
     "file": "jobs/good-fit-curriculum-pm.md",
-    "expectedRange": [80, 95],
-    "rationale": "Direct PM + EdTech + educator discovery + analytics alignment."
-  },
-  {
-    "id": "poor-fit-backend-payments",
-    "file": "jobs/poor-fit-backend-payments.md",
-    "expectedRange": [25, 50],
-    "rationale": "Backend payments engineering stack and onsite constraint are far from PM/EdTech profile."
-  },
-  {
-    "id": "medium-fit-people-ops",
-    "file": "jobs/medium-fit-people-ops.md",
-    "expectedRange": [60, 78],
-    "rationale": "People Ops and startup systems fit secondary targets but less direct than PM EdTech."
+    "expectedRange": [70, 100],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "compensation", "missionInterest"],
+    "notes": "Direct PM and EdTech evidence should lead the supported scored group."
   },
   {
     "id": "good-fit-learning-designer",
+    "label": "adjacent-transferable-fit",
+    "rankGroup": "adjacent",
     "file": "jobs/good-fit-learning-designer.md",
-    "expectedRange": [75, 92],
-    "rationale": "Learning design, career mobility, research, and product collaboration fit the profile."
+    "expectedRange": [60, 100],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "compensation", "missionInterest"],
+    "notes": "Adjacent learning-design work is supported by active verified education proofs."
+  },
+  {
+    "id": "transferable-edtech-operations",
+    "label": "verified-transferable-fit",
+    "rankGroup": "adjacent",
+    "file": "jobs/transferable-edtech-operations.md",
+    "expectedRange": [60, 100],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "compensation", "missionInterest"],
+    "notes": "Exact structured requirements are supported by active verified educator research, launch, and analytics proofs."
+  },
+  {
+    "id": "medium-fit-people-ops",
+    "label": "secondary-fit",
+    "rankGroup": "secondary",
+    "file": "jobs/medium-fit-people-ops.md",
+    "expectedRange": [45, 85],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "seniority", "compensation"],
+    "notes": "Secondary operations fit should remain below supported learning-product cases."
   },
   {
     "id": "poor-fit-enterprise-ae",
+    "label": "wrong-track-sales",
+    "rankGroup": "wrong-track",
     "file": "jobs/poor-fit-enterprise-ae.md",
-    "expectedRange": [30, 55],
-    "rationale": "Enterprise sales quota role is outside target role families despite some communication overlap."
+    "profile": "profiles/flexible-work-model.json",
+    "expectedRange": [0, 60],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "seniority", "compensation"],
+    "notes": "Enterprise quota sales remains outside the declared role track."
+  },
+  {
+    "id": "poor-fit-backend-payments",
+    "label": "wrong-track-technical",
+    "rankGroup": "wrong-track",
+    "file": "jobs/poor-fit-backend-payments.md",
+    "profile": "profiles/flexible-work-model.json",
+    "expectedRange": [0, 60],
+    "expectedDecision": "scored",
+    "requiredKnownDimensions": ["roleFit", "seniority", "compensation"],
+    "notes": "Backend payments engineering remains outside the declared role track."
+  },
+  {
+    "id": "unknown-compensation-location",
+    "label": "unknown-compensation-location",
+    "rankGroup": "review",
+    "file": "jobs/unknown-compensation-location.md",
+    "expectedRange": [0, 100],
+    "expectedDecision": "review_required",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "missionInterest"],
+    "notes": "Role and seniority permit a provisional score while missing location, compensation, and network remain explicit."
+  },
+  {
+    "id": "contradiction-onsite-remote",
+    "label": "contradiction-onsite-remote",
+    "rankGroup": "blocked",
+    "file": "jobs/contradiction-onsite-remote.md",
+    "profile": "profiles/remote-only.json",
+    "expectedRange": [0, 59],
+    "expectedDecision": "review_required",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "locationWorkModel", "compensation"],
+    "notes": "A direct on-site contradiction caps fit without becoming a posting-legitimacy score."
+  },
+  {
+    "id": "dealbreaker-equity-only",
+    "label": "dealbreaker-equity-only",
+    "rankGroup": "blocked",
+    "file": "jobs/dealbreaker-equity-only.md",
+    "profile": "profiles/no-equity-only.json",
+    "expectedRange": [0, 0],
+    "expectedDecision": "review_required",
+    "requiredKnownDimensions": ["roleFit", "domainFit", "seniority", "compensation"],
+    "notes": "An explicit equity-only compensation dealbreaker wins over otherwise strong fit."
   }
 ]

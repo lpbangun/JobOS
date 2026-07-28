@@ -2,9 +2,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 import { AcpClient, agentBackendCatalog, jobosMcpServer, redactSensitive } from '../src/acp.js';
 import { openStore, reload, one } from '../src/db.js';
 import { selectedJobContext } from '../src/domain-tools.js';
+import { seedMcpDemo } from './seed-mcp-demo.js';
 
 function parseArgs(argv) {
   const flags = {};
@@ -39,7 +41,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
   if (!hermes?.available) throw Error(`Hermes ACP unavailable: ${hermes?.readiness || 'missing'}`);
 
   const before = {
-    context: selectedJobContext(store, job.id),
+    context: selectedJobContext(store, job.id, selectedProfile),
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [job.id])?.count || 0),
     appliedApplications: Number(one(store, "SELECT COUNT(*) AS count FROM applications WHERE job_id=? AND status='applied'", [job.id])?.count || 0)
   };
@@ -74,7 +76,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
     append(records, 'turn_complete', { turn: 1, sessionId: client.sessionId, result: firstTurn });
 
     reload(store);
-    const between = selectedJobContext(store, job.id);
+    const between = selectedJobContext(store, job.id, selectedProfile);
     append(records, 'host_refresh', { context: between });
     secondTurn = await client.prompt(
       `Follow up in the same session: call get_job_context for ${job.id} and confirm whether the score is persisted in JobOS. Answer in one sentence and cite the job ID.`,
@@ -153,7 +155,7 @@ export async function runAcpDemo({ workspace, profileId = null, jobId = null, ou
 
   reload(store);
   const after = {
-    context: selectedJobContext(store, job.id),
+    context: selectedJobContext(store, job.id, selectedProfile),
     scoreAudits: Number(one(store, "SELECT COUNT(*) AS count FROM audit_log WHERE action='job.scored' AND entity_id=?", [job.id])?.count || 0),
     appliedApplications: Number(one(store, "SELECT COUNT(*) AS count FROM applications WHERE job_id=? AND status='applied'", [job.id])?.count || 0)
   };
@@ -259,14 +261,27 @@ async function main() {
   if (flags.job && typeof flags.job !== 'string') throw new Error('Missing --job <job-id>');
   if (flags.profile && typeof flags.profile !== 'string') throw new Error('Missing --profile <profile-id>');
   if (flags.workspace && typeof flags.workspace !== 'string') throw new Error('Missing --workspace <dir>');
-  const summary = await runAcpDemo({
-    workspace: flags.workspace,
-    profileId: flags.profile || null,
-    jobId: flags.job || null,
-    output: flags.output || null,
-    timeoutMs: typeof flags.timeout === 'string' && Number.isFinite(Number(flags.timeout)) ? Number(flags.timeout) : 300_000
-  });
-  console.log(JSON.stringify(summary, null, 2));
+  const bareInvocation = !flags.job && !flags.workspace && !flags.profile;
+  let temporaryRoot = null;
+  try {
+    if (bareInvocation) {
+      temporaryRoot = fs.mkdtempSync(path.join(tmpdir(), 'jobos-acp-demo-'));
+      const seeded = await seedMcpDemo(path.join(temporaryRoot, 'workspace'));
+      flags.workspace = seeded.workspace;
+      flags.profile = seeded.profileId;
+      flags.job = seeded.jobId;
+    }
+    const summary = await runAcpDemo({
+      workspace: flags.workspace,
+      profileId: flags.profile || null,
+      jobId: flags.job || null,
+      output: flags.output || null,
+      timeoutMs: typeof flags.timeout === 'string' && Number.isFinite(Number(flags.timeout)) ? Number(flags.timeout) : 300_000
+    });
+    console.log(JSON.stringify(summary, null, 2));
+  } finally {
+    if (temporaryRoot) fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

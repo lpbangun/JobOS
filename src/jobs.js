@@ -2,12 +2,32 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 import { id, now, slug, parseJson } from './utils.js';
-import { one, all, run, save, audit } from './db.js';
+import { one, all, run, save, audit, guardedWrite, queuePostCommit, projectAudit, recordAudit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
-import { scoreMd } from './scoring.js';
+import { deserializeFitScore, qualifiesForHighFit, scoreMd } from './scoring.js';
+import { extractRequirementInventory } from './requirements.js';
+import { classifyLiveness, deserializeLiveness, isLivenessFresh, livenessGate, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
+import { lifecycleTaskView } from './lifecycle.js';
+import { appendMemoryObservation, queueMemorySync } from './career-memory-observations.js';
+import { JOB_FEEDBACK_INPUT_SCHEMA, canonicalHash, normalizeJobFeedbackInput } from './career-memory-contract.js';
 
-export function requirements(text){ return String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean).filter(l=>/require|qualification|experience|skill|must|responsibil|you will|we need|looking for|preferred|ability/i.test(l)).slice(0,20); }
-export function parseJob(text, fb={}){ const lines=String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean); const find=k=>lines.find(l=>new RegExp('^'+k+'\\s*:','i').test(l))?.replace(new RegExp('^'+k+'\\s*:\\s*','i'),''); const heading=lines.find(l=>/^#\s+/.test(l)); return {title:fb.title||find('title')||(heading?heading.replace(/^#\s+/,''):'Imported role'),company:fb.company||find('company')||'Unknown company',location:fb.location||find('location')||'',description:text}; }
+export function requirementInventory(text){ return extractRequirementInventory(text); }
+export function requirements(text){ return requirementInventory(text).requirements.map(requirement => requirement.sourceText); }
+export function parseJob(text, fb = {}) {
+  const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const find = key => lines.find(line => new RegExp(`^${key}\\s*:`, 'i').test(line))?.replace(new RegExp(`^${key}\\s*:\\s*`, 'i'), '');
+  const heading = lines.find(line => /^#\s+/.test(line));
+  const workModelText = String(fb.workModel || find('work model') || '').trim().toLowerCase();
+  const workModel = /\bremote\b/.test(workModelText) ? 'remote' : /\bhybrid\b/.test(workModelText) ? 'hybrid' : /\b(on[- ]?site|in office)\b/.test(workModelText) ? 'onsite' : 'unknown';
+  return {
+    title: fb.title || find('title') || (heading ? heading.replace(/^#\s+/, '') : 'Imported role'),
+    company: fb.company || find('company') || 'Unknown company',
+    location: fb.location || find('location') || '',
+    compensation: fb.compensation || { text: find('compensation') || '' },
+    workModel,
+    description: text
+  };
+}
 export function ensureCompany(s,name){ const cid=slug(name||'unknown-company'), at=now(); run(s,'INSERT OR IGNORE INTO companies (id,name,created_at,updated_at) VALUES (?,?,?,?)',[cid,name||'Unknown company',at,at]); return one(s,'SELECT * FROM companies WHERE id=?',[cid]); }
 function publicUrl(u){ return String(u || '').startsWith('jobos:text:') ? '' : (u || ''); }
 export function dedupeKey(job){ return [job.company,job.title,job.location].map(x=>String(x||'').trim().toLowerCase().replace(/\s+/g,' ')).join('|'); }
@@ -24,47 +44,640 @@ function canMergeByKey(existing, dbUrl){ const a=publicUrl(existing?.url), b=pub
 function createPossibleDuplicateTask(s, job, candidates, at){
   if(!candidates.length) return null;
   const ids=candidates.map(c=>c.id).sort(), tid=id('task',`possible-duplicate:${job.id}:${ids.join(':')}`);
-  run(s,'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at]);
+  run(s,'INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[tid,job.id,null,`Review possible duplicate job: ${job.title}`,`This posting shares company, title, and location with existing job(s) ${ids.join(', ')}, but has a different source URL. Review before archiving or merging.`,'review',null,'normal','open','system',at,at,job.profile_id]);
   audit(s,'job.possible_duplicate','job',job.id,{jobId:job.id,candidateJobIds:ids,dedupeKey:job.dedupe_key});
   return tid;
 }
-export function syncJob(s,jid){ const job=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!job) return; const score=parseJson(job.score_json,null), app=one(s,'SELECT * FROM applications WHERE job_id=?',[jid]), tasks=all(s,'SELECT * FROM tasks WHERE job_id=? ORDER BY due_at IS NULL,due_at,created_at',[jid]); const dir=path.join(s.p.jobs,jid); writeYaml(path.join(dir,'job.yaml'),{id:job.id,profileId:job.profile_id,title:job.title,company:job.company,location:job.location,url:publicUrl(job.url),source:job.source,postedDate:job.posted_date||'',sourceHistory:parseJson(job.source_history_json,[]),requirements:parseJson(job.requirements_json,[]),compensation:job.compensation,workModel:job.work_model,status:job.status,fitScore:job.fit_score,highFit:Boolean(job.high_fit),dedupeKey:job.dedupe_key,lastSeenAt:job.last_seen_at,reposted:Boolean(job.reposted),discoveryRunId:job.discovery_run_id||'',score,application:app?{id:app.id,status:app.status,notes:app.notes,confirmationUrl:app.confirmation_url,updatedAt:app.updated_at}:null,updatedAt:job.updated_at}); writeMd(path.join(dir,'description.md'),job.description); if(app) writeYaml(path.join(dir,'application.yaml'),{id:app.id,status:app.status,notes:app.notes,confirmationUrl:app.confirmation_url,updatedAt:app.updated_at}); if(tasks.length) writeYaml(path.join(dir,'tasks.yaml'),tasks.map(t=>({id:t.id,title:t.title,type:t.type,dueAt:t.due_at,priority:t.priority,status:t.status,createdBy:t.created_by}))); if(score) writeMd(path.join(dir,'score.md'),scoreMd(job,score)); }
-export function importNormalized(s,{profileId,job,source='discovery',status='new',runId=''}) {
-  if(!one(s,'SELECT id FROM profiles WHERE id=?',[profileId])) throw Error(`Unknown profile: ${profileId}`);
-  const normalized={title:job.title||'Imported role',company:job.company||'Unknown company',location:job.location||'',url:job.url||'',source:job.source||source,description:job.description||'',postedDate:job.postedDate||job.posted_date||''};
-  const at=now(), key=dedupeKey(normalized), company=ensureCompany(s,normalized.company), dbUrl=normalized.url||`jobos:text:${id('job',`${profileId}:${normalized.title}:${normalized.company}:${normalized.description}`)}`;
-  const exByUrl=one(s,'SELECT * FROM jobs WHERE profile_id=? AND url<>"" AND url=? ORDER BY created_at LIMIT 1',[profileId,dbUrl]);
-  const keyMatches=all(s,'SELECT * FROM jobs WHERE profile_id=? AND dedupe_key=? ORDER BY created_at',[profileId,key]);
-  const keyMerge=keyMatches.find(j=>canMergeByKey(j,dbUrl));
-  const ex=exByUrl||keyMerge||null;
-  const possibleDuplicates=exByUrl ? [] : keyMatches.filter(j=>!canMergeByKey(j,dbUrl));
-  const entry=sourceEntry(normalized.source,dbUrl,at);
-  if(ex){
-    const history=appendSourceHistory(ex,entry), reposted=isRepost(ex,entry,at)?1:Number(ex.reposted||0);
-    const nextUrl=(!publicUrl(ex.url)&&publicUrl(dbUrl)&&!one(s,'SELECT id FROM jobs WHERE profile_id=? AND url=? AND id<>?',[profileId,dbUrl,ex.id])) ? dbUrl : ex.url;
-    const nextDescription=normalized.description||ex.description;
-    run(s,'UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?, posted_date=?, dedupe_key=?, last_seen_at=?, source_history_json=?, reposted=?, discovery_run_id=?, updated_at=? WHERE id=?',[company.id,normalized.title,normalized.company,normalized.location,nextUrl,normalized.source,nextDescription,JSON.stringify(requirements(nextDescription)),normalized.postedDate||ex.posted_date||'',key,at,JSON.stringify(history),reposted,runId||ex.discovery_run_id||'',at,ex.id]);
-    audit(s,'job.seen_again','job',ex.id,{jobId:ex.id,profileId,source:normalized.source,url:publicUrl(dbUrl),created:false,reposted:Boolean(reposted)});
-    syncJob(s,ex.id); save(s); return {job:one(s,'SELECT * FROM jobs WHERE id=?',[ex.id]),created:false,deduped:true};
+const WORK_MODELS = new Set(['remote', 'hybrid', 'onsite', 'unknown']);
+const EMPLOYMENT_TYPES = new Set(['full_time', 'part_time', 'contract', 'temporary', 'internship', 'volunteer', 'other']);
+
+function canonicalCompensation(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const numberOrNull = item => Number.isFinite(Number(item)) ? Number(item) : null;
+  const interval = ['hour', 'day', 'week', 'month', 'year'].includes(source.interval) ? source.interval : 'unknown';
+  return {
+    text: String(source.text ?? ''),
+    min: source.min == null ? null : numberOrNull(source.min),
+    max: source.max == null ? null : numberOrNull(source.max),
+    currency: String(source.currency ?? ''),
+    interval
+  };
+}
+
+function hasCompensation(value) {
+  const item = canonicalCompensation(value);
+  return Boolean(item.text || item.min != null || item.max != null || item.currency || item.interval !== 'unknown');
+}
+
+function nativeValuePresent(value) {
+  if (value == null || value === '' || value === 'unknown') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function mergeNativeFields(stored, incoming) {
+  const prior = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+  const next = incoming && typeof incoming === 'object' && !Array.isArray(incoming) ? incoming : {};
+  const merged = { ...prior };
+  for (const [key, value] of Object.entries(next)) {
+    if (nativeValuePresent(value)) merged[key] = value;
   }
-  const jid=id('job',`${profileId}:${dbUrl}:${key}:${normalized.description.slice(0,200)}`);
-  const history=[entry];
-  const reposted=possibleDuplicates.some(existing=>isRepost(existing,entry,at))?1:0;
-  run(s,'INSERT INTO jobs (id,profile_id,company_id,title,company,location,url,source,description,requirements_json,status,posted_date,dedupe_key,source_history_json,first_seen_at,last_seen_at,reposted,discovery_run_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',[jid,profileId,company.id,normalized.title,normalized.company,normalized.location,dbUrl,normalized.source,normalized.description,JSON.stringify(requirements(normalized.description)),status,normalized.postedDate,key,JSON.stringify(history),at,at,reposted,runId,at,at]);
-  const inserted=one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
-  createPossibleDuplicateTask(s,inserted,possibleDuplicates,at);
-  audit(s,'job.imported','job',jid,{jobId:jid,profileId,source:normalized.source,url:publicUrl(dbUrl),status,reposted:Boolean(reposted)});
-  syncJob(s,jid); save(s); return {job:one(s,'SELECT * FROM jobs WHERE id=?',[jid]),created:true,deduped:false};
+  return merged;
+}
+
+function normalizedDiscoveryFields(job, existing = null, jobId = '') {
+  const incomingCompensation = canonicalCompensation(job.compensation);
+  const storedCompensation = canonicalCompensation(parseJson(existing?.compensation_json, {}));
+  const compensationDetails = hasCompensation(incomingCompensation) ? incomingCompensation : storedCompensation;
+  const incomingWorkModel = WORK_MODELS.has(job.workModel) ? job.workModel : 'unknown';
+  const storedWorkModel = WORK_MODELS.has(existing?.work_model) ? existing.work_model : 'unknown';
+  const incomingEmploymentTypes = Array.isArray(job.employmentTypes)
+    ? [...new Set(job.employmentTypes.filter(value => EMPLOYMENT_TYPES.has(value)))]
+    : [];
+  const storedEmploymentTypes = parseJson(existing?.employment_types_json, []).filter(value => EMPLOYMENT_TYPES.has(value));
+  const sourceNativeFields = mergeNativeFields(parseJson(existing?.source_native_json, {}), job.sourceNativeFields);
+  const incomingLiveness = job.liveness
+    ? normalizeLiveness(job.liveness, { id: jobId || existing?.id, source: job.source || existing?.source })
+    : null;
+  const incomingHasStructured = hasCompensation(incomingCompensation);
+  const incomingHasText = Boolean(incomingCompensation.text);
+  const storedDisplay = String(existing?.compensation ?? '');
+  const compensationDisplay = incomingHasText
+    ? incomingCompensation.text
+    : (incomingHasStructured && storedDisplay ? storedDisplay : (incomingHasStructured ? incomingCompensation.text : storedDisplay));
+  return {
+    compensation: compensationDisplay,
+    compensationDetails,
+    workModel: incomingWorkModel !== 'unknown' ? incomingWorkModel : storedWorkModel,
+    employmentTypes: incomingEmploymentTypes.length ? incomingEmploymentTypes : storedEmploymentTypes,
+    department: String(job.department || existing?.department || ''),
+    sourceNativeFields,
+    liveness: incomingLiveness || (existing ? deserializeLiveness(existing) : null)
+  };
+}
+
+export function getJobLiveness(row) {
+  return deserializeLiveness(row);
+}
+
+export function getPostingLiveness(row) {
+  return postingLivenessHandoff(deserializeLiveness(row), row);
+}
+
+export function persistJobLiveness(s, jid, assessment, { persist = true } = {}) {
+  const row = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+  if (!row) throw Error(`Unknown job: ${jid}`);
+  const liveness = normalizeLiveness(assessment, row);
+  run(s, 'UPDATE jobs SET liveness_status=?, liveness_checked_at=?, liveness_json=?, updated_at=? WHERE id=?', [
+    liveness.status,
+    liveness.checkedAt,
+    JSON.stringify(liveness),
+    now(),
+    jid
+  ]);
+  audit(s, 'job.liveness_checked', 'job', jid, {
+    jobId: jid,
+    status: liveness.status,
+    checkedAt: liveness.checkedAt,
+    reasonCodes: liveness.reasonCodes,
+    source: liveness.source
+  });
+  syncJob(s, jid);
+  if (persist) save(s);
+  return liveness;
+}
+
+function staleDryRunLiveness(current, row) {
+  return normalizeLiveness({
+    ...current,
+    jobId: row.id,
+    status: 'uncertain',
+    reasonCodes: [...new Set([...(current.reasonCodes || []), 'stale_or_unchecked'])],
+    evidence: current.evidence || []
+  }, row);
+}
+
+export async function resolveJobLiveness(s, jid, opts = {}) {
+  const row = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+  if (!row) throw Error(`Unknown job: ${jid}`);
+  const nowFn = typeof opts.now === 'function' ? opts.now : Date.now;
+  const current = deserializeLiveness(row);
+  if (opts.dryRun) {
+    const visible = isLivenessFresh(current, nowFn()) ? current : staleDryRunLiveness(current, row);
+    return { ...livenessGate(visible, row), persistedLiveness: current, handoff: postingLivenessHandoff(visible, row), refreshed: false };
+  }
+  let liveness = current;
+  let refreshed = false;
+  if (!isLivenessFresh(current, nowFn())) {
+    const checkLiveness = opts.checkLiveness || classifyLiveness;
+    liveness = await checkLiveness({
+      jobId: row.id,
+      sourceId: row.id,
+      title: row.title,
+      company: row.company,
+      location: row.location,
+      url: row.url,
+      source: row.source,
+      listingPresent: false
+    }, { ...opts, now: nowFn });
+    liveness = persistJobLiveness(s, row.id, liveness);
+    refreshed = true;
+  }
+  return { ...livenessGate(liveness, row), persistedLiveness: liveness, handoff: postingLivenessHandoff(liveness, row), refreshed };
+}
+
+export function assertJobLivenessGate(gate, operation = 'continue') {
+  if (gate.outcome !== 'blocked') return gate;
+  throw Object.assign(
+    new Error(`Job ${gate.liveness.jobId} is expired and cannot ${operation}`),
+    {
+      code: 'job_expired',
+      type: 'validation',
+      liveness: gate.liveness,
+      postingLiveness: gate.handoff
+    }
+  );
+}
+function interviewMirrorSummary(s, job, application, currentW06Action) {
+  if (!application) {
+    return {
+      latestPrepArtifactId: null,
+      coveredCount: 0,
+      gapCount: 0,
+      latestDebriefId: null,
+      latestDebriefRevision: null,
+      currentW06Action: null,
+    };
+  }
+  const latestPrep = one(s, `SELECT * FROM artifacts
+    WHERE job_id=? AND profile_id=? AND type='interview_prep' AND series_key GLOB ?
+    ORDER BY created_at DESC,revision DESC,id DESC LIMIT 1`, [
+    job.id,
+    job.profile_id,
+    `interview_prep:${application.id}:*`,
+  ]);
+  const packCounts = latestPrep
+    ? one(s, `SELECT
+        SUM(CASE WHEN coverage_status='covered' THEN 1 ELSE 0 END) AS covered_count,
+        SUM(CASE WHEN coverage_status='gap' THEN 1 ELSE 0 END) AS gap_count
+      FROM interview_pack_items WHERE artifact_id=?`, [latestPrep.id])
+    : null;
+  const latestDebrief = one(s, `SELECT d.id,r.revision
+    FROM interview_debriefs d
+    JOIN interview_debrief_revisions r ON r.debrief_id=d.id
+    WHERE d.profile_id=? AND d.job_id=? AND d.application_id=?
+    ORDER BY r.recorded_at DESC,r.revision DESC,r.id DESC LIMIT 1`, [
+    job.profile_id,
+    job.id,
+    application.id,
+  ]);
+  return {
+    latestPrepArtifactId: latestPrep?.id || null,
+    coveredCount: Number(packCounts?.covered_count || 0),
+    gapCount: Number(packCounts?.gap_count || 0),
+    latestDebriefId: latestDebrief?.id || null,
+    latestDebriefRevision: latestDebrief ? Number(latestDebrief.revision) : null,
+    currentW06Action,
+  };
+}
+
+function cloneMirrorValue(value) {
+  return value == null ? null : structuredClone(value);
+}
+
+export function syncJob(s, jid) {
+  const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+  if (!job) return;
+  const storedScore = parseJson(job.score_json, null);
+  const fit = deserializeFitScore(storedScore, { persistedOverall: job.fit_score, jobId: job.id, profileId: job.profile_id });
+  const app = one(s, 'SELECT * FROM applications WHERE job_id=?', [jid]);
+  const tasks = all(s, `SELECT * FROM tasks WHERE job_id=? AND profile_id=? AND status='open'
+    ORDER BY CASE action_kind WHEN 'application_next_action' THEN 0 ELSE 1 END,
+      due_at IS NULL,due_at,created_at,id`, [jid, job.profile_id]);
+  const nextActionRow = tasks.find(task => task.action_kind === 'application_next_action') || null;
+  const nextAction = nextActionRow ? lifecycleTaskView(nextActionRow) : null;
+  const interview = interviewMirrorSummary(
+    s,
+    job,
+    app,
+    cloneMirrorValue(nextAction),
+  );
+  const liveness = deserializeLiveness(job);
+  const dir = path.join(s.p.jobs, jid);
+  writeYaml(path.join(dir, 'job.yaml'), {
+    id: job.id,
+    profileId: job.profile_id,
+    title: job.title,
+    company: job.company,
+    location: job.location,
+    url: publicUrl(job.url),
+    source: job.source,
+    postedDate: job.posted_date || '',
+    sourceHistory: parseJson(job.source_history_json, []),
+    requirements: parseJson(job.requirements_json, []),
+    compensation: job.compensation,
+    compensationDetails: canonicalCompensation(parseJson(job.compensation_json, {})),
+    workModel: WORK_MODELS.has(job.work_model) ? job.work_model : 'unknown',
+    employmentTypes: parseJson(job.employment_types_json, []),
+    department: job.department || '',
+    sourceNativeFields: parseJson(job.source_native_json, {}),
+    liveness,
+    postingLiveness: getPostingLiveness(job),
+    status: job.status,
+    fitScore: fit?.overall ?? null,
+    highFit: Boolean(job.high_fit) && qualifiesForHighFit(fit, 0),
+    dedupeKey: job.dedupe_key,
+    lastSeenAt: job.last_seen_at,
+    reposted: Boolean(job.reposted),
+    discoveryRunId: job.discovery_run_id || '',
+    fit,
+    interview,
+    application: app ? {
+      id: app.id,
+      status: app.status,
+      notes: app.notes,
+      confirmationUrl: app.confirmation_url,
+      nextAction,
+      interview: cloneMirrorValue(interview),
+      updatedAt: app.updated_at
+    } : null,
+    updatedAt: job.updated_at
+  });
+  writeMd(path.join(dir, 'description.md'), job.description);
+  if (app) writeYaml(path.join(dir, 'application.yaml'), {
+    id: app.id,
+    status: app.status,
+    notes: app.notes,
+    confirmationUrl: app.confirmation_url,
+    nextAction,
+    interview: cloneMirrorValue(interview),
+    updatedAt: app.updated_at
+  });
+  writeYaml(path.join(dir, 'tasks.yaml'), tasks.map(task => {
+    const lifecycle = task.action_kind === 'application_next_action' ? lifecycleTaskView(task) : null;
+    return {
+      id: task.id,
+      profileId: task.profile_id || null,
+      jobId: task.job_id || null,
+      applicationId: task.application_id || null,
+      title: task.title,
+      type: task.type,
+      dueAt: task.due_at,
+      priority: task.priority,
+      status: task.status,
+      createdBy: task.created_by,
+      actionKind: task.action_kind,
+      actionCode: task.action_code || null,
+      stage: task.stage || null,
+      state: lifecycle?.state || null,
+      waitingSince: task.waiting_since || null,
+      policyDueAt: task.policy_due_at || null,
+      urgentAt: task.urgent_at || null,
+      scheduleSource: task.schedule_source,
+      manualRescheduledAt: task.manual_rescheduled_at || null,
+      manualRescheduleReason: task.manual_reschedule_reason || '',
+      sourceEvent: {
+        type: task.source_event_type || null,
+        id: task.source_event_id || null,
+        occurredAt: task.updated_at,
+      },
+    };
+  }));
+  if (storedScore) writeMd(path.join(dir, 'score.md'), scoreMd(job, fit));
+}
+export function importNormalized(s, { profileId, job, source = 'discovery', status = 'new', runId = '' }) {
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const normalized = {
+    title: job.title || 'Imported role',
+    company: job.company || 'Unknown company',
+    location: job.location || '',
+    url: job.url || '',
+    source: job.source || source,
+    description: job.description || '',
+    postedDate: job.postedDate || job.posted_date || ''
+  };
+  const at = now();
+  const key = dedupeKey(normalized);
+  const company = ensureCompany(s, normalized.company);
+  const dbUrl = normalized.url || `jobos:text:${id('job', `${profileId}:${normalized.title}:${normalized.company}:${normalized.description}`)}`;
+  const exByUrl = one(s, 'SELECT * FROM jobs WHERE profile_id=? AND url<>"" AND url=? ORDER BY created_at LIMIT 1', [profileId, dbUrl]);
+  const keyMatches = all(s, 'SELECT * FROM jobs WHERE profile_id=? AND dedupe_key=? ORDER BY created_at', [profileId, key]);
+  const keyMerge = keyMatches.find(existing => canMergeByKey(existing, dbUrl));
+  const existing = exByUrl || keyMerge || null;
+  const possibleDuplicates = exByUrl ? [] : keyMatches.filter(candidate => !canMergeByKey(candidate, dbUrl));
+  const entry = sourceEntry(normalized.source, dbUrl, at);
+  if (existing) {
+    const history = appendSourceHistory(existing, entry);
+    const reposted = isRepost(existing, entry, at) ? 1 : Number(existing.reposted || 0);
+    const nextUrl = (!publicUrl(existing.url) && publicUrl(dbUrl) && !one(s, 'SELECT id FROM jobs WHERE profile_id=? AND url=? AND id<>?', [profileId, dbUrl, existing.id]))
+      ? dbUrl
+      : existing.url;
+    const nextDescription = normalized.description || existing.description;
+    const fields = normalizedDiscoveryFields(job, existing, existing.id);
+    const liveness = fields.liveness;
+    run(s, `UPDATE jobs SET company_id=?, title=?, company=?, location=?, url=?, source=?, description=?, requirements_json=?,
+      compensation=?, compensation_json=?, work_model=?, employment_types_json=?, department=?, source_native_json=?,
+      liveness_status=?, liveness_checked_at=?, liveness_json=?, posted_date=?, dedupe_key=?, last_seen_at=?,
+      source_history_json=?, reposted=?, discovery_run_id=?, updated_at=? WHERE id=?`, [
+      company.id,
+      normalized.title,
+      normalized.company,
+      normalized.location,
+      nextUrl,
+      normalized.source,
+      nextDescription,
+      JSON.stringify(requirementInventory(nextDescription)),
+      fields.compensation,
+      JSON.stringify(fields.compensationDetails),
+      fields.workModel,
+      JSON.stringify(fields.employmentTypes),
+      fields.department,
+      JSON.stringify(fields.sourceNativeFields),
+      liveness.status,
+      liveness.checkedAt,
+      job.liveness ? JSON.stringify(liveness) : existing.liveness_json,
+      normalized.postedDate || existing.posted_date || '',
+      key,
+      at,
+      JSON.stringify(history),
+      reposted,
+      runId || existing.discovery_run_id || '',
+      at,
+      existing.id
+    ]);
+    audit(s, 'job.seen_again', 'job', existing.id, {
+      jobId: existing.id,
+      profileId,
+      source: normalized.source,
+      url: publicUrl(dbUrl),
+      created: false,
+      reposted: Boolean(reposted)
+    });
+    syncJob(s, existing.id);
+    save(s);
+    return { job: one(s, 'SELECT * FROM jobs WHERE id=?', [existing.id]), created: false, deduped: true };
+  }
+  const jid = id('job', `${profileId}:${dbUrl}:${key}:${normalized.description.slice(0, 200)}`);
+  const history = [entry];
+  const reposted = possibleDuplicates.some(candidate => isRepost(candidate, entry, at)) ? 1 : 0;
+  const fields = normalizedDiscoveryFields(job, null, jid);
+  const liveness = fields.liveness;
+  run(s, `INSERT INTO jobs (
+    id,profile_id,company_id,title,company,location,url,source,description,requirements_json,
+    compensation,compensation_json,work_model,employment_types_json,department,source_native_json,
+    liveness_status,liveness_checked_at,liveness_json,status,posted_date,dedupe_key,source_history_json,
+    first_seen_at,last_seen_at,reposted,discovery_run_id,created_at,updated_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    jid,
+    profileId,
+    company.id,
+    normalized.title,
+    normalized.company,
+    normalized.location,
+    dbUrl,
+    normalized.source,
+    normalized.description,
+    JSON.stringify(requirementInventory(normalized.description)),
+    fields.compensation,
+    JSON.stringify(fields.compensationDetails),
+    fields.workModel,
+    JSON.stringify(fields.employmentTypes),
+    fields.department,
+    JSON.stringify(fields.sourceNativeFields),
+    liveness?.status || 'uncertain',
+    liveness?.checkedAt || null,
+    liveness ? JSON.stringify(liveness) : '{}',
+    status,
+    normalized.postedDate,
+    key,
+    JSON.stringify(history),
+    at,
+    at,
+    reposted,
+    runId,
+    at,
+    at
+  ]);
+  const inserted = one(s, 'SELECT * FROM jobs WHERE id=?', [jid]);
+  createPossibleDuplicateTask(s, inserted, possibleDuplicates, at);
+  audit(s, 'job.imported', 'job', jid, {
+    jobId: jid,
+    profileId,
+    source: normalized.source,
+    url: publicUrl(dbUrl),
+    status,
+    reposted: Boolean(reposted)
+  });
+  syncJob(s, jid);
+  save(s);
+  return { job: one(s, 'SELECT * FROM jobs WHERE id=?', [jid]), created: true, deduped: false };
 }
 export function importText(s,{profileId,filePath,source='text_file',url=''}){ const text=fs.readFileSync(filePath,'utf8'), parsed=parseJob(text), jidSeed=url||`${profileId}:${parsed.title}:${parsed.company}:${text}`, dbUrl=url||`jobos:text:${id('job',jidSeed)}`; return importNormalized(s,{profileId,job:{...parsed,url:dbUrl,source,description:text},source,status:'imported'}); }
 export async function importUrl(s,{profileId,url}){ let text; try { const r=await fetch(url,{headers:{'user-agent':'JobOS local CLI (+human-initiated import)'}}); const html=await r.text(); const $=cheerio.load(html); $('script,style,noscript').remove(); const title=($('title').first().text()||$('h1').first().text()||'Imported URL role').replace(/\s+/g,' ').trim(); const body=$('body').text().replace(/\s+/g,' ').trim(); text=`Title: ${title}\nCompany: Unknown company\nSource URL: ${url}\n\n${body.slice(0,12000)}`; } catch(e) { text=`Title: Imported URL role\nCompany: Unknown company\nSource URL: ${url}\n\nURL import was recorded, but content fetch failed: ${e.message}\nManual enrichment required before scoring or tailoring.`; } const tmp=path.join(s.p.state,`${id('urlimport',url)}.txt`); fs.writeFileSync(tmp,text); return importText(s,{profileId,filePath:tmp,source:'url',url}); }
-export function listJobs(s){ return all(s,'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC'); }
-export function updateJobStatus(s,jid,status){
+export function listJobs(s){ return all(s,'SELECT jobs.*, applications.status AS application_status FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id ORDER BY jobs.created_at DESC').map(row => ({ ...row, liveness: deserializeLiveness(row) })); }
+function jobFeedbackSource(job, statusAuditId) {
+  return {
+    type: 'job',
+    id: job.id,
+    versionId: statusAuditId,
+    revision: null,
+    contentHash: canonicalHash({
+      id: job.id,
+      profileId: job.profile_id,
+      status: job.status,
+      title: job.title,
+      company: job.company,
+      location: job.location || '',
+      workModel: job.work_model || '',
+      compensation: job.compensation || '',
+      description: job.description,
+      requirements: parseJson(job.requirements_json, []),
+      department: job.department || '',
+      postedDate: job.posted_date || '',
+    }),
+  };
+}
+
+export function assertJobFeedbackSignalSource(job, signals) {
+  const native = parseJson(job.source_native_json, {});
+  const parsedRequirements = parseJson(job.requirements_json, []);
+  const requirements = Array.isArray(parsedRequirements)
+    ? parsedRequirements
+    : Object.values(parsedRequirements || {}).flatMap(value => Array.isArray(value) ? value : []);
+  const requirementValues = requirements.flatMap(value => {
+    if (typeof value === 'string') return [value];
+    if (!value || typeof value !== 'object') return [];
+    return [value.text, value.requirement, value.name, value.skill].filter(Boolean);
+  }).map(value => String(value).replace(/\s+/g, ' ').trim().toLowerCase());
+  const values = {
+    role_family: [job.title], seniority: [job.title], company_stage: [native.companyStage, native.company_stage],
+    industry: [native.industry], mission: [native.mission, job.description], location: [job.location],
+    work_model: [job.work_model], compensation: [job.compensation], skill: requirementValues,
+    timing: [job.posted_date], trust_risk: [job.liveness_status],
+  };
+  for (const signal of signals) {
+    const candidates = (values[signal.field] || []).map(value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()).filter(Boolean);
+    const matches = signal.match === 'exact'
+      ? candidates.includes(signal.value)
+      : candidates.some(candidate => signal.value.split(/[^a-z0-9]+/).filter(Boolean).every(token => candidate.split(/[^a-z0-9]+/).includes(token)));
+    if (!matches) throw Object.assign(new Error(`Signal ${signal.field}=${signal.value} is not present in the canonical job source.`), {
+      code: 'memory_signal_source_mismatch', type: 'validation',
+    });
+  }
+}
+
+function memoryProducerError(code, message, details = {}) {
+  return Object.assign(new Error(message), { code, type: 'validation', details });
+}
+
+function memoryObservationProjection(s, row) {
+  const projection = {
+    schema: 'jobos.career-memory-observation.v1',
+    id: row.id,
+    profileId: row.profile_id,
+    eventType: row.event_type,
+    occurredAt: row.occurred_at,
+    recordedAt: row.recorded_at,
+    actor: row.actor,
+    source: row.source,
+    sourceEntity: {
+      type: row.source_entity_type,
+      id: row.source_entity_id,
+      versionId: row.source_version_id,
+      revision: row.source_revision === null ? null : Number(row.source_revision),
+      contentHash: row.source_content_hash,
+    },
+    reasonCodes: parseJson(row.reason_codes_json, []),
+    signals: parseJson(row.signal_json, []),
+    publicExplanation: row.public_explanation || '',
+    hasPrivateNote: Boolean(row.private_note),
+    current: !one(s, 'SELECT id FROM career_memory_observations WHERE supersedes_observation_id=?', [row.id]),
+    supersedesObservationId: row.supersedes_observation_id || null,
+    payload: parseJson(row.payload_json, {}),
+    interpretation: 'attributed_observation_only_no_preference_or_causal_claim',
+    externalSideEffects: 'none',
+  };
+  Object.defineProperty(projection, 'idempotent', { value: true, enumerable: false });
+  return projection;
+}
+
+function producerObservationHash({ profileId, eventType, sourceEntity, feedback, actor, source }) {
+  const publicHash = canonicalHash({
+    profileId,
+    eventType,
+    sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+    sourceEntity,
+    occurredAt: feedback.occurredAt,
+    actor,
+    source,
+    reasonCodes: feedback.reasonCodes,
+    signals: feedback.signals,
+    publicExplanation: feedback.publicExplanation,
+    payload: { decision: feedback.decision },
+    referenceId: feedback.referenceId,
+    supersedesObservationId: null,
+    undoesObservationId: null,
+    correctionReason: '',
+  });
+  return canonicalHash({ publicHash, privateNoteHash: canonicalHash(feedback.privateNote) });
+}
+
+export function preflightProducerFeedback(s, { profileId, eventType, sourceEntity = null, feedback, actor, source, job }) {
+  const normalizedActor = typeof actor === 'string' ? actor.replace(/\s+/g, ' ').trim() : '';
+  const normalizedSource = typeof source === 'string' ? source.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+  if (!normalizedActor || ['unknown', 'unknown_legacy', 'legacy', 'system'].includes(normalizedActor.toLowerCase())) {
+    throw memoryProducerError('memory_actor_invalid', 'actor must identify the user who made the decision.');
+  }
+  if (!['cli', 'tui'].includes(normalizedSource)) {
+    throw memoryProducerError('memory_source_invalid', 'W08 observations can be recorded only by trusted CLI or TUI human flows.');
+  }
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
+    throw memoryProducerError('memory_profile_unknown', `Unknown profile: ${profileId}.`);
+  }
+  assertJobFeedbackSignalSource(job, feedback.signals);
+  const existing = one(s, 'SELECT * FROM career_memory_observations WHERE profile_id=? AND reference_id=?', [profileId, feedback.referenceId]);
+  if (!existing) return null;
+  if (!sourceEntity) {
+    throw memoryProducerError('memory_reference_conflict', `Reference ${feedback.referenceId} identifies feedback for a different source.`, {
+      profileId, referenceId: feedback.referenceId,
+    });
+  }
+  const observationHash = producerObservationHash({
+    profileId, eventType, sourceEntity, feedback, actor: normalizedActor, source: normalizedSource,
+  });
+  if (existing.observation_hash !== observationHash) {
+    throw memoryProducerError('memory_reference_conflict', `Reference ${feedback.referenceId} already identifies different observation content.`, {
+      profileId, referenceId: feedback.referenceId,
+    });
+  }
+  return memoryObservationProjection(s, existing);
+}
+
+function preflightJobStatusFeedback(s, job, status, feedback, actor, source) {
+  const eventType = feedback.decision === 'save' ? 'job_saved' : 'job_skipped';
+  const statusEvent = one(s, `SELECT * FROM audit_log
+    WHERE action='job.status_changed' AND entity_type='job' AND entity_id=?
+    ORDER BY rowid DESC LIMIT 1`, [job.id]);
+  const sourceEntity = job.status === status && parseJson(statusEvent?.payload_json, {}).status === status
+    ? jobFeedbackSource(job, statusEvent.id)
+    : null;
+  const replay = preflightProducerFeedback(s, {
+    profileId: job.profile_id, eventType, sourceEntity, feedback, actor, source, job,
+  });
+  if (replay) return replay;
+  if (job.status === status) {
+    throw memoryProducerError('memory_source_state_invalid', `Job ${job.id} is already in the canonical ${status} state without matching feedback.`);
+  }
+  return null;
+}
+
+export function updateJobStatus(s,jid,status,{memoryFeedback=null,actor='user',source='domain'}={}){
   if(!['imported','new','saved','archived'].includes(status)) throw Error(`Invalid job status: ${status}`);
   const job=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!job) throw Error(`Unknown job: ${jid}`);
-  run(s,'UPDATE jobs SET status=?, updated_at=? WHERE id=?',[status,now(),jid]);
-  audit(s,'job.status_changed','job',jid,{jobId:jid,status});
-  syncJob(s,jid); save(s); return one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
+  const feedback = memoryFeedback === null ? null : normalizeJobFeedbackInput(memoryFeedback);
+  if (feedback) {
+    const expectedDecision = status === 'saved' ? 'save' : status === 'archived' ? 'skip' : null;
+    if (feedback.decision !== expectedDecision) throw Object.assign(new Error(`Feedback decision ${feedback.decision} does not match job status ${status}.`), {
+      code: 'memory_source_state_invalid', type: 'validation',
+    });
+    preflightJobStatusFeedback(s, job, status, feedback, actor, source);
+  }
+  return guardedWrite(s,()=>{
+    const current=one(s,'SELECT * FROM jobs WHERE id=?',[jid]); if(!current) throw Error(`Unknown job: ${jid}`);
+    if (feedback) {
+      const replay = preflightJobStatusFeedback(s, current, status, feedback, actor, source);
+      if (replay) return { ...current, observation: replay };
+    }
+    run(s,'UPDATE jobs SET status=?, updated_at=? WHERE id=?',[status,now(),jid]);
+    const updated=one(s,'SELECT * FROM jobs WHERE id=?',[jid]);
+    const statusEvent=recordAudit(s,'job.status_changed','job',jid,{jobId:jid,status});
+    let observation=null;
+    if (feedback) {
+      observation=appendMemoryObservation(s,{
+        profileId: updated.profile_id,
+        eventType: feedback.decision === 'save' ? 'job_saved' : 'job_skipped',
+        sourceSchema: JOB_FEEDBACK_INPUT_SCHEMA,
+        sourceEntity: jobFeedbackSource(updated,statusEvent.id),
+        occurredAt: feedback.occurredAt,
+        actor,
+        source,
+        reasonCodes: feedback.reasonCodes,
+        signals: feedback.signals,
+        publicExplanation: feedback.publicExplanation,
+        privateNote: feedback.privateNote,
+        payload: {decision:feedback.decision},
+        referenceId: feedback.referenceId,
+      });
+      if (!observation.idempotent) queueMemorySync(s,updated.profile_id,recordAudit(s,'career_memory.observation_recorded','career_memory_observation',observation.id,{
+        profileId: observation.profileId, eventType: observation.eventType, sourceEntity: observation.sourceEntity,
+        reasonCodes: observation.reasonCodes, signals: observation.signals, publicExplanation: observation.publicExplanation,
+        hasPrivateNote: observation.hasPrivateNote, referenceId: feedback.referenceId,
+      },'none'));
+    }
+    queuePostCommit(s,()=>{ projectAudit(s,statusEvent); syncJob(s,jid); });
+    return feedback ? { ...updated, observation } : updated;
+  });
 }
 export function dedupeJobs(s,{apply=false}={}){
   const rows=all(s,'SELECT * FROM jobs ORDER BY created_at');

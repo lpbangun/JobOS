@@ -18,14 +18,18 @@ import YAML from 'yaml';
 import { openStore, all, one, queuePostCommit, run, save } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
+import { createResumeRevision } from '../src/resumes.js';
 import { addAnswer, inspectApplicationQuestions } from '../src/answers.js';
 import { createArtifact, approveArtifact } from '../src/artifacts.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { appCreate, appUpdate } from '../src/tracking.js';
+import { rescheduleApplicationNextAction } from '../src/lifecycle.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, DomainToolError } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runPursuit } from '../src/workflows.js';
+import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -110,7 +114,17 @@ function artifactInput(fixture, type, content) {
     content,
     evidence: [{ proofPointId: fixture.proof.id }],
     warnings: [],
-    series: { kind: cover ? 'cover_letter' : 'resume' }
+    series: { kind: cover ? 'cover_letter' : 'resume' },
+    mutate: cover ? undefined : (store, created) => run(store, 'INSERT INTO artifact_resume_documents (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json) VALUES (?,?,?,?,?,?,?,?)', [
+      created.id,
+      1,
+      fixture.resumeSemantic.sourceResumeRevisionId,
+      JSON.stringify(fixture.resumeSemantic.document),
+      JSON.stringify(fixture.resumeSemantic.coverage),
+      JSON.stringify(fixture.resumeSemantic.validation),
+      JSON.stringify(fixture.resumeSemantic.layoutProfile),
+      JSON.stringify(fixture.resumeSemantic.renderManifest)
+    ])
   };
 }
 
@@ -135,8 +149,28 @@ async function baseFixture(t, {
     ['product', 'launch'],
     ['30%']
   );
+  const resumeDocument = {
+    schemaVersion: 1,
+    identity: { name: profile.name, email: 'packet@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_packet', text: 'Product manager with evidence-backed launch experience.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_packet', employer: 'Evidence Co', title: 'Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_packet', text: proof.summary, proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_packet', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_product', name: 'Product launches', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  };
+  const resumeRevision = createResumeRevision(store, { profileId: profile.id, document: resumeDocument, sourceText: JSON.stringify(resumeDocument), verificationStatus: 'verified' });
+  const resumeSemantic = {
+    sourceResumeRevisionId: resumeRevision.id,
+    document: resumeRevision.document,
+    coverage: { schemaVersion: 1, matrix: [{ requirementId: 'requirement_launch', status: 'supported', proofPointIds: [proof.id], sourceEntryIds: ['bullet_packet'], matchedTerms: ['launch'], confidence: 'high', requirement: { id: 'requirement_launch', sourceText: 'Must lead product launches and improve activation.', category: 'responsibility', priority: 'must_have', normalizedTerms: ['product launches'], years: null, credential: null } }], summary: { importantRequirementCount: 1, supportedImportantCount: 1, coverageRatio: 1, matchedRequirementIds: ['requirement_launch'], partiallySupportedRequirementIds: [], omittedSupportedRequirementIds: [], unsupportedRequirementIds: [] }, matched: [], partiallySupported: [], omittedSupported: [], unsupported: [] },
+    validation: { valid: true, schemaVersion: 1, sourceResumeRevisionId: resumeRevision.id, blockers: [], warnings: [] },
+    layoutProfile: { templateId: 'jobos-classic', templateVersion: 1, roleFamily: 'professional', sectionOrder: ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections'], density: 'standard', pageSize: 'letter', pageLimit: 2 },
+    renderManifest: { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] }
+  };
   const jobFile = path.join(root, 'job.md');
-  writeFileSync(jobFile, 'Title: Product Manager\nCompany: Packet Co\nLocation: Remote\n\nLead product launches and improve activation.');
+  writeFileSync(jobFile, 'Title: Product Manager\nCompany: Packet Co\nLocation: Remote\n\n## Requirements\n- Must lead product launches and improve activation.');
   const job = importText(store, { profileId: profile.id, filePath: jobFile }).job;
   const values = sentinels || {
     public: `PUBLIC-${crypto.randomUUID()}`,
@@ -189,8 +223,20 @@ async function baseFixture(t, {
       sourceRef: 'acceptance-fixture'
     });
   }
+  if (answers) {
+    addAnswer(store, {
+      profileId: profile.id,
+      category: 'motivation',
+      question: 'Why this role?',
+      answer: values.public,
+      sensitivity: 'public',
+      reuseScope: 'global',
+      verificationStatus: 'verified',
+      sourceRef: 'live-form-acceptance-fixture'
+    });
+  }
 
-  const fixture = { root, store, profile, proof, job, sentinels: values, resume: null, cover: null };
+  const fixture = { root, store, profile, proof, job, sentinels: values, resumeSemantic, resume: null, cover: null };
   if (artifacts) {
     fixture.resume = createArtifact(store, artifactInput(fixture, 'resume', '# Resume\n\nEvidence-backed launch improved activation by 30%.'));
     if (cover) fixture.cover = createArtifact(store, artifactInput(fixture, 'cover_letter', '# Cover letter\n\nEvidence-backed interest in Packet Co.'));
@@ -199,6 +245,39 @@ async function baseFixture(t, {
       if (fixture.cover) fixture.cover = approveArtifact(store, fixture.cover.id, { reviewedBy: 'cli', note: 'Acceptance fixture review.' });
     }
   }
+  const formAnswerRows = answers
+    ? all(store, 'SELECT * FROM answers WHERE profile_id=? ORDER BY question_fingerprint,id', [profile.id])
+    : [];
+  const snapshot = buildFormSnapshot({
+    snapshotId: `fs_packet_${crypto.randomUUID().replaceAll('-', '')}`,
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.packet.test/jobs/product-manager',
+    finalUrl: 'https://apply.packet.test/jobs/product-manager/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: {
+      frameKey: 'main',
+      formKey: 'application',
+      candidateCount: 1,
+      score: 10
+    },
+    fields: [
+      { frameKey: 'main', locatorPath: '#full-name', prompt: 'Full name', control: 'text', required: true },
+      { frameKey: 'main', locatorPath: '#resume', prompt: 'Resume', control: 'file', required: true },
+      ...formAnswerRows.map((answer, index) => ({
+        frameKey: 'main',
+        locatorPath: `#answer-${index}`,
+        prompt: answer.question_text,
+        control: 'textarea',
+        required: true,
+        classification: { category: answer.category, sensitivity: answer.sensitivity }
+      }))
+    ],
+    warnings: []
+  });
+  persistFormSnapshot(store, snapshot);
+  fixture.snapshot = snapshot;
   if (applicationStatus) fixture.application = appCreate(store, job.id, applicationStatus, 'Acceptance fixture status.');
   return fixture;
 }
@@ -287,13 +366,14 @@ test('AP03 packet freezes exact approved materials answers target and initialize
   assert.equal(packet.resumeContentHash, fixture.resume.contentHash);
   assert.equal(packet.coverArtifactId, fixture.cover.id);
   assert.equal(packet.coverContentHash, fixture.cover.contentHash);
-  assert.equal(packet.readinessVersion, 3);
-  assert.equal(packet.readinessStatusAtCreate, 'approved');
+  assert.equal(packet.readinessVersion, 4);
+  assert.equal(packet.readinessStatusAtCreate, 'form-ready');
+  assert.equal(packet.version, 2);
   assert.equal(packet.externalSideEffects, 'none');
   assert.equal(packet.submissionPerformed, false);
   assert.deepEqual(packet.materials.proofPointIds, [fixture.proof.id]);
   assert.equal(packet.target.identityKey, compileApplicationReadiness(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id }).identity.identityKey);
-  assert.ok(packet.answers.length >= 4);
+  assert.ok(packet.answers.length >= 1);
   for (const answer of packet.answers) {
     assert.ok(answer.answerId);
     assert.ok(answer.questionFingerprint);
@@ -424,11 +504,22 @@ test('AP07 CLI attestation creates one receipt and binds pre-apply status to the
     const shouldChange = ['saved', 'researching', 'materials-ready'].includes(status);
     assert.equal(app.status, shouldChange ? 'applied' : status);
     assert.equal(count(check, 'status_changes', 'application_id=?', [fixture.application.id]), beforeChanges + (shouldChange ? 1 : 0));
-    const change = one(check, 'SELECT note FROM status_changes WHERE application_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [fixture.application.id]);
+    const actions = all(check, `SELECT * FROM tasks WHERE application_id=?
+      AND action_kind='application_next_action' AND status='open'`, [fixture.application.id]);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].action_code, status === 'interview' ? 'prepare-interview' : 'employer-follow-up');
+    if (status !== 'interview') {
+      assert.equal(actions[0].source_event_id, result.json.receipt.id);
+      assert.equal(actions[0].policy_due_at, '2026-07-27T16:00:00.000Z');
+    }
+    const change = one(check, 'SELECT * FROM status_changes WHERE application_id=? ORDER BY created_at DESC,id DESC LIMIT 1', [fixture.application.id]);
     if (shouldChange) {
       assert.match(change.note, new RegExp(packet.id));
       assert.match(change.note, new RegExp(packet.contentHash));
       assert.match(change.note, new RegExp(result.json.receipt.id));
+      assert.equal(change.actor, 'human');
+      assert.equal(change.source, 'cli');
+      assert.equal(change.source_event_id, result.json.receipt.id);
     }
     const audit = one(check, "SELECT payload_json,external_side_effect FROM audit_log WHERE action='application.submission_attested' ORDER BY created_at DESC,id DESC LIMIT 1");
     assert.equal(audit.external_side_effect, 'none');
@@ -440,11 +531,33 @@ test('AP08 MCP and ACP can inspect but cannot freeze attest or confirm under spo
   const api = await packetApi();
   const fixture = await baseFixture(t);
   const packet = api.createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
+  const deniedMcp = [
+    'approve_artifact',
+    'reject_artifact',
+    'approve_contact',
+    'answers_add',
+    'create_application_packet',
+    'attest_application_submitted',
+    'confirm_application_receipt',
+    'checkpoint_application_form',
+    'verify_interview_story',
+    'retire_interview_story',
+    'add_interview_question_source',
+    'record_interview_debrief',
+    'correct_interview_debrief',
+    'record_job_feedback',
+    'correct_memory_observation',
+    'undo_memory_observation',
+    'accept_memory_proposal',
+    'reject_memory_proposal',
+    'revoke_memory_proposal',
+    'undo_memory_transition',
+  ];
   const advertised = mcpToolNames();
   for (const name of ['application_packets_list', 'application_packet_show', 'application_packet_diff']) assert.ok(advertised.includes(name));
-  for (const name of ['create_application_packet', 'attest_application_submitted', 'confirm_application_receipt']) assert.equal(advertised.includes(name), false);
+  for (const name of deniedMcp) assert.equal(advertised.includes(name), false);
   assert.ok(DOMAIN_TOOLS.some(tool => tool.name === 'create_application_packet'));
-  assert.equal(advertised.length, DOMAIN_TOOLS.length - 3, 'MCP advertises DOMAIN_TOOLS minus exactly the three MUTATION_DENY packet tools');
+  assert.equal(advertised.length, DOMAIN_TOOLS.length - deniedMcp.length, 'MCP excludes every always-denied human-gated mutation');
 
   const oldMediation = process.env.JOBOS_MEDIATION;
   const oldOverride = process.env.JOBOS_ALLOW_AGENT_ATTESTATION;
@@ -487,6 +600,17 @@ test('AP09 exact receipt replay is idempotent and conflicting immutable evidence
   const packet = createApplicationPacket(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id, createdBy: 'cli' });
   const input = { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', note: 'Exact note.', source: 'cli' };
   const first = attestApplicationSubmitted(fixture.store, input);
+  const initialAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(initialAction.action_code, 'employer-follow-up');
+  const manual = rescheduleApplicationNextAction(fixture.store, {
+    taskId: initialAction.id,
+    profileId: fixture.profile.id,
+    dueAt: '2026-08-10T12:00:00Z',
+    reason: 'Fixture manual schedule.',
+    nowDate: new Date('2026-07-21T12:00:00.000Z'),
+  });
+  assert.equal(manual.scheduleSource, 'manual');
   const before = {
     receipts: count(fixture.store, 'application_receipts'),
     audits: count(fixture.store, 'audit_log', "action='application.submission_attested'"),
@@ -498,6 +622,11 @@ test('AP09 exact receipt replay is idempotent and conflicting immutable evidence
   assert.equal(count(fixture.store, 'application_receipts'), before.receipts);
   assert.equal(count(fixture.store, 'audit_log', "action='application.submission_attested'"), before.audits);
   assert.equal(count(fixture.store, 'status_changes'), before.statuses);
+  const replayedAction = one(fixture.store, 'SELECT * FROM tasks WHERE id=?', [initialAction.id]);
+  assert.equal(replayedAction.status, 'open');
+  assert.equal(replayedAction.due_at, '2026-08-10T12:00:00.000Z');
+  assert.equal(replayedAction.policy_due_at, initialAction.policy_due_at);
+  assert.equal(replayedAction.schedule_source, 'manual');
   for (const conflict of [
     { ...input, submittedAt: '2026-07-20T13:00:00Z' },
     { ...input, note: 'Different note.' }
@@ -516,6 +645,9 @@ test('AP10 confirmation requires prior attestation and records reference without
     'receipt_attestation_required'
   );
   const attested = attestApplicationSubmitted(fixture.store, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source: 'cli' });
+  const attestedAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(attestedAction.action_code, 'employer-follow-up');
   await assertRejectCode(
     () => Promise.resolve().then(() => confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: '', source: 'cli' })),
     'receipt_reference_required'
@@ -529,6 +661,11 @@ test('AP10 confirmation requires prior attestation and records reference without
   assert.equal(count(fixture.store, 'status_changes'), beforeChanges);
   assert.equal(one(fixture.store, 'SELECT confirmation_url FROM applications WHERE id=?', [packet.applicationId]).confirmation_url, 'https://board.example/receipt/123');
   assert.equal(confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'https://board.example/receipt/123', note: 'Board confirmation.', source: 'cli' }).idempotent, true);
+  const confirmedAction = one(fixture.store, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(confirmedAction.id, attestedAction.id);
+  assert.equal(confirmedAction.due_at, attestedAction.due_at);
+  assert.equal(confirmedAction.source_event_id, attested.receipt.id);
   await assertRejectCode(
     () => Promise.resolve().then(() => confirmApplicationReceipt(fixture.store, { packetId: packet.id, reference: 'REF-DIFFERENT', note: 'Board confirmation.', source: 'cli' })),
     'receipt_conflict'
@@ -555,10 +692,23 @@ test('AP11 bare application applied update creates no receipt and remains explic
   assert.equal(payload.receiptBound, false);
   assert.equal(Object.hasOwn(payload, 'receiptId'), false);
   assert.equal(compileApplicationReadiness(check, { jobId: fixture.job.id, profileId: fixture.profile.id }).packet.receiptState, 'none');
+  const bareAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(bareAction.action_code, 'record-submission-evidence');
+  assert.notEqual(bareAction.action_code, 'employer-follow-up');
   const before = count(check, 'status_changes');
   const attested = attestApplicationSubmitted(check, { packetId: packet.id, submittedAt: '2026-07-20T12:00:00Z', source: 'cli' });
   assert.equal(attested.applicationStatusChanged, false);
   assert.equal(count(check, 'status_changes'), before);
+  const attestedAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(attestedAction.action_code, 'employer-follow-up');
+  assert.equal(one(check, 'SELECT status FROM tasks WHERE id=?', [bareAction.id]).status, 'superseded');
+  appUpdate(check, packet.applicationId, 'interview', 'Interview scheduled.');
+  const interviewAction = one(check, `SELECT * FROM tasks WHERE application_id=?
+    AND action_kind='application_next_action' AND status='open'`, [packet.applicationId]);
+  assert.equal(interviewAction.action_code, 'prepare-interview');
+  assert.equal(one(check, 'SELECT status FROM tasks WHERE id=?', [attestedAction.id]).status, 'superseded');
 });
 
 test('AP12 restricted and sensitive answer plaintext never crosses packet inspection surfaces', async t => {
@@ -586,9 +736,9 @@ test('AP12 restricted and sensitive answer plaintext never crosses packet inspec
     const directHash = crypto.createHash('sha256').update(value).digest('hex');
     assert.equal(surfaces.includes(directHash), false, 'value-derived sensitive hash leaked');
   }
-  assert.match(surfaces, /rowFingerprint/);
+  assert.match(surfaces, /rowFingerprint|answerRowFingerprint/);
   assert.match(surfaces, /restricted/);
-  assert.match(surfaces, /direct_input_redacted/);
+  assert.match(surfaces, /human-input|human-action/);
 });
 
 test('AP13 concurrent packet writers converge and stale persistence leaves no half projection', async t => {
@@ -660,11 +810,11 @@ test('AP13b conflicting receipt confirmation leaves every surface consistent wit
   assert.equal(readFileSync(packetYaml, 'utf8'), packetYamlBefore, 'packet mirror unchanged');
 });
 
-test('AP14 readiness v3 reports packet receipt state without claiming adapter submission', async t => {
+test('AP14 readiness v4 reports packet receipt state without claiming adapter submission', async t => {
   const { createApplicationPacket, attestApplicationSubmitted, confirmApplicationReceipt } = await packetApi();
   const fixture = await baseFixture(t);
   const empty = compileApplicationReadiness(fixture.store, { jobId: fixture.job.id, profileId: fixture.profile.id });
-  assert.equal(empty.version, 3);
+  assert.equal(empty.version, 4);
   assert.deepEqual(empty.packet, {
     currentPacketId: null,
     contentHash: null,
@@ -777,9 +927,22 @@ test('AP15 packet CLI list show and diff are filterable parseable historical and
 test('AP16 approved materials freeze attest confirm end to end with honest local evidence', async t => {
   const root = workspace(t, 'jobos-packet-e2e-');
   const profile = cliOk(root, ['profile', 'create', 'Packet E2E PM', '--json']);
-  cliOk(root, ['proof', 'add', '--profile', profile.id, '--summary', 'Led a product launch that improved activation by 30%.', '--evidence', 'Portfolio evidence', '--skills', 'product,launch', '--json']);
+  const proof = cliOk(root, ['proof', 'add', '--profile', profile.id, '--summary', 'Led a product launch that improved activation by 30%.', '--evidence', 'Portfolio evidence', '--skills', 'product,launch', '--json']);
+  const resumeFile = path.join(root, 'resume.json');
+  writeFileSync(resumeFile, JSON.stringify({
+    schemaVersion: 1,
+    identity: { name: 'Packet Candidate', email: 'packet@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_e2e', text: 'Product manager with verified launch experience.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_e2e', employer: 'Evidence Co', title: 'Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_e2e', text: proof.summary, proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_e2e', institution: 'State University', degree: 'BS', field: 'Product Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_launch', name: 'Product launches', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  }, null, 2));
+  cliOk(root, ['resume', 'import', '--profile', profile.id, '--file', resumeFile, '--json']);
   const jobFile = path.join(root, 'job.md');
-  writeFileSync(jobFile, 'Title: Product Manager\nCompany: E2E Packet Co\nLocation: Remote\n\nLead product launches and improve activation.');
+  writeFileSync(jobFile, 'Title: Product Manager\nCompany: E2E Packet Co\nLocation: Remote\n\n## Requirements\n- Must have product launch experience that improved activation.');
   const job = cliOk(root, ['jobs', 'import-text', '--profile', profile.id, '--file', jobFile, '--json']);
   cliOk(root, ['score', job.id, '--profile', profile.id, '--json']);
   cliOk(root, ['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--json']);
@@ -797,8 +960,25 @@ test('AP16 approved materials freeze attest confirm end to end with honest local
   assert.equal(queue.length, 2);
   for (const artifact of queue) cliOk(root, ['artifacts', 'approve', artifact.id, '--note', 'E2E exact revision review.', '--json']);
   const approved = cliOk(root, ['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']);
-  assert.equal(approved.status, 'approved');
+  const formStore = await openStore({ workspace: root });
+  persistFormSnapshot(formStore, buildFormSnapshot({
+    snapshotId: `fs_e2e_${crypto.randomUUID().replaceAll('-', '')}`,
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: '2026-07-22T12:00:00.000Z',
+    requestedUrl: 'https://apply.e2e.test/product-manager',
+    finalUrl: 'https://apply.e2e.test/product-manager/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 8 },
+    fields: [
+      { frameKey: 'main', prompt: 'Full name', control: 'text', required: true },
+      { frameKey: 'main', prompt: 'Resume', control: 'file', required: true }
+    ],
+    warnings: []
+  }));
+  assert.equal(approved.status, 'materials-ready');
   assert.equal(approved.packet.receiptState, 'none');
+  assert.equal(cliOk(root, ['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']).status, 'form-ready');
   const packet = cliOk(root, ['apply', 'packet', 'create', '--job', job.id, '--profile', profile.id, '--json']);
   assert.equal(packet.resumeContentHash, queue.find(item => item.type === 'resume').contentHash);
   const attested = cliOk(root, ['apply', 'attest-submitted', packet.id, '--submitted-at', '2026-07-20T12:00:00Z', '--note', 'User submitted externally.', '--json']);

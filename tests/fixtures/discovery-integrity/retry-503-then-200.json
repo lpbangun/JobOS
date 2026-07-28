@@ -1,0 +1,9 @@
+{
+  "name": "retry-503-then-200",
+  "description": "W03-HTTP-01: 503 then 200. Retry-After delta 0 within cap; second fetch succeeds.",
+  "url": "https://api.example.com/v1/boards/acme/jobs?content=true",
+  "responses": [
+    { "status": 503, "headers": { "retry-after": "0" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "jobs-dated-mixed",
+  "description": "W03-FILTER-01: normalized rows for recency filtering. Test wires nowIso/nowMs from the clock block; 'inside' is within 7 days of now, 'outside' is older, 'unknown' and 'invalid' are non-parseable, 'future' is a future date.",
+  "clock": {
+    "nowIso": "2026-07-22T00:00:00.000Z",
+    "nowMs": 1784678400000
+  },
+  "jobs": [
+    { "id": "inside", "title": "Engineer (recent)", "company": "Acme", "location": "Remote", "description": "platform work", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "outside", "title": "Engineer (older)", "company": "Acme", "location": "Remote", "description": "platform work", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "2026-06-01T00:00:00.000Z" },
+    { "id": "unknown", "title": "Engineer (unknown date)", "company": "Acme", "location": "Remote", "description": "platform work", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "" },
+    { "id": "invalid", "title": "Engineer (bad date)", "company": "Acme", "location": "Remote", "description": "platform work", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "not-a-date" },
+    { "id": "future", "title": "Engineer (future date)", "company": "Acme", "location": "Remote", "description": "platform work", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "2026-08-01T00:00:00.000Z" }
+  ]
+}

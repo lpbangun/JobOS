@@ -1,19 +1,42 @@
 import { all, one } from './db.js';
 import { discoveryHealth, listJobSummaries, reviewQueue, selectedJobContext } from './domain-tools.js';
+import { getInterviewStory, listInterviewDebriefs, listInterviewStories } from './interview.js';
 import { reviewQueue as discoveryReviewQueue } from './discovery.js';
 import { parseJson } from './utils.js';
 import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
-import { due } from './tracking.js';
-import { outreachDue } from './outreach.js';
+import { due, taskView } from './tracking.js';
+import { requirementTextsForJob } from './requirements.js';
+import { compareFitDecisions } from './scoring.js';
+import { listMemoryObservations } from './career-memory-observations.js';
+import { listMemoryProposals, resolveActiveMemoryRules } from './career-memory-proposals.js';
+import { getCareerBrief, getVoicePositioningGuide } from './career-memory-projections.js';
+import { buildOnboardingStatus } from './onboarding.js';
 
-const ACTIVE_APPLICATION_STATUSES = new Set(['interested', 'materials-ready', 'applied', 'interview', 'offer']);
+const ACTIVE_APPLICATION_STATUSES = new Set([
+  'saved',
+  'researching',
+  'materials-ready',
+  'applied',
+  'recruiter-screen',
+  'interview',
+  'offer'
+]);
 
-function firstTask(s, jobId) {
-  const row = one(s, "SELECT id,title,type,due_at,priority FROM tasks WHERE job_id=? AND status='open' ORDER BY due_at IS NULL,due_at,created_at LIMIT 1", [jobId]);
-  return row ? { id: row.id, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority } : null;
+function statusStage(item) {
+  return {
+    stage: item.applicationStatus || item.discoveryStatus,
+    stageSource: item.applicationStatus ? 'application' : 'discovery'
+  };
+}
+
+function firstTask(s, jobId, profileId, at) {
+  const row = one(s, `SELECT * FROM tasks WHERE job_id=? AND profile_id=? AND status='open'
+    ORDER BY CASE action_kind WHEN 'application_next_action' THEN 0 ELSE 1 END,
+      due_at IS NULL,due_at,created_at,id LIMIT 1`, [jobId, profileId]);
+  return row ? taskView(row, { nowDate: new Date(at) }) : null;
 }
 
 function signals(s, jobId) {
@@ -65,17 +88,29 @@ function stageState(s, context) {
   ];
 }
 
-function priorityStrip(s, jobs, at) {
-  const due = one(s, "SELECT tasks.title,tasks.due_at,jobs.id AS job_id,jobs.company FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id WHERE tasks.status='open' AND tasks.due_at IS NOT NULL ORDER BY tasks.due_at LIMIT 1");
-  const interview = one(s, "SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at FROM applications JOIN jobs ON jobs.id=applications.job_id LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.status='open' WHERE applications.status='interview' ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1");
+function priorityStrip(s, jobs, profileId, at) {
+  const actionRow = profileId ? one(s, `SELECT tasks.*,jobs.company
+    FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id
+    WHERE tasks.profile_id=? AND tasks.status='open' AND tasks.action_kind='application_next_action'
+    ORDER BY CASE WHEN tasks.urgent_at<=? THEN 0 WHEN tasks.due_at<=? THEN 1 ELSE 2 END,
+      tasks.due_at,tasks.id LIMIT 1`, [profileId, at, at]) : null;
+  const action = actionRow ? taskView(actionRow, { nowDate: new Date(at) }) : null;
+  const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
+    FROM applications JOIN jobs ON jobs.id=applications.job_id
+    LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.profile_id=applications.profile_id AND tasks.status='open'
+    WHERE applications.profile_id=? AND applications.status='interview'
+    ORDER BY tasks.due_at IS NULL,tasks.due_at LIMIT 1`, [profileId]) : null;
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
-  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.status) && String(job.updatedAt || '') >= recentThreshold);
+  const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
   return [
     {
-      kind: 'due',
-      jobId: due?.job_id || null,
-      text: due ? `${due.title}${due.company ? ` · ${due.company}` : ''}${due.due_at ? ` · ${due.due_at.slice(0, 16)}` : ''}` : 'No due tasks'
+      kind: action?.state || 'action',
+      jobId: action?.jobId || null,
+      taskId: action?.id || null,
+      text: action
+        ? `${action.title}${actionRow.company ? ` · ${actionRow.company}` : ''} · ${action.dueAt.slice(0, 16)}`
+        : 'No current application actions'
     },
     {
       kind: 'interview',
@@ -157,6 +192,156 @@ export function artifactDocs(s, jobId) {
   });
 }
 
+function interviewProjection(s, { profileId, selected }) {
+  if (!profileId) {
+    return {
+      profileId: null,
+      counts: {
+        stories: 0,
+        verified: 0,
+        stale: 0,
+        draftIneligible: 0,
+        debriefs: 0,
+        currentDebriefRevisions: 0
+      },
+      stories: [],
+      selectedApplication: null
+    };
+  }
+
+  const listedStories = listInterviewStories(s, { profileId, includeHistory: false });
+  const stories = listedStories.stories.map(story => getInterviewStory(s, {
+    profileId,
+    storyId: story.id,
+    includeHistory: true
+  }));
+  const listedDebriefs = listInterviewDebriefs(s, {
+    profileId,
+    includeHistory: false
+  });
+  const verified = stories.filter(story => story.eligibility === 'eligible').length;
+  const stale = stories.filter(story => story.eligibility === 'proof_stale').length;
+  const applicationId = selected?.job.applicationId || null;
+  const jobId = selected?.job.id || null;
+  let selectedApplication = null;
+
+  if (applicationId && jobId) {
+    const packArtifact = one(s, `SELECT a.id,a.title,a.revision,a.created_at
+      FROM artifacts a
+      WHERE a.profile_id=? AND a.job_id=? AND a.type='interview_prep'
+        AND EXISTS (
+          SELECT 1 FROM interview_pack_items i
+          WHERE i.artifact_id=a.id AND i.profile_id=? AND i.job_id=? AND i.application_id=?
+        )
+      ORDER BY a.created_at DESC,a.revision DESC,a.id DESC LIMIT 1`, [
+      profileId,
+      jobId,
+      profileId,
+      jobId,
+      applicationId
+    ]);
+    const packCounts = packArtifact
+      ? one(s, `SELECT COUNT(*) AS item_count,
+          SUM(CASE WHEN coverage_status='covered' THEN 1 ELSE 0 END) AS covered_count,
+          SUM(CASE WHEN coverage_status='gap' THEN 1 ELSE 0 END) AS gap_count,
+          MIN(interview_stage) AS interview_stage,
+          MIN(audience) AS audience
+        FROM interview_pack_items
+        WHERE artifact_id=? AND profile_id=? AND job_id=? AND application_id=?`, [
+        packArtifact.id,
+        profileId,
+        jobId,
+        applicationId
+      ])
+      : null;
+    const applicationDebriefs = listInterviewDebriefs(s, {
+      profileId,
+      applicationId,
+      includeHistory: true
+    }).debriefs;
+    selectedApplication = {
+      profileId,
+      jobId,
+      applicationId,
+      pack: packArtifact ? {
+        artifactId: packArtifact.id,
+        title: packArtifact.title,
+        revision: Number(packArtifact.revision),
+        stage: packCounts.interview_stage,
+        audience: packCounts.audience,
+        itemCount: Number(packCounts.item_count || 0),
+        coveredCount: Number(packCounts.covered_count || 0),
+        gapCount: Number(packCounts.gap_count || 0),
+        createdAt: packArtifact.created_at
+      } : null,
+      debriefs: {
+        count: applicationDebriefs.length,
+        currentRevisions: applicationDebriefs.filter(debrief => debrief.currentRevision).length,
+        items: applicationDebriefs
+      }
+    };
+  }
+
+  return {
+    profileId,
+    counts: {
+      stories: stories.length,
+      verified,
+      stale,
+      draftIneligible: stories.length - verified - stale,
+      debriefs: listedDebriefs.debriefs.length,
+      currentDebriefRevisions: listedDebriefs.debriefs.filter(debrief => debrief.currentRevision).length
+    },
+    stories,
+    selectedApplication
+  };
+}
+
+function memoryProjection(s, { profileId, at }) {
+  if (!profileId) {
+    return {
+      profileId: null,
+      observations: [],
+      proposals: [],
+      careerBrief: null,
+      voiceGuide: null,
+      counts: { observations: 0, proposals: 0, active: 0 },
+    };
+  }
+  const nowDate = new Date(at);
+  const observations = listMemoryObservations(s, {
+    profileId,
+    sinceDays: null,
+    includeHistory: false,
+    includePrivateNotes: false,
+    nowDate,
+  }).observations;
+  const resolved = resolveActiveMemoryRules(s, { profileId, asOf: nowDate });
+  const activeIds = new Set(resolved.rules.map(rule => rule.id));
+  const excludedReasons = new Map(resolved.excluded.map(item => [item.proposalId, item.reason]));
+  const proposals = listMemoryProposals(s, { profileId, includeEvidence: true }).proposals.map(proposal => {
+    const stale = proposal.evidenceFreshUntil < at;
+    const active = activeIds.has(proposal.id);
+    const inactiveReason = active
+      ? null
+      : excludedReasons.get(proposal.id)
+        || (stale ? 'evidence_stale' : `status_${proposal.status}`);
+    return { ...proposal, stale, active, inactiveReason };
+  });
+  return {
+    profileId,
+    observations,
+    proposals,
+    careerBrief: getCareerBrief(s, { profileId, refresh: false, asOf: nowDate }),
+    voiceGuide: getVoicePositioningGuide(s, { profileId, refresh: false, asOf: nowDate }),
+    counts: {
+      observations: observations.length,
+      proposals: proposals.length,
+      active: proposals.filter(proposal => proposal.active).length,
+    },
+  };
+}
+
 export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = new Date().toISOString() } = {}) {
   const profiles = all(s, 'SELECT id,name,created_at,updated_at FROM profiles ORDER BY created_at').map(row => ({
     id: row.id,
@@ -169,20 +354,21 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     : (profiles[0]?.id || null);
   const jobs = listJobSummaries(s, { profileId: selectedProfile }).map(job => ({
     ...job,
-    stage: job.applicationStatus || job.status,
-    next: firstTask(s, job.id),
+    ...statusStage(job),
+    next: firstTask(s, job.id, selectedProfile, at),
     signals: signals(s, job.id)
   }));
   const selectedId = jobs.some(job => job.id === selectedJobId) ? selectedJobId : (jobs[0]?.id || null);
-  const selected = selectedId ? selectedJobContext(s, selectedId) : null;
+  const selected = selectedId ? selectedJobContext(s, selectedId, selectedProfile) : null;
   const selectedRow = selectedId ? one(s, 'SELECT description,requirements_json,compensation,work_model FROM jobs WHERE id=?', [selectedId]) : null;
   const readiness = selected?.job.profileId
     ? compileApplicationReadiness(s, { jobId: selectedId, profileId: selected.job.profileId })
     : null;
   const details = selected ? {
     ...selected,
+    job: { ...selected.job, ...statusStage(selected.job) },
     narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
-    requirements: parseJson(selectedRow?.requirements_json, []).slice(0, 6),
+    requirements: selectedRow ? requirementTextsForJob(selectedRow).slice(0, 6) : [],
     compensation: selectedRow?.compensation || '',
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),
@@ -213,8 +399,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     })) : []
   } : null;
   const reviews = reviewQueue(s, { profileId: selectedProfile });
-  const openJobs = jobs.filter(job => job.status !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
-  const dueCount = Number(one(s, "SELECT COUNT(*) AS count FROM tasks WHERE status='open' AND due_at IS NOT NULL AND due_at<=?", [at])?.count || 0);
+  const openJobs = jobs.filter(job => job.discoveryStatus !== 'archived' && (!job.applicationStatus || ACTIVE_APPLICATION_STATUSES.has(job.applicationStatus)));
+  const dueRows = selectedProfile ? due(s, { profileId: selectedProfile, at }) : [];
+  const dueCount = dueRows.length;
   const interviewCount = jobs.filter(job => job.applicationStatus === 'interview').length;
   const logs = all(s, 'SELECT id,action,entity_type,entity_id,payload_json,external_side_effect,created_at FROM audit_log ORDER BY created_at DESC LIMIT 80')
     .map(row => ({
@@ -279,6 +466,13 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     return 'available';
   })();
 
+  const interviews = interviewProjection(s, {
+    profileId: selectedProfile,
+    selected: details
+  });
+  const memory = memoryProjection(s, { profileId: selectedProfile, at });
+  const onboarding = buildOnboardingStatus(s, { profileId, jobId: selectedJobId, asOf: at });
+
   return {
     version: 2,
     generatedAt: at,
@@ -293,14 +487,22 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
       drafts: reviews.length,
       interviews: interviewCount
     },
-    priority: priorityStrip(s, jobs, at),
+    priority: priorityStrip(s, jobs, selectedProfile, at),
     jobs,
     selectedJobId: selectedId,
     selected: details,
+    interviews,
+    memory,
+    onboarding,
     review: reviews,
     log: logs,
-    dueTasks: due(s).slice(0, 20).map(row => ({ id: row.id, jobId: row.job_id || null, title: row.title, type: row.type, dueAt: row.due_at || null, priority: row.priority })),
-    outreachDue: outreachDue(s).slice(0, 20),
+    dueTasks: dueRows.slice(0, 20).map(row => ({
+      ...taskView(row, { nowDate: new Date(at) }),
+      type: row.type,
+      source: row.created_by,
+      priority: row.priority,
+      actionKind: row.action_kind,
+    })),
     answers: {
       ...answerCounts,
       questions: readiness?.answers?.questions
@@ -309,7 +511,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.status === 'new').sort((a, b) => Number(b.highFit) - Number(a.highFit) || (b.fitScore ?? 0) - (a.fitScore ?? 0)) },
+    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions) },
     networkSetup: {
       status: networkSetupStatus,
       intent: {

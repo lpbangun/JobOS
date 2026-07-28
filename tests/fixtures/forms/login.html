@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Application — Authentication Required</title>
+  <meta name="fixture" content="login">
+</head>
+<body>
+  <!--
+    login.html
+    An authentication wall reached before the application form/submit boundary.
+    The adapter must never bypass it (WF14): record a typed `auth_required`
+    recovery and preserve pre-submit versus uncertain truth. Uses the existing
+    persistent-profile recovery flow, not credential automation.
+
+    Deterministic for local Chromium; no real identity provider.
+  -->
+  <header>
+    <h1>Sign in to continue</h1>
+  </header>
+
+  <main id="main">
+    <form id="login-form" name="login-form" data-form="login" aria-label="Authentication form" action="/login" method="post">
+      <fieldset>
+        <legend>Account</legend>
+        <div class="field">
+          <label for="login-email">Email</label>
+          <input id="login-email" name="email" type="email" autocomplete="email" required>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" name="remember" value="yes">
+            Remember this device
+          </label>
+        </div>
+      </fieldset>
+      <div class="actions">
+        <button id="login-submit" type="submit" data-submit="login">Sign in</button>
+      </div>
+    </form>
+
+    <p id="auth-marker" data-auth-required hidden>auth_required</p>
+  </main>
+</body>
+</html>

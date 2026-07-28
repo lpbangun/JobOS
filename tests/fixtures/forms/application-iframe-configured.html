@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Configured application hosted in a same-origin iframe</title>
+<meta name="fixture" content="application-iframe-configured">
+</head>
+<body>
+  <h1>Example Co Careers</h1>
+  <!--
+    application-iframe-configured.html
+    Host document. Contains a SEARCH form (must be rejected as an application
+    candidate via role="search") and a same-origin iframe (srcdoc) embedding a
+    minimal configured application form. On submit the iframe navigates to
+    /confirmation.html while the top page stays on this host document. This is
+    the regression fixture for the iframe confirmation browsing-context bug:
+    confirmation evidence must be read from the selected submitting frame, not
+    the main page.
+  -->
+  <form id="search-form" name="search-form" role="search" data-form="search" aria-label="Job search form" action="/search" method="get">
+    <label for="search-keywords">Keywords</label>
+    <input id="search-keywords" name="q" type="text">
+    <button type="submit">Search</button>
+  </form>
+
+  <iframe
+    id="application-iframe"
+    name="application-iframe"
+    title="Application form frame"
+    srcdoc="<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><title>Application Frame</title></head><body><form id='application-form' aria-label='Job application form' action='/submit/application?outcome=confirmed' method='post'><label for='frame-full-name'>Full name</label><input id='frame-full-name' name='full_name' type='text' required><button type='submit'>Submit application</button></form></body></html>"
+    width="100%"
+    height="320">
+  </iframe>
+</body>
+</html>

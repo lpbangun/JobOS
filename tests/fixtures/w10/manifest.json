@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "canonicalization": "recursive-sorted-object-keys-pretty-json",
+  "asOf": "2026-07-22T12:00:00.000Z",
+  "fixtures": [
+    {
+      "family": "document-completeness",
+      "file": "document-completeness.json",
+      "sourceWave": "W01",
+      "testName": "W10-GOLDEN-01 document completeness stays public and review-aware"
+    },
+    {
+      "family": "score-stability",
+      "file": "score-stability.json",
+      "sourceWave": "W03-W04",
+      "testName": "W10-GOLDEN-02 score projection is stable with a fixed clock"
+    },
+    {
+      "family": "contact-tiering",
+      "file": "contact-tiering.json",
+      "sourceWave": "W05",
+      "testName": "W10-GOLDEN-03 contact confidence preserves tier boundaries"
+    },
+    {
+      "family": "discovery-partials-liveness",
+      "file": "discovery-partials-liveness.json",
+      "sourceWave": "W03",
+      "testName": "W10-GOLDEN-04 discovery partials preserve source and liveness"
+    },
+    {
+      "family": "packet-bound-browser-outcome",
+      "file": "packet-bound-browser-outcome.json",
+      "sourceWave": "W02",
+      "testName": "W10-GOLDEN-05 packet outcome stays bound and secret-free"
+    },
+    {
+      "family": "career-memory-provenance",
+      "file": "career-memory-provenance.json",
+      "sourceWave": "W08",
+      "testName": "W10-GOLDEN-CM-01 provenance remains attributable and private-data-free"
+    },
+    {
+      "family": "career-memory-reversibility",
+      "file": "career-memory-reversibility.json",
+      "sourceWave": "W08",
+      "testName": "W10-GOLDEN-CM-02 revoke and undo restore active behavior without deleting history"
+    },
+    {
+      "family": "career-memory-isolation",
+      "file": "career-memory-isolation.json",
+      "sourceWave": "W08",
+      "testName": "W10-GOLDEN-CM-03 profile isolation rejects cross-profile data with zero delta"
+    }
+  ]
+}

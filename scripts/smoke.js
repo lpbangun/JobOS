@@ -2,31 +2,390 @@ import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { all, one, openStore } from '../src/db.js';
+import { all, one, openStore, run as dbRun, save } from '../src/db.js';
+import { createSearch, runSavedSearch } from '../src/discovery.js';
+import { greenhouse } from '../src/discovery/adapters.js';
+import { importNormalized, updateJobStatus } from '../src/jobs.js';
+import { score as scoreJob } from '../src/scoring.js';
+import { selectedJobContext } from '../src/domain-tools.js';
+import { compileApplicationReadiness } from '../src/readiness.js';
+import { runPursuit } from '../src/workflows.js';
+import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
+import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
+import { refreshMemoryProjection } from '../src/career-memory-projections.js';
+import { evaluateSearchGuidance, retrieveCareerMemory } from '../src/career-memory-retrieval.js';
+import { createMemoryProposal, getMemoryProposal, transitionMemoryProposal } from '../src/career-memory-proposals.js';
 
 const root = mkdtempSync(path.join(tmpdir(), 'jobos-smoke-'));
-const env = { ...process.env, JOBOS_HOME: root, JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '' };
+const env = { ...process.env, JOBOS_HOME: root, JOBOS_SEARCH_PROVIDER: 'none', JOBOS_ACP_COMMAND: '__jobos_missing_acp__', JOBOS_LLM_PROVIDER: '', JOBOS_LLM_MODEL: '', JOBOS_LLM_API_KEY: '', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', OLLAMA_API_KEY: '', XAI_API_KEY: '', GOOGLE_API_KEY: '', GEMINI_API_KEY: '' };
 function run(args, raw = false) {
   const result = spawnSync(process.execPath, ['src/cli.js', ...args], { cwd: process.cwd(), env, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(`${args.join(' ')} failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
   return raw ? result.stdout : result.stdout.trim();
 }
 
+function setSmokeLiveness(s, jobId, status) {
+  const checkedAt = new Date().toISOString();
+  const value = {
+    version: 1,
+    jobId,
+    status,
+    checkedAt,
+    requestedUrl: '',
+    finalUrl: '',
+    httpStatus: status === 'active' ? 200 : status === 'expired' ? 404 : null,
+    reasonCodes: [status === 'active' ? 'listed_in_current_listing' : status === 'expired' ? 'http_404' : 'manual_or_unchecked'],
+    evidence: [],
+    source: status === 'active' ? 'greenhouse' : 'manual',
+    freshUntil: new Date(Date.now() + 86_400_000).toISOString()
+  };
+  dbRun(s, 'UPDATE jobs SET liveness_status=?,liveness_checked_at=?,liveness_json=? WHERE id=?', [status, checkedAt, JSON.stringify(value), jobId]);
+  save(s);
+}
+
 try {
   const guide = JSON.parse(run(['agent-guide', '--json']));
   if (!guide.commands?.length || !existsSync(path.join(root, '.jobos', 'jobos.sqlite')) || !existsSync(path.join(root, 'jobos-workspace'))) throw new Error('First command did not auto-create the JobOS workspace');
-  const resume = path.join(root, 'resume.md');
-  writeFileSync(resume, '- Led discovery with educators and operations teams to prioritize an AI-assisted learning workflow that reduced manual review time by 30%.\n- Shipped a cross-functional product launch with engineering and design partners, improving activation for a technical user workflow.\n');
-  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--from-resume', resume, '--json']));
-  JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led evidence-backed EdTech product discovery and launch execution', '--evidence', 'Resume source: reduced manual review time by 30%', '--skills', 'product discovery,stakeholder management,launch execution', '--json']));
+  const initialSetup = JSON.parse(run(['setup', 'next', '--json']));
+  if (initialSetup.nextAction?.id !== 'create_profile' || initialSetup.policy.cloudKeyRequired !== false || initialSetup.policy.externalSideEffects !== 'none') throw new Error('W09 clean setup did not begin at the keyless profile action');
+  const preferences = path.join(root, 'preferences.json');
+  writeFileSync(preferences, JSON.stringify({
+    targetRoleFamilies: ['Product Manager'],
+    industries: ['EdTech', 'learning'],
+    locations: ['Remote'],
+    workModel: 'remote',
+    missionKeywords: ['learning', 'educator']
+  }));
+  const profile = JSON.parse(run(['profile', 'create', 'PM EdTech', '--preferences', preferences, '--json']));
+  const resumedAfterProfile = JSON.parse(run(['setup', 'next', '--profile', profile.id, '--json']));
+  if (resumedAfterProfile.nextAction?.id !== 'import_resume') throw new Error('W09 interrupted setup did not resume at canonical resume import');
+  const proof = JSON.parse(run(['proof', 'add', '--profile', profile.id, '--summary', 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', '--evidence', 'Verified portfolio case study', '--skills', 'product discovery,user research,stakeholder management,launch execution', '--json']));
+  const resume = path.join(root, 'resume.json');
+  writeFileSync(resume, JSON.stringify({
+    schemaVersion: 1,
+    identity: { name: 'Morgan Candidate', email: 'morgan@example.com', phone: '+1 555 555 0100', location: 'Remote', links: [], verificationStatus: 'verified' },
+    summary: { id: 'summary_main', text: 'Product leader building evidence-grounded learning workflows.', proofPointIds: [proof.id], verificationStatus: 'verified' },
+    experience: [{ id: 'experience_learning', employer: 'Learning Studio', title: 'Senior Product Manager', location: 'Remote', startDate: '2021-01', endDate: null, dateSource: { startText: '2021-01', endText: 'Present', verificationStatus: 'verified' }, verificationStatus: 'verified', bullets: [{ id: 'bullet_discovery', text: 'Led educator discovery and shipped a learning workflow that reduced manual review time by 30%.', proofPointIds: [proof.id], verificationStatus: 'verified' }] }],
+    education: [{ id: 'education_state', institution: 'State University', degree: 'BS', field: 'Information Systems', location: '', startDate: '2012', endDate: '2016', verificationStatus: 'verified' }],
+    skills: [{ id: 'skill_discovery', name: 'Product discovery', category: 'Product', verificationStatus: 'verified' }, { id: 'skill_research', name: 'User research', category: 'Product', verificationStatus: 'verified' }],
+    credentials: [],
+    projects: [],
+    additionalSections: []
+  }, null, 2));
+  JSON.parse(run(['resume', 'import', '--profile', profile.id, '--file', resume, '--json']));
+  const resumedAfterResume = JSON.parse(run(['setup', 'next', '--profile', profile.id, '--json']));
+  if (resumedAfterResume.nextAction?.id !== 'import_local_job') throw new Error('W09 interrupted setup did not resume at local job intake');
   JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json'), '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   const discovery = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   if (discovery.status !== 'succeeded' || discovery.counts.imported !== 1 || discovery.counts.highFit < 1) throw new Error('Fixture-backed discovery run did not import and flag a high-fit job');
+  const richFixture = path.join(process.cwd(), 'tests', 'fixtures', 'discovery-integrity', 'greenhouse-rich.json');
+  JSON.parse(run(['searches', 'create', 'W03 Rich Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme', '--board-token', 'acme', '--fixture', richFixture, '--posted-within-days', '30', '--remote-only', '--employment-types', 'full_time', '--min-fit', '50', '--json']));
+  const richDiscovery = JSON.parse(run(['discover', 'run', '--search', 'W03 Rich Discovery', '--json']));
+  if (richDiscovery.status !== 'succeeded' || richDiscovery.counts.imported !== 1) throw new Error('W03 rich fixture discovery did not succeed');
+  const richJobId = richDiscovery.jobs[0]?.id;
+  const richStore = await openStore({ workspace: root });
+  const richRow = one(richStore, 'SELECT * FROM jobs WHERE id=?', [richJobId]);
+  const richYaml = readFileSync(path.join(root, 'jobos-workspace', 'jobs', richJobId, 'job.yaml'), 'utf8');
+  if (JSON.parse(richRow.compensation_json).min !== 150000 || richRow.work_model !== 'remote' || !JSON.parse(richRow.employment_types_json).includes('full_time') || richRow.department !== 'Product') {
+    throw new Error('W03 normalized native fields did not survive the SQLite round trip');
+  }
+  if (!richYaml.includes('compensationDetails:') || !richYaml.includes('workModel: remote') || !richYaml.includes('liveness:')) {
+    throw new Error('W03 normalized native fields or liveness did not survive the workspace projection');
+  }
+  richStore.db.close();
+
+  const w03Store = await openStore({ workspace: root });
+  const [fixtureJob] = await greenhouse.fetchJobs({ fixture: richFixture, company: 'Acme', boardToken: 'acme' });
+  const mixedJobs = [
+    { ...fixtureJob, sourceId: 'smoke-active', title: 'W03 Active', url: 'https://boards.greenhouse.io/acme/jobs/smoke-active' },
+    { ...fixtureJob, sourceId: 'smoke-expired', title: 'W03 Expired', url: 'https://boards.greenhouse.io/acme/jobs/smoke-expired' },
+    { ...fixtureJob, sourceId: 'smoke-broken', title: 'W03 Broken Import', url: 'https://boards.greenhouse.io/acme/jobs/smoke-broken' },
+    { ...fixtureJob, sourceId: 'smoke-uncertain', title: 'W03 Uncertain', url: 'https://boards.greenhouse.io/acme/jobs/smoke-uncertain' }
+  ];
+  const mixedSearch = createSearch(w03Store, {
+    name: 'W03 Mixed Discovery',
+    profileId: profile.id,
+    adapter: 'greenhouse',
+    config: { fixture: richFixture, company: 'Acme', boardToken: 'acme' },
+    minFit: 50
+  });
+  const scoredW03Jobs = [];
+  const mixedNow = () => Date.now();
+  const mixedLiveness = async candidate => {
+    const checkedAt = new Date(mixedNow()).toISOString();
+    const status = candidate.sourceId === 'smoke-expired' ? 'expired' : candidate.sourceId === 'smoke-uncertain' ? 'uncertain' : 'active';
+    return {
+      version: 1,
+      jobId: '',
+      status,
+      checkedAt,
+      requestedUrl: candidate.url,
+      finalUrl: candidate.url,
+      httpStatus: status === 'expired' ? 404 : status === 'active' ? 200 : 429,
+      reasonCodes: [status === 'expired' ? 'not_found' : status === 'active' ? 'listed_in_current_listing' : 'anti_bot'],
+      evidence: [{ kind: status === 'uncertain' ? 'anti_bot' : 'http_status', value: status === 'expired' ? '404' : status === 'active' ? '200' : 'challenge' }],
+      source: 'greenhouse',
+      freshUntil: new Date(mixedNow() + 86_400_000).toISOString()
+    };
+  };
+  const mixedDiscovery = await runSavedSearch(w03Store, mixedSearch.id, {
+    adapter: { fetchJobs: async () => mixedJobs },
+    importJob: (store, args) => {
+      if (args.job.sourceId === 'smoke-broken') throw Object.assign(new Error('deterministic smoke import failure'), { code: 'smoke_import_failure' });
+      return importNormalized(store, args);
+    },
+    scoreJob: async (store, jobId, profileId, options) => {
+      scoredW03Jobs.push(jobId);
+      return scoreJob(store, jobId, profileId, options);
+    },
+    checkLiveness: mixedLiveness,
+    now: mixedNow
+  });
+  if (mixedDiscovery.status !== 'partial' || !mixedDiscovery.errors.some(item => item.stage === 'import') || !mixedDiscovery.jobs.some(item => item.title === 'W03 Uncertain' && item.outcome === 'scored')) {
+    throw new Error('W03 mixed discovery did not preserve partial status, structured failure, and later-result progress');
+  }
+  const expiredW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Expired' AND profile_id=?", [profile.id]);
+  const uncertainW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Uncertain' AND profile_id=?", [profile.id]);
+  const activeW03 = one(w03Store, "SELECT * FROM jobs WHERE title='W03 Active' AND profile_id=?", [profile.id]);
+  if (!activeW03 || activeW03.liveness_status !== 'active' || !expiredW03 || expiredW03.liveness_status !== 'expired' || !uncertainW03 || uncertainW03.liveness_status !== 'uncertain') {
+    throw new Error('W03 active, expired, and uncertain liveness states are not visible');
+  }
+  if (expiredW03.fit_score != null || scoredW03Jobs.includes(expiredW03.id)) throw new Error('W03 expired result was scored');
+  let expiredPursuitError = null;
+  try {
+    await runPursuit(w03Store, { jobId: expiredW03.id, profileId: profile.id });
+  } catch (error) {
+    expiredPursuitError = error;
+  }
+  if (expiredPursuitError?.code !== 'job_expired') throw new Error('W03 expired result entered pursuit');
+  const w03Runs = all(w03Store, "SELECT external_side_effects FROM automation_runs WHERE trigger_name='discover.run'");
+  const w03Audits = all(w03Store, "SELECT external_side_effect FROM audit_log WHERE entity_id=? OR entity_id IN (?,?,?)", [mixedDiscovery.runId, activeW03.id, expiredW03.id, uncertainW03.id]);
+  if (w03Runs.some(item => item.external_side_effects !== 'none') || w03Audits.some(item => item.external_side_effect !== 'none')) throw new Error('W03 discovery claimed an external side effect');
+  if (one(w03Store, 'SELECT COUNT(*) AS count FROM applications WHERE job_id IN (?,?,?)', [activeW03.id, expiredW03.id, uncertainW03.id]).count !== 0) throw new Error('W03 discovery created an application');
+  w03Store.db.close();
   const job = JSON.parse(run(['jobs', 'import-text', '--profile', profile.id, '--file', path.join(process.cwd(), 'samples/job-description.md'), '--json']));
   const score = JSON.parse(run(['score', job.id, '--profile', profile.id, '--json']));
-  if (!(score.overall > 0)) throw new Error('Score did not compute');
+  if (!(score.overall > 0) || score.contract !== 'jobos.fit-score.v1' || score.postingLiveness?.status !== 'uncertain') {
+    throw new Error('W04 manual score did not expose fit v1 beside uncertain posting liveness');
+  }
+  const resumedAfterDecision = JSON.parse(run(['setup', 'status', '--profile', profile.id, '--job', job.id, '--json']));
+  if (resumedAfterDecision.steps.find(step => step.id === 'decision')?.status !== 'complete' || resumedAfterDecision.nextAction?.id !== 'pursue_job') throw new Error('W09 explicit local job decision did not hand off to pursuit');
+  const w08Store = await openStore({ workspace: root });
+  const privateMemorySentinel = 'W08_PRIVATE_SMOKE_NOTE_DO_NOT_MIRROR';
+  const memoryObservation = updateJobStatus(w08Store, job.id, 'saved', {
+    actor: 'user',
+    source: 'cli',
+    memoryFeedback: {
+      schema: 'jobos.job-feedback-input.v1',
+      decision: 'save',
+      reasonCodes: ['role_fit'],
+      signals: [{ field: 'location', polarity: 'prefer', value: 'remote', match: 'token' }],
+      publicExplanation: '',
+      privateNote: privateMemorySentinel,
+      referenceId: 'w08-smoke-job-save',
+      occurredAt: '2026-07-21T12:00:00.000Z'
+    }
+  });
+  const memoryEvidence = [memoryObservation.observation];
+  for (const [index, evidenceJobId] of [richJobId, activeW03.id].entries()) {
+    const feedback = updateJobStatus(w08Store, evidenceJobId, 'saved', {
+      actor: 'user',
+      source: 'cli',
+      memoryFeedback: {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: 'save',
+        reasonCodes: ['location'],
+        signals: [{ field: 'location', polarity: 'prefer', value: 'remote', match: 'token' }],
+        publicExplanation: '',
+        privateNote: `${privateMemorySentinel}_${index + 2}`,
+        referenceId: `w08-smoke-location-save-${index + 2}`,
+        occurredAt: `2026-07-${22 + index}T12:00:00.000Z`
+      }
+    });
+    memoryEvidence.push(feedback.observation);
+  }
+  const memoryProposalInput = {
+    schema: 'jobos.memory-proposal-input.v1',
+    domain: 'search',
+    scope: 'search',
+    ruleType: 'location',
+    value: { polarity: 'prefer', value: 'remote', match: 'token' },
+    rationale: 'Repeated direct job feedback supports this visible location preference.',
+    evidence: memoryEvidence.map(item => ({
+      observationSchema: 'jobos.career-memory-observation.v1',
+      observationId: item.id,
+      polarity: 'support'
+    })),
+    referenceId: 'w08-smoke-location-proposal',
+    createdAt: '2026-07-24T12:00:00.000Z'
+  };
+  const memoryProposal = createMemoryProposal(w08Store, memoryProposalInput);
+  const memoryProposalReplay = createMemoryProposal(w08Store, memoryProposalInput);
+  const preAcceptanceGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  if (memoryProposalReplay.id !== memoryProposal.id || memoryProposalReplay.idempotent !== true
+    || preAcceptanceGuidance.adjustment !== 0 || preAcceptanceGuidance.matchedRuleIds.length !== 0
+    || preAcceptanceGuidance.citations.length !== 0) {
+    throw new Error('W08 proposed guidance was not idempotent and effect-free before acceptance');
+  }
+  const acceptedMemoryTransition = transitionMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id,
+    action: 'accept',
+    reason: '',
+    referenceId: 'w08-smoke-location-accept',
+    actor: 'user',
+    source: 'cli',
+    nowDate: new Date()
+  });
+  const acceptedMemoryGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const evidenceCitationIds = new Set(memoryEvidence.map(item => item.id));
+  if (acceptedMemoryTransition.toStatus !== 'accepted'
+    || acceptedMemoryGuidance.adjustment !== 2
+    || JSON.stringify(acceptedMemoryGuidance.matchedRuleIds) !== JSON.stringify([memoryProposal.id])
+    || acceptedMemoryGuidance.citations.length !== memoryEvidence.length
+    || acceptedMemoryGuidance.citations.some(citation => !evidenceCitationIds.has(citation.id))) {
+    throw new Error('W08 accepted search guidance did not have the exact cited consumer effect');
+  }
+  const revokedMemoryTransition = transitionMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id,
+    action: 'revoke',
+    reason: 'Restore the pre-acceptance smoke baseline.',
+    referenceId: 'w08-smoke-location-revoke',
+    actor: 'user',
+    source: 'cli',
+    nowDate: new Date()
+  });
+  const revokedMemoryGuidance = evaluateSearchGuidance(w08Store, {
+    profileId: profile.id,
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const memoryProposalHistory = getMemoryProposal(w08Store, {
+    profileId: profile.id,
+    proposalId: memoryProposal.id
+  });
+  if (revokedMemoryTransition.toStatus !== 'revoked'
+    || JSON.stringify(revokedMemoryGuidance) !== JSON.stringify(preAcceptanceGuidance)
+    || memoryProposalHistory.status !== 'revoked'
+    || JSON.stringify(memoryProposalHistory.transitions.map(item => item.toStatus)) !== JSON.stringify(['proposed', 'accepted', 'revoked'])
+    || JSON.stringify(memoryProposalHistory.transitions.map(item => item.referenceId)) !== JSON.stringify([
+      'w08-smoke-location-proposal',
+      'w08-smoke-location-accept',
+      'w08-smoke-location-revoke'
+    ])) {
+    throw new Error('W08 revocation did not restore baseline guidance with complete lifecycle history');
+  }
+  const memoryPacket = retrieveCareerMemory(w08Store, {
+    profileId: profile.id,
+    consumer: 'scoring',
+    jobId: job.id,
+    asOf: new Date()
+  });
+  const careerBrief = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'career_brief',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const voiceGuide = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'voice_positioning_guide',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const careerBriefReplay = refreshMemoryProjection(w08Store, {
+    profileId: profile.id,
+    projectionType: 'career_brief',
+    asOf: new Date(),
+    actor: 'user',
+    source: 'cli'
+  });
+  const memoryMirrorFiles = [
+    'observations.yaml',
+    'career-brief.yaml',
+    'career-brief.md',
+    'voice-positioning-guide.yaml',
+    'voice-positioning-guide.md'
+  ].map(file => path.join(root, 'jobos-workspace', 'profiles', profile.id, 'memory', file));
+  const memoryMirrorText = memoryMirrorFiles.map(file => readFileSync(file, 'utf8'));
+  if (!memoryObservation.observation?.id
+    || memoryPacket.externalSideEffects !== 'none'
+    || careerBriefReplay.revision !== careerBrief.revision
+    || careerBriefReplay.sourceStateHash !== careerBrief.sourceStateHash
+    || memoryMirrorText.some(text => text.includes(privateMemorySentinel) || /(^|\n)\s*[&*][A-Za-z0-9_-]+/.test(text))) {
+    throw new Error('W08 memory observation, retrieval, projection replay, or private mirror contract failed');
+  }
+  w08Store.db.close();
+  const w04Store = await openStore({ workspace: root });
+  const uncertainFit = JSON.parse(one(w04Store, 'SELECT score_json FROM jobs WHERE id=?', [job.id]).score_json);
+  setSmokeLiveness(w04Store, job.id, 'active');
+  const activeFit = await scoreJob(w04Store, job.id, profile.id);
+  if (activeFit.postingLiveness?.status !== 'active' || activeFit.overall !== uncertainFit.overall || activeFit.baseOverall !== uncertainFit.baseOverall || JSON.stringify(activeFit.dimensions) !== JSON.stringify(uncertainFit.dimensions)) {
+    throw new Error('W04 active and uncertain liveness changed identical candidate fit evidence');
+  }
+  const beforeExpiry = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  setSmokeLiveness(w04Store, job.id, 'expired');
+  let expiredScoreError = null;
+  try {
+    await scoreJob(w04Store, job.id, profile.id);
+  } catch (error) {
+    expiredScoreError = error;
+  }
+  const afterExpiry = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  if (expiredScoreError?.code !== 'job_expired' || JSON.stringify(afterExpiry) !== JSON.stringify(beforeExpiry)) {
+    throw new Error('W04 expired posting did not preserve its prior fit bytes');
+  }
+  setSmokeLiveness(w04Store, job.id, 'uncertain');
+  const networkAt = new Date().toISOString();
+  dbRun(w04Store, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+    ['smoke-w04-network-run', profile.id, 'job', job.id, 'succeeded', networkAt, networkAt, networkAt]);
+  dbRun(w04Store, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ['smoke-w04-network-candidate', job.id, 'Smoke Direct Connection', 'source-backed smoke path', 'high', 'candidate', networkAt, networkAt, 'smoke-w04-network-person', 'smoke-w04-network-run']);
+  dbRun(w04Store, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+    'smoke-w04-network-edge', 'profile', profile.id, 'person', 'smoke-w04-network-person', 'direct_connection',
+    '[{"label":"User-imported smoke connection","source":"smoke fixture"}]', 'high', networkAt
+  ]);
+  save(w04Store);
+  const networkFit = await scoreJob(w04Store, job.id, profile.id);
+  const knownDimensions = Object.values(networkFit.dimensions).filter(value => value.status !== 'unknown');
+  const expectedOverall = Math.round(
+    knownDimensions.reduce((sum, value) => sum + value.weight * value.score, 0)
+    / knownDimensions.reduce((sum, value) => sum + value.weight, 0)
+  );
+  const networkRow = one(w04Store, 'SELECT fit_score,score_json FROM jobs WHERE id=?', [job.id]);
+  const storedNetworkFit = JSON.parse(networkRow.score_json);
+  const scoreAudit = JSON.parse(one(w04Store, "SELECT payload_json FROM audit_log WHERE action='job.scored' AND entity_id=? ORDER BY created_at DESC,id DESC LIMIT 1", [job.id]).payload_json);
+  const w04Workspace = readFileSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml'), 'utf8');
+  const w04Readiness = compileApplicationReadiness(w04Store, { jobId: job.id, profileId: profile.id });
+  const w04Domain = selectedJobContext(w04Store, job.id, profile.id);
+  if (networkFit.dimensions.networkAccess.score !== 90 || networkFit.overall === uncertainFit.overall || networkFit.overall !== expectedOverall
+    || networkRow.fit_score !== expectedOverall || storedNetworkFit.overall !== expectedOverall || scoreAudit.overall !== expectedOverall
+    || w04Readiness.materials.score.overall !== expectedOverall || w04Domain.fit.overall !== expectedOverall
+    || w04Domain.postingLiveness?.status !== 'uncertain'
+    || !w04Workspace.includes(`fitScore: ${expectedOverall}`) || !w04Workspace.includes('contract: jobos.fit-score.v1')) {
+    throw new Error('W04 network rescore did not preserve canonical overall across projections');
+  }
+  const scoringSideEffects = one(w04Store, `SELECT COUNT(*) AS count FROM audit_log
+    WHERE entity_id=? AND action='job.scored' AND external_side_effect<>'none'`, [job.id]).count;
+  if (one(w04Store, 'SELECT COUNT(*) AS count FROM applications WHERE job_id=?', [job.id]).count !== 0
+    || one(w04Store, 'SELECT COUNT(*) AS count FROM outreach_plans WHERE job_id=?', [job.id]).count !== 0
+    || scoringSideEffects !== 0) {
+    throw new Error('W04 scoring caused an application, outreach plan, or external side effect');
+  }
+  w04Store.db.close();
   const resumeDraft = run(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
-  if (!resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft missing evidence section');
+  if (!resumeDraft.includes('## Experience') || !resumeDraft.includes('## Education') || resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft was not a complete semantic resume');
   run(['tailor', 'cover-letter', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
   const app = JSON.parse(run(['applications', 'create', '--job', job.id, '--status', 'materials-ready', '--json']));
   const unansweredPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
@@ -58,8 +417,24 @@ try {
     if (approval.approvalStatus !== 'approved' || approval.externalSideEffects !== 'none' || approval.submissionPerformed !== false || approval.applicationStatusChanged !== false) throw new Error(`Unsafe approval metadata for ${item.id}`);
   }
   const approvedPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
-  if (approvedPlan.status !== 'approved' || approvedPlan.localApprovalComplete !== true) throw new Error(`Application did not reach approved local readiness: ${approvedPlan.status}`);
+  if (approvedPlan.status !== 'materials-ready' || approvedPlan.localApprovalComplete !== true) throw new Error(`Application did not reach materials-ready local readiness: ${approvedPlan.status}`);
+  const completedSetup = JSON.parse(run(['setup', 'status', '--profile', profile.id, '--job', job.id, '--json']));
+  if (!completedSetup.coreReady || completedSetup.state !== 'complete' || completedSetup.steps.find(step => step.id === 'materials')?.evidence.readinessStatus !== 'materials-ready' || completedSetup.steps.find(step => step.id === 'calibration')?.status !== 'optional_ready') {
+    throw new Error('W09 setup did not derive core completion and visible optional calibration from canonical state');
+  }
   const afterReviewStore = await openStore({ workspace: root });
+  persistFormSnapshot(afterReviewStore, buildFormSnapshot({
+    snapshotId: 'form_smoke_application',
+    jobId: job.id,
+    profileId: profile.id,
+    capturedAt: new Date().toISOString(),
+    requestedUrl: 'https://board.example/jobs/smoke/apply',
+    finalUrl: 'https://board.example/jobs/smoke/apply',
+    adapter: DOM_ADAPTER_MANIFEST,
+    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 10 },
+    fields: [{ frameKey: 'main', locatorPath: '#full-name', prompt: 'Full name', control: 'text', required: true }],
+    warnings: []
+  }));
   const applicationAfterReview = one(afterReviewStore, 'SELECT status,notes,confirmation_url,updated_at FROM applications WHERE id=?', [app.id]);
   const statusChangesAfterReview = Number(one(afterReviewStore, 'SELECT COUNT(*) AS count FROM status_changes WHERE application_id=?', [app.id]).count);
   const auditsAfterReview = Number(one(afterReviewStore, 'SELECT COUNT(*) AS count FROM audit_log').count);
@@ -68,6 +443,8 @@ try {
   afterReviewStore.db.close();
   if (JSON.stringify(applicationAfterReview) !== JSON.stringify(applicationBeforeReview) || statusChangesAfterReview !== statusChangesBeforeReview) throw new Error('Local artifact approval changed application tracking state');
   if (auditsAfterReview !== auditsBeforeReview + 2 || approvalAudits.length !== 2 || approvalAudits.some(event => event.external_side_effect !== 'none')) throw new Error('Approval audit events were missing or claimed an external side effect');
+  const formReadyPlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (formReadyPlan.status !== 'form-ready' || formReadyPlan.form?.formReady !== true) throw new Error(`Application did not reach live form readiness: ${formReadyPlan.status}`);
 
   const applicationPacket = JSON.parse(run(['apply', 'packet', 'create', '--job', job.id, '--profile', profile.id, '--json']));
   const resumeReview = reviewQueue.find(item => item.type === 'resume');
@@ -107,11 +484,185 @@ try {
   if (!packetYaml.includes('receiptState: confirmed') || /^\s+answer(?:Text)?:/m.test(packetYaml)) throw new Error('Packet mirror is stale or contains answer plaintext fields');
 
   JSON.parse(run(['applications', 'update', app.id, '--status', 'interview', '--json']));
-  const interviewPacket = run(['interview', 'prep', '--application', app.id, '--stage', 'hiring-manager', '--output', 'markdown'], true);
+  const interviewStoryFile = path.join(root, 'interview-story.json');
+  const interviewStoryFields = ['title', 'situation', 'task', 'action', 'result', 'reflection'];
+  const interviewStoryFactualFields = ['situation', 'task', 'action', 'result'];
+  writeFileSync(interviewStoryFile, JSON.stringify({
+    title: 'Owning an evidence-grounded product launch',
+    situation: 'A learning workflow launch had fragmented ownership and a fixed deadline.',
+    task: 'I took ownership of delivery scope and the measurable impact target.',
+    action: 'I aligned stakeholders, resolved dependencies, and led weekly delivery risk reviews.',
+    result: 'The workflow shipped on schedule and reduced manual review time by 30%.',
+    reflection: 'I learned to surface dependency risk before committing to launch dates.',
+    competencyTags: ['ownership', 'impact', 'delivery'],
+    audienceTags: ['recruiter'],
+    fieldProvenance: Object.fromEntries(interviewStoryFields.map(field => [
+      field,
+      { origin: 'user', actor: 'user', source: 'cli', sourceRef: 'smoke-story' }
+    ])),
+    confirmedFields: [],
+    fieldEvidence: Object.fromEntries(interviewStoryFactualFields.map(field => [field, [proof.id]])),
+    actor: 'user'
+  }, null, 2));
+  const interviewStoryDraft = JSON.parse(run([
+    'interview', 'stories', 'create',
+    '--profile', profile.id,
+    '--file', interviewStoryFile,
+    '--json'
+  ]));
+  const interviewStory = JSON.parse(run([
+    'interview', 'stories', 'verify', interviewStoryDraft.id,
+    '--profile', profile.id,
+    '--revision', String(interviewStoryDraft.currentRevision.revision),
+    '--confirm-fields', interviewStoryFields.join(','),
+    '--json'
+  ]));
+  if (interviewStory.eligibility !== 'eligible' || interviewStory.activeVerifiedRevision?.state !== 'verified') {
+    throw new Error('W07 smoke story did not become proof-grounded and eligible');
+  }
+
+  const interviewPacket = run([
+    'interview', 'prep',
+    '--application', app.id,
+    '--stage', 'hiring-manager',
+    '--audience', 'hiring_manager',
+    '--output', 'markdown'
+  ], true);
   if (!interviewPacket.includes('STAR story') || !interviewPacket.includes('Questions to ask the interviewer')) throw new Error('Interview prep packet missing useful sections');
+  const secondInterviewApp = JSON.parse(run([
+    'applications', 'create',
+    '--job', richJobId,
+    '--status', 'interview',
+    '--json'
+  ]));
+  const recruiterPacket = run([
+    'interview', 'prep',
+    '--application', secondInterviewApp.id,
+    '--stage', 'recruiter-screen',
+    '--audience', 'recruiter',
+    '--output', 'markdown'
+  ], true);
+  if (interviewPacket === recruiterPacket
+    || !interviewPacket.includes('[inferred]')
+    || !recruiterPacket.includes('[inferred]')
+    || !interviewPacket.includes('Coverage: gap')
+    || !recruiterPacket.includes('Coverage: gap')) {
+    throw new Error('W07 audience packs did not differ with explicit question labels and honest gaps');
+  }
+
+  const debriefFields = ['observedQuestions', 'observedOutcome', 'proofGaps', 'storyUses', 'notes'];
+  const debriefFile = path.join(root, 'interview-debrief.json');
+  const debriefBase = {
+    interviewStage: 'interview',
+    audience: 'hiring_manager',
+    referenceId: 'jobos-smoke-interview-debrief',
+    occurredAt: '2026-07-22T16:30:00Z',
+    actor: 'candidate',
+    observedQuestions: [],
+    observedOutcome: { type: 'no_change', note: 'The team will finish the remaining interviews.' },
+    proofGaps: [],
+    storyUses: [],
+    notes: 'Private local smoke debrief note.',
+    fieldProvenance: Object.fromEntries(debriefFields.map(field => [
+      field,
+      { origin: 'user', actor: 'candidate', source: 'cli', sourceRef: 'smoke-debrief' }
+    ]))
+  };
+  writeFileSync(debriefFile, JSON.stringify(debriefBase, null, 2));
+  const recordedDebrief = JSON.parse(run([
+    'interview', 'debrief', 'record',
+    '--profile', profile.id,
+    '--application', app.id,
+    '--file', debriefFile,
+    '--json'
+  ]));
+  const correctionFile = path.join(root, 'interview-debrief-correction.json');
+  writeFileSync(correctionFile, JSON.stringify({
+    ...debriefBase,
+    observedOutcome: { type: 'advanced', note: 'A follow-up conversation was scheduled.' },
+    notes: 'Corrected private local smoke debrief note.'
+  }, null, 2));
+  const correctedDebrief = JSON.parse(run([
+    'interview', 'debrief', 'correct', recordedDebrief.id,
+    '--profile', profile.id,
+    '--file', correctionFile,
+    '--reason', 'Reviewed contemporaneous smoke notes.',
+    '--json'
+  ]));
+  if (recordedDebrief.currentRevision.revision !== 1 || correctedDebrief.currentRevision.revision !== 2) {
+    throw new Error('W07 smoke debrief did not record and correct append-only revisions');
+  }
+
+  const interviewObservations = JSON.parse(run([
+    'interview', 'observations',
+    '--profile', profile.id,
+    '--json'
+  ]));
+  const currentDebriefObservations = interviewObservations.observations.filter(observation => (
+    observation.debriefId === recordedDebrief.id && observation.current
+  ));
+  if (currentDebriefObservations.length !== 1
+    || currentDebriefObservations[0].sourceEntity.revision !== 2
+    || currentDebriefObservations[0].actor !== 'candidate'
+    || currentDebriefObservations[0].source !== 'cli'
+    || currentDebriefObservations[0].externalSideEffects !== 'none') {
+    throw new Error('W07 current W08 observation is missing exact attribution or no-side-effect semantics');
+  }
+
+  const w07Store = await openStore({ workspace: root });
+  const packRows = all(w07Store, `SELECT artifact_id,application_id,interview_stage,audience,coverage_status,story_id,story_revision_id
+    FROM interview_pack_items
+    WHERE profile_id=? AND application_id IN (?,?)
+    ORDER BY application_id,artifact_id,position`, [profile.id, app.id, secondInterviewApp.id]);
+  const storyApplications = new Set(packRows
+    .filter(item => item.story_id === interviewStory.id && item.story_revision_id === interviewStory.activeVerifiedRevision.id)
+    .map(item => item.application_id));
+  const firstPackRows = packRows.filter(item => item.application_id === app.id);
+  const secondPackRows = packRows.filter(item => item.application_id === secondInterviewApp.id);
+  if (storyApplications.size !== 2
+    || !firstPackRows.some(item => item.audience === 'hiring_manager' && item.coverage_status === 'gap')
+    || !secondPackRows.some(item => item.audience === 'recruiter' && item.coverage_status === 'gap')) {
+    throw new Error('W07 canonical story was not reused across both audience packs with explicit gaps');
+  }
+  const followupActions = all(w07Store, `SELECT * FROM tasks
+    WHERE application_id=? AND action_kind='application_next_action'
+      AND action_code='follow-up-after-interview' AND status='open'
+    ORDER BY id`, [app.id]);
+  if (followupActions.length !== 1 || followupActions[0].source_event_id !== recordedDebrief.id) {
+    throw new Error('W07 debrief did not leave exactly one current W06 follow-up action');
+  }
+  const interviewAudits = all(w07Store, `SELECT action,external_side_effect,payload_json FROM audit_log
+    WHERE action LIKE 'interview.%' OR action LIKE 'interview_prep.%'
+    ORDER BY created_at,id`);
+  const mutationAuditActions = new Set([
+    'interview.story.created',
+    'interview.story.verified',
+    'interview.debrief.recorded',
+    'interview.debrief.corrected'
+  ]);
+  if (interviewAudits.some(event => event.external_side_effect !== 'none')
+    || interviewAudits.filter(event => mutationAuditActions.has(event.action)).some(event => (
+      JSON.parse(event.payload_json).externalSideEffects !== 'none'
+    ))) {
+    throw new Error('W07 audit spine claimed an external side effect');
+  }
+  w07Store.db.close();
+
+  const requiredInterviewMirrors = [
+    path.join(root, 'jobos-workspace', 'profiles', profile.id, 'interviews', 'stories.yaml'),
+    path.join(root, 'jobos-workspace', 'profiles', profile.id, 'interviews', 'observations.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'artifacts', 'interview-prep-hiring-manager.md'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'interviews', 'debriefs.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'job.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', job.id, 'application.yaml'),
+    path.join(root, 'jobos-workspace', 'jobs', richJobId, 'artifacts', 'interview-prep-recruiter-screen.md')
+  ];
+  if (requiredInterviewMirrors.some(file => readFileSync(file).byteLength === 0)) {
+    throw new Error('W07 required interview workspace mirror was not byte-readable');
+  }
   const funnel = JSON.parse(run(['analytics', 'funnel', '--profile', profile.id, '--since', '30', '--json']));
   if (funnel.totals.interviews < 1 || !funnel.byRoleFamily.length) throw new Error('Analytics funnel did not report interview conversion by role family');
-  JSON.parse(run(['tasks', 'due', '--json']));
+  JSON.parse(run(['tasks', 'due', '--profile', profile.id, '--json']));
   const review = run(['review', 'weekly', '--profile', profile.id, '--output', 'markdown'], true);
   if (!review.includes('Weekly JobOS review') || !review.includes('Funnel analytics')) throw new Error('Weekly review missing funnel insights');
   const now = new Date();
@@ -123,7 +674,106 @@ try {
   if (!briefPath || !readFileSync(path.join(root, 'jobos-workspace', briefPath), 'utf8').includes('Morning priority brief')) throw new Error('Scheduler did not write priority brief export');
   const runDay = schedulerRun.runs[0].createdAt.slice(0, 10);
   if (!readFileSync(path.join(root, 'jobos-workspace', 'automations', `runs-${runDay}.jsonl`), 'utf8').includes('smoke_brief')) throw new Error('Scheduler did not append automation run JSONL');
-  console.log(JSON.stringify({ ok: true, root, profile: profile.id, job: job.id, score: score.overall, application: app.id, humanReview: { readyForReview: reviewPlan.status, approved: approvedPlan.status, reviewedArtifactIds: reviewQueue.map(item => item.id), applicationStatusChanged: false, externalSideEffects: 'none' }, receiptSpine: { packetId: applicationPacket.id, contentHash: applicationPacket.contentHash, receiptState: confirmedPlan.packet.receiptState, receiptCount: receiptRows.length, appliedStatusBound: true, submissionPerformed: false, externalSideEffects: 'none' }, discoveryRun: discovery.runId, schedulerRun: schedulerRun.runs[0].id, priorityBrief: briefPath, interviewPrep: true, interviews: funnel.totals.interviews }, null, 2));
+  const revisedResume = JSON.parse(readFileSync(resume, 'utf8'));
+  revisedResume.summary.text = 'Product leader building verified, evidence-grounded learning workflows.';
+  const revisedResumePath = path.join(root, 'resume-revised.json');
+  writeFileSync(revisedResumePath, JSON.stringify(revisedResume, null, 2));
+  JSON.parse(run(['resume', 'replace', '--profile', profile.id, '--file', revisedResumePath, '--json']));
+  const stalePlan = JSON.parse(run(['applications', 'plan', '--job', job.id, '--profile', profile.id, '--json']));
+  if (!stalePlan.blockers.some(item => item.code === 'resume_stale_source_revision')) throw new Error('Canonical resume revision did not stale the tailored artifact');
+  const stalePacket = JSON.parse(run(['apply', 'packet', 'show', applicationPacket.id, '--json']));
+  if (stalePacket.currency !== 'stale') throw new Error('Canonical resume revision did not stale the frozen packet');
+  console.log(JSON.stringify({
+    ok: true,
+    root,
+    profile: profile.id,
+    job: job.id,
+    score: score.overall,
+    application: app.id,
+    humanReview: {
+      readyForReview: reviewPlan.status,
+      approved: approvedPlan.status,
+      reviewedArtifactIds: reviewQueue.map(item => item.id),
+      applicationStatusChanged: false,
+      externalSideEffects: 'none'
+    },
+    receiptSpine: {
+      packetId: applicationPacket.id,
+      contentHash: applicationPacket.contentHash,
+      receiptState: confirmedPlan.packet.receiptState,
+      receiptCount: receiptRows.length,
+      appliedStatusBound: true,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    discoveryRun: discovery.runId,
+    w03: {
+      richRun: richDiscovery.runId,
+      normalizedFieldsRoundTrip: true,
+      mixedRun: mixedDiscovery.runId,
+      mixedStatus: mixedDiscovery.status,
+      laterResultImported: Boolean(uncertainW03),
+      structuredErrors: mixedDiscovery.errors,
+      liveness: {
+        active: activeW03.liveness_status,
+        expired: expiredW03.liveness_status,
+        uncertain: uncertainW03.liveness_status
+      },
+      expiredScored: false,
+      expiredPursued: false,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    w04: {
+      contract: networkFit.contract,
+      initialOverall: uncertainFit.overall,
+      networkOverall: networkFit.overall,
+      networkAccess: networkFit.dimensions.networkAccess.score,
+      activeUncertainFitIdentity: true,
+      expiredPriorFitPreserved: true,
+      postingLivenessSeparated: true,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    w07: {
+      storyId: interviewStory.id,
+      storyRevisionId: interviewStory.activeVerifiedRevision.id,
+      applicationIds: [app.id, secondInterviewApp.id],
+      canonicalStoryReuse: storyApplications.size,
+      hiringManagerGapCount: firstPackRows.filter(item => item.coverage_status === 'gap').length,
+      recruiterGapCount: secondPackRows.filter(item => item.coverage_status === 'gap').length,
+      debriefId: recordedDebrief.id,
+      currentDebriefRevision: correctedDebrief.currentRevision.revision,
+      currentFollowupActions: followupActions.length,
+      currentAttributedObservations: currentDebriefObservations.length,
+      readableMirrors: requiredInterviewMirrors.length,
+      externalSideEffects: 'none'
+    },
+    w08: {
+      observationId: memoryObservation.observation.id,
+      observationSourceVersionId: memoryObservation.observation.sourceEntity.versionId,
+      proposalId: memoryProposal.id,
+      proposalReplayIdempotent: memoryProposalReplay.idempotent,
+      preAcceptanceAdjustment: preAcceptanceGuidance.adjustment,
+      acceptedAdjustment: acceptedMemoryGuidance.adjustment,
+      acceptedMatchedRuleIds: acceptedMemoryGuidance.matchedRuleIds,
+      acceptedCitationCount: acceptedMemoryGuidance.citations.length,
+      revokedAdjustment: revokedMemoryGuidance.adjustment,
+      lifecycleHistory: memoryProposalHistory.transitions.map(item => item.toStatus),
+      retrievalSchema: memoryPacket.schema,
+      careerBriefRevision: careerBrief.revision,
+      careerBriefSourceStateHash: careerBrief.sourceStateHash,
+      voiceGuideRevision: voiceGuide.revision,
+      readablePrivateNoteFreeMirrors: memoryMirrorFiles.length,
+      representative: false,
+      causalAttribution: false,
+      externalSideEffects: 'none'
+    },
+    schedulerRun: schedulerRun.runs[0].id,
+    priorityBrief: briefPath,
+    interviewPrep: true,
+    interviews: funnel.totals.interviews
+  }, null, 2));
 } finally {
   if (!process.env.KEEP_JOBOS_SMOKE) rmSync(root, { recursive: true, force: true });
 }

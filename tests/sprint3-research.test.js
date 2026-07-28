@@ -88,14 +88,11 @@ function fakeResearchLlmServer() {
       }
       if (parsed.metadata?.schemaName === 'jobos_outreach_draft') {
         const payload = {
-          subject: 'Question about Acme Learning product priorities',
-          message: 'Hi Maya,\n\nI saw that you lead product at Acme Learning and that Acme Learning builds an AI tutoring platform for workforce upskilling. My background includes educator discovery for AI-assisted learning workflows, so I would value your perspective on what strong contribution looks like for the Product Manager role.\n\nWould you be open to a short learning conversation?\n\nThanks,\nPM EdTech',
+          strategyClass: 'hiring_manager',
           evidence: [
-            { sourceUrl: 'https://acme.example/team/maya-chen', reason: 'Stakeholder relevance' },
-            { sourceUrl: 'https://acme.example/about', reason: 'Company product context' }
+            { sourceUrl: 'https://acme.example/team/maya-chen' },
+            { sourceUrl: 'https://acme.example/about' },
           ],
-          quality: { specificity: 9, personalization: 9, askClarity: 9, lengthDiscipline: 9, toneMatch: 9 },
-          warnings: []
         };
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
@@ -313,8 +310,8 @@ test('outreach draft uses LLM evidence schema when configured', async () => {
       '--json'
     ]));
     const draft = JSON.parse(await run(['outreach', 'draft', '--job', job.id, '--stakeholder', added.id, '--profile', profile.id, '--goal', 'informational', '--json']));
-    assert.equal(draft.mode, 'llm');
-    assert.equal(draft.subject, 'Question about Acme Learning product priorities');
+    assert.equal(draft.mode, 'llm-selection');
+    assert.equal(draft.subject, 'hiring manager question about Acme Learning');
     assert.ok(llm.requests.some(r => r.body.metadata?.schemaName === 'jobos_outreach_draft'));
     const content = readFileSync(path.join(root, 'jobos-workspace', draft.path), 'utf8');
     assert.match(content, /AI tutoring platform for workforce upskilling/);

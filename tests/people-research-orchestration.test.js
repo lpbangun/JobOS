@@ -387,17 +387,17 @@ test('integrated alumni flow ranks a source-backed direct path and keeps all act
   } finally { f.cleanup(); }
 });
 
-test('network access scoring uses deterministic fresh and stale evidence bands without response claims', async () => {
+test('W04-NETWORK-01 derives fresh stale and absent network access from exact local evidence without response claims', async () => {
   const scenarios = [
-    { kind: 'direct', fresh: true, score: 90 },
-    { kind: 'direct', fresh: false, score: 80 },
-    { kind: 'mutual', fresh: true, score: 80 },
-    { kind: 'mutual', fresh: false, score: 70 },
-    { kind: 'approved', fresh: true, score: 70 },
-    { kind: 'approved', fresh: false, score: 60 },
-    { kind: 'generic', fresh: true, score: 60 },
-    { kind: 'generic', fresh: false, score: 50 },
-    { kind: 'none', fresh: true, score: 50 }
+    { kind: 'direct', fresh: true, status: 'scored', score: 90, evidenceKind: 'relationship_edge' },
+    { kind: 'direct', fresh: false, status: 'scored', score: 75, evidenceKind: 'relationship_edge' },
+    { kind: 'mutual', fresh: true, status: 'scored', score: 75, evidenceKind: 'relationship_edge' },
+    { kind: 'mutual', fresh: false, status: 'scored', score: 60, evidenceKind: 'relationship_edge' },
+    { kind: 'approved', fresh: true, status: 'scored', score: 60, evidenceKind: 'contact_point' },
+    { kind: 'approved', fresh: false, status: 'scored', score: 45, evidenceKind: 'contact_point' },
+    { kind: 'generic', fresh: true, status: 'scored', score: 25 },
+    { kind: 'generic', fresh: false, status: 'unknown', score: null },
+    { kind: 'none', fresh: true, status: 'unknown', score: null }
   ];
   const observedBands = new Set();
   for (const scenario of scenarios) {
@@ -420,21 +420,114 @@ test('network access scoring uses deterministic fresh and stale evidence bands w
           run(f.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
             `edge_${runId}`, 'profile', f.profile.id, 'person', person.id,
             scenario.kind === 'direct' ? 'direct_connection' : 'shared_school',
-            JSON.stringify([{ label: `${scenario.kind} fixture` }]), 'high', at
+            JSON.stringify([{ label: `User-imported ${scenario.kind} connection`, source: 'connections.csv' }]), 'high', at
           ]);
         }
         if (scenario.kind === 'approved') {
-          run(f.s, `INSERT INTO contact_points (id,person_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [`contact_${runId}`, person.id, 'email', `${scenario.kind}@example.test`, `${scenario.kind}@example.test`, 'A', 'exact_public', 'high', '[]', '{}', 1, 0, at, at]);
+          const sourceId = `source_${runId}`;
+          run(f.s, `INSERT INTO source_observations (id,job_id,url,canonical_url,source_type,provider,trust,fetched_at) VALUES (?,?,?,?,?,?,?,?)`,
+            [sourceId, f.job.id, `https://sources.example/${runId}`, `https://sources.example/${runId}`, 'person', 'fixture', 'high', finishedAt]);
+          run(f.s, 'INSERT INTO research_run_sources (run_id,source_observation_id) VALUES (?,?)', [runId, sourceId]);
+          run(f.s, `INSERT INTO contact_points (id,person_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at,origin_research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [`contact_${runId}`, person.id, 'email', `${scenario.kind}@example.test`, `${scenario.kind}@example.test`, 'A', 'exact_public', 'high', JSON.stringify([sourceId]), '{}', 1, 0, at, at, runId]);
         }
       }
       const result = networkAccessFromEvidence(f.s, { jobId: f.job.id, profileId: f.profile.id });
+      assert.equal(result.status, scenario.status, `${scenario.kind}/${scenario.fresh ? 'fresh' : 'stale'}: ${result.reason}`);
       assert.equal(result.score, scenario.score, `${scenario.kind}/${scenario.fresh ? 'fresh' : 'stale'}: ${result.reason}`);
-      assert.doesNotMatch(result.reason, /response|reply|probabil/i);
-      observedBands.add(result.score);
+      assert.doesNotMatch(result.reason, /response|reply|referral|interview|probabil/i);
+      if (scenario.kind !== 'none') assert.ok(result.evidenceRefs.some(item => item.kind === 'research_run'));
+      if (scenario.evidenceKind) assert.ok(result.evidenceRefs.some(item => item.kind === scenario.evidenceKind));
+      if (result.score != null) observedBands.add(result.score);
     } finally { f.cleanup(); }
   }
-  assert.deepEqual([...observedBands].sort((a, b) => a - b), [50, 60, 70, 80, 90]);
+  assert.deepEqual([...observedBands].sort((a, b) => a - b), [25, 45, 60, 75, 90]);
+  const invalidEdgeEvidence = [
+    ['empty', '[]'],
+    ['malformed', '{not-json'],
+    ['bare_string', '["agent claim"]'],
+    ['unknown_keys', '[{"foo":"bar"}]'],
+    ['empty_recognized_fields', '[{"label":"  ","source":"","sourceUrl":null,"sourceObservationId":[]}]']
+  ];
+  for (const [name, evidenceJson] of invalidEdgeEvidence) {
+    const invalidEdge = await fixture({ job: true });
+    try {
+      const at = new Date().toISOString();
+      const runId = `research_${name}_edge`;
+      const person = resolvePerson(invalidEdge.s, {
+        name: `${name} Evidence`,
+        profileUrl: `https://profiles.example/${name}-evidence`,
+        sourceRecordId: runId
+      }).person;
+      run(invalidEdge.s, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+        [runId, invalidEdge.profile.id, 'job', invalidEdge.job.id, 'succeeded', at, at, at]);
+      run(invalidEdge.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [`candidate_${runId}`, invalidEdge.job.id, person.name, 'invalid edge fixture', 'high', 'candidate', at, at, person.id, runId]);
+      run(invalidEdge.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+        [`edge_${runId}`, 'profile', invalidEdge.profile.id, 'person', person.id, 'direct_connection', evidenceJson, 'high', at]);
+      const result = networkAccessFromEvidence(invalidEdge.s, { jobId: invalidEdge.job.id, profileId: invalidEdge.profile.id });
+      assert.equal(result.score, 25, name);
+      assert.equal(result.evidenceRefs.some(item => item.kind === 'relationship_edge'), false, name);
+    } finally { invalidEdge.cleanup(); }
+  }
+
+  const unrelatedFresh = await fixture({ job: true });
+  try {
+    const at = new Date().toISOString();
+    const oldAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+    const oldPerson = resolvePerson(unrelatedFresh.s, {
+      name: 'Old Path',
+      profileUrl: 'https://profiles.example/old-path',
+      sourceRecordId: 'old-path'
+    }).person;
+    const freshPerson = resolvePerson(unrelatedFresh.s, {
+      name: 'Unrelated Fresh Person',
+      profileUrl: 'https://profiles.example/unrelated-fresh',
+      sourceRecordId: 'unrelated-fresh'
+    }).person;
+    for (const [runId, person, finishedAt] of [
+      ['research_old_path', oldPerson, oldAt],
+      ['research_unrelated_fresh', freshPerson, at]
+    ]) {
+      run(unrelatedFresh.s, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+        [runId, unrelatedFresh.profile.id, 'job', unrelatedFresh.job.id, 'succeeded', finishedAt, finishedAt, finishedAt]);
+      run(unrelatedFresh.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [`candidate_${runId}`, unrelatedFresh.job.id, person.name, 'freshness fixture', 'high', 'candidate', finishedAt, finishedAt, person.id, runId]);
+    }
+    run(unrelatedFresh.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+      ['edge_old_path', 'profile', unrelatedFresh.profile.id, 'person', oldPerson.id, 'direct_connection', '[{"label":"old source"}]', 'high', oldAt]);
+    const result = networkAccessFromEvidence(unrelatedFresh.s, { jobId: unrelatedFresh.job.id, profileId: unrelatedFresh.profile.id });
+    assert.equal(result.score, 75);
+    assert.ok(result.evidenceRefs.some(item => item.kind === 'research_run' && item.id === 'research_old_path'));
+    assert.equal(result.evidenceRefs.some(item => item.id === 'research_unrelated_fresh'), false);
+  } finally { unrelatedFresh.cleanup(); }
+
+  const crossProfile = await fixture({ job: true });
+  try {
+    const at = new Date().toISOString();
+    const person = resolvePerson(crossProfile.s, { name: 'Other Profile Contact', profileUrl: 'https://profiles.example/other-profile', sourceRecordId: 'other-profile-edge' }).person;
+    run(crossProfile.s, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+      ['research_cross_profile', crossProfile.profile.id, 'job', crossProfile.job.id, 'succeeded', at, at, at]);
+    run(crossProfile.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      ['candidate_cross_profile', crossProfile.job.id, person.name, 'score fixture', 'high', 'candidate', at, at, person.id, 'research_cross_profile']);
+    run(crossProfile.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+      ['edge_other_profile', 'profile', 'profile-other', 'person', person.id, 'direct_connection', '[]', 'high', at]);
+    run(crossProfile.s, 'INSERT INTO profiles (id,name,preferences_json,resume_text,created_at,updated_at) VALUES (?,?,?,?,?,?)',
+      ['profile-other', 'Other Profile', '{}', '', at, at]);
+    run(crossProfile.s, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
+      ['research_other_profile', 'profile-other', 'job', crossProfile.job.id, 'succeeded', at, at, at]);
+    run(crossProfile.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      ['candidate_other_profile', crossProfile.job.id, person.name, 'other profile fixture', 'high', 'candidate', at, at, person.id, 'research_other_profile']);
+    run(crossProfile.s, `INSERT INTO source_observations (id,job_id,url,canonical_url,source_type,provider,trust,fetched_at) VALUES (?,?,?,?,?,?,?,?)`,
+      ['source_other_profile', crossProfile.job.id, 'https://sources.example/other', 'https://sources.example/other', 'person', 'fixture', 'high', at]);
+    run(crossProfile.s, 'INSERT INTO research_run_sources (run_id,source_observation_id) VALUES (?,?)',
+      ['research_other_profile', 'source_other_profile']);
+    run(crossProfile.s, `INSERT INTO contact_points (id,person_id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at,origin_research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ['contact_other_profile', person.id, 'email', 'other@example.test', 'other@example.test', 'A', 'exact_public', 'high', '["source_other_profile"]', '{}', 1, 0, at, at, 'research_other_profile']);
+    const result = networkAccessFromEvidence(crossProfile.s, { jobId: crossProfile.job.id, profileId: crossProfile.profile.id });
+    assert.equal(result.score, 25);
+    assert.equal(result.evidenceRefs.some(item => ['edge_other_profile', 'contact_other_profile'].includes(item.id)), false);
+  } finally { crossProfile.cleanup(); }
 });
 
 test('research deadline becomes a terminal partial checkpoint instead of an orphan timeout', async () => {

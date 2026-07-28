@@ -1,0 +1,13 @@
+{
+  "name": "liveness-expired-redirect-away",
+  "description": "W03-LIVE-02 case D: direct posting URL redirects to a generic jobs listing without the original posting identity. Classifier must produce status=expired with redirect evidence.",
+  "input": {
+    "jobId": "j3",
+    "source": "career-page",
+    "url": "https://example.com/careers/jobs/99"
+  },
+  "responses": [
+    { "status": 302, "headers": { "location": "https://example.com/careers/jobs" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "text/html" }, "body": "<!DOCTYPE html><html><body><h1>All open roles</h1></body></html>", "ok": true }
+  ]
+}

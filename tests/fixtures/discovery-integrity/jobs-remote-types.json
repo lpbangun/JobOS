@@ -1,0 +1,12 @@
+{
+  "name": "jobs-remote-types",
+  "description": "W03-FILTER-02: six normalized rows exercising remote-only and employment-type filters. Rows already carry canonical workModel and employmentTypes; no inference from prose expected.",
+  "jobs": [
+    { "id": "rm-ft", "title": "Remote Full Time PM", "company": "Acme", "location": "Remote US", "description": "product leadership", "workModel": "remote", "employmentTypes": ["full_time"], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "hyb-ft", "title": "Hybrid Full Time PM", "company": "Acme", "location": "NY", "description": "product", "workModel": "hybrid", "employmentTypes": ["full_time"], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "rm-ct", "title": "Remote Contract PM", "company": "Acme", "location": "Remote", "description": "product", "workModel": "remote", "employmentTypes": ["contract"], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "rm-unk", "title": "Remote Unknown Type", "company": "Acme", "location": "Remote", "description": "product", "workModel": "remote", "employmentTypes": [], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "on-eng", "title": "Onsite Engineer", "company": "Acme", "location": "NY", "description": "backend payments", "workModel": "onsite", "employmentTypes": ["full_time"], "postedDate": "2026-07-20T00:00:00.000Z" },
+    { "id": "rm-int", "title": "Remote Intern", "company": "Acme", "location": "Remote", "description": "learning platform", "workModel": "remote", "employmentTypes": ["internship"], "postedDate": "2026-07-20T00:00:00.000Z" }
+  ]
+}

@@ -12,6 +12,7 @@ JobOS is a local-first CLI for job discovery, networking, and application prepar
 - JSON errors have `{ "ok": false, "error": { "code", "type", "message" } }`.
 - Select a registered local agent with `--agent <name>` or `JOBOS_AGENT`; the flag wins. Explicit agent failures never fall back silently.
 - SQLite is canonical. Use CLI/MCP writes instead of hand-editing runtime mirrors.
+- `jobos agent-guide --json` includes `domainTools`, where every function has an MCP/ACP eligibility flag, trusted-human mediation policy, input schema, and `/<domain_tool> <json-object>` TUI slash command.
 
 ## Safety
 
@@ -35,18 +36,28 @@ jobos pursue <job-id> --profile pm-edtech --json
 jobos network paths --job <job-id> --json
 ```
 
-`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `pursue` composes score, research, contact discovery, user-owned network mapping, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies.
+`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `discover run-all` is the advanced raw runner for callers that need per-search results without the daily workflow's cross-run dedupe and combined ranking. `pursue` composes score, research, contact discovery, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies. Full reachable-network mapping remains the standalone `network paths` operation.
+
+Prefer `pursue` for the first end-to-end pass. Standalone score, research, tailoring, application, and outreach commands intentionally run only their operation. The `loop ...` commands are bounded JSONL primitives for agents and test harnesses; use `scheduler start` or `scheduler run-once` for human-operated background automation.
 
 ## Extension surfaces
 
 ```bash
+jobos agents doctor --json
+jobos agents connect codex --dry-run --json
+jobos agents connect codex
 jobos agents list --json
-jobos agents test codex --json
 jobos browser status --json
 jobos mcp
 ```
 
 Generic agents receive one protocol-v1 JSON request on stdin and must emit exactly one JSON object on stdout. MCP exposes `daily_discovery`, `pursue_job`, and `answers_match` plus lower-level domain tools. Authenticated browser state stays only in `.jobos/browser/`; it is credential material and never part of the workspace mirror.
+
+Hermes, Codex, and Claude Code connect to the same external `jobos mcp` stdio door through `jobos agents connect <client>`. Hermes additionally has the certified embedded ACP path. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation. Run `jobos agents doctor` to distinguish executable availability, authentication evidence, embedded ACP, external MCP registration, and batch readiness.
+
+In the embedded pane, use normal language (“score this role,” “show due follow-ups,” “draft interview prep”). The host prompt supplies the complete agent-eligible tool catalog and typed handoffs for human-only decisions. Direct TUI invocation uses `/<domain_tool> <json-object>`; friendly host navigation remains under `:...`.
+
+Domain state, mirrors, Career Memory, and a private per-profile Hermes ACP session ID persist under the workspace. JobOS resumes a valid session on relaunch and replaces stale or quarantined sessions; it does not mirror provider credentials or raw chat transcripts.
 
 ## Agent-readable files
 

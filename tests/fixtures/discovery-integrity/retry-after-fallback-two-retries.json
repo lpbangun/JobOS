@@ -1,0 +1,11 @@
+{
+  "name": "retry-after-fallback-two-retries",
+  "description": "W03-HTTP-03: two consecutive retryable responses with invalid Retry-After values. Confirms the 250ms then 500ms fallback sequence with no jitter.",
+  "url": "https://api.example.com/v1/boards/acme/jobs",
+  "responses": [
+    { "status": 429, "headers": { "retry-after": "abc" }, "body": "", "ok": false },
+    { "status": 503, "headers": { "retry-after": "2.5" }, "body": "", "ok": false },
+    { "status": 200, "headers": { "content-type": "application/json" }, "body": "{\"jobs\":[]}", "ok": true }
+  ],
+  "expectedSleeps": [250, 500]
+}

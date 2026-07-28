@@ -4,10 +4,11 @@ import { id, now, slug, tokenize, parseJson } from './utils.js';
 import { one, all, run, save, audit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
 import { normalizeOrganization } from './research/context.js';
+import { createResumeRevision, readResumeFile, validateResumeDocument } from './resumes.js';
 
 export function defaultPrefs(name){ return {targetRoleFamilies:[name],industries:[],companyStages:[],locations:[],salary:{min:null,max:null,currency:'USD'},dealbreakers:[],skills:slug(name).split('-').filter(Boolean),missionKeywords:[],values:[],workModel:'',communicationStyle:'concise, warm, evidence-grounded',searchStrategy:'focused',automationPolicy:{externalApply:'user_configured',externalSend:'user_configured',autoApply:'disabled',autoSend:'disabled',allowedConnectors:[]},networkIntent:{version:1,targetCompanies:[],targetRoles:[],preferredPersonas:[],comfortableRelationshipTypes:[],exclusions:[],allowedSources:{publicWeb:true,linkedinImport:false,xai:false},completedAt:null}}; }
 export function extractMetrics(line){ return [...String(line).matchAll(/(?:\$[\d,.]+|\d+(?:\.\d+)?%|\d+x|\b\d{2,}\b)/gi)].map(m=>m[0]); }
-export function structuredProofs(profileId, text, source){ return String(text||'').split(/\r?\n/).map(l=>l.trim().replace(/^[-*•]\s*/, '')).filter(l=>l.length>=20).filter(l=>/\b(built|led|managed|created|designed|improved|launched|reduced|increased|owned|shipped|analyzed|implemented|taught|researched|coordinated|facilitated|developed)\b/i.test(l)).slice(0,24).map((line,idx)=>({id:id('proof',`${profileId}:${idx}:${line}`),summary:line,evidence:source,skills:[...new Set(tokenize(line).filter(t=>t.length>3).slice(0,10))],metrics:extractMetrics(line),metadata:{origin:'resume_import',claimType:'experience',requiresHumanVerification:false}})); }
+export function structuredProofs(profileId, text, source){ return String(text||'').split(/\r?\n/).map(l=>l.trim().replace(/^[-*•]\s*/, '')).filter(l=>l.length>=20).filter(l=>/\b(built|led|managed|created|designed|improved|launched|reduced|increased|owned|shipped|analyzed|implemented|taught|researched|coordinated|facilitated|developed)\b/i.test(l)).slice(0,24).map((line,idx)=>({id:id('proof',`${profileId}:${idx}:${line}`),summary:line,evidence:source,skills:[...new Set(tokenize(line).filter(t=>t.length>3).slice(0,10))],metrics:extractMetrics(line),metadata:{origin:'resume_import',claimType:'experience',requiresHumanVerification:true}})); }
 export function suggestProfileAffiliations(resumeText){
   const lines=String(resumeText||'').split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length>=10);
   const results=[], seen=new Set();
@@ -24,17 +25,74 @@ export function suggestProfileAffiliations(resumeText){
   }
   return results;
 }
+const INDUSTRY_LEXICON = [
+  [['edtech', 'education', 'learning', 'educator', 'curriculum', 'school', 'university', 'student', 'teaching', 'instructional'], 'education'],
+  [['fintech', 'finance', 'banking', 'payments', 'lending', 'insurance'], 'fintech'],
+  [['health', 'clinical', 'medical', 'patient', 'biotech', 'pharma', 'hospital'], 'healthcare'],
+  [['saas', 'b2b software', 'enterprise software', 'cloud infrastructure', 'developer tools'], 'software'],
+  [['e-commerce', 'ecommerce', 'retail', 'marketplace', 'consumer product'], 'commerce'],
+  [['media', 'journalism', 'news', 'publishing', 'entertainment', 'gaming'], 'media'],
+  [['logistics', 'supply chain', 'transportation', 'mobility'], 'logistics'],
+  [['energy', 'climate', 'sustainability', 'renewable', 'solar'], 'climate/energy'],
+  [['cybersecurity', 'security engineering', 'privacy'], 'security'],
+  [['nonprofit', 'non-profit', ' ngo ', 'philanthropy', 'civic', 'government', 'public sector'], 'civic'],
+  [['artificial intelligence', 'machine learning', ' llm', 'deep learning'], 'ai/ml'],
+  [['real estate', 'housing', 'construction', 'proptech'], 'real estate'],
+  [['agriculture', 'food systems', 'agtech'], 'food/agriculture'],
+  [['travel', 'hospitality', 'tourism'], 'travel'],
+  [['consulting', 'professional services'], 'consulting'],
+  [['recruiting', 'talent acquisition', 'people ops', 'workforce'], 'hr/workforce']
+];
+export function extractResumePreferences(resumeText, document = null) {
+  const text = String(resumeText || '');
+  const lower = ` ${text.toLowerCase()} `;
+  const industries = INDUSTRY_LEXICON.filter(([terms]) => terms.some(term => lower.includes(term))).map(([, label]) => label);
+  const skills = [...new Set(
+    (document?.skills || [])
+      .map(skill => String(skill?.name || '').trim())
+      .filter(Boolean)
+  )].slice(0, 15);
+  // Resume facts are not job-search preferences. In particular, a past title,
+  // office location, or remote role must not become a target role, desired
+  // location, or work-model constraint. Those fields require explicit profile
+  // preferences; unknown is safer than a fabricated preference.
+  return {
+    industries,
+    missionKeywords: [],
+    skills,
+    locations: [],
+    workModel: '',
+    targetRoleFamilies: []
+  };
+}
 export function syncProfile(s, pid){ const p=one(s,'SELECT * FROM profiles WHERE id=?',[pid]); if(!p) return; const proofs=all(s,'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at',[pid]); const affs=all(s,'SELECT * FROM profile_affiliations WHERE profile_id=? ORDER BY type,organization',[pid]).map(a=>({id:a.id,type:a.type,organization:a.organization,role_or_program:a.role_or_program,start_date:a.start_date,end_date:a.end_date,source:a.source,confidence:a.confidence,status:a.status})); writeYaml(path.join(s.p.profiles,`${pid}.yaml`),{id:p.id,name:p.name,preferences:parseJson(p.preferences_json,{}),affiliations:affs,proofPoints:proofs.map(x=>({id:x.id,summary:x.summary,evidence:x.evidence,skills:parseJson(x.skills_json,[]),metrics:parseJson(x.metrics_json,[]),source:x.source,metadata:parseJson(x.metadata_json,{})})),updatedAt:p.updated_at}); writeMd(path.join(s.p.proofs,`${pid}.md`), ['# Proof points for '+p.name,'',...proofs.map(x=>`- **${x.id}:** ${x.summary}${x.evidence ? ` _(evidence: ${x.evidence})_` : ''}${parseJson(x.metrics_json,[]).length ? ` Metrics: ${parseJson(x.metrics_json,[]).join(', ')}` : ''}`),''].join('\n')); }
 export function createProfile(s, name, opts = {}) {
   const pid = slug(name);
   const existing = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (existing) return { profile: existing, created: false, nextActions: [] };
   const at = now();
-  const resume = opts.fromResume ? fs.readFileSync(opts.fromResume, 'utf8') : '';
+  const resumeInput = opts.fromResume ? readResumeFile(pid, opts.fromResume) : null;
+  const resume = resumeInput?.sourceText || '';
   const custom = opts.preferences ? JSON.parse(fs.readFileSync(opts.preferences, 'utf8')) : {};
+  const sourceEntries = new Map();
+  for (const experience of resumeInput?.document?.experience || []) {
+    for (const bullet of experience.bullets || []) sourceEntries.set(bullet.text, bullet.id);
+  }
+  for (const project of resumeInput?.document?.projects || []) {
+    for (const bullet of project.bullets || []) sourceEntries.set(bullet.text, bullet.id);
+  }
+  const proofs = structuredProofs(pid, resume, opts.fromResume || 'profile import').map(proof => ({ ...proof, sourceResumeEntryId: sourceEntries.get(proof.summary) || null }));
   const defaults = defaultPrefs(name);
+  const extracted = resume ? extractResumePreferences(resume, resumeInput?.document || null) : {};
+  if (resume && extracted.skills.length && defaults.skills.length) {
+    extracted.skills = [...new Set([...extracted.skills, ...defaults.skills])].slice(0, 15);
+  }
+  if (resume && extracted.targetRoleFamilies.length && !extracted.targetRoleFamilies.includes(name)) {
+    extracted.targetRoleFamilies = [extracted.targetRoleFamilies[0], name];
+  }
   const prefs = {
     ...defaults,
+    ...Object.fromEntries(Object.entries(extracted).filter(([, value]) => (Array.isArray(value) ? value.length > 0 : Boolean(value)))),
     ...custom,
     automationPolicy: { ...defaults.automationPolicy, ...(custom.automationPolicy || {}) },
     networkIntent: {
@@ -44,12 +102,23 @@ export function createProfile(s, name, opts = {}) {
     }
   };
   run(s, 'INSERT INTO profiles VALUES (?,?,?,?,?,?)', [pid, name, JSON.stringify(prefs), resume, at, at]);
-  const proofs = structuredProofs(pid, resume, opts.fromResume || 'profile import');
   for (const proof of proofs) {
-    run(s, 'INSERT OR IGNORE INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [
+    run(s, 'INSERT OR IGNORE INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,status,verification_status,source_resume_entry_id,updated_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
       proof.id, pid, proof.summary, proof.evidence, JSON.stringify(proof.skills), JSON.stringify(proof.metrics),
-      proof.metadata.origin, JSON.stringify(proof.metadata), at
+      proof.metadata.origin, JSON.stringify(proof.metadata), 'active', 'unverified', proof.sourceResumeEntryId, at, at
     ]);
+  }
+  const resumeRevisionCreated = Boolean(resumeInput && validateResumeDocument(resumeInput.document).valid);
+  if (resumeRevisionCreated) {
+    const linkedDocument = structuredClone(resumeInput.document);
+    const proofsByEntry = new Map();
+    for (const proof of proofs) if (proof.sourceResumeEntryId) proofsByEntry.set(proof.sourceResumeEntryId, [...(proofsByEntry.get(proof.sourceResumeEntryId) || []), proof.id]);
+    for (const section of ['experience', 'projects']) {
+      for (const entry of linkedDocument[section] || []) {
+        for (const bullet of entry.bullets || []) bullet.proofPointIds = [...new Set([...(bullet.proofPointIds || []), ...(proofsByEntry.get(bullet.id) || [])])];
+      }
+    }
+    createResumeRevision(s, { profileId: pid, ...resumeInput, document: linkedDocument, persist: false });
   }
   const affiliations = suggestProfileAffiliations(resume);
   for (const affiliation of affiliations) {
@@ -60,7 +129,7 @@ export function createProfile(s, name, opts = {}) {
       affiliation.start_date, affiliation.end_date, 'resume', '[]', affiliation.confidence, 'suggested', at, at
     ]);
   }
-  audit(s, 'profile.created', 'profile', pid, { proofPointsImported: proofs.length, affiliationsSuggested: affiliations.length });
+  audit(s, 'profile.created', 'profile', pid, { proofPointsImported: proofs.length, affiliationsSuggested: affiliations.length, resumeRevisionCreated, preferencesExtracted: Object.fromEntries(Object.entries(extracted).map(([field, value]) => [field, Array.isArray(value) ? value.length : (value ? 1 : 0)])) });
   syncProfile(s, pid);
   save(s);
   return {
@@ -142,5 +211,62 @@ export function setNetworkIntent(s, { profileId, intent, affiliations }) {
     affiliationsReplaced: affiliations === undefined ? null : affiliations.length
   };
 }
-export function addProof(s,pid,summary,evidence='',skills=[],metrics=[]){ if(!one(s,'SELECT id FROM profiles WHERE id=?',[pid])) throw Error(`Unknown profile: ${pid}`); const at=now(), proofId=id('proof',`${pid}:${summary}:${evidence}`); const meta={origin:'manual',claimType:'experience',requiresHumanVerification:false}; run(s,'INSERT OR IGNORE INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)',[proofId,pid,summary,evidence,JSON.stringify(skills),JSON.stringify(metrics.length?metrics:extractMetrics(summary)),'manual',JSON.stringify(meta),at]); audit(s,'proof_point.added','proof_point',proofId,{profileId:pid}); syncProfile(s,pid); save(s); return one(s,'SELECT * FROM proof_points WHERE id=?',[proofId]); }
+export function addProof(s, pid, summary, evidence = '', skills = [], metrics = []) {
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [pid])) throw Error(`Unknown profile: ${pid}`);
+  const at = now();
+  const proofId = id('proof', `${pid}:${summary}:${evidence}`);
+  const meta = { origin: 'manual', claimType: 'experience', requiresHumanVerification: false };
+  run(s, 'INSERT OR IGNORE INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,status,verification_status,updated_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [proofId, pid, summary, evidence, JSON.stringify(skills), JSON.stringify(metrics.length ? metrics : extractMetrics(`${summary} ${evidence}`)), 'manual', JSON.stringify(meta), 'active', 'verified', at, at]);
+  audit(s, 'proof_point.added', 'proof_point', proofId, { profileId: pid });
+  syncProfile(s, pid);
+  save(s);
+  return one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+}
 export function listProofs(s,pid){ return all(s,'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at',[pid]).map(p=>({...p,skills:parseJson(p.skills_json,[]),metrics:parseJson(p.metrics_json,[]),metadata:parseJson(p.metadata_json,{})})); }
+
+export function verifyProof(s, proofId) {
+  const proof = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+  if (!proof) throw Error(`Unknown proof point: ${proofId}`);
+  const at = now();
+  run(s, "UPDATE proof_points SET verification_status='verified',status=CASE WHEN status='needs_verification' THEN 'active' ELSE status END,updated_at=? WHERE id=?", [at, proofId]);
+  audit(s, 'proof_point.verified', 'proof_point', proofId, { profileId: proof.profile_id });
+  syncProfile(s, proof.profile_id);
+  save(s);
+  return one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+}
+
+export function retireProof(s, proofId, reason) {
+  const proof = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+  if (!proof) throw Error(`Unknown proof point: ${proofId}`);
+  if (!String(reason || '').trim()) throw Error('Proof retirement requires a reason');
+  const at = now();
+  run(s, "UPDATE proof_points SET status='retired',retired_at=?,retirement_reason=?,updated_at=? WHERE id=?", [at, String(reason).trim(), at, proofId]);
+  audit(s, 'proof_point.retired', 'proof_point', proofId, { profileId: proof.profile_id, reason: String(reason).trim() });
+  syncProfile(s, proof.profile_id);
+  save(s);
+  return one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+}
+
+export function supersedeProof(s, proofId, { summary, evidence = '', skills = [], metrics = [] }) {
+  const original = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+  if (!original) throw Error(`Unknown proof point: ${proofId}`);
+  if (original.status === 'retired') throw Error(`Cannot supersede retired proof point: ${proofId}`);
+  if (!String(summary || '').trim()) throw Error('Replacement proof summary is required');
+  const at = now();
+  const replacementId = id('proof', `${original.profile_id}:${proofId}:${summary}:${evidence}`);
+  const meta = { origin: 'manual_correction', claimType: 'experience', requiresHumanVerification: false };
+  run(s, 'INSERT INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,status,verification_status,supersedes_proof_point_id,updated_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+    replacementId, original.profile_id, String(summary).trim(), String(evidence || ''), JSON.stringify(skills), JSON.stringify(metrics.length ? metrics : extractMetrics(summary)),
+    'manual', JSON.stringify(meta), 'active', 'verified', proofId, at, at
+  ]);
+  run(s, "UPDATE proof_points SET status='retired',retired_at=?,retirement_reason='superseded',updated_at=? WHERE id=?", [at, at, proofId]);
+  audit(s, 'proof_point.superseded', 'proof_point', replacementId, { profileId: original.profile_id, supersedesProofPointId: proofId });
+  syncProfile(s, original.profile_id);
+  save(s);
+  return one(s, 'SELECT * FROM proof_points WHERE id=?', [replacementId]);
+}
+
+export function activeVerifiedProofs(s, profileId) {
+  return all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified' ORDER BY created_at", [profileId])
+    .map(proof => ({ ...proof, skills: parseJson(proof.skills_json, []), metrics: parseJson(proof.metrics_json, []), metadata: parseJson(proof.metadata_json, {}) }));
+}

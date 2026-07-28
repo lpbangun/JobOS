@@ -222,7 +222,7 @@ pm.candidate@example.com`;
   const resumeWarnings = JSON.stringify(['gen-warn']);
 
   // ── INSERT artifacts (with main schema columns) ──
-  const resumeSeries = artifactSeriesKey('resume', jobA.id, profile.id, 'resume.md');
+  const resumeSeries = artifactSeriesKey('other', jobA.id, profile.id, 'resume.md');
   const coverSeries = artifactSeriesKey('cover', jobA.id, profile.id, 'cover.md');
   const orphanSeries = artifactSeriesKey('resume', jobA.id, profile.id, 'other-resume.md');
   const staleSeries = artifactSeriesKey('other', jobA.id, profile.id, 'stale-evidence.md');
@@ -236,13 +236,13 @@ pm.candidate@example.com`;
   // resume v1 (earlier)
   run(store,
     `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
-    [resumeV1Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v1', resumeBaseContent, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T1, resumeSeries, 1, null, artifactHash(resumeBaseContent), null, null, '']
+    [resumeV1Id, jobA.id, profile.id, 'other', 'resume.md', 'Resume v1', resumeBaseContent, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T1, resumeSeries, 1, null, artifactHash(resumeBaseContent), null, null, '']
   );
 
   // resume v2 (same path, later) — adds ADDED_LINE_V2
   run(store,
     `INSERT INTO artifacts (${cols}) VALUES ${vals}`,
-    [resumeV2Id, jobA.id, profile.id, 'resume', 'resume.md', 'Resume v2', resumeBaseContent + resumeV2Addition, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T2, resumeSeries, 2, resumeV1Id, artifactHash(resumeBaseContent + resumeV2Addition), null, null, '']
+    [resumeV2Id, jobA.id, profile.id, 'other', 'resume.md', 'Resume v2', resumeBaseContent + resumeV2Addition, resumeEvidence, resumeWarnings, 'draft_needs_human_review', T2, resumeSeries, 2, resumeV1Id, artifactHash(resumeBaseContent + resumeV2Addition), null, null, '']
   );
 
   // cover letter (different path, same type)
@@ -301,8 +301,8 @@ pm.candidate@example.com`;
     proofs: [proofA, proofB],
     jobs: { jobA, jobB, jobC },
     artifacts: {
-      resumeV1: { id: resumeV1Id, path: 'resume.md', type: 'resume', title: 'Resume v1', created_at: T1 },
-      resumeV2: { id: resumeV2Id, path: 'resume.md', type: 'resume', title: 'Resume v2', created_at: T2 },
+      resumeV1: { id: resumeV1Id, path: 'resume.md', type: 'other', title: 'Resume v1', created_at: T1 },
+      resumeV2: { id: resumeV2Id, path: 'resume.md', type: 'other', title: 'Resume v2', created_at: T2 },
       cover: { id: coverId, path: 'cover.md', type: 'cover', title: 'Cover Letter', created_at: T2 },
       orphanResume: { id: orphanResumeId, path: 'other-resume.md', type: 'resume', title: 'Other Resume', created_at: T1 },
       staleEvidence: { id: staleEvidenceId, path: 'stale-evidence.md', type: 'other', title: 'Stale Evidence', created_at: T1 },

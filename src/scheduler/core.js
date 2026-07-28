@@ -50,7 +50,7 @@ export function dueAutomations(s, { nowDate = new Date() } = {}) {
 
 function createReviewTaskForFailure(s, automation, error, at) {
   const tid = id('task', `automation-failed:${automation.id}:${at}`);
-  run(s, 'INSERT OR IGNORE INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [
+  run(s, 'INSERT OR IGNORE INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)', [
     tid,
     null,
     null,
@@ -62,12 +62,13 @@ function createReviewTaskForFailure(s, automation, error, at) {
     'open',
     'automation',
     at,
-    at
+    at,
+    null
   ]);
   return tid;
 }
 
-export async function runAutomation(s, idOrAutomation, { trigger = 'manual', nowDate = new Date() } = {}) {
+export async function runAutomation(s, idOrAutomation, { trigger = 'manual', nowDate = new Date(), runAction: executeAction = runAction } = {}) {
   const automation = typeof idOrAutomation === 'string' ? getAutomation(s, idOrAutomation) : idOrAutomation;
   if (!automation) throw Error(`Unknown automation: ${idOrAutomation}`);
   const started = nowDate.toISOString();
@@ -79,9 +80,11 @@ export async function runAutomation(s, idOrAutomation, { trigger = 'manual', now
   let counts = {};
   let error = null;
   try {
-    const result = await runAction(s, automation, { nowDate });
+    const result = await executeAction(s, automation, { nowDate });
     outputs = result?.outputs || result || {};
     counts = result?.counts || {};
+    if (['succeeded', 'partial', 'failed'].includes(result?.derivedStatus)) status = result.derivedStatus;
+    if (status === 'failed') error = result?.error || 'Automation action reported failure';
   } catch (e) {
     status = 'failed';
     error = e.message;
@@ -115,7 +118,8 @@ export async function runAutomation(s, idOrAutomation, { trigger = 'manual', now
     JSON.stringify(counts)
   ]);
   run(s, 'UPDATE automations SET last_run_at=?, last_status=?, consecutive_failures=?, enabled=CASE WHEN ? THEN 0 ELSE enabled END, updated_at=? WHERE id=?', [finished, status, failures, disabled ? 1 : 0, finished, automation.id]);
-  audit(s, status === 'succeeded' ? 'automation.succeeded' : 'automation.failed', 'automation_run', rid, { automationId: automation.id, actionId: automation.actionId, status, error, disabled, failureTaskId });
+  const auditAction = status === 'succeeded' ? 'automation.succeeded' : status === 'partial' ? 'automation.partial' : 'automation.failed';
+  audit(s, auditAction, 'automation_run', rid, { automationId: automation.id, actionId: automation.actionId, status, error, disabled, failureTaskId });
   const runRecord = {
     id: rid,
     automationId: automation.id,

@@ -1,0 +1,26 @@
+{
+  "artifactStates": {
+    "coverLetter": {
+      "approvalStatus": null,
+      "required": false,
+      "state": "missing",
+      "valid": null
+    },
+    "resume": {
+      "approvalStatus": null,
+      "required": true,
+      "state": "missing",
+      "valid": null
+    }
+  },
+  "asOf": "2026-07-22T12:00:00.000Z",
+  "blockerCodes": [
+    "missing_resume_material"
+  ],
+  "family": "document-completeness",
+  "jobId": "job_d9c21705429b",
+  "profileId": "w10-document-candidate",
+  "status": "blocked",
+  "valid": false,
+  "version": 4
+}
