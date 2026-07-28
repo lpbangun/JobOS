@@ -181,7 +181,9 @@ test('root help is concise and shows Setup / Workflows / Extend structure', () =
   assert.ok(help.includes('daily'), 'help should mention daily');
   assert.ok(help.includes('pursue'), 'help should mention pursue');
   assert.ok(help.includes('network'), 'help should mention network');
-  assert.match(help, /Use `tui` for interactive work; use `daily` and `pursue` for scripted workflows\./);
+  assert.ok(help.includes('agents connect'), 'help should expose the agent connection journey');
+  assert.ok(help.includes('agents doctor'), 'help should expose agent diagnostics');
+  assert.match(help, /Run `jobos` to open the primary terminal product\./);
   const lines = help.split('\n').length;
   assert.ok(lines < 45, `help should be concise (got ${lines} lines)`);
 });

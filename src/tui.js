@@ -55,7 +55,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'], ['t', 'stage'], ['c', 'reconnect'], ['x', 'cancel'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
     ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['/', 'slash'], ['Q', 'quit'],
-    ['Tab', 'strip'], ['Enter', 'jump']
+    ['Tab', 'focus-chat'], ['←/→', 'priority'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
@@ -73,7 +73,7 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'return']),
+  global: Object.freeze(['j', 'k', 'h', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'left', 'right', 'return']),
   review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
@@ -120,6 +120,20 @@ export function keypressForToken(token) {
     return { value: token, key: { name: token.toLowerCase(), shift: true } };
   }
   return { value: token, key: { name: token.length === 1 ? token.toLowerCase() : token } };
+}
+
+export function parseSgrMouse(value) {
+  const events = [];
+  const pattern = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+  for (const match of String(value || '').matchAll(pattern)) {
+    events.push({
+      button: Number(match[1]),
+      x: Math.max(0, Number(match[2]) - 1),
+      y: Math.max(0, Number(match[3]) - 1),
+      pressed: match[4] === 'M'
+    });
+  }
+  return events;
 }
 
 function redraftCliHint(artifact, profileId) {
@@ -293,6 +307,12 @@ function headerLine(model, state, width, color) {
 
 function priorityLines(model, state, width, color) {
   const focused = state.stripIndex || 0;
+  if (width < 90) {
+    const item = model.priority[focused] || model.priority[0];
+    if (!item) return [];
+    const prefix = `[${focused + 1}/${model.priority.length}] ${item.kind.toUpperCase()}`;
+    return [paint(fit(`▶ ${prefix} · ${item.text} · ←/→`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color)];
+  }
   if (width < 100) {
     return model.priority.map((item, index) => paint(fit(`${index === focused ? '▶' : ' '}[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
   }
@@ -404,22 +424,30 @@ function detailPanel(model, width, height, color) {
 }
 
 function agentPanel(model, state, width, height, color) {
-  const lines = [
+  const header = [
     paint(`Hermes ACP · ${state.agentState}${state.sessionId ? ` · ${state.sessionId.slice(0, 8)}` : ''}`, state.agentState === 'ready' ? 'green' : (state.agentState === 'failed' || state.agentState === 'crashed' ? 'bad' : 'warn'), color),
     paint(`Context: ${model.selectedJobId || 'no job'} · tools: JobOS MCP · terminal/fs denied`, 'muted', color),
     ''
   ];
-  const messages = state.messages.slice(-10);
-  for (const message of messages) {
+  if (state.agentState === 'offline' || !state.agentOn) header.splice(1, 0, 'agent off');
+  const history = [];
+  for (const message of state.messages.slice(-80)) {
     const label = message.role === 'user' ? 'you' : (message.role === 'tool' ? 'tool' : 'hermes');
-    lines.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
-    lines.push(...wrap(message.text, width - 4).slice(-4));
+    history.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
+    history.push(...wrap(message.text, width - 4));
   }
-  if (state.agentState === 'offline' || !state.agentOn) lines.splice(1, 0, 'agent off');
-  if (!messages.length) lines.push('Agent pane is on by default.', 'Press i to prompt. Press a to toggle.', 'Press c to reconnect after a failure.');
-  if (state.mode === 'agent') lines.push('', paint(`> ${state.input}█`, 'green', color));
-  else if (state.agentState === 'working') lines.push('', paint('working · navigation remains active · x cancels', 'warn', color));
-  return panel('AGENT', lines.slice(Math.max(0, lines.length - (height - 2))), width, color);
+  if (!history.length) history.push('Agent pane is on by default.', 'Press i to prompt. Tab expands chat.', 'Press c to reconnect after a failure.');
+  const composer = [];
+  if (state.mode === 'agent') composer.push('', paint(`> ${state.input}█`, 'green', color));
+  else if (state.agentState === 'working') composer.push('', paint('working · navigation remains active · x cancels', 'warn', color));
+  const room = Math.max(1, height - 2 - header.length - composer.length);
+  const maxScroll = Math.max(0, history.length - room);
+  const scroll = Math.min(maxScroll, Math.max(0, state.agentScroll || 0));
+  const end = history.length - scroll;
+  const visible = history.slice(Math.max(0, end - room), end);
+  const body = [...header, ...visible, ...composer];
+  while (body.length < Math.max(1, height - 2)) body.push('');
+  return panel(`${state.focusTarget === 'agent' ? 'AGENT · FOCUSED' : 'AGENT'}${scroll ? ` · scroll ↑${scroll}` : ''}`, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
 function overlayItems(model, state) {
@@ -897,6 +925,9 @@ function overlayPanel(model, state, width, height, color) {
       `side-effects · ${model.policy.sideEffects}`,
       `drafts · ${model.policy.drafts}`,
       '',
+      'PRIMARY CONTROLS',
+      ...wrap(keyHints('global'), width - 4),
+      '',
       'c reconnect ACP · x cancel turn · Esc closes'
     ];
   } else if (state.overlay === 'profile') {
@@ -966,39 +997,55 @@ function overlayPanel(model, state, width, height, color) {
   return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
-function footerLines(width) {
+function footerLines(width, state) {
+  if (state.focusTarget === 'agent') {
+    if (width >= 90) {
+      return [
+        ' CHAT FOCUSED · ↑/↓ or j/k scroll · i type · x cancel · c reconnect · Tab/Esc dashboard · ? system · Q quit'
+      ];
+    }
+    return [
+      ' CHAT · ↑/↓ scroll · i type · x cancel',
+      ' Tab/Esc dashboard · c reconnect · Q quit'
+    ];
+  }
   if (width >= 120) {
     return [
-      ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview · p pursue z score d daily · t stage',
-      ' a agent i prompt c reconnect x cancel · r review l log m memory n network o docs q answers · s sources g setup b network v profile ? system · : command / tool Q quit'
+      ' j/k jobs · ←/→ priority · Enter jump · Tab focus chat · i prompt · p pursue · d discover',
+      ' r review · o documents · g setup · ? all controls · Q quit'
     ];
   }
   if (width >= 90) {
     return [
-      ' j/k select · 1 today 2 all 3 high 4 review 5 materials-ready 6 applied 7 interview',
-      ' p pursue · z score · d daily · t stage · a agent · i prompt',
-      ' c reconnect · x cancel · r review · l log · m memory · n network · o docs · q answers',
-      ' s sources · g setup · b build-network · v profile · ? system · : command · / tool · Q quit'
+      ' j/k jobs · ←/→ priority · Enter jump · Tab chat · i prompt · p pursue · d discover',
+      ' r review · o docs · g setup · ? controls · Q quit'
     ];
   }
   return [
-    ' j/k select · 1 today · 2 all · 3 high',
-    ' 4 review · 5 materials-ready · 6 applied · 7 interview',
-    ' p pursue · z score · d daily · a agent · i prompt',
-    ' t stage · c reconnect · x cancel · g setup · v profile',
-    ' r review · l log · m memory · n network · o docs · q answers',
-    ' s sources · ? system · b net · : cmd · / tool · Q quit'
+    ' j/k jobs · ←/→ priority · Enter jump',
+    ' Tab chat · i prompt · p pursue · d discover',
+    ' r review · o docs · g setup · ? help · Q quit'
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
-  const safeWidth = Math.max(60, width);
-  const safeHeight = Math.max(20, height);
-  const footers = footerLines(safeWidth);
+  const measuredWidth = Math.max(1, Math.floor(Number(width) || 140));
+  const measuredHeight = Math.max(1, Math.floor(Number(height) || 42));
+  if (measuredWidth < 60 || measuredHeight < 20) {
+    const resize = [
+      'JobOS needs a larger terminal.',
+      `Current: ${measuredWidth}×${measuredHeight} · minimum: 60×20`,
+      'Resize the window; your workspace is unchanged.'
+    ];
+    return resize.slice(0, measuredHeight).map(line => fit(line, measuredWidth)).join('\n');
+  }
+  const safeWidth = measuredWidth;
+  const safeHeight = measuredHeight;
+  const footers = footerLines(safeWidth, state);
   const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
-  const bodyHeight = Math.max(9, safeHeight - lines.length - trailingRows);
+  const bodyHeight = Math.max(4, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
     const sideWidth = Math.max(38, Math.floor(safeWidth * 0.36));
     const docsWidth = safeWidth - sideWidth - 1;
@@ -1012,31 +1059,45 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   } else if (state.overlay) {
     lines.push(...overlayPanel(model, state, safeWidth, bodyHeight, color));
   } else if (safeWidth >= 116 && state.agentOn) {
-    const listWidth = Math.max(30, Math.floor(safeWidth * 0.27));
-    const agentWidth = Math.max(32, Math.floor(safeWidth * 0.27));
-    const detailWidth = safeWidth - listWidth - agentWidth - 2;
-    lines.push(...mergeColumns([
-      listPanel(model, state, listWidth, bodyHeight, color),
-      detailPanel(model, detailWidth, bodyHeight, color),
-      agentPanel(model, state, agentWidth, bodyHeight, color)
-    ], [listWidth, detailWidth, agentWidth], color));
+    if (state.focusTarget === 'agent') {
+      const contextWidth = Math.max(28, Math.floor(safeWidth * 0.22));
+      const agentWidth = safeWidth - contextWidth - 1;
+      lines.push(...mergeColumns([
+        detailPanel(model, contextWidth, bodyHeight, color),
+        agentPanel(model, state, agentWidth, bodyHeight, color)
+      ], [contextWidth, agentWidth], color));
+    } else {
+      const listWidth = Math.max(30, Math.floor(safeWidth * 0.27));
+      const agentWidth = Math.max(32, Math.floor(safeWidth * 0.27));
+      const detailWidth = safeWidth - listWidth - agentWidth - 2;
+      lines.push(...mergeColumns([
+        listPanel(model, state, listWidth, bodyHeight, color),
+        detailPanel(model, detailWidth, bodyHeight, color),
+        agentPanel(model, state, agentWidth, bodyHeight, color)
+      ], [listWidth, detailWidth, agentWidth], color));
+    }
   } else if (safeWidth >= 90) {
-    const agentHeight = state.agentOn ? Math.max(3, Math.floor(bodyHeight * 0.32)) : 0;
-    const topHeight = bodyHeight - agentHeight;
-    const listWidth = Math.max(32, Math.floor(safeWidth * 0.36));
-    const detailWidth = safeWidth - listWidth - 1;
-    lines.push(...mergeColumns([
-      listPanel(model, state, listWidth, topHeight, color),
-      detailPanel(model, detailWidth, topHeight, color)
-    ], [listWidth, detailWidth], color));
-    if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    if (state.agentOn && state.focusTarget === 'agent') {
+      const contextHeight = Math.max(5, Math.floor(bodyHeight * 0.24));
+      lines.push(...detailPanel(model, safeWidth, contextHeight, color));
+      lines.push(...agentPanel(model, state, safeWidth, bodyHeight - contextHeight, color));
+    } else {
+      const agentHeight = state.agentOn ? Math.max(4, Math.floor(bodyHeight * 0.32)) : 0;
+      const topHeight = bodyHeight - agentHeight;
+      const listWidth = Math.max(32, Math.floor(safeWidth * 0.36));
+      const detailWidth = safeWidth - listWidth - 1;
+      lines.push(...mergeColumns([
+        listPanel(model, state, listWidth, topHeight, color),
+        detailPanel(model, detailWidth, topHeight, color)
+      ], [listWidth, detailWidth], color));
+      if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    }
+  } else if (state.agentOn && state.focusTarget === 'agent') {
+    lines.push(...agentPanel(model, state, safeWidth, bodyHeight, color));
   } else {
-    const listHeight = Math.max(3, Math.floor(bodyHeight * 0.3));
-    const agentHeight = state.agentOn ? Math.max(3, Math.floor(bodyHeight * 0.3)) : 0;
-    const detailHeight = bodyHeight - listHeight - agentHeight;
+    const listHeight = Math.max(4, Math.floor(bodyHeight * 0.36));
     lines.push(...listPanel(model, state, safeWidth, listHeight, color));
-    lines.push(...detailPanel(model, safeWidth, detailHeight, color));
-    if (state.agentOn) lines.push(...agentPanel(model, state, safeWidth, agentHeight, color));
+    lines.push(...detailPanel(model, safeWidth, bodyHeight - listHeight, color));
   }
   if (state.pendingConfirm) {
     const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
@@ -1071,6 +1132,7 @@ export function defaultTuiState() {
     docsView: 'document',
     docsEvidenceExpanded: false,
     focusTarget: 'shell',
+    agentScroll: 0,
     pendingAutoOpenArtifactId: null,
     editorActive: false,
     stageIndex: 0,
@@ -1102,6 +1164,7 @@ export class JobosTui {
     selectedJobId = null,
     initialOverlay = null,
     connectAgent = true,
+    mouse = false,
     color = stdout.isTTY,
     now = () => new Date()
   } = {}) {
@@ -1114,11 +1177,13 @@ export class JobosTui {
     this.state.selectedJobId = selectedJobId || this.model.selectedJobId;
     this.state.overlay = initialOverlay || (this.model.empty.noProfile ? 'setup' : null);
     this.shouldConnectAgent = connectAgent;
+    this.mouseEnabled = Boolean(mouse);
     this.color = Boolean(color);
     this.client = null;
     this.sessionPersistence = Promise.resolve();
     this.refreshTimer = null;
     this.boundKeypress = (value, key) => this.onKeypress(value, key);
+    this.boundMouseData = chunk => this.onMouseData(chunk);
     this.boundResize = () => this.render();
     this.stopped = false;
     this.notedArtifactIds = new Set();
@@ -1150,9 +1215,95 @@ export class JobosTui {
     };
   }
 
+  toggleAgentFocus() {
+    if (this.state.overlay) return false;
+    if (this.state.focusTarget === 'agent') {
+      this.state.focusTarget = 'shell';
+      this.state.status = 'Dashboard focus restored.';
+    } else {
+      this.state.agentOn = true;
+      this.state.focusTarget = 'agent';
+      this.state.status = 'Chat focused · Tab or Esc returns to the dashboard.';
+      if (!this.client && this.shouldConnectAgent) void this.connectAgent();
+    }
+    this.render();
+    return true;
+  }
+
+  scrollAgent(delta) {
+    this.state.agentScroll = Math.max(0, (this.state.agentScroll || 0) + delta);
+    this.state.status = this.state.agentScroll ? `Chat history · ${this.state.agentScroll} lines from latest` : 'Chat history · latest';
+    this.render();
+    return true;
+  }
+
+  onMouseData(chunk) {
+    for (const event of parseSgrMouse(chunk)) {
+      if (event.button === 64) {
+        if (this.state.focusTarget === 'agent') this.scrollAgent(3);
+        continue;
+      }
+      if (event.button === 65) {
+        if (this.state.focusTarget === 'agent') this.scrollAgent(-3);
+        continue;
+      }
+      if (!event.pressed || event.button !== 0 || this.state.overlay) continue;
+      const { width, height } = this.dimensions();
+      if (event.y <= (width < 90 ? 2 : 4)) {
+        const count = this.model.priority?.length || 0;
+        if (count) {
+          this.state.stripIndex = width < 100
+            ? Math.min(count - 1, Math.max(0, event.y - 2))
+            : Math.min(count - 1, Math.floor((event.x - 1) / Math.max(1, width / count)));
+          this.state.status = `Priority selected: ${this.model.priority[this.state.stripIndex].kind} · Enter jumps`;
+          this.render();
+        }
+        continue;
+      }
+      const frame = this.lastFrame;
+      if (frame?.sections.footer && event.y >= frame.sections.footer.y) {
+        const footerIndex = event.y - frame.sections.footer.y;
+        const footer = frame.sections.footer.lines[footerIndex] || '';
+        if (footer.includes('Tab')) this.toggleAgentFocus();
+        continue;
+      }
+      const jobHit = frame?.sections.jobs?.hits?.find((hit, index, hits) => {
+        const nextY = hits[index + 1]?.y ?? frame.sections.jobs.bottom;
+        return event.y >= hit.y && event.y < nextY;
+      });
+      if (jobHit && this.state.focusTarget !== 'agent') {
+        this.selectJobInMainList(jobHit.id, `Selected ${jobHit.title}.`);
+        continue;
+      }
+      const agentHit = this.state.focusTarget === 'agent'
+        || (width >= 116 && event.x > Math.floor(width * 0.72))
+        || (width >= 90 && width < 116 && event.y > Math.floor(height * 0.58));
+      if (agentHit && this.state.agentOn && this.state.focusTarget !== 'agent') this.toggleAgentFocus();
+    }
+  }
+
   render() {
     if (this.stopped || this.state.editorActive) return;
     const screen = renderTui(this.model, this.state, this.dimensions());
+    const dimensions = this.dimensions();
+    const plain = stripAnsiText(screen).split('\n');
+    const jobsY = plain.findIndex(line => line.includes('┌ JOBS ·'));
+    const jobsBottom = jobsY < 0 ? -1 : plain.findIndex((line, index) => index > jobsY && line.startsWith('└'));
+    const jobs = filteredJobs(this.model, this.state.filter);
+    const hits = jobsY < 0 ? [] : jobs.map(job => ({
+      id: job.id,
+      title: job.title,
+      y: plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(job.title))
+    })).filter(hit => hit.y >= 0);
+    const footers = footerLines(dimensions.width, this.state);
+    this.lastFrame = {
+      width: dimensions.width,
+      height: dimensions.height,
+      sections: {
+        jobs: jobsY < 0 ? null : { y: jobsY, bottom: jobsBottom < 0 ? dimensions.height : jobsBottom, hits },
+        footer: { y: Math.max(0, plain.length - footers.length), lines: footers }
+      }
+    };
     this.stdout.write(`${ESC}H${ESC}2J${screen}`);
   }
 
@@ -1881,11 +2032,11 @@ export class JobosTui {
     this.render();
   }
 
-  cycleStripFocus() {
+  cycleStripFocus(delta = 1) {
     const items = this.model.priority || [];
     if (!items.length) return;
-    this.state.stripIndex = ((this.state.stripIndex || 0) + 1) % items.length;
-    this.state.status = `Strip focus: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
+    this.state.stripIndex = ((this.state.stripIndex || 0) + delta + items.length) % items.length;
+    this.state.status = `Priority: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
     this.render();
   }
 
@@ -2682,7 +2833,7 @@ export class JobosTui {
     const wasRaw = Boolean(this.stdin.isRaw);
     const wasPaused = this.stdin.isPaused?.() ?? true;
     this.state.editorActive = true;
-    this.stdout.write(`${ESC}?25h${ESC}?1049l`);
+    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?25h${ESC}?1049l`);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     let editorReadCount = 0;
@@ -2720,7 +2871,7 @@ export class JobosTui {
       this.state.status = `Editor failed: ${error.message}`;
       return { error: error.message };
     } finally {
-      this.stdout.write(`${ESC}?1049h${ESC}?25l`);
+      this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
       if (this.stdin.isTTY) this.stdin.setRawMode(wasRaw);
       if (!wasPaused) this.stdin.resume?.();
       this.state.editorActive = false;
@@ -3360,6 +3511,11 @@ export class JobosTui {
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
     if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
+    if (!this.state.overlay && this.state.focusTarget === 'agent') {
+      if (key.name === 'escape' || key.name === 'tab') return this.toggleAgentFocus();
+      if (key.name === 'up' || key.name === 'pageup' || value === 'k') return this.scrollAgent(key.name === 'pageup' ? 10 : 1);
+      if (key.name === 'down' || key.name === 'pagedown' || value === 'j') return this.scrollAgent(key.name === 'pagedown' ? -10 : -1);
+    }
     if (this.state.overlay === 'docs' && key.ctrl && key.name === 'a') {
       if (this.dimensions().width >= 116) {
         this.state.focusTarget = this.state.focusTarget === 'viewer' ? 'shell' : 'viewer';
@@ -3390,7 +3546,8 @@ export class JobosTui {
     }
     if (this.state.overlay) return this.onOverlayKey(value, key);
     if (key.name === 'escape') return this.closeTransient();
-    if (value === 'j') this.moveSelection(1);
+    if (value === 'h') this.cycleStripFocus(-1);
+    else if (value === 'j') this.moveSelection(1);
     else if (value === 'k') this.moveSelection(-1);
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
     else if (value === '2') { this.state.filter = 'all'; this.refresh({ disk: false }); }
@@ -3416,6 +3573,8 @@ export class JobosTui {
       this.render();
     } else if (value === 'i') {
       this.state.agentOn = true;
+      this.state.focusTarget = 'agent';
+      this.state.agentScroll = 0;
       this.state.mode = 'agent';
       this.state.input = '';
       this.render();
@@ -3440,7 +3599,9 @@ export class JobosTui {
       void this.persistAgentSession(null).catch(() => {});
       this.state.status = 'cancelling agent turn';
       this.render();
-    } else if (key.name === 'tab') this.cycleStripFocus();
+    } else if (key.name === 'tab') this.toggleAgentFocus();
+    else if (key.name === 'left') this.cycleStripFocus(-1);
+    else if (key.name === 'right') this.cycleStripFocus(1);
     else if (key.name === 'return' || key.name === 'enter') this.jumpToStripJob();
     return true;
   }
@@ -3451,8 +3612,9 @@ export class JobosTui {
     this.stdin.setRawMode(true);
     this.stdin.resume();
     this.stdin.on('keypress', this.boundKeypress);
+    if (this.mouseEnabled) this.stdin.on('data', this.boundMouseData);
     this.stdout.on('resize', this.boundResize);
-    this.stdout.write(`${ESC}?1049h${ESC}?25l`);
+    this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
     this.render();
     this.refreshTimer = setInterval(() => {
       if (!this.state.busy && !this.state.editorActive) {
@@ -3479,12 +3641,13 @@ export class JobosTui {
     this.stopped = true;
     clearInterval(this.refreshTimer);
     this.stdin.off('keypress', this.boundKeypress);
+    if (this.mouseEnabled) this.stdin.off('data', this.boundMouseData);
     this.stdout.off('resize', this.boundResize);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     if (this.client) await this.client.stop();
     await this.sessionPersistence.catch(() => {});
-    this.stdout.write(`${ESC}?25h${ESC}?1049l`);
+    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?25h${ESC}?1049l`);
     this.resolveStop?.();
   }
 }

@@ -43,15 +43,17 @@ Prefer `pursue` for the first end-to-end pass. Standalone score, research, tailo
 ## Extension surfaces
 
 ```bash
+jobos agents doctor --json
+jobos agents connect codex --dry-run --json
+jobos agents connect codex
 jobos agents list --json
-jobos agents test codex --json
 jobos browser status --json
 jobos mcp
 ```
 
 Generic agents receive one protocol-v1 JSON request on stdin and must emit exactly one JSON object on stdout. MCP exposes `daily_discovery`, `pursue_job`, and `answers_match` plus lower-level domain tools. Authenticated browser state stays only in `.jobos/browser/`; it is credential material and never part of the workspace mirror.
 
-Hermes, Codex, and Claude Code connect to the same external `jobos mcp` stdio door. The exact project-scoped setup commands are maintained in README “Pluggable agents.” Hermes additionally has the certified embedded ACP path. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation.
+Hermes, Codex, and Claude Code connect to the same external `jobos mcp` stdio door through `jobos agents connect <client>`. Hermes additionally has the certified embedded ACP path. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation. Run `jobos agents doctor` to distinguish executable availability, authentication evidence, embedded ACP, external MCP registration, and batch readiness.
 
 In the embedded pane, use normal language (“score this role,” “show due follow-ups,” “draft interview prep”). The host prompt supplies the complete agent-eligible tool catalog and typed handoffs for human-only decisions. Direct TUI invocation uses `/<domain_tool> <json-object>`; friendly host navigation remains under `:...`.
 

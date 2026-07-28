@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const readme = readFileSync('README.md', 'utf8');
+const contracts = readFileSync('docs/SAFETY_AND_STATE.md', 'utf8');
 const progress = readFileSync('BUILD_PROGRESS.md', 'utf8');
 const workflow = readFileSync('.github/workflows/quality.yml', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
@@ -15,15 +16,15 @@ function section(document, heading) {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
-test('W10-DOCS-01 README states the shipped packet v2 and receipt contracts', () => {
-  const packet = section(readme, '### Live form, immutable packet, and receipt bridge');
+test('W10-DOCS-01 dedicated contracts doc states the shipped packet v2 and receipt contracts', () => {
+  const packet = section(contracts, '### Live form, immutable packet, and receipt bridge');
   assert.match(packet, /Packet v2/);
   assert.match(packet, /receiptState.*none.*attested.*confirmed/s);
   assert.match(packet, /uncertain.*creates no receipt.*cannot be replayed automatically/s);
 });
 
-test('W10-DOCS-02 README bounds MCP and ACP to mediated actions without human authority', () => {
-  const mcp = section(readme, '### MCP parity');
+test('W10-DOCS-02 dedicated contracts doc bounds MCP and ACP to mediated actions without human authority', () => {
+  const mcp = section(contracts, '### MCP parity');
   assert.match(mcp, /existing mediated inspection, configured fill, and configured submission path/);
   const authorityBoundaries = [/artifact approval/, /rejection/, /restricted answer/, /attestation/, /receipt confirmation/, /Career Memory transition/i];
   for (const authority of authorityBoundaries) {
@@ -32,8 +33,8 @@ test('W10-DOCS-02 README bounds MCP and ACP to mediated actions without human au
   assert.match(mcp, /omitted from the MCP catalog.*rejected at the service boundary/s);
 });
 
-test('W10-DOCS-03 README documents the Career Memory trust boundary', () => {
-  const memory = section(readme, '## Career Memory');
+test('W10-DOCS-03 dedicated contracts doc documents the Career Memory trust boundary', () => {
+  const memory = section(contracts, '## Career Memory');
   for (const contract of ['provenance', 'accepted', 'revoke', 'undo', 'profile isolation', 'private note']) {
     assert.match(memory, new RegExp(contract, 'i'), `missing Career Memory contract: ${contract}`);
   }

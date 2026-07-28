@@ -101,8 +101,12 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   tui.refresh({ disk: false });
 
   const compactScreen = renderTui(tui.model, tui.state, { width: 80, height: 42, color: false });
-  for (const hint of ['t stage', 'c reconnect', 'x cancel', 'g setup', 'v profile']) {
-    assert.match(compactScreen, new RegExp(hint), `compact footer advertises ${hint}`);
+  for (const hint of ['Tab chat', 'i prompt', 'p pursue', 'd discover', 'r review', 'o docs', 'g setup', '? help', 'Q quit']) {
+    assert.match(compactScreen, new RegExp(hint.replace('?', '\\?')), `compact footer advertises ${hint}`);
+  }
+  const helpScreen = renderTui(tui.model, { ...tui.state, overlay: 'system' }, { width: 100, height: 42, color: false });
+  for (const hint of ['t stage', 'c reconnect', 'x cancel', 'v profile']) {
+    assert.match(helpScreen, new RegExp(hint), `system help advertises ${hint}`);
   }
 
   const fire = (token) => {

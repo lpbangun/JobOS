@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, reload, save } from './db.js';
 import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
@@ -27,6 +27,7 @@ import { recentRuns, runAutomation, runAutomationByName, runDueAutomations, sche
 import { addAnswer, listAnswers } from './answers.js';
 import { listNetworkContacts, listNetworkEdges } from './workflows.js';
 import { addAgent, listAgents, testAgent } from './agents.js';
+import { connectAgentClient, doctorAgents } from './agent-setup.js';
 import { callDomainTool } from './domain-tools.js';
 import { domainCapabilityCatalog } from './capabilities.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
@@ -65,11 +66,11 @@ function cmd(pathParts, usage, summary, opts = {}) {
 
 export const commandRegistry = [
   cmd(['init'], 'jobos init [--json]', 'Create or verify the local database and agent-readable workspace.'),
-  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--mouse] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>', '--mouse'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['setup', 'status'], 'jobos setup status [--profile <profile-id>] [--job <job-id>] [--json]', 'Inspect the read-only guided setup projection and optional capability status.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['setup', 'next'], 'jobos setup next [--profile <profile-id>] [--job <job-id>] [--json]', 'Return the next canonical or optional guided setup action without writing.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
-  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the locked data-bound terminal product shell with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
+  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--mouse] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the primary data-bound terminal product with an embedded ACP agent pane.', { flags: ['--agent off', '--mouse', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
@@ -186,6 +187,8 @@ export const commandRegistry = [
   cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run due scheduler automations with bounded JSONL events.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
   cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one persisted named automation.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
   cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one ephemeral scheduler action.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
+  cmd(['agents', 'connect'], 'jobos agents connect <hermes|codex|claude> [--dry-run] [--json]', 'Detect an agent and register this JobOS workspace through MCP.', { flags: ['--dry-run'], category: 'extend' }),
+  cmd(['agents', 'doctor'], 'jobos agents doctor [hermes|codex|claude] [--json]', 'Diagnose Node, workspace, embedded ACP, external MCP, and batch-agent readiness.', { category: 'extend' }),
   cmd(['agents', 'add'], 'jobos agents add <name> --command <executable> [--args <json>] [--transport stdin-json|prompt-arg] [--json]', 'Register a local Codex, Hermes, or compatible agent.', { flags: ['--command <executable>', '--args <json>', '--transport <type>'], category: 'extend' }),
   cmd(['agents', 'list'], 'jobos agents list [--json]', 'List configured and suggested local agents with availability.', { category: 'extend' }),
   cmd(['agents', 'test'], 'jobos agents test <name> [--json]', 'Check one agent executable and structured JSON protocol.', { category: 'extend' }),
@@ -239,19 +242,20 @@ function commandFor(parts) {
 }
 
 function renderRootHelp({ allCommands = false } = {}) {
-  const primaryNames = new Set(['init', 'setup', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents list', 'browser status']);
+  const primaryNames = new Set(['init', 'setup', 'profile create', 'tui', 'daily', 'pursue', 'jobs list', 'network paths', 'agents connect', 'agents doctor']);
   const primary = commandRegistry.filter(command => primaryNames.has(command.name));
   const section = (title, names) => `${title}:\n${names.map(command => `  ${command.usage}\n      ${command.summary}`).join('\n')}`;
   const setup = primary.filter(command => ['init', 'setup', 'profile create'].includes(command.name));
   const workflows = primary.filter(command => ['tui', 'daily', 'pursue', 'jobs list', 'network paths'].includes(command.name));
-  const extend = primary.filter(command => ['agents list', 'browser status'].includes(command.name));
+  const extend = primary.filter(command => ['agents connect', 'agents doctor'].includes(command.name));
   const advanced = allCommands ? `\n\nAdvanced commands:\n${commandRegistry.filter(command => !primaryNames.has(command.name)).map(command => `  ${command.usage}`).join('\n')}` : '\n\nRun "jobos help --all" for every low-level command.';
-  return `JobOS — local-first agent-native terminal product and composable CLI
+  return `JobOS — local-first, agent-native job search
 
 Usage:
+  jobos
   jobos <command> [flags]
 
-Use \`tui\` for interactive work; use \`daily\` and \`pursue\` for scripted workflows.
+Run \`jobos\` to open the primary terminal product. Use \`daily\` and \`pursue\` for scripted workflows.
 
 ${section('Setup', setup)}
 
@@ -262,7 +266,7 @@ ${section('Extend', extend)}${advanced}
 Global flags:
   ${globalFlags.join(' · ')}
 
-Run \"jobos <command> --help\" for command-specific help.`;
+Run "jobos <command> --help" for command-specific help.`;
 }
 
 function renderCommandHelp(parts) {
@@ -621,7 +625,9 @@ function normalizedError(e) {
 export async function main(argv = process.argv.slice(2)) {
   const parsed = parse(argv);
   const flags = parsed.flags;
-  const [group, action, subaction, ...rest] = parsed._;
+  let [group, action, subaction, ...rest] = parsed._;
+  const interactiveDefault = !group && !flags.help && !flags.json && process.stdin.isTTY && process.stdout.isTTY;
+  if (interactiveDefault) group = 'tui';
 
   if (!group || group === 'help' || flags.help) {
     const parts = group === 'help' ? parsed._.slice(1) : parsed._;
@@ -670,11 +676,13 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const { startTui } = await import('./tui.js');
     const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
     await startTui(s, {
       profileId: setupOptions.profileId,
       selectedJobId: setupOptions.jobId,
       initialOverlay: 'setup',
-      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
+      mouse
     });
     return;
   }
@@ -699,9 +707,11 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
+    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
     await startTui(s, {
       profileId,
-      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
+      mouse
     });
     return;
   }
@@ -1634,6 +1644,25 @@ export async function main(argv = process.argv.slice(2)) {
     }
     usage('Missing loop target: scheduler, automation, or action');
   }
+  if (group === 'agents' && action === 'connect') {
+    if (!subaction) usage('Missing client: hermes, codex, or claude');
+    out(await connectAgentClient(String(subaction), {
+      workspace: s.root,
+      cliPath: fileURLToPath(import.meta.url),
+      dryRun: Boolean(flags['dry-run']),
+      timeoutMs: flags.timeout ? numberFlag(flags, 'timeout', 10_000, { min: 1000 }) : undefined
+    }));
+    return;
+  }
+  if (group === 'agents' && action === 'doctor') {
+    out(await doctorAgents({
+      workspace: s.root,
+      cliPath: fileURLToPath(import.meta.url),
+      client: subaction ? String(subaction).toLowerCase() : 'all',
+      timeoutMs: flags.timeout ? numberFlag(flags, 'timeout', 5_000, { min: 1000 }) : undefined
+    }));
+    return;
+  }
   if (group === 'agents' && action === 'add') {
     if (!subaction) usage('Missing agent name');
     let args = [];
@@ -1736,7 +1765,7 @@ export async function main(argv = process.argv.slice(2)) {
   usage(`Unknown command: ${argv.join(' ')}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   main().catch(e => {
     const wantsJson = process.argv.includes('--json');
     const payload = normalizedError(e);

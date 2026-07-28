@@ -1,8 +1,39 @@
 {
-  "name": "jobos-local-first-mvp",
+  "name": "jobos",
   "version": "0.1.0",
-  "description": "Local-first agent-native terminal product for job discovery, networking, applications, and review",
+  "description": "Local-first, agent-native terminal operating system for job search and applications",
   "type": "module",
+  "license": "MIT",
+  "author": "JobOS contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lpbangun/JobOS.git"
+  },
+  "homepage": "https://github.com/lpbangun/JobOS#readme",
+  "bugs": {
+    "url": "https://github.com/lpbangun/JobOS/issues"
+  },
+  "keywords": [
+    "job-search",
+    "career",
+    "terminal",
+    "local-first",
+    "mcp",
+    "agent"
+  ],
+  "files": [
+    "src/",
+    "docs/jobos-tui.svg",
+    "docs/AGENT_GUIDE.md",
+    "docs/CONFIGURATION.md",
+    "docs/SAFETY_AND_STATE.md",
+    "docs/mcp-compatibility-decision.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "jobos": "./src/cli.js"
   },

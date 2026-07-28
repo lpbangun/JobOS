@@ -254,16 +254,64 @@ test('first-run and no-job states are honest, actionable, and do not invent cont
   assert.match(screen, /daily discovery/);
 });
 
-test('narrow terminals keep safety state, controls, and all three product panes reachable', async t => {
+test('compact terminals keep context reachable and switch to a focused chat page', async t => {
   const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  const screen = renderTui(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' }, { width: 60, height: 24, color: false });
-  assert.match(screen, /FX:OFF/);
-  assert.match(screen, /JOBS · today/);
-  assert.match(screen, /SELECTED JOB/);
-  assert.match(screen, /AGENT/);
-  assert.match(screen, /s sources · \? system · b net · : cmd · \/ tool · Q quit/);
-  assert.equal(screen.split('\n').length, 24);
+  const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
+  const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
+  assert.match(dashboard, /FX:OFF/);
+  assert.match(dashboard, /JOBS · today/);
+  assert.match(dashboard, /SELECTED JOB/);
+  assert.doesNotMatch(dashboard, /┌ AGENT/);
+  assert.match(dashboard, /Tab chat/);
+  assert.equal(dashboard.split('\n').length, 24);
+
+  const chat = renderTui(model, { ...state, focusTarget: 'agent' }, { width: 60, height: 24, color: false });
+  assert.match(chat, /AGENT · FOCUSED/);
+  assert.match(chat, /Hermes ACP · ready/);
+  assert.match(chat, /Press i to prompt/);
+  assert.doesNotMatch(chat, /┌ SELECTED JOB/);
+  assert.match(chat, /Tab\/Esc dashboard/);
+  assert.equal(chat.split('\n').length, 24);
+});
+
+test('focused chat owns most wide-terminal real estate and supports scrollback', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
+  const messages = Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: `message-${index}` }));
+  const state = {
+    ...defaultTuiState(),
+    profileId: profile.id,
+    selectedJobId: jobs[0].id,
+    agentState: 'ready',
+    focusTarget: 'agent',
+    agentScroll: 5,
+    messages
+  };
+  const screen = renderTui(model, state, { width: 140, height: 34, color: false });
+  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('AGENT · FOCUSED'));
+  assert.ok(panelHeader, 'focused chat includes selected-job context and agent panels');
+  assert.ok(panelHeader.indexOf('┌ AGENT') <= 38, 'agent panel begins within the first 27% of the terminal');
+  assert.match(screen, /message-14/);
+  assert.doesNotMatch(screen, /message-19/);
+  assert.match(screen, /scroll ↑5/);
+});
+
+test('optional mouse clicks select jobs and switch the compact page', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 2, draft: false });
+  const io = streams();
+  io.stdout.columns = 100;
+  io.stdout.rows = 42;
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: false, mouse: true, color: false });
+  tui.render();
+  const secondJob = tui.lastFrame.sections.jobs.hits.find(hit => hit.id === jobs[1].id);
+  assert.ok(secondJob, 'second job has a visible mouse target');
+  tui.onMouseData(`\u001b[<0;10;${secondJob.y + 1}M`);
+  assert.equal(tui.state.selectedJobId, jobs[1].id);
+  const footer = tui.lastFrame.sections.footer;
+  const tabRow = footer.lines.findIndex(line => line.includes('Tab'));
+  tui.onMouseData(`\u001b[<0;10;${footer.y + tabRow + 1}M`);
+  assert.equal(tui.state.focusTarget, 'agent');
 });
 
 test('model exposes network setup state, affiliation counts, and safe xAI display', async t => {

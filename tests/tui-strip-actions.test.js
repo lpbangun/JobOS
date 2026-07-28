@@ -63,18 +63,26 @@ test('priority strip carries jobId on actionable cards and null on failure', asy
   assert.equal(model.priority[3].jobId, null, 'failure card never carries a job');
 });
 
-// Gap #7 — Tab cycles strip focus (with wrap) and paints a marker
-test('Tab cycles strip focus with wrap and paints the focused card', async t => {
+// Tab owns the primary chat-focus transition; arrows retain strip navigation.
+test('Tab focuses chat while arrows cycle the priority strip with wrap', async t => {
   const { store, profile, job } = await seeded(t);
   const tui = makeTui(store, profile, job);
   assert.equal(tui.state.stripIndex, 0);
   tui.onKeypress('', { name: 'tab' });
+  assert.equal(tui.state.focusTarget, 'agent');
+  assert.equal(tui.state.stripIndex, 0);
+  assert.match(tui.state.status, /Chat focused/);
+  tui.onKeypress('', { name: 'tab' });
+  assert.equal(tui.state.focusTarget, 'shell');
+
+  tui.onKeypress('', { name: 'right' });
   assert.equal(tui.state.stripIndex, 1);
-  assert.match(tui.state.status, /Strip focus: interview/);
-  tui.onKeypress('', { name: 'tab' });
-  tui.onKeypress('', { name: 'tab' });
-  tui.onKeypress('', { name: 'tab' });
-  assert.equal(tui.state.stripIndex, 0, 'focus wraps after the last card');
+  assert.match(tui.state.status, /Priority: interview/);
+  tui.onKeypress('', { name: 'left' });
+  tui.onKeypress('', { name: 'left' });
+  assert.equal(tui.state.stripIndex, 3, 'left wraps to the last card');
+  tui.onKeypress('', { name: 'right' });
+  assert.equal(tui.state.stripIndex, 0, 'right wraps to the first card');
   const screen = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
   assert.ok(screen.includes('▶'), 'focused card is marked');
 });
