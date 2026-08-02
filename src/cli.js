@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, reload, save } from './db.js';
@@ -35,12 +36,15 @@ import { preflightResumeArtifact } from './artifacts.js';
 import { getMemoryObservation } from './career-memory-observations.js';
 import { inspectOnboardingStatus } from './onboarding.js';
 
+const { version: packageVersion } = createRequire(import.meta.url)('../package.json');
+
 const globalFlags = [
   '--workspace <dir>',
   '--profile <profile-id>',
   '--json',
   '--quiet',
   '--help',
+  '--version, -V',
   '--agent <name>',
   '--all (help only)'
 ];
@@ -220,7 +224,9 @@ function parse(argv) {
   const out = { _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg.startsWith('--')) {
+    if (arg === '-V') {
+      out.flags.version = true;
+    } else if (arg.startsWith('--')) {
       const key = arg.slice(2);
       if (key.includes('=')) {
         const [name, ...value] = key.split('=');
@@ -625,6 +631,10 @@ function normalizedError(e) {
 export async function main(argv = process.argv.slice(2)) {
   const parsed = parse(argv);
   const flags = parsed.flags;
+  if (flags.version) {
+    console.log(packageVersion);
+    return;
+  }
   let [group, action, subaction, ...rest] = parsed._;
   const interactiveDefault = !group && !flags.help && !flags.json && process.stdin.isTTY && process.stdout.isTTY;
   if (interactiveDefault) group = 'tui';
