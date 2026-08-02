@@ -51,16 +51,19 @@ jobos
 
 ## First run
 
-The guided setup walks through the canonical local state in order:
+The guided setup walks through seven canonical local steps in order:
 
-1. Create a profile.
-2. Import a resume.
-3. Confirm at least one verifiable proof point.
-4. Import or discover a job.
-5. Record a pursue/hold decision.
-6. Generate and review materials.
+1. Open the local workspace.
+2. Create or explicitly select a profile.
+3. Import and validate the canonical resume.
+4. Confirm at least one verifiable proof point.
+5. Import or discover a job.
+6. Record an explicit pursue/hold decision.
+7. Generate and review application materials.
 
-No provider, browser, or API key is required for this core flow.
+No provider, browser, or API key is required for this core flow. The first run opens setup as a centered modal over the main shell; press `g` later to resume it from canonical SQLite state.
+
+Inside guided setup, use `j`/`k`, `↑`/`↓`, or `Tab`/`Shift+Tab` to move; `1`–`7` jumps directly to a required step. `Enter` opens the selected action, `c` opens its correction route, `r` recomputes state, and `Esc` closes setup without changing canonical data.
 
 Primary controls:
 

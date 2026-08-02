@@ -1,12 +1,12 @@
 # JobOS Build Progress
 
-## Current status — 2026-07-27
+## Current status — 2026-08-02
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
 ### Primary workflows
 
-- `jobos setup`, `setup status`, and `setup next` expose a resumable, read-only projection over seven canonical core steps. The TUI `g` overlay uses the same projection; profile/job ambiguity requires explicit selection, resume/proof blockers retain W01 correction codes, materials reuse readiness v4, and provider/browser/calibration/network remain optional.
+- `jobos setup`, `setup status`, and `setup next` expose a resumable, read-only projection over seven canonical core steps. First-run TUI setup is now a centered modal over the current main shell with `j`/`k`, arrow, Tab/Shift+Tab, and direct `1`–`7` navigation; profile/job ambiguity still requires explicit selection, resume/proof blockers retain W01 correction codes, materials reuse readiness v4, and provider/browser/calibration/network remain optional.
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
@@ -71,6 +71,8 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
+- Rebased setup-navigation verification on 2026-08-02: `npm test` passed **618/618** checks after installing the current mainline development dependencies; `npm run smoke` passed the clean-workspace workflow with W03/W04/W07/W08 projections and zero external side effects.
+- Focused setup/TUI verification passed **57/57** checks across the new modal/navigation suite, canonical W09 onboarding, live keymap invariants, and existing TUI workflows; direct rendering also exercised the `120×36` and minimum `60×20` layouts.
 - W10 focused verification on 2026-07-27: `npm run test:w10` passed for golden projections, generated-data containment, tracked-data/static policy, documentation/workflow semantics, and measured MCP compatibility/decision.
 - `npm audit --omit=dev --audit-level=high --json` passed with zero high or critical production advisories. Registry unavailability remains release-blocking inconclusive evidence, never a clean result.
 - `node scripts/release-evidence.js --output .tmp/w10-release-evidence --skip-audit` completed every local check and correctly returned `inconclusive`; the test-only audit skip was not promoted to pass.

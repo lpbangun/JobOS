@@ -64,7 +64,7 @@ export const TUI_KEYMAP = Object.freeze({
   due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
   memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']]),
-  setup: Object.freeze([['j/k', 'step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
+  setup: Object.freeze([['j/k', 'step'], ['↑/↓', 'step'], ['Tab', 'next'], ['Shift+Tab', 'back'], ['1–7', 'required step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
 });
 
 /**
@@ -81,7 +81,7 @@ export const TUI_HANDLED_KEYS = Object.freeze({
   due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
   memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape']),
-  setup: Object.freeze(['j', 'k', 'return', 'c', 'r', 'escape'])
+  setup: Object.freeze(['j', 'k', 'up', 'down', 'tab', 'shift+tab', '1', '2', '3', '4', '5', '6', '7', 'return', 'c', 'r', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -91,6 +91,8 @@ export function expandKeymapBinding(binding) {
     'n/N': ['n', 'N'],
     '↑/↓': ['up', 'down'],
     '←/→': ['left', 'right', 'h', 'l'],
+    '1–7': ['1', '2', '3', '4', '5', '6', '7'],
+    'Shift+Tab': ['shift+tab'],
     'Ctrl+A': ['ctrl+a'],
     Enter: ['return'],
     Esc: ['escape'],
@@ -111,6 +113,7 @@ export function keypressForToken(token) {
   if (token === 'return') return { value: '', key: { name: 'return' } };
   if (token === 'escape') return { value: '', key: { name: 'escape' } };
   if (token === 'tab') return { value: '', key: { name: 'tab' } };
+  if (token === 'shift+tab') return { value: '', key: { name: 'tab', shift: true } };
   if (token === 'up' || token === 'down' || token === 'left' || token === 'right') {
     return { value: '', key: { name: token } };
   }
@@ -206,6 +209,14 @@ function panel(title, body, width, color) {
   return [paint(top, 'green', color), ...rows, paint(`└${'─'.repeat(inner)}┘`, 'green', color)];
 }
 
+function modalPanel(title, body, width, color) {
+  const inner = Math.max(1, width - 2);
+  const topLabel = ` ${title} `;
+  const top = `╔${topLabel}${'═'.repeat(Math.max(0, inner - topLabel.length))}╗`;
+  const rows = body.map(line => `║${fit(line, inner)}║`);
+  return [paint(top, 'green', color), ...rows, paint(`╚${'═'.repeat(inner)}╝`, 'green', color)];
+}
+
 function mergeColumns(columns, widths, color, separator = '│') {
   const rows = Math.max(...columns.map(column => column.length));
   const output = [];
@@ -216,6 +227,19 @@ function mergeColumns(columns, widths, color, separator = '│') {
       return `${value}${' '.repeat(pad)}`;
     });
     output.push(parts.join(paint(separator, 'green', color)));
+  }
+  return output;
+}
+
+function composeModal(background, modal, width, bodyStart, bodyHeight) {
+  const output = [...background];
+  const modalWidth = Math.min(width, Math.max(1, ...modal.map(line => stringWidth(line))));
+  const top = bodyStart + Math.max(0, Math.floor((bodyHeight - modal.length) / 2));
+  const left = Math.max(0, Math.floor((width - modalWidth) / 2));
+  for (let index = 0; index < modal.length && index < bodyHeight; index++) {
+    const row = top + index;
+    const backdrop = fit(output[row] || '', width);
+    output[row] = `${sliceAnsi(backdrop, 0, left)}${modal[index]}${sliceAnsi(backdrop, left + modalWidth, width)}`;
   }
   return output;
 }
@@ -702,31 +726,48 @@ function overlayPanel(model, state, width, height, color) {
     const setup = model.onboarding;
     title = `GUIDED SETUP · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} REQUIRED`;
     const items = setup?.steps || [];
-    const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 10));
-    body = visible.items.map((item, offset) => {
-      const selectedStep = visible.start + offset === state.overlayIndex;
-      return `${selectedStep ? '▶' : ' '} ${item.required ? 'required' : 'optional'} · ${item.id} · ${item.status} · ${item.summary}`;
-    });
+    const required = items.filter(item => item.required);
+    const requiredIndex = new Map(required.map((item, index) => [item.id, index + 1]));
+    const ruler = required.map((item, index) => {
+      const selectedStep = items[state.overlayIndex]?.id === item.id;
+      const marker = selectedStep ? '●' : (item.status === 'complete' ? '✓' : String(index + 1));
+      return `[${marker}]`;
+    }).join('─');
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(2, height - 13));
+    body = [
+      `CORE JOURNEY  ${ruler}`,
+      '✓ complete · ! blocked · optional steps follow the required journey',
+      'Navigate  j/k or ↑/↓ · Tab/Shift+Tab · 1–7 required step',
+      'Act  Enter · c correct · r recompute · Esc close',
+      '',
+      ...visible.items.map((item, offset) => {
+        const selectedStep = visible.start + offset === state.overlayIndex;
+        const marker = item.status === 'complete' ? '✓' : (item.status === 'blocked' ? '!' : '·');
+        const position = item.required ? String(requiredIndex.get(item.id)) : 'optional';
+        return `${selectedStep ? '▶' : ' '} ${marker} ${position} ${item.id.toUpperCase()} · ${item.status}`;
+      })
+    ];
     const focused = items[state.overlayIndex];
     if (focused) {
-      body.push('', `FOCUS · ${focused.id}`);
-      body.push(...focused.blockers.map(item => `blocker ${item.code} · ${item.message}`));
-      if (focused.actions[0]) body.push(...focused.actions.map(action => `action ${action.label} · ${action.command}`));
+      body.push('', `SELECTED · ${focused.required ? `REQUIRED ${requiredIndex.get(focused.id)}/${required.length}` : 'OPTIONAL'} · ${focused.id.toUpperCase()}`);
+      body.push(...wrap(focused.summary, Math.max(20, width - 4)).slice(0, 2));
+      if (focused.blockers[0]) body.push(`BLOCKED · ${focused.blockers[0].message}`);
+      if (focused.actions[0]) body.push(`ENTER · ${focused.actions[0].label}`);
     }
-    body.push('', `core ${setup?.coreReady ? 'complete' : 'incomplete'} · no provider/browser/key required`, keyHints('setup'));
+    body.push('', `Core ${setup?.coreReady ? 'complete' : 'incomplete'} · provider, browser, and API keys remain optional`);
   } else if (state.overlay === 'setup-action-picker') {
     title = `GUIDED SETUP · SELECT ${state.setupActionStepId || 'ACTION'}`;
     const items = state.setupActionItems || [];
     body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label} · ${item.command}`);
-    body.push('', 'j/k select · Enter runs the selected guided action · Esc returns to setup');
+    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter runs selected action · Esc returns');
   } else if (state.overlay === 'setup-profile-picker') {
     title = 'GUIDED SETUP · SELECT PROFILE';
     body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
-    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter selects profile · Esc returns');
   } else if (state.overlay === 'setup-job-picker') {
     title = 'GUIDED SETUP · SELECT JOB';
     body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company} · ${item.id}`);
-    body.push('', 'j/k select · Enter returns to setup · Esc returns without changing selection');
+    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter selects job · Esc returns');
   } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
@@ -994,7 +1035,9 @@ function overlayPanel(model, state, width, height, color) {
     }
     body.push('', 'Esc closes');
   }
-  return panel(title, body.slice(0, Math.max(1, height - 2)), width, color);
+  const setupModal = String(state.overlay || '').startsWith('setup');
+  const box = setupModal ? modalPanel : panel;
+  return box(title, body.slice(0, Math.max(1, height - 2)), width, color);
 }
 
 function footerLines(width, state) {
@@ -1041,9 +1084,11 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const safeWidth = measuredWidth;
   const safeHeight = measuredHeight;
   const footers = footerLines(safeWidth, state);
+  const setupModal = String(state.overlay || '').startsWith('setup');
   const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
+  const bodyStart = lines.length;
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(4, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
@@ -1056,7 +1101,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
       side,
       docsPanel(model, state, docsWidth, bodyHeight, color)
     ], [sideWidth, docsWidth], color));
-  } else if (state.overlay) {
+  } else if (state.overlay && !setupModal) {
     lines.push(...overlayPanel(model, state, safeWidth, bodyHeight, color));
   } else if (safeWidth >= 116 && state.agentOn) {
     if (state.focusTarget === 'agent') {
@@ -1098,6 +1143,12 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     const listHeight = Math.max(4, Math.floor(bodyHeight * 0.36));
     lines.push(...listPanel(model, state, safeWidth, listHeight, color));
     lines.push(...detailPanel(model, safeWidth, bodyHeight - listHeight, color));
+  }
+  if (setupModal) {
+    const modalWidth = Math.max(48, Math.min(96, safeWidth - 4));
+    const modal = overlayPanel(model, state, modalWidth, bodyHeight, color);
+    const composed = composeModal(lines, modal, safeWidth, bodyStart, bodyHeight);
+    lines.splice(0, lines.length, ...composed);
   }
   if (state.pendingConfirm) {
     const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
@@ -2941,13 +2992,18 @@ export class JobosTui {
         const stepId = this.state.setupActionStepId;
         this.state.overlay = 'setup';
         this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
-      } else if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
-      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
-      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
-        const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
-        this.state.overlay = 'setup';
-        return this.openSetupAction(step, items[this.state.overlayIndex]);
+      } else {
+        const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
+          ? 1
+          : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
+        if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
+        else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+          const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
+          this.state.overlay = 'setup';
+          return this.openSetupAction(step, items[this.state.overlayIndex]);
+        }
       }
+
       this.render();
       return true;
     }
@@ -2960,8 +3016,10 @@ export class JobosTui {
         this.render();
         return true;
       }
-      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
-      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
+        ? 1
+        : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
+      if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
       else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
         if (picker === 'setup-profile-picker') {
           this.state.setupProfileId = items[this.state.overlayIndex].id;
@@ -2986,8 +3044,15 @@ export class JobosTui {
     if (key.name === 'escape') return this.closeTransient();
     if (this.state.overlay === 'setup') {
       const items = this.model.onboarding?.steps || [];
-      if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
-      else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
+      const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
+        ? 1
+        : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
+      if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
+      else if (/^[1-7]$/.test(value)) {
+        const required = items.filter(item => item.required);
+        const target = required[Number(value) - 1];
+        if (target) this.state.overlayIndex = items.indexOf(target);
+      }
       else if (value === 'r') {
         this.refresh();
         this.state.status = 'setup recomputed from canonical SQLite state';

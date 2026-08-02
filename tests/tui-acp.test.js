@@ -466,9 +466,9 @@ test('build-network editor: editing a list field and toggling a source persists 
   tui.onOverlayKey('\r', { name: 'return' });
   assert.equal(tui.state.mode, 'build-network-field', 'entered field edit mode');
   // Type a value
-  for (const ch of 'Acme Learning, EduCo') tui.onInputKey(ch, { name: ch });
-  // Commit with Enter
-  tui.onInputKey('\r', { name: 'return' });
+  for (const ch of 'Acme Learning, EduCo') tui.onKeypress(ch, { name: ch });
+  // Commit through the live dispatcher so modal routing cannot bypass field input.
+  tui.onKeypress('\r', { name: 'return' });
   assert.equal(tui.state.mode, 'normal', 'edit mode exited after commit');
   assert.equal(tui.state.networkDraft.targetCompanies, 'Acme Learning, EduCo', 'draft updated with typed value');
 
