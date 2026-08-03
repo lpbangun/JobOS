@@ -51,25 +51,27 @@ jobos
 
 ## First run
 
-The guided setup walks through seven canonical local steps in order:
+Guided setup opens as a focused full-screen workspace and starts on the first task that needs action:
 
-1. Open the local workspace.
-2. Create or explicitly select a profile.
-3. Import and validate the canonical resume.
-4. Confirm at least one verifiable proof point.
-5. Import or discover a job.
-6. Record an explicit pursue/hold decision.
+1. Confirm the local workspace.
+2. Create or choose a profile.
+3. Add a resume by pasting text, browsing supported files, or entering a path; review the extraction preview before import.
+4. Verify, edit, reject, or add the experience highlights extracted from the resume.
+5. Add a job by pasting a description or URL, browsing a local file, entering a path, or configuring company-page discovery.
+6. Check the fit and choose whether to pursue the job.
 7. Generate and review application materials.
 
-No provider, browser, or API key is required for this core flow. The first run opens setup as a centered modal over the main shell; press `g` later to resume it from canonical SQLite state.
+No provider, browser, or API key is required for this core flow. Successful actions move directly to the next task. Press `g` later to return to setup.
 
-Inside guided setup, use `j`/`k`, `↑`/`↓`, or `Tab`/`Shift+Tab` to move; `1`–`7` jumps directly to a required step. `Enter` opens the selected action, `c` opens its correction route, `r` recomputes state, and `Esc` closes setup without changing canonical data.
+Use `↑`/`↓` on every selectable list; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard.
+
+Every text field supports `Left`/`Right`, `Home`/`End`, `Backspace`, `Delete`, and `Shift`+arrow selection. Pasted text is inserted at the cursor and replaces the current selection. Press `?` for controls and the recommended action on the current screen; press `?` again for the complete shortcut reference.
 
 Primary controls:
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | Move through jobs or the active list |
+| `↑` / `↓` or `j` / `k` | Move through jobs or the active list |
 | `Enter` | Open the selected action |
 | `Tab` | Focus chat; press again to restore the dashboard |
 | `i` | Type an agent prompt |
@@ -78,10 +80,10 @@ Primary controls:
 | `r` | Open review |
 | `o` | Open documents |
 | `g` | Resume guided setup |
-| `?` | Show the complete contextual controls |
+| `?` | Show contextual help; press again for all shortcuts |
 | `Q` | Quit cleanly |
 
-Use optional mouse support to select visible job rows and focus chat from the agent pane or footer:
+Use optional mouse support to select visible jobs, filters, setup choices, and overlay rows, or to focus chat from the agent pane or footer:
 
 ```bash
 jobos --mouse

@@ -2,14 +2,26 @@ import stripAnsiText from 'strip-ansi';
 import stringWidth from 'string-width';
 import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
-import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
-import { addProof, createProfile, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
-import { importResume, replaceResume } from './resumes.js';
-import { importText } from './jobs.js';
+import {
+  addProof,
+  createProfile,
+  importResumeProofCandidates,
+  listProofs,
+  rejectProof,
+  retireProof,
+  setNetworkIntent,
+  structuredProofs,
+  supersedeProof,
+  verifyProof
+} from './profiles.js';
+import { createResumeRevision, parseResumeText, readResumeFile, validateResumeDocument } from './resumes.js';
+import { importNormalized, importText, importUrl, parseJob } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
 import { validStatuses, appCreate, appUpdate } from './tracking.js';
@@ -20,6 +32,7 @@ import { updateJobStatus } from './jobs.js';
 import { getInterviewDebrief } from './interview.js';
 import { transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
 import { refreshMemoryProjection } from './career-memory-projections.js';
+import { createSearch } from './discovery.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -36,7 +49,10 @@ const COLORS = {
   muted: `${ESC}38;5;243m`,
   warn: `${ESC}38;5;221m`,
   bad: `${ESC}38;5;203m`,
-  inverse: `${ESC}7m`
+  inverse: `${ESC}7m`,
+  header: `${ESC}48;5;234m${ESC}38;5;159m${ESC}1m`,
+  surface: `${ESC}48;5;233m${ESC}38;5;252m`,
+  selected: `${ESC}48;5;23m${ESC}38;5;159m${ESC}1m`
 };
 export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
 const TASK_FILTERS = ['all', 'followup', 'review'];
@@ -50,21 +66,21 @@ export const TUI_DOMAIN_ACTIONS = Object.freeze({
 export const stageOrder = Array.from(validStatuses);
 export const TUI_KEYMAP = Object.freeze({
   global: Object.freeze([
-    ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
+    ['↑/↓', 'select'], ['j/k', 'select'], ['1', 'today'], ['2', 'all'], ['3', 'high'],
     ['4', 'review'], ['5', 'materials-ready'], ['6', 'applied'], ['7', 'interview'],
     ['p', 'pursue'], ['z', 'score'], ['d', 'daily'], ['a', 'agent'], ['i', 'prompt'], ['t', 'stage'], ['c', 'reconnect'], ['x', 'cancel'],
     ['r', 'review'], ['l', 'log'], ['m', 'memory'], ['n', 'network'], ['o', 'docs'], ['q', 'answers'],
-    ['s', 'sources'], ['g', 'setup'], ['?', 'system'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['/', 'slash'], ['Q', 'quit'],
+    ['s', 'sources'], ['g', 'setup'], ['?', 'help'], ['b', 'build-network'], ['v', 'profile'], [':', 'command'], ['/', 'slash'], ['Q', 'quit'],
     ['Tab', 'focus-chat'], ['←/→', 'priority'], ['Enter', 'jump']
   ]),
-  review: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
-  docs: Object.freeze([['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['↑/↓', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
-  network: Object.freeze([['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
-  due: Object.freeze([['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
+  review: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
+  docs: Object.freeze([['↑/↓', 'artifact'], ['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['PgUp/PgDn', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
+  discovery: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
+  network: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
+  due: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
-  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['j/k', 'select'], ['Esc', 'close']]),
-  setup: Object.freeze([['j/k', 'step'], ['↑/↓', 'step'], ['Tab', 'next'], ['Shift+Tab', 'back'], ['1–7', 'required step'], ['Enter', 'action'], ['c', 'correct'], ['r', 'recompute'], ['Esc', 'close']])
+  memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['↑/↓', 'select'], ['j/k', 'select'], ['Esc', 'close']]),
+  setup: Object.freeze([['↑/↓', 'step'], ['j/k', 'step'], ['Tab', 'next'], ['Shift+Tab', 'back'], ['1–7', 'required step'], ['Enter', 'action'], ['c', 'change'], ['r', 'refresh'], ['?', 'help'], ['Esc', 'close']])
 });
 
 /**
@@ -73,15 +89,15 @@ export const TUI_KEYMAP = Object.freeze({
  * Tokens: plain char, 'up'|'down'|'left'|'right'|'return'|'escape', or 'ctrl+a'.
  */
 export const TUI_HANDLED_KEYS = Object.freeze({
-  global: Object.freeze(['j', 'k', 'h', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'left', 'right', 'return']),
-  review: Object.freeze(['j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
-  docs: Object.freeze(['j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'up', 'down', 'ctrl+a', 'escape', 'D', 'X']),
-  discovery: Object.freeze(['j', 'k', 'return', 'A', 'X', 'd', 'escape']),
-  network: Object.freeze(['j', 'k', 'm', 'A', 'X', 'P', 'escape']),
-  due: Object.freeze(['j', 'k', '1', '2', '3', 'return', 'escape']),
+  global: Object.freeze(['up', 'down', 'j', 'k', 'h', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'left', 'right', 'return']),
+  review: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
+  docs: Object.freeze(['up', 'down', 'j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'pageup', 'pagedown', 'ctrl+a', 'escape', 'D', 'X']),
+  discovery: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'X', 'd', 'escape']),
+  network: Object.freeze(['up', 'down', 'j', 'k', 'm', 'A', 'X', 'P', 'escape']),
+  due: Object.freeze(['up', 'down', 'j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
-  memory: Object.freeze(['1', '2', '3', '4', 'j', 'k', 'escape']),
-  setup: Object.freeze(['j', 'k', 'up', 'down', 'tab', 'shift+tab', '1', '2', '3', '4', '5', '6', '7', 'return', 'c', 'r', 'escape'])
+  memory: Object.freeze(['1', '2', '3', '4', 'up', 'down', 'j', 'k', 'escape']),
+  setup: Object.freeze(['j', 'k', 'up', 'down', 'tab', 'shift+tab', '1', '2', '3', '4', '5', '6', '7', 'return', 'c', 'r', '?', 'escape'])
 });
 
 /** Expand a KEYMAP binding label into handler tokens from TUI_HANDLED_KEYS. */
@@ -94,6 +110,7 @@ export function expandKeymapBinding(binding) {
     '1–7': ['1', '2', '3', '4', '5', '6', '7'],
     'Shift+Tab': ['shift+tab'],
     'Ctrl+A': ['ctrl+a'],
+    'PgUp/PgDn': ['pageup', 'pagedown'],
     Enter: ['return'],
     Esc: ['escape'],
     Tab: ['tab'],
@@ -114,7 +131,7 @@ export function keypressForToken(token) {
   if (token === 'escape') return { value: '', key: { name: 'escape' } };
   if (token === 'tab') return { value: '', key: { name: 'tab' } };
   if (token === 'shift+tab') return { value: '', key: { name: 'tab', shift: true } };
-  if (token === 'up' || token === 'down' || token === 'left' || token === 'right') {
+  if (['up', 'down', 'left', 'right', 'pageup', 'pagedown', 'home', 'end', 'delete'].includes(token)) {
     return { value: '', key: { name: token } };
   }
   if (token === 'N') return { value: 'N', key: { name: 'n', shift: true } };
@@ -137,6 +154,61 @@ export function parseSgrMouse(value) {
     });
   }
   return events;
+}
+
+const SETUP_STEP_LABELS = Object.freeze({
+  workspace: 'Workspace ready',
+  profile: 'About you',
+  resume: 'Your resume',
+  proofs: 'Experience highlights',
+  intake: 'Add a job',
+  decision: 'Check the fit',
+  materials: 'Application drafts',
+  source: 'Job discovery',
+  calibration: 'Your preferences',
+  provider: 'AI assistant',
+  browser: 'Web applications',
+  network: 'Connections'
+});
+
+const RESUME_SOURCE_CHOICES = Object.freeze([
+  { id: 'paste', label: 'Paste resume text', detail: 'Best for copying from any document.' },
+  { id: 'browse', label: 'Browse this computer', detail: 'Choose TXT, Markdown, JSON, YAML, or YML.' },
+  { id: 'path', label: 'Enter a file path', detail: 'Use a full or relative path.' }
+]);
+
+const JOB_SOURCE_CHOICES = Object.freeze([
+  { id: 'paste', label: 'Paste a job description', detail: 'Copy the complete posting text.' },
+  { id: 'url', label: 'Import a job URL', detail: 'JobOS fetches the page you choose.' },
+  { id: 'browse', label: 'Browse this computer', detail: 'Choose a TXT or Markdown file.' },
+  { id: 'path', label: 'Enter a file path', detail: 'Use a full or relative path.' },
+  { id: 'discovery', label: 'Set up job discovery', detail: 'Watch a company careers page.' }
+]);
+
+const RESUME_FILE_EXTENSIONS = new Set(['.txt', '.md', '.json', '.yaml', '.yml']);
+const JOB_FILE_EXTENSIONS = new Set(['.txt', '.md']);
+
+function friendlySetupText(value) {
+  return String(value || '')
+    .replace(/\bcanonical\b/gi, 'saved')
+    .replace(/\bderived\b/gi, 'calculated')
+    .replace(/\brecompute(?:d)?\b/gi, 'refresh')
+    .replace(/\boptional_incomplete\b/gi, 'available later')
+    .replace(/\bSQLite\b/g, 'local')
+    .replace(/\bblocked\b/gi, 'needs action');
+}
+
+function setupStepLabel(id) {
+  return SETUP_STEP_LABELS[id] || String(id || 'Next step').replace(/[_-]+/g, ' ');
+}
+
+function firstActionableSetupIndex(onboarding) {
+  const items = onboarding?.steps || [];
+  const actionId = onboarding?.nextAction?.id;
+  const actionIndex = actionId ? items.findIndex(item => item.actions?.some(action => action.id === actionId)) : -1;
+  if (actionIndex >= 0) return actionIndex;
+  const blockedIndex = items.findIndex(item => item.status !== 'complete' && item.actions?.length);
+  return blockedIndex >= 0 ? blockedIndex : Math.max(0, items.findIndex(item => item.status !== 'complete'));
 }
 
 function redraftCliHint(artifact, profileId) {
@@ -201,20 +273,38 @@ function wrap(value, width) {
   return lines.length ? lines : [''];
 }
 
+function editableInput(state, color) {
+  const input = String(state.input || '').replace(/\r?\n/g, ' ↵ ');
+  const cursor = Math.max(0, Math.min(input.length, Number(state.inputCursor ?? input.length)));
+  const anchor = state.inputAnchor == null ? cursor : Math.max(0, Math.min(input.length, Number(state.inputAnchor)));
+  const start = Math.min(cursor, anchor);
+  const end = Math.max(cursor, anchor);
+  if (start !== end) {
+    return `${input.slice(0, start)}${paint(input.slice(start, end), 'inverse', color)}${input.slice(end)}█`;
+  }
+  return `${input.slice(0, cursor)}█${input.slice(cursor)}`;
+}
+
 function panel(title, body, width, color) {
   const inner = Math.max(1, width - 2);
   const topLabel = ` ${title} `;
   const top = `┌${topLabel}${'─'.repeat(Math.max(0, inner - topLabel.length))}┐`;
-  const rows = body.map(line => `│${fit(line, inner)}│`);
-  return [paint(top, 'green', color), ...rows, paint(`└${'─'.repeat(inner)}┘`, 'green', color)];
+  const rows = body.map(line => {
+    const row = `│${fit(line, inner)}│`;
+    return paint(row, String(line).includes('▶') ? 'selected' : 'surface', color);
+  });
+  return [paint(top, 'header', color), ...rows, paint(`└${'─'.repeat(inner)}┘`, 'header', color)];
 }
 
 function modalPanel(title, body, width, color) {
   const inner = Math.max(1, width - 2);
   const topLabel = ` ${title} `;
   const top = `╔${topLabel}${'═'.repeat(Math.max(0, inner - topLabel.length))}╗`;
-  const rows = body.map(line => `║${fit(line, inner)}║`);
-  return [paint(top, 'green', color), ...rows, paint(`╚${'═'.repeat(inner)}╝`, 'green', color)];
+  const rows = body.map(line => {
+    const row = `║${fit(line, inner)}║`;
+    return paint(row, String(line).includes('▶') ? 'selected' : 'surface', color);
+  });
+  return [paint(top, 'header', color), ...rows, paint(`╚${'═'.repeat(inner)}╝`, 'header', color)];
 }
 
 function mergeColumns(columns, widths, color, separator = '│') {
@@ -316,17 +406,16 @@ function documentDiff(before, after, width) {
 
 function headerLine(model, state, width, color) {
   const agentState = state.agentOn ? state.agentState : 'off';
+  const profile = model.profile?.name || 'no profile';
   if (width < 140) {
-    const profile = model.profile?.name || 'no profile';
-    const compact = ` JOBOS · FX:OFF · A:${agentState} · O${model.counts.open} H${model.counts.high} D${model.counts.due} R${model.counts.drafts} IV${model.counts.interviews} · ${profile} `;
-    return paint(fit(compact, width), 'green', color);
+    const compact = ` JOBOS · ${profile} · A:${agentState} · FX:OFF · side-effects:off · ${model.counts.open} open  ${model.counts.due} due  ${model.counts.drafts} drafts `;
+    return paint(fit(compact, width), 'header', color);
   }
-  const profile = model.profile ? `${model.profile.name} (${model.profile.id})` : 'no profile';
-  const counts = `open ${model.counts.open} · high ${model.counts.high} · due ${model.counts.due} · drafts ${model.counts.drafts} · iv ${model.counts.interviews}`;
+  const counts = `${model.counts.open} open  ·  ${model.counts.high} high fit  ·  ${model.counts.due} due  ·  ${model.counts.drafts} drafts`;
   const left = ` JOBOS · ${profile} `;
-  const right = ` ${counts} · review · log · agent:${agentState} · sources · system · side-effects:off `;
+  const right = ` ${counts}  ·  A:${agentState}  ·  FX:OFF · side-effects:off · local workspace `;
   const gap = Math.max(1, width - left.length - right.length);
-  return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'green', color);
+  return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'header', color);
 }
 
 function priorityLines(model, state, width, color) {
@@ -358,9 +447,9 @@ function listPanel(model, state, width, height, color) {
   const filters = FILTERS.map(name => name === state.filter ? `[${name}]` : name).join(' · ');
   const body = wrap(filters, width - 4).map(line => paint(line, 'cyan', color));
   if (model.empty.noProfile) {
-    body.push('', 'No profile yet.', 'Run:', 'jobos profile create "PM EdTech"', '', 'Then import a job or run daily.');
+    body.push('', 'No profile yet.', 'Press g to finish setup.', 'CLI option:', 'jobos profile create "Your focus"', '', 'JobOS will guide each required step.');
   } else if (!jobs.length) {
-    body.push('', ...(model.empty.noJobs ? ['No jobs yet.', 'Workspace healthy and empty.'] : [`No jobs in filter: ${state.filter}`]), '', 'Press d for daily discovery', 'Import a job through CLI.');
+    body.push('', ...(model.empty.noJobs ? ['No jobs yet.', 'Workspace healthy and empty.'] : [`No jobs in filter: ${state.filter}`]), '', 'Press d for daily discovery', 'Press g for guided job intake.');
   } else {
     const selectedId = model.selectedJobId;
     const maxCards = Math.max(1, Math.floor((height - 5) / 4));
@@ -370,7 +459,7 @@ function listPanel(model, state, width, height, color) {
       const selected = job.id === selectedId;
       const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
-      body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'green' : 'reset', color));
+      body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'selected' : 'reset', color));
       body.push(crop(`  ${job.company} · ${job.location || 'location —'} · posting:${job.postingLiveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
       body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
       body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
@@ -398,7 +487,7 @@ function postingStatusLines(item, width) {
   const posting = item.postingLiveness;
   const status = posting
     ? `${posting.status} · ${posting.reasonCodes?.join(', ') || 'no reason codes'}`
-    : 'uncertain · no posting-liveness handoff';
+    : 'uncertain · not checked';
   const risks = item.fit?.postingRisks?.length
     ? item.fit.postingRisks.map(value => {
         const label = value.code.replace(/^posting_risk_/, '').replaceAll('_', ' ');
@@ -407,7 +496,6 @@ function postingStatusLines(item, width) {
     : [];
   return [crop(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width), ...risks];
 }
-
 function detailPanel(model, width, height, color) {
   const item = model.selected;
   if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'JobOS will show real local state here after import.'], width, color);
@@ -462,7 +550,7 @@ function agentPanel(model, state, width, height, color) {
   }
   if (!history.length) history.push('Agent pane is on by default.', 'Press i to prompt. Tab expands chat.', 'Press c to reconnect after a failure.');
   const composer = [];
-  if (state.mode === 'agent') composer.push('', paint(`> ${state.input}█`, 'green', color));
+  if (state.mode === 'agent') composer.push('', paint(`> ${editableInput(state, color)}`, 'green', color));
   else if (state.agentState === 'working') composer.push('', paint('working · navigation remains active · x cancels', 'warn', color));
   const room = Math.max(1, height - 2 - header.length - composer.length);
   const maxScroll = Math.max(0, history.length - room);
@@ -479,6 +567,10 @@ function overlayItems(model, state) {
   if (state.overlay === 'setup-action-picker') return state.setupActionItems || [];
   if (state.overlay === 'setup-profile-picker') return model.profiles || [];
   if (state.overlay === 'setup-job-picker') return model.jobs || [];
+  if (state.overlay === 'setup-resume-source') return RESUME_SOURCE_CHOICES;
+  if (state.overlay === 'setup-job-source') return JOB_SOURCE_CHOICES;
+  if (state.overlay === 'setup-file-browser') return state.setupFileItems || [];
+  if (state.overlay === 'setup-proof-review') return state.setupProofItems || [];
   if (state.overlay === 'review') return model.review;
   if (state.overlay === 'docs') return model.selected?.docs || [];
   if (state.overlay === 'profile') return model.profiles;
@@ -694,6 +786,7 @@ function docsPanel(model, state, width, height, color) {
   const content = documentLines(doc, state, innerWidth, color);
   const scroll = state.docsView === 'diff' ? state.docsDiffScroll : state.docsScroll;
   const meta = [
+    docs.map((item, itemIndex) => `${itemIndex === index ? '▶' : ' '} ${item.title}`).join('  ·  '),
     `${index + 1}/${docs.length} · ${doc.title} · ${doc.approvalStatus}`,
     `${doc.path}`,
     `hash ${doc.contentHash}`,
@@ -724,50 +817,110 @@ function overlayPanel(model, state, width, height, color) {
   let body = [];
   if (state.overlay === 'setup') {
     const setup = model.onboarding;
-    title = `GUIDED SETUP · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} REQUIRED`;
+    title = `SET UP JOBOS · ${setup?.completedRequired || 0}/${setup?.totalRequired || 7} ESSENTIAL STEPS DONE`;
     const items = setup?.steps || [];
     const required = items.filter(item => item.required);
     const requiredIndex = new Map(required.map((item, index) => [item.id, index + 1]));
-    const ruler = required.map((item, index) => {
+    const ruler = required.map(item => {
       const selectedStep = items[state.overlayIndex]?.id === item.id;
-      const marker = selectedStep ? '●' : (item.status === 'complete' ? '✓' : String(index + 1));
-      return `[${marker}]`;
+      return selectedStep ? '[●]' : (item.status === 'complete' ? '[✓]' : '[ ]');
     }).join('─');
     const visible = visibleWindow(items, state.overlayIndex, Math.max(2, height - 13));
     body = [
-      `CORE JOURNEY  ${ruler}`,
-      '✓ complete · ! blocked · optional steps follow the required journey',
-      'Navigate  j/k or ↑/↓ · Tab/Shift+Tab · 1–7 required step',
-      'Act  Enter · c correct · r recompute · Esc close',
+      `YOUR PROGRESS  ${ruler}`,
+      '✓ done  ·  ! needs your attention  ·  later steps are optional',
+      'Move with ↑/↓ or j/k  ·  Enter starts the selected task  ·  ? help',
       '',
       ...visible.items.map((item, offset) => {
         const selectedStep = visible.start + offset === state.overlayIndex;
         const marker = item.status === 'complete' ? '✓' : (item.status === 'blocked' ? '!' : '·');
-        const position = item.required ? String(requiredIndex.get(item.id)) : 'optional';
-        return `${selectedStep ? '▶' : ' '} ${marker} ${position} ${item.id.toUpperCase()} · ${item.status}`;
+        const position = item.required ? String(requiredIndex.get(item.id)) : 'later';
+        const status = item.status === 'complete' ? 'done' : (item.status === 'blocked' ? 'needs action' : 'ready');
+        return `${selectedStep ? '▶' : ' '} ${marker} ${position}  ${setupStepLabel(item.id)}  ·  ${status}`;
       })
     ];
     const focused = items[state.overlayIndex];
     if (focused) {
-      body.push('', `SELECTED · ${focused.required ? `REQUIRED ${requiredIndex.get(focused.id)}/${required.length}` : 'OPTIONAL'} · ${focused.id.toUpperCase()}`);
-      body.push(...wrap(focused.summary, Math.max(20, width - 4)).slice(0, 2));
-      if (focused.blockers[0]) body.push(`BLOCKED · ${focused.blockers[0].message}`);
-      if (focused.actions[0]) body.push(`ENTER · ${focused.actions[0].label}`);
+      body.push('', `NEXT TASK · ${setupStepLabel(focused.id)}`);
+      body.push(...wrap(friendlySetupText(focused.summary), Math.max(20, width - 4)).slice(0, 2));
+      if (focused.blockers[0]) body.push(...wrap(`What to do: ${friendlySetupText(focused.blockers[0].remediation || focused.blockers[0].message)}`, width - 4).slice(0, 2));
+      if (focused.actions[0]) body.push(`ENTER · ${friendlySetupText(focused.actions[0].label)}`);
+      else if (focused.status === 'complete') body.push('This step is finished. Move down to continue.');
     }
-    body.push('', `Core ${setup?.coreReady ? 'complete' : 'incomplete'} · provider, browser, and API keys remain optional`);
+    body.push('', `${setup?.coreReady ? 'Your essential setup is complete.' : 'Complete the highlighted tasks to start using JobOS.'} Optional connections can wait.`);
   } else if (state.overlay === 'setup-action-picker') {
-    title = `GUIDED SETUP · SELECT ${state.setupActionStepId || 'ACTION'}`;
+    title = `SET UP JOBOS · CHOOSE HOW TO ${setupStepLabel(state.setupActionStepId).toUpperCase()}`;
     const items = state.setupActionItems || [];
-    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label} · ${item.command}`);
-    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter runs selected action · Esc returns');
+    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${friendlySetupText(item.label)}`);
+    body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
   } else if (state.overlay === 'setup-profile-picker') {
-    title = 'GUIDED SETUP · SELECT PROFILE';
+    title = 'SET UP JOBOS · CHOOSE YOUR PROFILE';
     body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
-    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter selects profile · Esc returns');
+    body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
   } else if (state.overlay === 'setup-job-picker') {
-    title = 'GUIDED SETUP · SELECT JOB';
-    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company} · ${item.id}`);
-    body.push('', 'j/k or ↑/↓ · Tab/Shift+Tab · Enter selects job · Esc returns');
+    title = 'SET UP JOBOS · CHOOSE A JOB';
+    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company}`);
+    body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
+  } else if (state.overlay === 'setup-resume-source') {
+    title = 'SET UP JOBOS · ADD YOUR RESUME';
+    body = [
+      'Choose the easiest way to bring in your resume.',
+      'Supported files: TXT, Markdown, JSON, YAML, and YML.',
+      'PDF and DOCX are not read as text; copy and paste their text instead.',
+      '',
+      ...RESUME_SOURCE_CHOICES.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label}  ·  ${item.detail}`),
+      '',
+      '↑/↓ choose  ·  Enter continue  ·  Esc go back'
+    ];
+  } else if (state.overlay === 'setup-job-source') {
+    title = 'SET UP JOBOS · ADD A JOB';
+    body = [
+      'Add a posting now or set up discovery for later.',
+      '',
+      ...JOB_SOURCE_CHOICES.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label}  ·  ${item.detail}`),
+      '',
+      '↑/↓ choose  ·  Enter continue  ·  Esc go back'
+    ];
+  } else if (state.overlay === 'setup-file-browser') {
+    title = `SET UP JOBOS · CHOOSE A ${state.setupFilePurpose === 'resume' ? 'RESUME' : 'JOB'} FILE`;
+    body = [
+      `Folder: ${state.setupBrowseCwd || process.cwd()}`,
+      state.setupFilePurpose === 'resume'
+        ? 'Supported: TXT, Markdown, JSON, YAML, YML. PDF/DOCX: paste the text instead.'
+        : 'Supported: TXT and Markdown.',
+      '',
+      ...(state.setupFileItems || []).map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.kind === 'directory' ? 'Folder' : 'File'}  ${item.label}${item.supported === false ? '  ·  not supported' : ''}`),
+      '',
+      '↑/↓ choose  ·  Enter open  ·  Esc go back'
+    ];
+  } else if (state.overlay === 'setup-resume-preview') {
+    const preview = state.setupResumePreview || {};
+    const document = preview.document || {};
+    const claims = preview.claims || [];
+    title = 'SET UP JOBOS · CHECK YOUR RESUME';
+    body = [
+      `Source: ${preview.label || 'pasted text'}`,
+      `Name: ${document.identity?.name || 'not found'}  ·  Roles found: ${document.experience?.length || 0}  ·  Education: ${document.education?.length || 0}`,
+      `Experience highlights found: ${claims.length}`,
+      ...(preview.validation?.warnings || []).slice(0, 2).map(item => `Please check: ${friendlySetupText(item.message)}`),
+      '',
+      'PREVIEW',
+      ...claims.slice(0, Math.max(2, height - 11)).map(item => `• ${item.summary}`),
+      ...(claims.length ? [] : ['No achievement-style claims were found. You can add them after import.']),
+      '',
+      'Enter confirms import  ·  Esc changes the source'
+    ];
+  } else if (state.overlay === 'setup-proof-review') {
+    const items = state.setupProofItems || [];
+    title = 'SET UP JOBOS · REVIEW YOUR EXPERIENCE HIGHLIGHTS';
+    body = [
+      'Confirm only claims you can support. JobOS will never invent achievements.',
+      'Enter/V verify  ·  E edit  ·  R reject  ·  A add another  ·  Esc continue',
+      '',
+      ...(items.length
+        ? items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.verification_status === 'verified' ? '✓' : '!'} ${item.summary}`)
+        : ['No extracted claims remain. Press A to add one in your own words.'])
+    ];
   } else if (state.overlay === 'review') {
     if (model.review.length) {
       const visible = visibleWindow(model.review, state.overlayIndex, height - 5);
@@ -959,6 +1112,32 @@ function overlayPanel(model, state, width, height, color) {
     if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
     if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');
     body.push('', keyHints('discovery'));
+  } else if (state.overlay === 'help') {
+    const context = state.helpContextOverlay || 'dashboard';
+    const scope = context === 'dashboard' ? 'global'
+      : context.startsWith('setup') ? 'setup'
+        : (TUI_KEYMAP[context] ? context : 'global');
+    const setupItem = model.onboarding?.steps?.[state.helpContextIndex || 0];
+    title = state.helpFull ? 'HELP · ALL SHORTCUTS' : `HELP · ${context === 'dashboard' ? 'DASHBOARD' : setupStepLabel(context.replace(/^setup-/, ''))}`;
+    body = state.helpFull
+      ? Object.entries(TUI_KEYMAP).flatMap(([name, bindings]) => [
+          name.toUpperCase(),
+          ...wrap(bindings.map(([key, label]) => `${key} ${label}`).join('  ·  '), width - 4),
+          ''
+        ])
+      : [
+          'RECOMMENDED NEXT ACTION',
+          ...(context.startsWith('setup') && setupItem
+            ? wrap(setupItem.actions?.[0]
+              ? `Press Enter to ${friendlySetupText(setupItem.actions[0].label).toLowerCase()}.`
+              : 'This task is done. Press Down to move to the next task.', width - 4)
+            : ['Use ↑/↓ to choose an item, then press Enter.']),
+          '',
+          'CONTROLS FOR THIS SCREEN',
+          ...wrap(keyHints(scope), width - 4),
+          '',
+          'Press ? again to see every shortcut  ·  Esc returns'
+        ];
   } else if (state.overlay === 'system') {
     body = [
       ...state.catalog.map(item => `${item.name} · ${item.available ? 'available' : 'unavailable'} · ${item.protocol} · ${item.role}`),
@@ -999,10 +1178,10 @@ function overlayPanel(model, state, width, height, color) {
       const scope = state.selectedJobId ? `job:${state.selectedJobId?.slice(0, 8)}` : 'profile';
       body.push('', `Profile: ${profileId} · Proposed scope: ${scope}`);
       if (state.mode === 'build-network-field') {
-        body.push(`editing: ${state.networkDraft?._editingKey || ''} > ${state.input}█`);
-        body.push('Enter commits · Esc cancels edit');
+        body.push(`editing: ${state.networkDraft?._editingKey || ''} > ${editableInput(state, color)}`);
+        body.push('Left/Right, Home/End, Shift+arrows, Delete · Enter saves · Esc cancels');
       } else {
-        body.push('j/k move · Enter edit field/toggle · Enter on Save only saves · b Save and build · Esc closes');
+        body.push('↑/↓ or j/k move · Enter edits/selects · b saves and builds · Esc closes');
       }
     }
   } else if (state.overlay === 'packet') {
@@ -1044,7 +1223,7 @@ function footerLines(width, state) {
   if (state.focusTarget === 'agent') {
     if (width >= 90) {
       return [
-        ' CHAT FOCUSED · ↑/↓ or j/k scroll · i type · x cancel · c reconnect · Tab/Esc dashboard · ? system · Q quit'
+        ' CHAT FOCUSED · ↑/↓ or j/k scroll · i type · x cancel · c reconnect · Tab/Esc dashboard · ? help · Q quit'
       ];
     }
     return [
@@ -1054,18 +1233,18 @@ function footerLines(width, state) {
   }
   if (width >= 120) {
     return [
-      ' j/k jobs · ←/→ priority · Enter jump · Tab focus chat · i prompt · p pursue · d discover',
-      ' r review · o documents · g setup · ? all controls · Q quit'
+      ' ↑/↓ or j/k jobs · ←/→ priority · Enter jump · Tab focus chat · i prompt · p pursue · d discover',
+      ' r review · o documents · g setup · ? help · Q quit'
     ];
   }
   if (width >= 90) {
     return [
-      ' j/k jobs · ←/→ priority · Enter jump · Tab chat · i prompt · p pursue · d discover',
-      ' r review · o docs · g setup · ? controls · Q quit'
+      ' ↑/↓ or j/k jobs · ←/→ priority · Enter jump · Tab chat · i prompt · p pursue',
+      ' d discover · r review · o docs · g setup · ? help · Q quit'
     ];
   }
   return [
-    ' j/k jobs · ←/→ priority · Enter jump',
+    ' ↑/↓ or j/k jobs · ←/→ priority · Enter jump',
     ' Tab chat · i prompt · p pursue · d discover',
     ' r review · o docs · g setup · ? help · Q quit'
   ];
@@ -1083,12 +1262,50 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   }
   const safeWidth = measuredWidth;
   const safeHeight = measuredHeight;
-  const footers = footerLines(safeWidth, state);
-  const setupModal = String(state.overlay || '').startsWith('setup');
-  const inputModes = new Set(['command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration']);
+  const inputModes = new Set([
+    'command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason',
+    'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
+    'setup-resume-path', 'setup-resume-paste', 'setup-job-path', 'setup-job-paste',
+    'setup-job-url', 'setup-discovery'
+  ]);
+  const setupWorkspace = String(state.overlay || '').startsWith('setup')
+    || (state.overlay === 'help' && String(state.helpContextOverlay || '').startsWith('setup'));
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
+  if (setupWorkspace) {
+    const setupFooter = ' ↑/↓ choose  ·  Enter continue  ·  ? help  ·  Esc back  ·  Q quit';
+    const trailingRows = 2 + (extraPrompt ? 1 : 0);
+    const bodyHeight = Math.max(4, safeHeight - trailingRows - 2);
+    const lines = [
+      paint(fit(' JOBOS  /  GUIDED SETUP                                      local and private ', safeWidth), 'header', color),
+      paint(fit(' Complete one clear task at a time. Your dashboard is waiting behind this workspace. ', safeWidth), 'muted', color),
+      ...overlayPanel(model, state, safeWidth, bodyHeight, color)
+    ];
+    while (lines.length < safeHeight - trailingRows) {
+      lines.push(paint(fit('', safeWidth), 'surface', color));
+    }
+    if (state.pendingConfirm) {
+      lines.push(paint(fit('Review this action  ·  Enter/y confirm  ·  n/Esc cancel', safeWidth), 'warn', color));
+    } else if (inputModes.has(state.mode)) {
+      const labels = {
+        'setup-profile': 'Your name',
+        'setup-file': 'Local file path',
+        'setup-resume-path': 'Resume file path',
+        'setup-resume-paste': 'Resume text',
+        'setup-job-path': 'Job file path',
+        'setup-job-paste': 'Job description',
+        'setup-job-url': 'Job URL',
+        'setup-discovery': 'Company name | careers page URL',
+        'setup-proof': 'Experience highlight | supporting source',
+        'setup-calibration': 'Preference details'
+      };
+      lines.push(paint(fit(`${labels[state.mode] || 'Input'}: ${editableInput(state, color)}`, safeWidth), 'selected', color));
+    }
+    lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
+    lines.push(paint(fit(setupFooter, safeWidth), 'header', color));
+    return lines.slice(0, safeHeight).join('\n');
+  }
+  const footers = footerLines(safeWidth, state);
   const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
-  const bodyStart = lines.length;
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(4, safeHeight - lines.length - trailingRows);
   if (state.overlay === 'docs' && safeWidth >= 116) {
@@ -1101,7 +1318,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
       side,
       docsPanel(model, state, docsWidth, bodyHeight, color)
     ], [sideWidth, docsWidth], color));
-  } else if (state.overlay && !setupModal) {
+  } else if (state.overlay) {
     lines.push(...overlayPanel(model, state, safeWidth, bodyHeight, color));
   } else if (safeWidth >= 116 && state.agentOn) {
     if (state.focusTarget === 'agent') {
@@ -1144,20 +1361,15 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     lines.push(...listPanel(model, state, safeWidth, listHeight, color));
     lines.push(...detailPanel(model, safeWidth, bodyHeight - listHeight, color));
   }
-  if (setupModal) {
-    const modalWidth = Math.max(48, Math.min(96, safeWidth - 4));
-    const modal = overlayPanel(model, state, modalWidth, bodyHeight, color);
-    const composed = composeModal(lines, modal, safeWidth, bodyStart, bodyHeight);
-    lines.splice(0, lines.length, ...composed);
-  }
+
   if (state.pendingConfirm) {
     const guided = String(state.pendingConfirm.kind || '').startsWith('setup-');
     lines.push(paint(fit(guided ? 'Guided trusted action · y/Enter confirm · n/Esc cancel' : 'Discard unsent review feedback? y/Enter confirm · n/Esc keep editing', safeWidth), 'warn', color));
   } else if (state.mode === 'stage') {
     lines.push(paint(fit(`Stage: ${stageOrder[state.stageIndex] || 'invalid'} · ${keyHints('stage')}`, safeWidth), 'green', color));
   } else if (inputModes.has(state.mode)) {
-    const labels = { command: state.commandPrefix || ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)', 'setup-profile': 'Profile name', 'setup-file': 'Local file path', 'setup-proof': 'Proof summary | evidence', 'setup-calibration': 'Feedback JSON' };
-    lines.push(paint(fit(`${labels[state.mode]}: ${state.input}█`, safeWidth), 'green', color));
+    const labels = { command: state.commandPrefix || ':', 'review-note': 'Reject feedback', 'stage-note': 'Stage note (optional)', 'docs-search': 'Search', 'suppress-reason': 'Suppress reason (optional)' };
+    lines.push(paint(fit(`${labels[state.mode] || 'Input'}: ${editableInput(state, color)}`, safeWidth), 'selected', color));
   }
   lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
   lines.push(...footers.map(footer => paint(fit(footer, safeWidth), 'green', color)));
@@ -1193,10 +1405,22 @@ export function defaultTuiState() {
     setupActionItems: [],
     setupActionStepId: null,
     setupProofId: null,
+    setupProofItems: [],
+    setupFileItems: [],
+    setupFilePurpose: null,
+    setupBrowseCwd: null,
+    setupResumePreview: null,
+    setupJobPreview: null,
+    helpContextOverlay: null,
+    helpContextIndex: 0,
+    helpFull: false,
+    helpReturnMode: 'normal',
     packetDetail: null,
     mode: 'normal',
     commandPrefix: ':',
     input: '',
+    inputCursor: null,
+    inputAnchor: null,
     status: 'starting JobOS host',
     error: null,
     busy: null,
@@ -1227,6 +1451,7 @@ export class JobosTui {
     this.model = buildTuiModel(store, { profileId, selectedJobId, at: this.now().toISOString() });
     this.state.selectedJobId = selectedJobId || this.model.selectedJobId;
     this.state.overlay = initialOverlay || (this.model.empty.noProfile ? 'setup' : null);
+    if (this.state.overlay === 'setup') this.state.overlayIndex = firstActionableSetupIndex(this.model.onboarding);
     this.shouldConnectAgent = connectAgent;
     this.mouseEnabled = Boolean(mouse);
     this.color = Boolean(color);
@@ -1239,6 +1464,7 @@ export class JobosTui {
     this.stopped = false;
     this.notedArtifactIds = new Set();
     this.parseEditorCommand = parseEditorCommand;
+    this.lastScreen = null;
   }
   selectedDocument() {
     const docs = this.model.selected?.docs || [];
@@ -1266,6 +1492,72 @@ export class JobosTui {
     };
   }
 
+  setInput(value = '') {
+    this.state.input = String(value);
+    this.state.inputCursor = this.state.input.length;
+    this.state.inputAnchor = null;
+  }
+
+  focusNextSetupAction() {
+    this.state.overlayIndex = firstActionableSetupIndex(this.model.onboarding);
+    return this.state.overlayIndex;
+  }
+
+  openHelp() {
+    if (this.state.overlay === 'help') {
+      this.state.helpFull = !this.state.helpFull;
+      this.render();
+      return true;
+    }
+    this.state.helpContextOverlay = this.state.overlay || 'dashboard';
+    this.state.helpContextIndex = this.state.overlayIndex;
+    this.state.helpReturnMode = this.state.mode;
+    this.state.overlay = 'help';
+    this.state.helpFull = false;
+    this.state.mode = 'normal';
+    this.state.status = 'Help for this screen · ? shows every shortcut · Esc returns';
+    this.render();
+    return true;
+  }
+
+  closeHelp() {
+    this.state.overlay = this.state.helpContextOverlay === 'dashboard' ? null : this.state.helpContextOverlay;
+    this.state.overlayIndex = this.state.helpContextIndex || 0;
+    this.state.mode = this.state.helpReturnMode || 'normal';
+    this.state.helpFull = false;
+    this.render();
+    return true;
+  }
+
+  setupFiles(directory = process.cwd(), purpose = this.state.setupFilePurpose) {
+    const supported = purpose === 'resume' ? RESUME_FILE_EXTENSIONS : JOB_FILE_EXTENSIONS;
+    const resolved = path.resolve(directory);
+    const entries = readdirSync(resolved, { withFileTypes: true })
+      .filter(entry => !entry.name.startsWith('.'))
+      .map(entry => ({
+        id: path.join(resolved, entry.name),
+        label: entry.name,
+        kind: entry.isDirectory() ? 'directory' : 'file',
+        supported: entry.isDirectory() || supported.has(path.extname(entry.name).toLowerCase())
+      }))
+      .filter(entry => entry.kind === 'directory' || entry.supported)
+      .sort((left, right) => left.kind === right.kind ? left.label.localeCompare(right.label) : (left.kind === 'directory' ? -1 : 1));
+    if (path.dirname(resolved) !== resolved) entries.unshift({ id: path.dirname(resolved), label: '..', kind: 'directory', supported: true });
+    this.state.setupBrowseCwd = resolved;
+    this.state.setupFileItems = entries;
+    this.state.overlayIndex = 0;
+    return entries;
+  }
+
+  refreshSetupProofItems() {
+    const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+    this.state.setupProofItems = profileId
+      ? listProofs(this.store, profileId).filter(item => item.status === 'active' && item.verification_status !== 'rejected')
+      : [];
+    this.state.overlayIndex = Math.min(this.state.overlayIndex, Math.max(0, this.state.setupProofItems.length - 1));
+    return this.state.setupProofItems;
+  }
+
   toggleAgentFocus() {
     if (this.state.overlay) return false;
     if (this.state.focusTarget === 'agent') {
@@ -1290,15 +1582,52 @@ export class JobosTui {
 
   onMouseData(chunk) {
     for (const event of parseSgrMouse(chunk)) {
-      if (event.button === 64) {
-        if (this.state.focusTarget === 'agent') this.scrollAgent(3);
+      if (event.button === 64 || event.button === 65) {
+        const delta = event.button === 64 ? -1 : 1;
+        if (this.state.overlay && overlayItems(this.model, this.state).length) {
+          const items = overlayItems(this.model, this.state);
+          this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
+          this.render();
+        } else if (this.state.focusTarget === 'agent') {
+          this.scrollAgent(event.button === 64 ? 3 : -3);
+        } else {
+          this.moveSelection(delta);
+        }
         continue;
       }
-      if (event.button === 65) {
-        if (this.state.focusTarget === 'agent') this.scrollAgent(-3);
+      if (!event.pressed || event.button !== 0) continue;
+      const frame = this.lastFrame;
+      const overlayHit = frame?.overlayHits?.find(hit => (
+        hit.y === event.y && event.x >= hit.x && event.x < hit.x + hit.width
+      ));
+      if (this.state.overlay && overlayHit) {
+        if (overlayHit.discoveryJobId) {
+          this.state.selectedDiscoveryJobId = overlayHit.discoveryJobId;
+        } else {
+          this.state.overlayIndex = overlayHit.index;
+          if (this.state.overlay === 'docs') this.setSelectedArtifact(overlayHit.id, { reset: false });
+        }
+        this.state.status = `Selected ${overlayHit.label}. Press Enter to continue.`;
+        this.render();
         continue;
       }
-      if (!event.pressed || event.button !== 0 || this.state.overlay) continue;
+      const filterHit = frame?.filterHits?.find(hit => event.y === hit.y && event.x >= hit.x && event.x < hit.x + hit.width);
+      if (filterHit) {
+        if (filterHit.kind === 'due') {
+          this.state.taskFilter = filterHit.filter;
+          this.state.overlayIndex = 0;
+          this.render();
+        } else if (filterHit.kind === 'memory') {
+          this.state.memoryView = filterHit.filter;
+          this.state.overlayIndex = 0;
+          this.render();
+        } else {
+          this.state.filter = filterHit.filter;
+          this.refresh({ disk: false });
+        }
+        continue;
+      }
+      if (this.state.overlay) continue;
       const { width, height } = this.dimensions();
       if (event.y >= 1 && event.y <= (width < 90 ? 1 : 4)) {
         const count = this.model.priority?.length || 0;
@@ -1311,7 +1640,6 @@ export class JobosTui {
         }
         continue;
       }
-      const frame = this.lastFrame;
       if (frame?.sections.footer && event.y >= frame.sections.footer.y) {
         const footerIndex = event.y - frame.sections.footer.y;
         const footer = frame.sections.footer.lines[footerIndex] || '';
@@ -1334,9 +1662,10 @@ export class JobosTui {
   }
 
   render() {
-    if (this.stopped || this.state.editorActive) return;
-    const screen = renderTui(this.model, this.state, this.dimensions());
+    if (this.stopped || this.state.editorActive) return false;
     const dimensions = this.dimensions();
+    const previousDimensions = this.lastRenderDimensions;
+    const screen = renderTui(this.model, this.state, dimensions);
     const plain = stripAnsiText(screen).split('\n');
     const jobsY = plain.findIndex(line => line.includes('┌ JOBS ·'));
     const jobsBottom = jobsY < 0 ? -1 : plain.findIndex((line, index) => index > jobsY && line.startsWith('└'));
@@ -1346,16 +1675,83 @@ export class JobosTui {
       title: job.title,
       y: plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(job.title))
     })).filter(hit => hit.y >= 0);
+    const currentOverlayItems = this.state.overlay === 'discovery'
+      ? this.model.discovery.queue
+      : overlayItems(this.model, this.state);
+    const termFor = item => {
+      if (this.state.overlay === 'setup') return setupStepLabel(item.id);
+      if (this.state.overlay === 'setup-action-picker') return friendlySetupText(item.label);
+      if (this.state.overlay === 'setup-file-browser') return item.label;
+      if (this.state.overlay === 'setup-proof-review') return item.summary;
+      if (this.state.overlay === 'network') return crop(item.label, 24);
+      if (this.state.overlay === 'build-network') return item.label;
+      return item.title || item.name || item.summary || item.label || item.id || item.entityId || '';
+    };
+    const overlayHits = currentOverlayItems.map((item, index) => {
+      const term = termFor(item);
+      const y = term ? plain.findIndex(line => line.includes(term)) : -1;
+      const x = y < 0 ? -1 : plain[y].indexOf(term);
+      return {
+        index,
+        id: item.id,
+        discoveryJobId: this.state.overlay === 'discovery' ? item.id : null,
+        label: term,
+        y,
+        x,
+        width: Math.max(1, term.length)
+      };
+    }).filter(hit => hit.y >= 0 && hit.x >= 0);
+    const dashboardFilterHits = FILTERS.map(filter => {
+      const y = plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(filter));
+      return {
+        kind: 'dashboard',
+        filter,
+        y,
+        x: y < 0 ? -1 : plain[y].indexOf(filter),
+        width: filter.length
+      };
+    }).filter(hit => hit.y >= 0 && hit.x >= 0);
+    const overlayFilters = this.state.overlay === 'due'
+      ? TASK_FILTERS.map(filter => ({ kind: 'due', filter }))
+      : this.state.overlay === 'memory'
+        ? ['observations', 'proposals', 'career-brief', 'voice-guide'].map(filter => ({ kind: 'memory', filter }))
+        : [];
+    const filterHits = [
+      ...dashboardFilterHits,
+      ...overlayFilters.map(hit => {
+        const label = hit.filter.replace('-', ' ');
+        const y = plain.findIndex(line => line.includes(label));
+        return { ...hit, y, x: y < 0 ? -1 : plain[y].indexOf(label), width: label.length };
+      }).filter(hit => hit.y >= 0 && hit.x >= 0)
+    ];
     const footers = footerLines(dimensions.width, this.state);
     this.lastFrame = {
       width: dimensions.width,
       height: dimensions.height,
+      overlayHits,
+      filterHits,
       sections: {
         jobs: jobsY < 0 ? null : { y: jobsY, bottom: jobsBottom < 0 ? dimensions.height : jobsBottom, hits },
         footer: { y: Math.max(0, plain.length - footers.length), lines: footers }
       }
     };
-    this.stdout.write(`${ESC}H${ESC}2J${screen}`);
+    if (screen === this.lastScreen) return false;
+    const previous = this.lastScreen;
+    this.lastScreen = screen;
+    this.lastRenderDimensions = { width: dimensions.width, height: dimensions.height };
+    if (previous == null || previousDimensions?.width !== dimensions.width || previousDimensions?.height !== dimensions.height) {
+      this.stdout.write(`${ESC}H${ESC}2J${screen}`);
+      return true;
+    }
+    const oldLines = previous.split('\n');
+    const newLines = screen.split('\n');
+    const updates = [];
+    for (let index = 0; index < Math.max(oldLines.length, newLines.length); index++) {
+      if (oldLines[index] === newLines[index]) continue;
+      updates.push(`${ESC}${index + 1};1H${ESC}2K${newLines[index] || ''}`);
+    }
+    if (updates.length) this.stdout.write(updates.join(''));
+    return updates.length > 0;
   }
 
   refresh({ disk = true } = {}) {
@@ -1367,8 +1763,9 @@ export class JobosTui {
     const previousReviewIndex = Math.max(0, previousModel?.review?.findIndex(item => item.id === previousArtifactId) ?? 0);
     const previousDiscoveryIndex = Math.max(0, previousModel?.discovery?.queue?.findIndex(item => item.id === this.state.selectedDiscoveryJobId) ?? 0);
     if (disk) reload(this.store);
-    const setupSurface = ['setup', 'setup-profile-picker', 'setup-job-picker'].includes(this.state.overlay)
-      || this.state.mode === 'setup-calibration';
+    const setupSurface = String(this.state.overlay || '').startsWith('setup')
+      || (this.state.overlay === 'help' && String(this.state.helpContextOverlay || '').startsWith('setup'))
+      || String(this.state.mode || '').startsWith('setup-');
     this.model = buildTuiModel(this.store, {
       profileId: setupSurface ? this.state.setupProfileId : this.state.profileId,
       selectedJobId: setupSurface ? this.state.setupJobId : this.state.selectedJobId,
@@ -1527,7 +1924,7 @@ export class JobosTui {
     this.state.overlayIndex = 0;
     this.state.docsDiff = false;
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     if (name === 'build-network') {
       this.state.networkDraft = seedNetworkDraft(this.model);
       this.state.status = 'build-network editor · Enter edits fields · Esc closes';
@@ -1546,19 +1943,20 @@ export class JobosTui {
     const selectedJob = this.model.jobs.find(job => job.id === this.state.selectedJobId);
     this.state.setupJobId = selectedJob && this.state.setupProfileId === this.state.profileId ? selectedJob.id : null;
     this.state.overlay = 'setup';
-    this.state.overlayIndex = 0;
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     this.refresh({ disk: false });
-    this.state.status = 'setup overlay · recomputed from canonical state · Esc closes';
+    this.focusNextSetupAction();
+    this.state.status = 'Start with the highlighted task · Esc returns to the dashboard';
     this.render();
     return true;
   }
 
   closeTransient() {
+    if (this.state.overlay === 'help') return this.closeHelp();
     if (this.state.mode === 'build-network-field') {
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       if (this.state.networkDraft) this.state.networkDraft._editingKey = null;
       this.state.status = 'edit cancelled';
       this.render();
@@ -1568,7 +1966,7 @@ export class JobosTui {
       this.state.overlay = null;
       this.state.overlayIndex = 0;
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.networkDraft = null;
       this.state.status = 'overlay closed';
       this.render();
@@ -1721,6 +2119,8 @@ export class JobosTui {
       this.render();
       return;
     }
+    const setupAction = String(this.state.overlay || '').startsWith('setup');
+    let succeeded = false;
     const profileId = this.model.profileId;
     const jobId = this.state.selectedJobId;
     if ((name !== 'daily') && !jobId) {
@@ -1747,6 +2147,7 @@ export class JobosTui {
     this.render();
     try {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
+      succeeded = true;
       this.state.status = `${name} complete · local state refreshed`;
     } catch (error) {
 
@@ -1760,6 +2161,11 @@ export class JobosTui {
     } finally {
       this.state.busy = null;
       this.refresh({ disk: false });
+      if (succeeded && setupAction) {
+        this.state.overlay = 'setup';
+        this.focusNextSetupAction();
+        this.state.status = `${name === 'score' ? 'Fit check' : 'Application draft'} complete · the next task is highlighted`;
+      }
       this.noteArtifactChanges(before, this.artifactSnapshot());
     }
   }
@@ -1778,7 +2184,7 @@ export class JobosTui {
     try {
       await callDomainTool(this.store, tool, args, { source: 'tui' });
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.refresh({ disk: false });
       this.state.busy = null;
       if (decision === 'rejected') {
@@ -1894,7 +2300,7 @@ export class JobosTui {
       this.state.packetDetail = { empty: true, jobId, profileId };
       this.state.overlay = 'packet';
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = `No packet · freeze with :packet create (or CLI: jobos apply packet create --job ${jobId} --profile ${profileId || '<profile>'} --json)`;
       this.render();
       return;
@@ -1908,7 +2314,7 @@ export class JobosTui {
       this.state.packetDetail = detail;
       this.state.overlay = 'packet';
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = `Packet ${detail.id} · ${detail.currency}/${detail.receiptState} · ${packetCtaLine(detail).replace(/^next /, 'next: ')}`;
     } catch (error) {
       this.state.packetDetail = { ...meta, id: meta.currentPacketId, fallback: true };
@@ -1928,7 +2334,7 @@ export class JobosTui {
     const [command] = trimmed.split(/\s+/);
     const argText = trimmed.slice((command || '').length).trim();
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     if (!command) return this.render();
     if (slash && DOMAIN_TOOLS.some(tool => tool.name === command)) {
       let args = {};
@@ -2593,7 +2999,7 @@ export class JobosTui {
     if (!artifactId) return;
     this.setSelectedArtifact(artifactId, { reset: false });
     this.state.mode = 'review-note';
-    this.state.input = '';
+    this.setInput('');
     this.state.status = 'Rejection feedback is required before saving.';
     this.render();
   }
@@ -2608,7 +3014,7 @@ export class JobosTui {
     const artifactId = this.state.selectedArtifactId;
     const row = one(this.store, 'SELECT id,job_id,path,type FROM artifacts WHERE id=?', [artifactId]);
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     const reviewed = this.reviewCurrentArtifact('rejected', note);
     if (!reviewed || !row) return;
     const hint = redraftCliHint(
@@ -2676,7 +3082,7 @@ export class JobosTui {
     if (item.kind !== 'contact') { this.state.status = 'X suppresses a contact row · P promotes a candidate row.'; this.render(); return true; }
     this.state.pendingSuppressContactId = item.id;
     this.state.mode = 'suppress-reason';
-    this.state.input = '';
+    this.setInput('');
     this.state.status = 'Suppress reason (optional) · Enter marks do-not-use locally · Esc cancels';
     this.render();
     return true;
@@ -2686,7 +3092,7 @@ export class JobosTui {
     const contactId = this.state.pendingSuppressContactId;
     const reason = this.state.input.trim();
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     this.state.pendingSuppressContactId = null;
     if (!contactId) { this.render(); return; }
     try {
@@ -2779,7 +3185,7 @@ export class JobosTui {
     const index = stageOrder.indexOf(current);
     this.state.stageIndex = index >= 0 ? index : 0;
     this.state.mode = 'stage';
-    this.state.input = '';
+    this.setInput('');
     this.state.status = 'Choose the human-tracked application stage.';
     this.render();
   }
@@ -2788,7 +3194,7 @@ export class JobosTui {
     const status = stageOrder[this.state.stageIndex];
     const note = this.state.input.trim();
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     try {
       if (!validStatuses.has(status)) throw Error(`Invalid status: ${status}`);
       const application = one(this.store, 'SELECT id FROM applications WHERE job_id=? AND profile_id=?', [this.state.selectedJobId, this.model.profileId]);
@@ -2828,7 +3234,7 @@ export class JobosTui {
     const query = sanitizeTerminalText(this.state.input).trim();
     this.state.docsQuery = query;
     this.state.mode = 'normal';
-    this.state.input = '';
+    this.setInput('');
     if (!query) {
       this.state.docsMatchIndex = 0;
       this.state.status = 'Search cleared.';
@@ -2932,15 +3338,15 @@ export class JobosTui {
 
   onDocsKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
+    if (key.name === 'down') return this.state.focusTarget === 'viewer' ? this.scrollDocument(1) : this.moveArtifactSelection(1);
+    if (key.name === 'up') return this.state.focusTarget === 'viewer' ? this.scrollDocument(-1) : this.moveArtifactSelection(-1);
     if (value === 'j') return this.moveArtifactSelection(1);
     if (value === 'k') return this.moveArtifactSelection(-1);
-    if (key.name === 'down') return this.scrollDocument(1);
-    if (key.name === 'up') return this.scrollDocument(-1);
     if (key.name === 'pagedown') return this.scrollDocument(Math.max(1, this.dimensions().height - 12));
     if (key.name === 'pageup') return this.scrollDocument(-Math.max(1, this.dimensions().height - 12));
     if (value === '/') {
       this.state.mode = 'docs-search';
-      this.state.input = '';
+      this.setInput('');
       this.render();
       return true;
     }
@@ -2948,7 +3354,7 @@ export class JobosTui {
     if (value === 'N' || (key.shift && key.name === 'n')) return this.moveDocsMatch(-1);
     if (value === 'A') {
       this.state.mode = 'approve-confirm';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = 'Approve current artifact revision? (y/n)';
       this.render();
       return true;
@@ -2956,7 +3362,7 @@ export class JobosTui {
     if (value === 'R') return this.beginReject();
     if (value === 'X') {
       this.state.mode = 'reject-note';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = 'Reject: type feedback, then Enter to confirm.';
       this.render();
       return true;
@@ -2982,45 +3388,342 @@ export class JobosTui {
       this.render();
       return true;
     }
+    if (value === 'r') return this.openOverlay('review');
     return false;
   }
 
+  beginSetupSource(kind) {
+    this.state.overlay = kind === 'resume' ? 'setup-resume-source' : 'setup-job-source';
+    this.state.overlayIndex = 0;
+    this.state.mode = 'normal';
+    this.setInput('');
+    this.state.error = null;
+    this.state.status = kind === 'resume'
+      ? 'Choose paste, browse, or a file path · supported formats are shown above'
+      : 'Choose how you want to add jobs';
+    this.render();
+    return true;
+  }
+
+  previewSetupResume({ filePath = '', sourceText = '', label = '' } = {}) {
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+      if (!profileId) throw new Error('Create your profile before adding a resume.');
+      let input;
+      if (filePath) {
+        const extension = path.extname(filePath).toLowerCase();
+        if (!RESUME_FILE_EXTENSIONS.has(extension)) {
+          throw new Error('That file type is not supported. Use TXT, Markdown, JSON, YAML, or YML; paste text from PDF or DOCX.');
+        }
+        input = readResumeFile(profileId, filePath);
+      } else {
+        input = { sourceText: String(sourceText), document: parseResumeText(profileId, sourceText) };
+      }
+      const validation = validateResumeDocument(input.document);
+      this.state.setupResumePreview = {
+        ...input,
+        filePath,
+        label: label || filePath || 'pasted resume text',
+        validation,
+        claims: structuredProofs(profileId, input.sourceText, label || filePath || 'pasted resume')
+      };
+      this.state.overlay = 'setup-resume-preview';
+      this.state.overlayIndex = 0;
+      this.state.mode = 'normal';
+      this.setInput('');
+      this.state.error = validation.valid ? null : 'Resume details need attention';
+      this.state.status = validation.valid
+        ? 'Review the extraction preview · Enter imports · Esc chooses another source'
+        : `Resume cannot be imported yet · ${friendlySetupText(validation.blockers[0]?.message)}`;
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message;
+    }
+    this.render();
+    return true;
+  }
+
+  confirmSetupResume() {
+    const preview = this.state.setupResumePreview;
+    if (!preview?.validation?.valid) {
+      this.state.error = 'Resume details need attention';
+      this.state.status = friendlySetupText(preview?.validation?.blockers?.[0]?.message || 'Choose another source and try again.');
+      this.render();
+      return true;
+    }
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      createResumeRevision(this.store, {
+        profileId,
+        document: preview.document,
+        sourceText: preview.sourceText
+      });
+      importResumeProofCandidates(this.store, profileId, preview.sourceText, preview.label);
+      this.state.overlay = 'setup-proof-review';
+      this.state.overlayIndex = 0;
+      this.state.mode = 'normal';
+      this.setInput('');
+      this.refresh({ disk: false });
+      this.refreshSetupProofItems();
+      this.state.error = null;
+      this.state.status = this.state.setupProofItems.length
+        ? 'Resume imported · review each extracted highlight now'
+        : 'Resume imported · no highlights were extracted, so press A to add one';
+      this.render();
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Resume import failed: ${friendlySetupText(error.message)}`;
+      this.render();
+    }
+    return true;
+  }
+
+  finishSetupJobImport(result, label = 'Job') {
+    this.state.setupJobId = result.job.id;
+    this.state.selectedJobId = result.job.id;
+    this.state.overlay = 'setup';
+    this.state.mode = 'normal';
+    this.setInput('');
+    this.refresh({ disk: false });
+    this.focusNextSetupAction();
+    this.state.error = null;
+    this.state.status = `${label} added · the next task is highlighted`;
+    this.render();
+    return true;
+  }
+
+  importSetupJobText(sourceText, label = 'Pasted job') {
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+      const parsed = parseJob(sourceText);
+      const result = importNormalized(this.store, {
+        profileId,
+        job: { ...parsed, description: sourceText, source: 'manual', url: '' },
+        source: 'manual',
+        status: 'imported'
+      });
+      return this.finishSetupJobImport(result, label);
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Could not add this job: ${error.message}`;
+      this.render();
+      return true;
+    }
+  }
+
+  importSetupJobFile(filePath) {
+    try {
+      if (!JOB_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+        throw new Error('Choose a TXT or Markdown job description.');
+      }
+      const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+      const result = importText(this.store, { profileId, filePath });
+      return this.finishSetupJobImport(result, 'Job file');
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Could not add this job file: ${error.message}`;
+      this.render();
+      return true;
+    }
+  }
+
+  async importSetupJobUrl(url) {
+    this.state.busy = 'job import';
+    this.state.error = null;
+    this.state.status = 'Reading the job page you provided…';
+    this.render();
+    try {
+      const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+      const result = await importUrl(this.store, { profileId, url });
+      this.finishSetupJobImport(result, 'Job URL');
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Could not import that URL: ${error.message}`;
+      this.render();
+    } finally {
+      this.state.busy = null;
+    }
+    return true;
+  }
+
+  saveSetupDiscovery(value) {
+    try {
+      const [company, ...urlParts] = String(value).split('|').map(part => part.trim());
+      const url = urlParts.join('|').trim();
+      if (!company || !/^https?:\/\//i.test(url)) throw new Error('Enter a company name, then |, then its full careers page URL.');
+      const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+      createSearch(this.store, {
+        name: `${company} roles`,
+        profileId,
+        adapter: 'career-page',
+        config: { url, companyLabel: company }
+      });
+      this.state.overlay = 'setup';
+      this.state.mode = 'normal';
+      this.setInput('');
+      this.refresh({ disk: false });
+      this.focusNextSetupAction();
+      this.state.error = null;
+      this.state.status = `Discovery saved for ${company} · press d from the dashboard whenever you want to search`;
+      this.render();
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message;
+      this.render();
+    }
+    return true;
+  }
+
   onOverlayKey(value, key) {
+    const isEnter = key.name === 'return' || key.name === 'enter';
+    const moveDelta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
+      ? 1
+      : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
+
+    if (this.state.overlay === 'help') {
+      if (value === '?') return this.openHelp();
+      if (key.name === 'escape') return this.closeHelp();
+      return true;
+    }
+
+    if (this.state.overlay === 'setup-resume-source' || this.state.overlay === 'setup-job-source') {
+      const kind = this.state.overlay === 'setup-resume-source' ? 'resume' : 'job';
+      const choices = kind === 'resume' ? RESUME_SOURCE_CHOICES : JOB_SOURCE_CHOICES;
+      if (key.name === 'escape') {
+        this.state.overlay = 'setup';
+        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === (kind === 'resume' ? 'resume' : 'intake'));
+      } else if (moveDelta !== null) {
+        this.state.overlayIndex = Math.max(0, Math.min(choices.length - 1, this.state.overlayIndex + moveDelta));
+      } else if (isEnter) {
+        const choice = choices[this.state.overlayIndex];
+        if (choice?.id === 'browse') {
+          this.state.setupFilePurpose = kind;
+          this.setupFiles(process.cwd(), kind);
+          this.state.overlay = 'setup-file-browser';
+          this.state.status = 'Choose a folder or supported file';
+        } else if (choice?.id === 'paste') {
+          this.state.mode = kind === 'resume' ? 'setup-resume-paste' : 'setup-job-paste';
+          this.setInput('');
+          this.state.status = `Paste the ${kind === 'resume' ? 'resume text' : 'job description'} · Enter continues`;
+        } else if (choice?.id === 'path') {
+          this.state.mode = kind === 'resume' ? 'setup-resume-path' : 'setup-job-path';
+          this.setInput('');
+          this.state.status = 'Enter a full or relative file path · Enter continues';
+        } else if (choice?.id === 'url') {
+          this.state.mode = 'setup-job-url';
+          this.setInput('');
+          this.state.status = 'Paste the full job posting URL · Enter imports it';
+        } else if (choice?.id === 'discovery') {
+          this.state.mode = 'setup-discovery';
+          this.setInput('');
+          this.state.status = 'Enter company name | full careers page URL';
+        }
+      } else if (value === '?') return this.openHelp();
+      this.render();
+      return true;
+    }
+
+    if (this.state.overlay === 'setup-file-browser') {
+      const items = this.state.setupFileItems || [];
+      if (key.name === 'escape') return this.beginSetupSource(this.state.setupFilePurpose);
+      if (moveDelta !== null && items.length) {
+        this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+      } else if (isEnter) {
+        const item = items[this.state.overlayIndex];
+        if (item?.kind === 'directory') {
+          try {
+            this.setupFiles(item.id, this.state.setupFilePurpose);
+            this.state.status = `Folder: ${item.id}`;
+          } catch (error) {
+            this.state.error = error.message;
+            this.state.status = `Cannot open that folder: ${error.message}`;
+          }
+        } else if (item?.supported) {
+          if (this.state.setupFilePurpose === 'resume') return this.previewSetupResume({ filePath: item.id, label: item.label });
+          return this.importSetupJobFile(item.id);
+        }
+      } else if (value === '?') return this.openHelp();
+      this.render();
+      return true;
+    }
+
+    if (this.state.overlay === 'setup-resume-preview') {
+      if (key.name === 'escape') return this.beginSetupSource('resume');
+      if (isEnter) return this.confirmSetupResume();
+      if (value === '?') return this.openHelp();
+      return true;
+    }
+
+    if (this.state.overlay === 'setup-proof-review') {
+      const items = this.state.setupProofItems || [];
+      const item = items[this.state.overlayIndex];
+      if (key.name === 'escape') {
+        this.state.overlay = 'setup';
+        this.refresh({ disk: false });
+        this.focusNextSetupAction();
+        this.state.status = 'Experience highlights reviewed · the next task is highlighted';
+        this.render();
+        return true;
+      }
+      if (moveDelta !== null && items.length) {
+        this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+      } else if ((isEnter || value === 'V') && item) {
+        verifyProof(this.store, item.id);
+        this.refreshSetupProofItems();
+        this.refresh({ disk: false });
+        this.state.overlay = 'setup-proof-review';
+        this.state.status = 'Highlight verified · review another, add one, or press Esc to continue';
+      } else if (value === 'R' && item) {
+        rejectProof(this.store, item.id);
+        this.refreshSetupProofItems();
+        this.refresh({ disk: false });
+        this.state.overlay = 'setup-proof-review';
+        this.state.status = 'Highlight rejected and excluded';
+      } else if (value === 'E' && item) {
+        this.state.mode = 'setup-proof';
+        this.state.setupFormAction = 'replace_proof';
+        this.state.setupProofId = item.id;
+        this.state.setupReturnOverlay = 'setup-proof-review';
+        this.setInput(`${item.summary} | ${item.evidence || ''}`);
+        this.state.status = 'Edit the claim and supporting source · Enter saves';
+      } else if (value === 'A') {
+        this.state.mode = 'setup-proof';
+        this.state.setupFormAction = 'add_proof';
+        this.state.setupProofId = null;
+        this.state.setupReturnOverlay = 'setup-proof-review';
+        this.setInput('');
+        this.state.status = 'Add an experience highlight | supporting source · Enter saves';
+      } else if (value === '?') return this.openHelp();
+      this.render();
+      return true;
+    }
+
     if (this.state.overlay === 'setup-action-picker') {
       const items = overlayItems(this.model, this.state);
       if (key.name === 'escape') {
         const stepId = this.state.setupActionStepId;
         this.state.overlay = 'setup';
         this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
-      } else {
-        const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
-          ? 1
-          : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
-        if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
-        else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
-          const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
-          this.state.overlay = 'setup';
-          return this.openSetupAction(step, items[this.state.overlayIndex]);
-        }
-      }
-
+      } else if (moveDelta !== null && items.length) {
+        this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+      } else if (isEnter && items[this.state.overlayIndex]) {
+        const step = this.model.onboarding.steps.find(item => item.id === this.state.setupActionStepId);
+        this.state.overlay = 'setup';
+        return this.openSetupAction(step, items[this.state.overlayIndex]);
+      } else if (value === '?') return this.openHelp();
       this.render();
       return true;
     }
+
     if (this.state.overlay === 'setup-profile-picker' || this.state.overlay === 'setup-job-picker') {
       const picker = this.state.overlay;
       const items = overlayItems(this.model, this.state);
       if (key.name === 'escape') {
         this.state.overlay = 'setup';
         this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === (picker === 'setup-profile-picker' ? 'profile' : 'decision'));
-        this.render();
-        return true;
-      }
-      const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
-        ? 1
-        : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
-      if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
-      else if ((key.name === 'return' || key.name === 'enter') && items[this.state.overlayIndex]) {
+      } else if (moveDelta !== null && items.length) {
+        this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+      } else if (isEnter && items[this.state.overlayIndex]) {
         if (picker === 'setup-profile-picker') {
           this.state.setupProfileId = items[this.state.overlayIndex].id;
           this.state.profileId = items[this.state.overlayIndex].id;
@@ -3030,41 +3733,39 @@ export class JobosTui {
           this.state.setupJobId = items[this.state.overlayIndex].id;
           this.state.selectedJobId = items[this.state.overlayIndex].id;
         }
-        const stepId = picker === 'setup-profile-picker' ? 'profile' : 'decision';
         this.state.overlay = 'setup';
         this.refresh({ disk: false });
-        this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === stepId);
-        this.state.status = `${stepId} selected explicitly · setup recomputed`;
-        this.render();
-        return true;
-      }
+        this.focusNextSetupAction();
+        this.state.status = 'Selection saved · the next task is highlighted';
+      } else if (value === '?') return this.openHelp();
       this.render();
       return true;
     }
-    if (key.name === 'escape') return this.closeTransient();
+
     if (this.state.overlay === 'setup') {
       const items = this.model.onboarding?.steps || [];
-      const delta = value === 'j' || key.name === 'down' || (key.name === 'tab' && !key.shift)
-        ? 1
-        : value === 'k' || key.name === 'up' || (key.name === 'tab' && key.shift) ? -1 : null;
-      if (delta !== null && items.length) this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + delta));
-      else if (/^[1-7]$/.test(value)) {
-        const required = items.filter(item => item.required);
-        const target = required[Number(value) - 1];
+      if (key.name === 'escape') return this.closeTransient();
+      if (moveDelta !== null && items.length) {
+        this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+      } else if (/^[1-7]$/.test(value)) {
+        const target = items.filter(item => item.required)[Number(value) - 1];
         if (target) this.state.overlayIndex = items.indexOf(target);
-      }
-      else if (value === 'r') {
+      } else if (value === 'r') {
         this.refresh();
-        this.state.status = 'setup recomputed from canonical SQLite state';
+        this.focusNextSetupAction();
+        this.state.status = 'Setup refreshed · the next task is highlighted';
         return true;
       } else if (value === 'c') {
         return this.openSetupCorrection(items[this.state.overlayIndex]);
-      } else if (key.name === 'return' || key.name === 'enter') {
+      } else if (isEnter) {
         return this.openSetupAction(items[this.state.overlayIndex]);
-      }
+      } else if (value === '?') return this.openHelp();
       this.render();
       return true;
     }
+
+    if (key.name === 'escape') return this.closeTransient();
+    if (value === '?') return this.openHelp();
     if (this.state.mode === 'build-network-field') return this.onInputKey(value, key);
     if (this.state.overlay === 'memory' && ['1', '2', '3', '4'].includes(value)) {
       this.state.memoryView = ['observations', 'proposals', 'career-brief', 'voice-guide'][Number(value) - 1];
@@ -3074,9 +3775,9 @@ export class JobosTui {
       return true;
     }
     if (this.state.overlay === 'discovery') {
-      if (key.name === 'return' || key.name === 'enter') return this.openDiscoverySelection();
-      if (value === 'j') return this.moveDiscoverySelection(1);
-      if (value === 'k') return this.moveDiscoverySelection(-1);
+      if (isEnter) return this.openDiscoverySelection();
+      if (moveDelta === 1) return this.moveDiscoverySelection(1);
+      if (moveDelta === -1) return this.moveDiscoverySelection(-1);
       if (value === 'A') return this.decideDiscovery('saved');
       if (value === 'X') return this.decideDiscovery('archived');
       if (value === 'd') {
@@ -3084,13 +3785,6 @@ export class JobosTui {
         return true;
       }
     }
-    if (value === 'r') return this.openOverlay('review');
-    if (value === 'l') return this.openOverlay('log');
-    if (value === 'n') return this.openOverlay('network');
-    if (value === 'o') return this.openDocuments();
-    if (value === 'q') return this.openOverlay('answers');
-    if (value === 's') return this.openOverlay('discovery');
-    if (value === '?') return this.openOverlay('system');
     if (this.state.overlay === 'due' && ['1', '2', '3'].includes(value)) {
       this.state.taskFilter = TASK_FILTERS[Number(value) - 1];
       this.state.overlayIndex = 0;
@@ -3121,32 +3815,25 @@ export class JobosTui {
       if (value === 'X') return this.beginSuppressContact();
       if (value === 'P') return void this.promoteCandidateSelection();
     }
-    if (this.state.overlay === 'discovery') {
-      if (value === 'A') return this.decideDiscovery('saved');
-      if (value === 'X') return this.decideDiscovery('archived');
-    }
     const items = overlayItems(this.model, this.state);
-    if (value === 'j' && items.length) this.state.overlayIndex = Math.min(items.length - 1, this.state.overlayIndex + 1);
-    else if (value === 'k' && items.length) this.state.overlayIndex = Math.max(0, this.state.overlayIndex - 1);
-    else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'profile' && items[this.state.overlayIndex]) {
+    if (moveDelta !== null && items.length) {
+      this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
+    } else if (isEnter && this.state.overlay === 'profile' && items[this.state.overlayIndex]) {
       this.state.profileId = items[this.state.overlayIndex].id;
       this.state.selectedJobId = null;
       this.state.overlay = null;
       this.refresh({ disk: false });
       return true;
-    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
+    } else if (isEnter && this.state.overlay === 'review' && items[this.state.overlayIndex]) {
       this.openReviewDocument();
       return true;
-    } else if ((key.name === 'return' || key.name === 'enter') && this.state.overlay === 'due') {
+    } else if (isEnter && this.state.overlay === 'due') {
       const task = items[this.state.overlayIndex];
       if (task?.jobId) this.selectJobInMainList(task.jobId, 'Due task · job now selected in the main list.');
       else {
         this.state.status = 'This task has no linked job.';
         this.render();
       }
-      return true;
-    } else if (value === 'd' && this.state.overlay === 'discovery') {
-      void this.runAction('daily');
       return true;
     } else if (this.state.overlay === 'build-network') {
       this.onBuildNetworkKey(value, key, items);
@@ -3184,7 +3871,7 @@ export class JobosTui {
     const action = selectedAction || item?.actions?.[0];
     const actionId = action?.id;
     if (!actionId) {
-      this.state.status = `${item?.id || 'step'} has no pending action`;
+      this.state.status = `${setupStepLabel(item?.id)} has no pending action`;
       this.render();
       return true;
     }
@@ -3193,7 +3880,7 @@ export class JobosTui {
       this.state.overlayIndex = 0;
       this.state.setupActionItems = item.actions;
       this.state.setupActionStepId = item.id;
-      this.state.status = `Select a ${item.id} recovery action.`;
+      this.state.status = `Choose how to continue with ${setupStepLabel(item.id)}.`;
       this.render();
       return true;
     }
@@ -3201,14 +3888,14 @@ export class JobosTui {
     if (actionId === 'select_job' || actionId === 'select_current_job') return this.openOverlay('setup-job-picker');
     if (actionId === 'record_calibration') {
       this.state.mode = 'setup-calibration';
-      this.state.input = '';
-      this.state.status = 'Enter feedback JSON with jobId, decision, reasonCodes, optional signals/explanations · Enter previews';
+      this.setInput('');
+      this.state.status = 'Describe one job decision so JobOS can preview what it learned · Enter previews';
       this.render();
       return true;
     }
     if (actionId === 'derive_calibration') {
       this.state.pendingConfirm = { kind: 'setup-calibration-derive' };
-      this.state.status = 'Derive inactive proposals from current attributed observations? (y/n)';
+      this.state.status = 'Create preference suggestions from your saved feedback? (y/n)';
       this.render();
       return true;
     }
@@ -3218,50 +3905,55 @@ export class JobosTui {
       this.state.setupCalibrationReview = true;
       return true;
     }
-    if (actionId === 'verify_proof') {
-      const proofId = String(action.command).match(/proof verify\s+(\S+)/)?.[1];
+    if (!selectedAction && ['verify_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
+      this.state.overlay = 'setup-proof-review';
+      this.state.overlayIndex = 0;
+      this.refreshSetupProofItems();
+      this.state.status = 'Review each experience highlight in context';
+      this.render();
+      return true;
+    }
+    if (selectedAction && actionId === 'verify_proof') {
+      const proofId = String(action.command || '').match(/proof verify\s+(\S+)/)?.[1] || null;
       this.state.pendingConfirm = { kind: 'setup-proof-verify', proofId };
-      this.state.status = `Verify proof ${proofId} as a trusted human? (y/n)`;
+      this.state.status = 'Verify this experience highlight? (y/n)';
       this.render();
       return true;
     }
     if (actionId === 'score_job' || actionId === 'pursue_job') {
       this.state.pendingConfirm = { kind: 'setup-domain-action', action: actionId === 'score_job' ? 'score' : 'pursue' };
-      this.state.status = `Confirm ${actionId === 'score_job' ? 'deterministic scoring' : 'pursuit and local draft creation'}? (y/n)`;
+      this.state.status = `Confirm ${actionId === 'score_job' ? 'the fit check' : 'creating your local application drafts'}? (y/n)`;
       this.render();
       return true;
     }
     if (actionId === 'create_profile') {
       this.state.mode = 'setup-profile';
-      this.state.input = '';
+      this.setInput('');
       this.state.setupFormAction = actionId;
-      this.state.status = 'Enter the canonical profile name · Enter saves · Esc cancels';
+      this.state.status = 'What should JobOS call this profile? · Enter saves · Esc cancels';
       this.render();
       return true;
     }
-    if (['import_resume', 'replace_resume', 'import_local_job'].includes(actionId)) {
-      this.state.mode = 'setup-file';
-      this.state.input = '';
-      this.state.setupFormAction = actionId;
-      this.state.status = 'Enter a local file path · validation runs before setup advances · Esc cancels';
-      this.render();
-      return true;
-    }
+    if (actionId === 'import_resume' || actionId === 'replace_resume') return this.beginSetupSource('resume');
+    if (actionId === 'import_local_job') return this.beginSetupSource('job');
     if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
       const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
       this.state.mode = 'setup-proof';
-      this.state.input = '';
+      this.setInput('');
       this.state.setupFormAction = actionId;
       this.state.setupProofId = proofId;
+      this.state.setupReturnOverlay = 'setup';
       this.state.status = actionId === 'retire_proof'
-        ? 'Enter the retirement reason · Enter retires this canonical proof · Esc cancels'
+        ? 'Why should this highlight be removed? · Enter saves'
         : actionId === 'replace_proof'
-          ? 'Enter replacement proof summary | evidence · Enter supersedes the canonical proof · Esc cancels'
-          : 'Enter proof summary | evidence · this direct human proof is verified · Esc cancels';
+          ? 'Edit the experience highlight | supporting source · Enter saves'
+          : 'Add an experience highlight | supporting source · Enter saves';
       this.render();
       return true;
     }
-    this.state.status = action?.command ? `This action is human-owned · ${action.command}` : `No guided action is available for ${item?.id || 'this step'}.`;
+    this.state.status = action?.command
+      ? `Open the related screen to continue: ${friendlySetupText(action.label)}`
+      : `Nothing else is needed for ${setupStepLabel(item?.id)}.`;
     this.render();
     return true;
   }
@@ -3271,7 +3963,7 @@ export class JobosTui {
     const input = this.state.input.trim();
     if (!input) {
       this.state.error = 'Input is required';
-      this.state.status = 'Setup input is required; no canonical state was changed.';
+      this.state.status = 'Please enter a value before continuing.';
       this.render();
       return true;
     }
@@ -3280,39 +3972,32 @@ export class JobosTui {
         const result = createProfile(this.store, input);
         this.state.setupProfileId = result.profile.id;
         this.state.profileId = result.profile.id;
-      } else if (actionId === 'import_resume' || actionId === 'replace_resume') {
-        const owner = actionId === 'replace_resume' ? replaceResume : importResume;
-        owner(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
       } else if (actionId === 'add_proof') {
         const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
-        if (!summary) throw new Error('Proof summary is required.');
+        if (!summary) throw new Error('An experience highlight is required.');
         addProof(this.store, this.state.setupProfileId || this.model.onboarding.profileId, summary, evidenceParts.join(' | '), []);
       } else if (actionId === 'replace_proof') {
         const [summary, ...evidenceParts] = input.split('|').map(part => part.trim());
         supersedeProof(this.store, this.state.setupProofId, { summary, evidence: evidenceParts.join(' | ') });
       } else if (actionId === 'retire_proof') {
         retireProof(this.store, this.state.setupProofId, input);
-      } else if (actionId === 'import_local_job') {
-        const result = importText(this.store, { profileId: this.state.setupProfileId || this.model.onboarding.profileId, filePath: input });
-        this.state.setupJobId = result.job.id;
-        this.state.selectedJobId = result.job.id;
       }
+      const returnOverlay = this.state.setupReturnOverlay;
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.setupFormAction = null;
       this.state.setupProofId = null;
+      this.state.setupReturnOverlay = null;
       this.state.error = null;
-      this.state.overlay = 'setup';
+      this.state.overlay = returnOverlay || 'setup';
       this.refresh({ disk: false });
-      const nextStepId = this.model.onboarding.nextAction
-        ? this.model.onboarding.steps.find(item => item.actions.some(candidate => candidate.id === this.model.onboarding.nextAction.id))?.id
-        : null;
-      const nextIndex = this.model.onboarding.steps.findIndex(item => item.id === nextStepId);
-      if (nextIndex >= 0) this.state.overlayIndex = nextIndex;
-      this.state.status = `${actionId} complete · setup recomputed from canonical state`;
+      if (this.state.overlay === 'setup-proof-review') this.refreshSetupProofItems();
+      else this.focusNextSetupAction();
+      this.state.status = `${friendlySetupText(actionId).replaceAll('_', ' ')} complete · continue with the highlighted task`;
+      this.render();
     } catch (error) {
       this.state.error = error.message;
-      this.state.status = `${actionId} failed: ${error.message} · correct the input and retry`;
+      this.state.status = `Could not save: ${friendlySetupText(error.message)} · correct the input and retry`;
       this.render();
     }
     return true;
@@ -3373,10 +4058,10 @@ export class JobosTui {
       this.state.overlay = 'setup';
       this.refresh({ disk: false });
       this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'calibration');
-      this.state.status = 'Calibration proposals derived · inactive until explicitly accepted; review to accept or reject';
+      this.state.status = 'Preference suggestions are ready · review each one before accepting';
     } catch (error) {
       this.state.error = error.message;
-      this.state.status = `Calibration derivation failed: ${error.message}`;
+      this.state.status = `Could not create preference suggestions: ${error.message}`;
       this.render();
     }
   }
@@ -3402,7 +4087,7 @@ export class JobosTui {
       // Enter edit mode: seed input with current value
       const draftKey = item.key;
       this.state.mode = 'build-network-field';
-      this.state.input = this.state.networkDraft?.[draftKey] || '';
+      this.setInput(this.state.networkDraft?.[draftKey] || '');
       if (this.state.networkDraft) this.state.networkDraft._editingKey = draftKey;
       this.state.status = `editing ${item.label} · Enter commits · Esc cancels`;
       this.render();
@@ -3424,21 +4109,108 @@ export class JobosTui {
     if (this.state.mode === 'reject-confirm') {
       if (value === 'y') { void this.commitArtifactReview('rejected'); return true; }
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = 'Rejection cancelled.';
       this.render();
       return true;
     }
-    if (key.name === 'escape') return this.closeTransient();
+
+    const input = String(this.state.input || '');
+    let cursor = Math.max(0, Math.min(input.length, Number(this.state.inputCursor ?? input.length)));
+    let anchor = this.state.inputAnchor == null ? null : Math.max(0, Math.min(input.length, Number(this.state.inputAnchor)));
+    const selection = () => anchor == null || anchor === cursor ? null : [Math.min(anchor, cursor), Math.max(anchor, cursor)];
+    const replaceSelection = replacement => {
+      const range = selection() || [cursor, cursor];
+      this.state.input = `${this.state.input.slice(0, range[0])}${replacement}${this.state.input.slice(range[1])}`;
+      this.state.inputCursor = range[0] + replacement.length;
+      this.state.inputAnchor = null;
+    };
+    const moveCursor = target => {
+      const bounded = Math.max(0, Math.min(this.state.input.length, target));
+      if (key.shift) {
+        if (this.state.inputAnchor == null) this.state.inputAnchor = cursor;
+      } else {
+        this.state.inputAnchor = null;
+      }
+      this.state.inputCursor = bounded;
+    };
+
+    if (key.name === 'escape') {
+      if (String(this.state.mode).startsWith('setup-')) {
+        const returnOverlay = this.state.setupReturnOverlay;
+        this.state.mode = 'normal';
+        this.state.setupFormAction = null;
+        this.state.setupProofId = null;
+        this.state.setupReturnOverlay = null;
+        this.setInput('');
+        if (returnOverlay) this.state.overlay = returnOverlay;
+        this.state.status = 'Edit cancelled · choose another option';
+        this.render();
+        return true;
+      }
+      return this.closeTransient();
+    }
+    if (key.ctrl && key.name === 'a') {
+      this.state.inputAnchor = 0;
+      this.state.inputCursor = this.state.input.length;
+      this.render();
+      return true;
+    }
+    if (key.name === 'left') {
+      const range = selection();
+      moveCursor(!key.shift && range ? range[0] : cursor - 1);
+      this.render();
+      return true;
+    }
+    if (key.name === 'right') {
+      const range = selection();
+      moveCursor(!key.shift && range ? range[1] : cursor + 1);
+      this.render();
+      return true;
+    }
+    if (key.name === 'home') {
+      moveCursor(0);
+      this.render();
+      return true;
+    }
+    if (key.name === 'end') {
+      moveCursor(this.state.input.length);
+      this.render();
+      return true;
+    }
     if (key.name === 'backspace') {
-      this.state.input = this.state.input.slice(0, -1);
+      if (selection()) replaceSelection('');
+      else if (cursor > 0) {
+        this.state.input = `${this.state.input.slice(0, cursor - 1)}${this.state.input.slice(cursor)}`;
+        this.state.inputCursor = cursor - 1;
+        this.state.inputAnchor = null;
+      }
+      this.render();
+      return true;
+    }
+    if (key.name === 'delete') {
+      if (selection()) replaceSelection('');
+      else if (cursor < this.state.input.length) {
+        this.state.input = `${this.state.input.slice(0, cursor)}${this.state.input.slice(cursor + 1)}`;
+        this.state.inputCursor = cursor;
+        this.state.inputAnchor = null;
+      }
       this.render();
       return true;
     }
     if (key.name === 'return' || key.name === 'enter') {
       const text = this.state.input.trim();
       const mode = this.state.mode;
-      if (['setup-profile', 'setup-file', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (['setup-profile', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (mode === 'setup-resume-path') return this.previewSetupResume({ filePath: text, label: path.basename(text) });
+      if (mode === 'setup-resume-paste') return this.previewSetupResume({ sourceText: this.state.input, label: 'pasted resume text' });
+      if (mode === 'setup-job-path') return this.importSetupJobFile(text);
+      if (mode === 'setup-job-paste') return this.importSetupJobText(this.state.input);
+      if (mode === 'setup-job-url') {
+        void this.importSetupJobUrl(text);
+        return true;
+      }
+      if (mode === 'setup-discovery') return this.saveSetupDiscovery(this.state.input);
       if (mode === 'setup-calibration') {
         void this.previewSetupCalibration();
         return true;
@@ -3471,7 +4243,7 @@ export class JobosTui {
         return true;
       }
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       if (mode === 'agent' && text) void this.promptAgent(text);
       else if (mode === 'command') this.executeCommand(`${this.state.commandPrefix || ':'}${text}`);
       else if (mode === 'build-network-field' && this.state.networkDraft) {
@@ -3483,9 +4255,17 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (!key.ctrl && !key.meta && value && /^[\x20-\x7e]$/.test(value)) {
-      this.state.input += value;
-      this.render();
+    if (!key.ctrl && !key.meta && value) {
+      const multiline = ['setup-resume-paste', 'setup-job-paste'].includes(this.state.mode);
+      const inserted = String(value)
+        .replace(/\r\n?/g, '\n')
+        .split('')
+        .filter(character => character === '\n' ? multiline : character >= ' ')
+        .join('');
+      if (inserted) {
+        replaceSelection(inserted);
+        this.render();
+      }
     }
     return true;
   }
@@ -3502,7 +4282,7 @@ export class JobosTui {
     if (value === 'y' || key.name === 'return' || key.name === 'enter') {
       this.state.pendingConfirm = null;
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       if (confirm.kind === 'setup-domain-action') {
         void this.runAction(confirm.action);
         return true;
@@ -3522,7 +4302,7 @@ export class JobosTui {
           this.refresh({ disk: false });
           this.state.overlayIndex = this.model.onboarding.steps.findIndex(step => step.id === 'proofs');
           this.state.error = null;
-          this.state.status = `Proof ${confirm.proofId} verified · setup recomputed`;
+          this.state.status = `Experience highlight verified · setup refreshed`;
         } catch (error) {
           this.state.error = error.message;
           this.state.status = `Proof verification failed: ${error.message}`;
@@ -3549,7 +4329,7 @@ export class JobosTui {
   onStageKey(value, key) {
     if (key.name === 'escape') {
       this.state.mode = 'normal';
-      this.state.input = '';
+      this.setInput('');
       this.state.status = 'Stage change cancelled.';
       this.applyPendingAutoOpen();
       this.render();
@@ -3565,7 +4345,7 @@ export class JobosTui {
         this.state.status = `Invalid status: ${status}`;
       } else {
         this.state.mode = 'stage-note';
-        this.state.input = '';
+        this.setInput('');
         this.state.status = `Optional note for ${status}.`;
       }
     }
@@ -3597,23 +4377,27 @@ export class JobosTui {
       this.render();
       return true;
     }
-    if (['review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm', 'reject-confirm', 'reject-note', 'suppress-reason', 'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration'].includes(this.state.mode)) return this.onInputKey(value, key);
+    if ([
+      'review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm',
+      'reject-confirm', 'reject-note', 'suppress-reason', 'build-network-field',
+      'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
+      'setup-resume-path', 'setup-resume-paste', 'setup-job-path', 'setup-job-paste',
+      'setup-job-url', 'setup-discovery'
+    ].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
     if (this.docsViewerActive()) {
       const handled = this.onDocsKey(value, key);
       if (handled !== false) return handled;
     }
-    if (this.state.overlay === 'docs' && ['A', 'R', 'B', 'E', 'V', 'I', 'D', 'X'].includes(value)) return this.onDocsKey(value, key);
-    if (this.state.overlay === 'docs' && this.dimensions().width >= 116) {
-      if (value === 'j') return this.moveSelection(1);
-      if (value === 'k') return this.moveSelection(-1);
-      if (value === 'n') return this.openOverlay('network');
-    }
+    if (this.state.overlay === 'docs' && (
+      ['j', 'k'].includes(value) || ['up', 'down'].includes(key.name)
+      || ['A', 'R', 'B', 'E', 'V', 'I', 'D', 'X'].includes(value)
+    )) return this.onDocsKey(value, key);
     if (this.state.overlay) return this.onOverlayKey(value, key);
     if (key.name === 'escape') return this.closeTransient();
     if (value === 'h') this.cycleStripFocus(-1);
-    else if (value === 'j') this.moveSelection(1);
-    else if (value === 'k') this.moveSelection(-1);
+    else if (value === 'j' || key.name === 'down') this.moveSelection(1);
+    else if (value === 'k' || key.name === 'up') this.moveSelection(-1);
     else if (value === '1') { this.state.filter = 'today'; this.refresh({ disk: false }); }
     else if (value === '2') { this.state.filter = 'all'; this.refresh({ disk: false }); }
     else if (value === '3') { this.state.filter = 'high'; this.refresh({ disk: false }); }
@@ -3629,19 +4413,19 @@ export class JobosTui {
     } else if (value === ':') {
       this.state.mode = 'command';
       this.state.commandPrefix = ':';
-      this.state.input = '';
+      this.setInput('');
       this.render();
     } else if (value === '/') {
       this.state.mode = 'command';
       this.state.commandPrefix = '/';
-      this.state.input = '';
+      this.setInput('');
       this.render();
     } else if (value === 'i') {
       this.state.agentOn = true;
       this.state.focusTarget = 'agent';
       this.state.agentScroll = 0;
       this.state.mode = 'agent';
-      this.state.input = '';
+      this.setInput('');
       this.render();
     } else if (value === 't') this.beginStage();
     else if (value === 'r') this.openOverlay('review');
@@ -3651,7 +4435,7 @@ export class JobosTui {
     else if (value === 'o') this.openDocuments();
     else if (value === 'q') this.openOverlay('answers');
     else if (value === 's') this.openOverlay('discovery');
-    else if (value === '?') this.openOverlay('system');
+    else if (value === '?') this.openHelp();
     else if (value === 'v') this.openOverlay('profile');
     else if (value === 'b') this.openOverlay('build-network');
     else if (value === 'p') void this.runAction('pursue');

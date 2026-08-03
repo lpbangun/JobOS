@@ -1,12 +1,12 @@
 # JobOS Build Progress
 
-## Current status — 2026-08-02
+## Current status — 2026-08-03
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
 ### Primary workflows
 
-- `jobos setup`, `setup status`, and `setup next` expose a resumable, read-only projection over seven canonical core steps. First-run TUI setup is now a centered modal over the current main shell with `j`/`k`, arrow, Tab/Shift+Tab, and direct `1`–`7` navigation; profile/job ambiguity still requires explicit selection, resume/proof blockers retain W01 correction codes, materials reuse readiness v4, and provider/browser/calibration/network remain optional.
+- `jobos setup`, `setup status`, and `setup next` expose a resumable projection over seven local core steps. First-run TUI setup now opens as a focused full-screen workspace on the first actionable task, advances after successful actions, supports arrows, optional `j`/`k`, Tab/Shift+Tab, mouse selection, and direct `1`–`7` navigation, and keeps profile/job ambiguity explicit. Resume intake supports paste, file browsing, path validation, extraction preview, and immediate claim review; job intake supports pasted descriptions, URLs, local files, and discovery configuration.
 - `jobos tui --profile <id>` opens the locked 011 pipeline/list/detail/agent shell with real SQLite data, overlays, direct domain actions, and a default-on Hermes ACP guest.
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
@@ -17,7 +17,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos agents ...`, `--agent`, and `JOBOS_AGENT` route structured generation through Codex, Hermes, or any registered protocol-compatible executable.
 - `jobos browser ...` provides optional private Playwright profiles, cookie/storage-state synchronization, authenticated fetches, and SHA-256-pinned trusted scripts with explicit side-effect gating.
 - `jobos apply form inspect|show|assist|checkpoint|submit` provides the narrow packet-bound live-form bridge. Inspection is read-only; fill and configured submit have separate default-off configuration and per-invocation gates; manual submission/attestation remains first-class.
-- W09 guided setup exposes the same seven-step completion contract through CLI and TUI, with explicit profile/job selection and deterministic recovery actions.
+- W09 guided setup preserves the seven-step CLI completion contract while presenting plain-language, task-oriented TUI guidance, contextual help, and standard cursor/selection editing.
 - W08 Career Memory records attributable profile-scoped observations, keeps proposals inert until human acceptance, applies accepted rules only, and preserves append-only revoke/undo history without exposing private notes.
 
 ### Implemented in the ACP host, lean CLI, and people-research passes
@@ -25,7 +25,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - Real ACP v1 client lifecycle for Hermes 0.18.2: initialize, session creation, event streaming, mediated MCP tools, cancellation, timeout/crash typing, redacted stderr, and restart.
 - Cancelled or timed-out ACP sessions quarantine later updates and start a clean process/session before the next prompt; raw TUI and ACP drills verify uncontaminated recovery.
 - One `domain-tools` facade serves CLI/TUI actions, the ACP session's inward MCP door, and the independent external `jobos mcp` door.
-- Data-bound locked 011 terminal shell: priority strip, dense job list, selected detail stack, default-on agent pane, human-gated review/discovery/stage actions, responsive artifact documents, and clean raw-terminal shutdown.
+- Data-bound locked 011 terminal shell: filled visual hierarchy, priority strip, job list, selected detail stack, default-on agent pane, human-gated review/discovery/stage actions, responsive artifact documents, universal arrow/mouse list selection, incremental line rendering, and clean raw-terminal shutdown.
 - Artifact review lifecycle: sanitized Markdown/diffs, selected-artifact evidence, predecessor-aware versions, workspace-confined `$VISUAL`/`$EDITOR` round-trips, auditable approve/reject/draft decisions, and input-safe agent-created artifact auto-open.
 - Scripted real-client evidence: multi-turn ACP cancel/recover/restart/policy/timeout/missing-binary drill and external MCP initialize/list/call/exit drill.
 - Concise root help grouped into Setup, Workflows, and Extend; the complete low-level registry remains behind `help --all` and `agent-guide --json`.
@@ -71,8 +71,8 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
-- Rebased setup-navigation verification on 2026-08-02: `npm test` passed **618/618** checks after installing the current mainline development dependencies; `npm run smoke` passed the clean-workspace workflow with W03/W04/W07/W08 projections and zero external side effects.
-- Focused setup/TUI verification passed **57/57** checks across the new modal/navigation suite, canonical W09 onboarding, live keymap invariants, and existing TUI workflows; direct rendering also exercised the `120×36` and minimum `60×20` layouts.
+- Setup-navigation verification on 2026-08-03: `npm test` passed **620/620** checks; `npm run smoke` passed the clean-workspace workflow with W03/W04/W07/W08 projections and zero external side effects.
+- The advisor-owned usability suite converged in three iterations and passed **6/6** focused benchmarks covering isolated `120×36` and `80×24` setup layouts, first-action focus and automatic advance, universal keyboard/mouse selection, resume preview and proof review, standard text editing, contextual help, and incremental rendering.
 - W10 focused verification on 2026-07-27: `npm run test:w10` passed for golden projections, generated-data containment, tracked-data/static policy, documentation/workflow semantics, and measured MCP compatibility/decision.
 - `npm audit --omit=dev --audit-level=high --json` passed with zero high or critical production advisories. Registry unavailability remains release-blocking inconclusive evidence, never a clean result.
 - `node scripts/release-evidence.js --output .tmp/w10-release-evidence --skip-audit` completed every local check and correctly returned `inconclusive`; the test-only audit skip was not promoted to pass.
