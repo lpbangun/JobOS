@@ -55,10 +55,9 @@ test('populated dashboard prioritizes jobs and selected action while technical d
   const screen = renderTui(model, state, { width: 150, height: 46, color: false });
 
   assert.match(screen, /JOBOS · PM EdTech/);
-  assert.match(screen, /ACTION/);
-  assert.doesNotMatch(screen, /QUEUE .*INTERVIEW/, 'empty interview category is not navigable');
-  assert.match(screen, /NEW/);
-  assert.doesNotMatch(screen, /QUEUE .*FAILURE/, 'empty failure category is not navigable');
+  assert.match(screen, /NEXT UP/);
+  assert.deepEqual(model.priority.map(item => item.kind), ['action', 'new']);
+  assert.doesNotMatch(screen, /QUEUE|INTERVIEW|FAILURE/, 'priority metadata and empty categories stay out of the calm default view');
   assert.match(screen, /JOBS · today/);
   assert.match(screen, /SELECTED JOB/);
   assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');

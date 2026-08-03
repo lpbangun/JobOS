@@ -102,7 +102,9 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction) {
       kind: recommendedAction?.state || 'action',
       jobId: recommendedAction?.jobId || null,
       taskId: recommendedAction?.taskId || null,
-      text: recommendedAction?.label || 'Review your workspace and choose the next step'
+      text: recommendedAction?.label || 'Review your workspace and choose the next step',
+      actionId: recommendedAction?.id || null,
+      source: recommendedAction?.source || null
     },
     interview ? {
       kind: 'interview',

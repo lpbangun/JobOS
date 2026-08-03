@@ -451,12 +451,11 @@ function documentDiff(before, after, width) {
 
 function headerLine(model, state, width, color) {
   const profile = model.profile?.name || 'no profile';
-  const counts = `${model.counts.open} open · ${model.counts.due} due · ${model.counts.drafts} drafts`;
   if (width < 100) {
-    return paint(fit(` JOBOS · ${profile} · ${counts} `, width), 'header', color);
+    return paint(fit(` JOBOS · ${profile} `, width), 'header', color);
   }
   const left = ` JOBOS · ${profile}`;
-  const right = `${counts} · local workspace `;
+  const right = 'local workspace ';
   const gap = Math.max(1, width - stringWidth(left) - stringWidth(right));
   return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'header', color);
 }
@@ -467,15 +466,13 @@ function priorityLines(model, state, width, color) {
   if (!item) return [];
   const tone = item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn');
   if (width < 90) {
-    return wrap(` ▶ ${item.kind.toUpperCase()} ${focused + 1}/${model.priority.length} · ${item.text} · ←/→`, width)
+    return wrap(` ▶ ${item.text} · Enter opens · ${focused + 1}/${model.priority.length} · ←/→`, width)
       .slice(0, 2)
       .map(line => paint(fit(line, width), tone, color));
   }
-  const queue = model.priority.map(entry => entry.kind.toUpperCase()).join(' · ');
   return [
-    paint(fit(` PRIORITY  ${focused + 1} of ${model.priority.length}  ·  use ←/→ to review`, width), 'header', color),
-    paint(fit(` ▶ ${item.kind.toUpperCase()}  ${item.text}`, width), tone, color),
-    paint(fit(` QUEUE  ${queue}`, width), 'muted', color)
+    paint(fit(` NEXT UP  ${focused + 1} of ${model.priority.length}  ·  use ←/→ to review`, width), 'header', color),
+    paint(fit(` ▶ ${item.text}  ·  Enter opens`, width), tone, color)
   ];
 }
 
@@ -495,43 +492,19 @@ function listPanel(model, state, width, height, color) {
   } else {
     const selectedId = model.selectedJobId;
     const available = Math.max(1, height - 2 - body.length);
-    const coreRows = width < 90 ? 4 : 5;
+    const coreRows = width < 90 ? 3 : 4;
     const maxCards = Math.max(1, Math.floor(available / coreRows));
     let start = Math.max(0, jobs.findIndex(job => job.id === selectedId) - Math.floor(maxCards / 2));
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
     for (const job of jobs.slice(start, start + maxCards)) {
       const selected = job.id === selectedId;
-      const fitScore = fitLabel(job.fit);
-      const core = [
+      body.push(
         ...wrap(`${selected ? '▶' : ' '} ${job.title}`, width - 4).slice(0, 2),
-        paint(`  FIT ${fitScore}${job.highFit ? ' · HIGH' : ''}`, selected ? 'selected' : 'cyan', color),
-        ...wrap(`  STAGE ${job.stage} · NEXT ${job.id === selectedId ? model.recommendedAction?.label : (job.next?.title || 'No action due')}`, width - 4).slice(0, 2)
-      ];
-      body.push(...core);
-      if (width >= 90 && body.length < height - 2) {
-        body.push(paint(crop(`  ${job.company} · ${job.location || 'location not listed'}`, width - 4), 'muted', color));
-      }
-    }
-    if (body.length + 2 < height - 2) body.push('', ...wrap('Next: ↑/↓ choose a role · Enter follows the priority action.', width - 4));
-    if (height >= 20 && body.length < height - 4) {
-      const selected = model.jobs.find(job => job.id === selectedId);
-      const filterCounts = FILTERS.map(name => `${name} ${filteredJobs(model, name).length}`);
-      const pulse = [
-        '',
-        paint('WORKSPACE PULSE', 'cyan', color),
-        `${model.counts.open} open · ${model.counts.due} due · ${model.counts.drafts} drafts`,
-        paint('FILTER COUNTS', 'cyan', color),
-        ...wrap(filterCounts.join(' · '), width - 4),
-        paint('SELECTED SIGNALS', 'cyan', color),
-        selected
-          ? `${selected.signals.artifacts} artifacts · ${selected.signals.proofs} proofs · network ${selected.signals.path}`
-          : 'Choose a role to inspect its signals.',
-        paint('WORKFLOW STATUS', 'cyan', color),
-        ...wrap((model.selected?.stages || []).map(stage => `${stage.name}:${stage.state}`).join(' · ') || 'No workflow stages yet.', width - 4),
-        paint('ACTIVE PRIORITIES', 'cyan', color),
-        ...model.priority.flatMap(item => wrap(`${item.kind.toUpperCase()} · ${item.text}`, width - 4))
-      ];
-      body.push(...pulse.slice(0, Math.max(0, height - 2 - body.length)));
+        ...(width >= 90
+          ? [paint(crop(`  ${job.company} · ${job.location || 'location not listed'}`, width - 4), 'muted', color)]
+          : []),
+        paint(`  FIT ${fitLabel(job.fit)}${job.highFit ? ' · HIGH' : ''}`, selected ? 'selected' : 'cyan', color)
+      );
     }
   }
   return fixedPanel(`JOBS · ${state.filter}`, body, width, height, color);
@@ -571,7 +544,6 @@ function postingStatusLines(item, width) {
 function detailSummaryLines(model, state, width, height, color) {
   const item = model.selected;
   const fitScore = fitLabel(item.fit);
-  const applicationStatus = item.job.applicationStatus || 'not started';
   const recommended = item.recommendedAction || model.recommendedAction;
   const readinessStatus = item.readiness?.status === 'approved'
     ? 'ready'
@@ -580,21 +552,21 @@ function detailSummaryLines(model, state, width, height, color) {
     ? (state.focusTarget === 'details' ? 'e hide details · Esc jobs · ↑/↓ scroll' : 'e focus details · p prepare · i ask')
     : 'e details · p prepare · z score · i ask';
   const room = Math.max(1, height - 2);
-  if (room <= 6) {
-    const nextRows = wrap(`▶ NEXT · ${recommended?.label || 'Review this job and choose your next step'}`, width)
-      .slice(0, Math.max(1, room - 3));
-    return [
+  if (room <= 13) {
+    const leading = [
       paint(`▶ ${item.job.title}`, 'selected', color),
-      paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
-      ...nextRows,
-      paint(hint, 'green', color)
-    ].slice(0, room);
+      ...(room >= 8 ? [`${item.job.company} · ${item.job.location || 'location not listed'}`] : []),
+      paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color)
+    ];
+    const nextRows = wrap(`▶ NEXT · ${recommended?.label || 'Review this job and choose your next step'}`, width)
+      .slice(0, Math.max(1, room - leading.length - 1));
+    return [...leading, ...nextRows, paint(hint, 'green', color)].slice(0, room);
   }
   return [
     paint(`▶ ${item.job.title}`, 'selected', color),
     `${item.job.company} · ${item.job.location || 'location not listed'}`,
     '',
-    paint(`FIT ${fitScore}${item.fit?.highFit ? ' · HIGH' : ''}   STATUS ${applicationStatus}`, 'cyan', color),
+    paint(`FIT ${fitScore}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
     paint(`READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
     '',
     paint('▶ NEXT', 'selected', color),
@@ -604,26 +576,50 @@ function detailSummaryLines(model, state, width, height, color) {
   ];
 }
 
-function decisionOverviewLines(item, width, color) {
-  const requirements = (item.requirements || []).slice(0, 3);
-  const lines = [
-    '',
-    paint('ROLE BRIEF', 'cyan', color),
-    ...wrap([item.workModel, item.compensation].filter(Boolean).join(' · ') || item.narrative, width).slice(0, 3)
-  ];
-  if (requirements.length) {
-    lines.push(
-      paint('KEY REQUIREMENTS', 'cyan', color),
-      ...requirements.flatMap(value => wrap(`• ${value}`, width))
-    );
+function decisionOverviewSections(item, width, color) {
+  const structured = [item.workModel, item.compensation].filter(value => (
+    value && !/^(unknown|not (listed|specified|provided)|n\/a)$/i.test(String(value).trim())
+  ));
+  const storedDescription = String(item.postingText || '').trim();
+  const descriptionLines = storedDescription.split(/\r?\n/);
+  const firstSection = descriptionLines.findIndex(line => /^#{1,6}\s+\S/.test(line.trim()));
+  const roleDescription = descriptionLines
+    .slice(0, firstSection < 0 ? descriptionLines.length : firstSection)
+    .map(line => line.trim())
+    .filter(line => line && !/^(title|company|location)\s*:/i.test(line))
+    .join(' ');
+  const descriptionKnown = roleDescription && storedDescription !== 'No description is stored for this job.';
+  const sections = [];
+  if (structured.length) {
+    sections.push({
+      heading: paint('ROLE DETAILS', 'cyan', color),
+      rows: wrap(structured.join(' · '), width).slice(0, 3)
+    });
+  } else if (descriptionKnown) {
+    sections.push({
+      heading: paint('ROLE DESCRIPTION', 'cyan', color),
+      rows: wrap(roleDescription, width).slice(0, 4)
+    });
   }
-  lines.push(
-    paint('APPLICATION PATH', 'cyan', color),
-    ...item.stages.map(stage => `${stage.state === 'empty' ? '○' : '●'} ${stage.name} · ${stage.state}`),
-    paint('MATERIALS', 'cyan', color),
-    `${item.docs.length} artifacts · ${item.proofs.length} matched proofs`
-  );
-  return lines;
+  if (item.requirements?.length) {
+    sections.push({
+      heading: paint('KEY REQUIREMENTS', 'cyan', color),
+      rows: item.requirements.slice(0, 3).flatMap(value => wrap(`• ${value}`, width))
+    });
+  }
+  return sections;
+}
+
+function appendVisibleSections(body, sections, room) {
+  for (const section of sections) {
+    const rows = section.rows.filter(row => String(stripAnsi(row)).trim());
+    if (!rows.length) continue;
+    const separator = body.length && body[body.length - 1] !== '' ? [''] : [];
+    const available = room - body.length;
+    if (available < separator.length + 2) break;
+    body.push(...separator, section.heading, ...rows.slice(0, available - separator.length - 1));
+  }
+  return body;
 }
 
 function technicalDetailLines(item, state, width, color) {
@@ -656,24 +652,38 @@ function technicalDetailLines(item, state, width, color) {
   ];
 }
 
+const TECHNICAL_DETAIL_HEADINGS = new Set([
+  '▶ NEXT',
+  'TECHNICAL DETAILS',
+  'POSTING TEXT',
+  'POSTING REQUIREMENTS',
+  'POLICY',
+  'MATCHED PROOFS',
+  'ARTIFACTS',
+  'PURSUE STAGES'
+]);
+
 function detailPanel(model, state, width, height, color) {
   const item = model.selected;
   if (!item) {
     return fixedPanel('SELECTED JOB', ['No job selected.', '', 'Next: choose a job to see its fit and recommended action.'], width, height, color);
   }
   const contentWidth = Math.max(8, width - 4);
+  const room = Math.max(1, height - 2);
   const summary = detailSummaryLines(model, state, contentWidth, height, color);
   if (!state.detailsExpanded) {
-    return fixedPanel('SELECTED JOB', [...summary, ...decisionOverviewLines(item, contentWidth, color)], width, height, color);
+    const body = appendVisibleSections([...summary], decisionOverviewSections(item, contentWidth, color), room);
+    return fixedPanel('SELECTED JOB', body, width, height, color);
   }
   const body = [...summary, ...technicalDetailLines(item, state, contentWidth, color)];
-  const room = Math.max(1, height - 2);
   const scrollMax = Math.max(0, body.length - room);
   const scroll = Math.max(0, Math.min(scrollMax, Number(state.detailsScroll || 0)));
   const end = Math.min(body.length, scroll + room);
+  const visible = body.slice(scroll, end);
+  if (TECHNICAL_DETAIL_HEADINGS.has(stripAnsi(visible[visible.length - 1]).trim())) visible.pop();
   const focused = state.focusTarget === 'details';
   const title = `SELECTED JOB · DETAILS${focused ? ' · FOCUSED' : ''} · rows ${scroll + 1}-${end}/${body.length}`;
-  return fixedPanel(title, body.slice(scroll, end), width, height, color);
+  return fixedPanel(title, visible, width, height, color);
 }
 
 function agentPanel(model, state, width, height, color) {
@@ -1928,9 +1938,9 @@ export class JobosTui {
         this.render();
         continue;
       }
-      const { width } = this.dimensions();
-      if (event.y >= 1 && event.y <= (width < 90 ? 2 : 3)) {
-        if (this.model.priority?.[this.state.stripIndex || 0]) this.jumpToStripJob();
+      const priority = frame?.sections?.priority;
+      if (priority && event.y >= priority.y && event.y <= priority.bottom) {
+        this.jumpToStripJob();
         continue;
       }
       if (frame?.sections.footer && event.y >= frame.sections.footer.y) {
@@ -2028,6 +2038,12 @@ export class JobosTui {
       }).filter(hit => hit.y >= 0 && hit.x >= 0)
     ];
     const footers = footerLines(dimensions.width, this.state);
+    const renderedPriority = priorityLines(this.model, this.state, dimensions.width, false);
+    const priorityVisible = renderedPriority.length > 0
+      && renderedPriority.every((line, index) => plain[index + 1] === line);
+    const prioritySection = priorityVisible
+      ? { y: 1, bottom: renderedPriority.length }
+      : null;
     this.lastFrame = {
       width: dimensions.width,
       height: dimensions.height,
@@ -2035,6 +2051,7 @@ export class JobosTui {
       filterHits,
       sections: {
         jobs: jobsY < 0 ? null : { y: jobsY, bottom: jobsBottom < 0 ? dimensions.height : jobsBottom, hits },
+        priority: prioritySection,
         details: detailsSection,
         footer: { y: Math.max(0, plain.length - footers.length), lines: footers }
       }
@@ -2806,6 +2823,18 @@ export class JobosTui {
 
   jumpToStripJob() {
     const item = (this.model.priority || [])[this.state.stripIndex || 0];
+    if (item?.source === 'setup' && item.actionId) {
+      this.openSetupOverlay();
+      const setupItem = this.model.onboarding?.steps?.find(step => (
+        step.actions?.some(action => action.id === item.actionId)
+      ));
+      const setupAction = setupItem?.actions?.find(action => action.id === item.actionId);
+      if (setupItem && setupAction) {
+        this.state.overlayIndex = this.model.onboarding.steps.indexOf(setupItem);
+        return this.openSetupAction(setupItem, setupAction);
+      }
+      return;
+    }
     if (item?.target === 'log') {
       this.openOverlay('log');
       return;

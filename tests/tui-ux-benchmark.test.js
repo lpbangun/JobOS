@@ -151,7 +151,7 @@ test('UX-BENCH-05 populated dashboard presents decision summary before hidden te
     const lines = render(model, base, size.width, size.height);
     assertFrame(lines, size);
     const text = lines.join('\n');
-    assert.match(text, /▶ ACTION/, `${size.name}: priority strip names the action`);
+    assert.match(text, /▶ Import resume/, `${size.name}: priority strip names the action`);
     assert.match(text, /Senior Product Manager/, `${size.name}: selected job stays visible`);
     assert.match(text, /FIT /, `${size.name}: fit summary stays visible`);
     assert.match(text, /READINESS /, `${size.name}: readiness state stays visible`);
@@ -187,11 +187,10 @@ test('UX-BENCH-06 priority hierarchy navigates only actionable categories', asyn
   const { model, profile, job } = await fixture(t, { withJob: true });
   const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 140, 42);
   assert.deepEqual(model.priority.map(item => item.kind), ['action', 'new']);
-  assert.match(lines[1], /PRIORITY  1 of 2/);
-  assert.match(lines[2], /▶ ACTION/);
-  assert.match(lines[3], /QUEUE  ACTION · NEW/);
-  assert.doesNotMatch(lines[3], /INTERVIEW|FAILURE/, 'empty categories do not consume navigation positions');
-  assert.ok(lines.slice(1, 4).every(line => !line.includes('┌') && !line.includes('┐')), 'priority hierarchy avoids card chrome');
+  assert.match(lines[1], /NEXT UP  1 of 2/);
+  assert.match(lines[2], /▶ Import resume  ·  Enter opens/);
+  assert.doesNotMatch(lines.slice(1, 3).join('\n'), /QUEUE|INTERVIEW|FAILURE/, 'filler and empty categories do not consume visual rows');
+  assert.ok(lines.slice(1, 3).every(line => !line.includes('┌') && !line.includes('┐')), 'priority hierarchy avoids card chrome');
   const tui = new JobosTui((await fixture(t, { withJob: true })).store, { connectAgent: false, stdout: output(140, 42), now: () => new Date(AS_OF) });
   tui.state.profileId = profile.id;
   tui.state.selectedJobId = job.id;
@@ -282,26 +281,29 @@ test('UX-BENCH-10 panel geometry is aligned across breakpoints and surfaces', as
   assertFrame(chat, { width: 120, height: 36, name: 'chat focus' });
 });
 
-test('UX-BENCH-11 job list and detail panels reorder information by priority as width shrinks', async t => {
+test('UX-BENCH-11 job list sheds duplicate workflow copy as width shrinks', async t => {
   const { model, profile, job } = await fixture(t, { withJob: true });
   const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
-  const label = model.recommendedAction.label;
 
   for (const width of [160, 120]) {
-    const rows = panelRows(render(model, base, width, 42), 'JOBS');
+    const panel = panelRows(render(model, base, width, 42), 'JOBS');
+    const rows = panel.map(row => row.slice(0, Math.max(42, Math.floor(width * 0.44))));
     assert.ok(rows.some(row => row.includes('Senior Product Manager')), `${width}: job card keeps the title`);
-    assert.ok(rows.some(row => row.includes('Northstar Learning')), `${width}: job card keeps the company`);
-    assert.ok(rows.some(row => row.includes(`NEXT ${label}`)), `${width}: job card leads with the recommended action`);
+    assert.ok(!rows.some(row => row.includes('Northstar Learning')), `${width}: company stays in the selected-role summary instead of being duplicated`);
+    assert.ok(rows.some(row => row.includes('FIT ')), `${width}: job card keeps fit`);
+    assert.ok(!rows.some(row => /\bSTAGE\b|\bNEXT\b/.test(row)), `${width}: job card does not duplicate stage or next-action copy`);
   }
 
   const compact = panelRows(render(model, base, 80, 24), 'JOBS');
   assert.ok(compact.some(row => row.includes('Senior Product Manager')), '80: job card keeps the title');
-  assert.ok(compact.some(row => row.includes(`NEXT ${label}`)), '80: job card keeps the recommended action');
-  assert.ok(!compact.some(row => row.includes('Northstar Learning')), '80: company line is dropped before the recommended action');
+  assert.ok(compact.some(row => row.includes('FIT ')), '80: job card keeps fit');
+  assert.ok(!compact.some(row => row.includes('Northstar Learning')), '80: company line yields to fit and action context');
+  assert.ok(!compact.some(row => /\bSTAGE\b|\bNEXT\b/.test(row)), '80: duplicate workflow copy stays absent');
 
   const minimum = panelRows(render(model, base, 60, 20), 'JOBS');
   assert.ok(minimum.some(row => row.includes('Senior Product Manager')), '60: job card keeps the title');
-  assert.ok(!minimum.some(row => row.includes('Northstar Learning')), '60: decorative company line is dropped');
+  assert.ok(minimum.some(row => row.includes('FIT ')), '60: job card keeps fit');
+  assert.ok(!minimum.some(row => row.includes('Northstar Learning')), '60: company line is dropped before the selected-role summary');
 });
 
 test('UX-BENCH-12 dashboard and setup copy stay compact without ellipsis truncation', async t => {
@@ -490,19 +492,85 @@ test('UX-BENCH-16 artifact evidence stays hidden until the docs surface expands 
   assert.doesNotMatch(shown, /TECHNICAL DETAILS/, 'docs evidence is a separate surface from dashboard technical details');
 });
 
-test('UX-BENCH-17 standard dashboard fills vertical space with useful decision context', async t => {
+test('UX-BENCH-17 standard dashboard is calm and shows the stored description when role details are unknown', async t => {
   const { model, profile, job } = await fixture(t, { withJob: true });
   const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 120, 36);
   const text = lines.join('\n');
-  assert.match(text, /WORKSPACE PULSE/);
-  assert.match(text, /APPLICATION PATH/);
-  assert.match(text, /ACTIVE PRIORITIES/);
-  const bottom = lines.findIndex(line => line.startsWith('└'));
-  assert.ok(bottom >= 30, `dashboard content reaches the lower workspace instead of ending near the midpoint: row ${bottom}`);
-  assert.ok(lines.slice(18, bottom).some(line => /WORKFLOW STATUS|APPLICATION PATH|ACTIVE PRIORITIES/.test(line)), 'lower rows contain actionable context rather than only panel padding');
+  assert.match(text, /ROLE DESCRIPTION/);
+  assert.match(text, /Lead product discovery and launch improvements for educators\./);
+  assert.doesNotMatch(text, /WORKSPACE PULSE|FILTER COUNTS|SELECTED SIGNALS|WORKFLOW STATUS|ACTIVE PRIORITIES/);
+  assert.doesNotMatch(text, /APPLICATION PATH|MATERIALS|○ .* · empty/);
+  assert.doesNotMatch(text, /\d+ open · \d+ due · \d+ drafts/, 'duplicated dashboard counts stay out of the default view');
 });
 
-test('UX-BENCH-18 focused technical details scroll without changing jobs and preserve full text', async t => {
+test('UX-BENCH-18 Enter and click execute the recommended Import resume action', async t => {
+  const { store, model, profile, job } = await fixture(t, { withJob: true });
+  assert.equal(model.recommendedAction?.label, 'Import resume');
+  assert.equal(model.priority[0]?.actionId, 'import_resume');
+
+  const enterTui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
+  enterTui.state.profileId = profile.id;
+  enterTui.state.selectedJobId = job.id;
+  enterTui.model = model;
+  enterTui.onKeypress('', { name: 'return' });
+  assert.equal(enterTui.state.overlay, 'setup-resume-source', 'Enter opens the resume source chooser instead of reselecting the job');
+
+  const clickTui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
+  clickTui.state.profileId = profile.id;
+  clickTui.state.selectedJobId = job.id;
+  clickTui.model = model;
+  clickTui.render();
+  const lines = clickTui.lastScreen.split('\n');
+  const y = lines.findIndex(line => line.includes('▶ Import resume'));
+  const x = lines[y].indexOf('Import resume');
+  assert.ok(y >= 0 && x >= 0, 'recommended action is visible and clickable');
+  const jobBorderY = lines.findIndex(line => line.includes('┌ JOBS ·'));
+  clickTui.onMouseData(`\x1b[<0;2;${jobBorderY + 1}M`);
+  assert.equal(clickTui.state.overlay, null, 'the adjacent jobs panel border is outside the priority hitbox');
+  clickTui.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
+  assert.equal(clickTui.state.overlay, 'setup-resume-source', 'click opens the same resume source chooser as Enter');
+});
+
+test('UX-BENCH-19 visible dashboard and technical headings always keep body text with them', async t => {
+  const { model, profile, job } = await fixture(t, { withJob: true });
+  const headings = [
+    '▶ NEXT',
+    'ROLE DESCRIPTION',
+    'KEY REQUIREMENTS',
+    'TECHNICAL DETAILS',
+    'POSTING TEXT',
+    'POSTING REQUIREMENTS',
+    'POLICY',
+    'MATCHED PROOFS',
+    'ARTIFACTS',
+    'PURSUE STAGES'
+  ];
+  const assertAttached = (lines, name) => {
+    for (let row = 0; row < lines.length; row++) {
+      for (const heading of headings) {
+        const column = lines[row].indexOf(heading);
+        if (column < 0) continue;
+        const next = lines[row + 1] || '';
+        const boundary = next.indexOf('│', column);
+        const body = next.slice(column, boundary < 0 ? undefined : boundary).trim();
+        assert.ok(body && !headings.includes(body), `${name}: ${heading} has visible body text on the next row`);
+      }
+    }
+  };
+
+  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
+  for (const size of SIZES) {
+    assertAttached(render(model, base, size.width, size.height), `${size.name} dashboard`);
+    for (const detailsScroll of [0, 4, 8, 12, 16, 24, 32, 48]) {
+      assertAttached(
+        render(model, { ...base, detailsExpanded: true, detailsScroll }, size.width, size.height),
+        `${size.name} details row ${detailsScroll}`
+      );
+    }
+  }
+});
+
+test('UX-BENCH-20 focused technical details scroll without changing jobs and preserve full text', async t => {
   const { root, store, profile, job } = await fixture(t, { withJob: true });
   const tailMarker = 'reason_code_tail_marker_7f31';
   for (let index = 0; index < 6; index++) {
