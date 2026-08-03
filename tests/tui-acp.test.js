@@ -58,7 +58,8 @@ test('populated dashboard prioritizes jobs and selected action while technical d
   assert.match(screen, /NEXT UP/);
   assert.deepEqual(model.priority.map(item => item.kind), ['action', 'new']);
   assert.doesNotMatch(screen, /QUEUE|INTERVIEW|FAILURE/, 'priority metadata and empty categories stay out of the calm default view');
-  assert.match(screen, /JOBS · today/);
+  assert.match(screen, /┌ JOBS /);
+  assert.match(screen, /\[today\] all high review ready applied interview/);
   assert.match(screen, /SELECTED JOB/);
   assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');
   assert.doesNotMatch(screen, /Hermes ACP|side-effects:off|TECHNICAL DETAILS/);
@@ -262,7 +263,7 @@ test('compact terminals keep context reachable and switch to a focused chat page
   const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
   const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
   assert.doesNotMatch(dashboard, /FX:OFF|side-effects/);
-  assert.match(dashboard, /JOBS · today/);
+  assert.match(dashboard, /┌ JOBS /);
   assert.match(dashboard, /SELECTED JOB/);
   assert.doesNotMatch(dashboard, /┌ ASSISTANT/);
   assert.match(dashboard, /FIT .*STATUS|FIT unknown/);

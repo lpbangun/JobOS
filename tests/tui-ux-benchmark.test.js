@@ -524,7 +524,7 @@ test('UX-BENCH-18 Enter and click execute the recommended Import resume action',
   const y = lines.findIndex(line => line.includes('▶ Import resume'));
   const x = lines[y].indexOf('Import resume');
   assert.ok(y >= 0 && x >= 0, 'recommended action is visible and clickable');
-  const jobBorderY = lines.findIndex(line => line.includes('┌ JOBS ·'));
+  const jobBorderY = lines.findIndex(line => line.includes('┌ JOBS'));
   clickTui.onMouseData(`\x1b[<0;2;${jobBorderY + 1}M`);
   assert.equal(clickTui.state.overlay, null, 'the adjacent jobs panel border is outside the priority hitbox');
   clickTui.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
@@ -636,4 +636,22 @@ test('UX-BENCH-20 focused technical details scroll without changing jobs and pre
   tui.onKeypress('', { name: 'escape' });
   tui.onKeypress('', { name: 'down' });
   assert.equal(tui.state.selectedJobId, second.id, 'job navigation resumes after details explicitly releases focus');
+});
+
+test('UX-BENCH-21 dashboard panels fit their content and minimum layout preserves identity', async t => {
+  const { model, profile, job } = await fixture(t, { withJob: true });
+  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
+
+  const standard = render(model, base, 120, 36);
+  const panelBottom = standard.findIndex(line => line.startsWith('└'));
+  assert.ok(panelBottom > 0 && panelBottom < 24, 'standard panels stop near their content instead of filling 29 rows');
+  assert.equal(standard.filter(line => line.includes('[today]')).length, 1, 'filters occupy one calm row');
+  assert.doesNotMatch(standard.join('\n'), /JOBS · today/, 'active filter is not duplicated in the panel title');
+
+  const minimum = render(model, base, 60, 20).join('\n');
+  assert.match(minimum, /Northstar Learning · Remote/, 'minimum dashboard keeps company and location context');
+  assert.match(minimum, /Ready · local workspace/, 'status reads as a stable user-facing state');
+  assert.doesNotMatch(minimum, /starting JobOS host/, 'startup implementation detail stays out of the interface');
+  assert.match(minimum, /↑\/↓ jobs · ←\/→ next · Enter open · Tab chat/, 'minimum footer keeps primary navigation on one line');
+  assert.match(minimum, /i ask · p pursue · g setup · \? help · Q quit/, 'minimum footer progressively discloses secondary commands through help');
 });

@@ -101,7 +101,7 @@ test('advertised KEYMAP keys do not throw when pressed in their scope', async t 
   tui.refresh({ disk: false });
 
   const compactScreen = renderTui(tui.model, tui.state, { width: 80, height: 42, color: false });
-  for (const hint of ['Tab chat', 'i prompt', 'p pursue', 'd discover', 'r review', 'o docs', 'g setup', '? help', 'Q quit']) {
+  for (const hint of ['Tab chat', 'i ask', 'p pursue', 'g setup', '? help', 'Q quit']) {
     assert.match(compactScreen, new RegExp(hint.replace('?', '\\?')), `compact footer advertises ${hint}`);
   }
   const helpScreen = renderTui(tui.model, { ...tui.state, overlay: 'system' }, { width: 100, height: 42, color: false });
@@ -477,7 +477,10 @@ test('number keys select every painted filter in header order', async t => {
 
   // Header paints exactly FILTERS; no advertised filter lacks a key
   const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  for (const name of FILTERS) assert.ok(screen.includes(name), `filter "${name}" painted in header`);
+  for (const name of FILTERS) {
+    const label = name === 'materials-ready' ? 'ready' : name;
+    assert.ok(screen.includes(label), `filter "${name}" painted in header as "${label}"`);
+  }
 });
 
 // Gap #4 — discovery Enter opens the highlighted job in the main list

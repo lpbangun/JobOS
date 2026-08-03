@@ -57,6 +57,9 @@ const COLORS = {
   selected: `${ESC}48;5;23m${ESC}38;5;159m${ESC}1m`
 };
 export const FILTERS = ['today', 'all', 'high', 'review', 'materials-ready', 'applied', 'interview'];
+const FILTER_LABELS = {
+  'materials-ready': 'ready'
+};
 const TASK_FILTERS = ['all', 'followup', 'review'];
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
@@ -476,10 +479,19 @@ function priorityLines(model, state, width, color) {
   ];
 }
 
+function dashboardFilterLabel(filter) {
+  return FILTER_LABELS[filter] || filter;
+}
+
+function dashboardFilterText(activeFilter) {
+  return FILTERS
+    .map(filter => filter === activeFilter ? `[${dashboardFilterLabel(filter)}]` : dashboardFilterLabel(filter))
+    .join(' ');
+}
+
 function listPanel(model, state, width, height, color) {
   const jobs = filteredJobs(model, state.filter);
-  const filters = FILTERS.map(name => name === state.filter ? `[${name}]` : name).join(' · ');
-  const body = wrap(filters, width - 4).map(line => paint(line, 'cyan', color));
+  const body = wrap(dashboardFilterText(state.filter), width - 4).map(line => paint(line, 'cyan', color));
   if (model.empty.noProfile) {
     body.push('', 'No profile yet.', 'Press g to finish setup.');
   } else if (!jobs.length) {
@@ -492,7 +504,7 @@ function listPanel(model, state, width, height, color) {
   } else {
     const selectedId = model.selectedJobId;
     const available = Math.max(1, height - 2 - body.length);
-    const coreRows = width < 90 ? 3 : 4;
+    const coreRows = 3;
     const maxCards = Math.max(1, Math.floor(available / coreRows));
     let start = Math.max(0, jobs.findIndex(job => job.id === selectedId) - Math.floor(maxCards / 2));
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
@@ -500,14 +512,11 @@ function listPanel(model, state, width, height, color) {
       const selected = job.id === selectedId;
       body.push(
         ...wrap(`${selected ? '▶' : ' '} ${job.title}`, width - 4).slice(0, 2),
-        ...(width >= 90
-          ? [paint(crop(`  ${job.company} · ${job.location || 'location not listed'}`, width - 4), 'muted', color)]
-          : []),
         paint(`  FIT ${fitLabel(job.fit)}${job.highFit ? ' · HIGH' : ''}`, selected ? 'selected' : 'cyan', color)
       );
     }
   }
-  return fixedPanel(`JOBS · ${state.filter}`, body, width, height, color);
+  return fixedPanel('JOBS', body, width, height, color);
 }
 
 function fitDimensionLines(fit, width) {
@@ -555,7 +564,7 @@ function detailSummaryLines(model, state, width, height, color) {
   if (room <= 13) {
     const leading = [
       paint(`▶ ${item.job.title}`, 'selected', color),
-      ...(room >= 8 ? [`${item.job.company} · ${item.job.location || 'location not listed'}`] : []),
+      ...(room >= 7 ? [`${item.job.company} · ${item.job.location || 'location not listed'}`] : []),
       paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color)
     ];
     const nextRows = wrap(`▶ NEXT · ${recommended?.label || 'Review this job and choose your next step'}`, width)
@@ -574,6 +583,41 @@ function detailSummaryLines(model, state, width, height, color) {
     '',
     paint(hint, 'green', color)
   ];
+}
+
+function naturalListPanelHeight(model, state, width, availableHeight) {
+  const jobs = filteredJobs(model, state.filter);
+  const contentWidth = Math.max(8, width - 4);
+  const filterRows = wrap(dashboardFilterText(state.filter), contentWidth).length;
+  if (!jobs.length) return Math.min(availableHeight, 2 + filterRows + 4);
+  let rows = filterRows;
+  for (let index = 0; index < jobs.length; index++) {
+    const cardRows = 3;
+    if (rows + cardRows > availableHeight - 2) break;
+    rows += cardRows;
+  }
+  return Math.min(availableHeight, Math.max(5, rows + 2));
+}
+
+function naturalDetailPanelHeight(model, state, width, availableHeight, color) {
+  if (!model.selected) return Math.min(availableHeight, 7);
+  const contentWidth = Math.max(8, width - 4);
+  const summary = detailSummaryLines(model, state, contentWidth, availableHeight, color);
+  const complete = appendVisibleSections(
+    [...summary],
+    decisionOverviewSections(model.selected, contentWidth, color),
+    Math.max(1, availableHeight - 2)
+  );
+  const identityHeight = availableHeight >= 9 ? 9 : 7;
+  return Math.min(availableHeight, Math.max(identityHeight, complete.length + 2));
+}
+
+function naturalDashboardHeight(model, state, listWidth, detailWidth, availableHeight, color) {
+  if (state.detailsExpanded) return availableHeight;
+  return Math.max(
+    naturalListPanelHeight(model, state, listWidth, availableHeight),
+    naturalDetailPanelHeight(model, state, detailWidth, availableHeight, color)
+  );
 }
 
 function decisionOverviewSections(item, width, color) {
@@ -616,8 +660,8 @@ function appendVisibleSections(body, sections, room) {
     if (!rows.length) continue;
     const separator = body.length && body[body.length - 1] !== '' ? [''] : [];
     const available = room - body.length;
-    if (available < separator.length + 2) break;
-    body.push(...separator, section.heading, ...rows.slice(0, available - separator.length - 1));
+    if (available < separator.length + 1 + rows.length) break;
+    body.push(...separator, section.heading, ...rows);
   }
   return body;
 }
@@ -1502,9 +1546,8 @@ function footerLines(width, state) {
     ];
   }
   return [
-    ' ↑/↓ or j/k jobs · ←/→ priority · Enter jump',
-    ' Tab chat · i prompt · p pursue · d discover',
-    ' r review · o docs · g setup · ? help · Q quit'
+    ' ↑/↓ jobs · ←/→ next · Enter open · Tab chat',
+    ' i ask · p pursue · g setup · ? help · Q quit'
   ];
 }
 export function renderTui(model, state, { width = 140, height = 42, color = false } = {}) {
@@ -1602,17 +1645,22 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
       lines.push(...agentPanel(model, state, safeWidth, bodyHeight, color));
     }
   } else if (safeWidth >= 90) {
-    const contentHeight = state.detailsExpanded ? bodyHeight : Math.min(bodyHeight, 29);
     const listWidth = Math.max(42, Math.floor(safeWidth * 0.44));
     const detailWidth = safeWidth - listWidth - 1;
+    const contentHeight = naturalDashboardHeight(model, state, listWidth, detailWidth, bodyHeight, color);
     lines.push(...mergeColumns([
       listPanel(model, state, listWidth, contentHeight, color),
       detailPanel(model, state, detailWidth, contentHeight, color)
     ], [listWidth, detailWidth], color));
   } else {
-    const listHeight = Math.max(6, Math.min(Math.floor(bodyHeight * 0.44), bodyHeight - 8));
+    const listHeight = state.detailsExpanded
+      ? Math.max(5, Math.min(Math.floor(bodyHeight * 0.36), bodyHeight - 9))
+      : naturalListPanelHeight(model, state, safeWidth, Math.max(5, bodyHeight - 7));
+    const detailHeight = state.detailsExpanded
+      ? bodyHeight - listHeight
+      : naturalDetailPanelHeight(model, state, safeWidth, bodyHeight - listHeight, color);
     lines.push(...listPanel(model, state, safeWidth, listHeight, color));
-    lines.push(...detailPanel(model, state, safeWidth, bodyHeight - listHeight, color));
+    lines.push(...detailPanel(model, state, safeWidth, detailHeight, color));
   }
   while (lines.length < safeHeight - trailingRows) lines.push(fit('', safeWidth));
 
@@ -1677,7 +1725,7 @@ export function defaultTuiState() {
     input: '',
     inputCursor: null,
     inputAnchor: null,
-    status: 'starting JobOS host',
+    status: 'Ready · local workspace',
     error: null,
     busy: null,
     messages: [],
@@ -1966,7 +2014,7 @@ export class JobosTui {
     const previousDimensions = this.lastRenderDimensions;
     const screen = renderTui(this.model, this.state, dimensions);
     const plain = stripAnsiText(screen).split('\n');
-    const jobsY = plain.findIndex(line => line.includes('┌ JOBS ·'));
+    const jobsY = plain.findIndex(line => line.includes('┌ JOBS'));
     const jobsBottom = jobsY < 0 ? -1 : plain.findIndex((line, index) => index > jobsY && line.startsWith('└'));
     const detailsY = plain.findIndex(line => line.includes('┌ SELECTED JOB'));
     const detailsX = detailsY < 0 ? -1 : plain[detailsY].indexOf('┌ SELECTED JOB');
@@ -2015,13 +2063,14 @@ export class JobosTui {
       };
     }).filter(hit => hit.y >= 0 && hit.x >= 0);
     const dashboardFilterHits = FILTERS.map(filter => {
-      const y = plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(filter));
+      const label = dashboardFilterLabel(filter);
+      const y = plain.findIndex((line, index) => index > jobsY && (jobsBottom < 0 || index < jobsBottom) && line.includes(label));
       return {
         kind: 'dashboard',
         filter,
         y,
-        x: y < 0 ? -1 : plain[y].indexOf(filter),
-        width: filter.length
+        x: y < 0 ? -1 : plain[y].indexOf(label),
+        width: label.length
       };
     }).filter(hit => hit.y >= 0 && hit.x >= 0);
     const overlayFilters = this.state.overlay === 'due'
