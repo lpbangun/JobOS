@@ -71,7 +71,7 @@ export function createProfile(s, name, opts = {}) {
   const existing = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (existing) return { profile: existing, created: false, nextActions: [] };
   const at = now();
-  const resumeInput = opts.fromResume ? readResumeFile(pid, opts.fromResume) : null;
+  const resumeInput = opts.resumeInput || (opts.fromResume ? readResumeFile(pid, opts.fromResume) : null);
   const resume = resumeInput?.sourceText || '';
   const custom = opts.preferences ? JSON.parse(fs.readFileSync(opts.preferences, 'utf8')) : {};
   const sourceEntries = new Map();

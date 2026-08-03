@@ -71,6 +71,7 @@ Not required for the smallest coherent CLI product:
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
+- Resume-ingestion verification on 2026-08-04: `npm test` passed **651/651** checks after adding multiline terminal paste handling, identity correction, and local PDF/DOCX extraction coverage; `npm run smoke` passed with zero external side effects.
 - TUI usability verification on 2026-08-03: `npm test` passed **642/642** checks; `npm run smoke` passed the clean-workspace W03/W04/W07/W08 workflow with zero external side effects.
 - The advisor-owned usability suite passed **18/18** focused benchmarks plus **10/10** guided-navigation checks across `60×20`, `80×24`, `120×36`, and `160×50` layouts. Gates cover setup stability, compact source guidance, blocker recovery, intentional empty states, decision-first hierarchy, actionable-only priority density, minimum-size navigation and action visibility, useful standard-terminal vertical space, one recommended action, aligned geometry, responsive information priority, no-ellipsis copy, scrollable lossless diagnostics, visible disclosure focus, keyboard/mouse focus parity, click-as-Enter behavior, Home/recent file browsing, atomic profile advancement, and progressive evidence disclosure.
 - W10 focused verification on 2026-07-27: `npm run test:w10` passed for golden projections, generated-data containment, tracked-data/static policy, documentation/workflow semantics, and measured MCP compatibility/decision.

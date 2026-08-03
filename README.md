@@ -55,7 +55,7 @@ Guided setup opens as a focused full-screen workspace and starts on the first ta
 
 1. Confirm the local workspace.
 2. Create or choose a profile.
-3. Add a resume by pasting text, browsing supported files, or entering a path; review the extraction preview before import.
+3. Add a resume by pasting text or choosing a local PDF, DOCX, TXT, Markdown, JSON, or YAML file; review and correct the extracted identity fields before import. Image-only PDFs need local OCR first.
 4. Verify, edit, reject, or add the experience highlights extracted from the resume.
 5. Add a job by pasting a description or URL, browsing a local file, entering a path, or configuring company-page discovery.
 6. Check the fit and choose whether to pursue the job.
@@ -66,6 +66,8 @@ No provider, browser, or API key is required for this core flow. Successful acti
 Use `↑`/`↓` on every selectable list; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard.
 
 Every text field supports `Left`/`Right`, `Home`/`End`, `Backspace`, `Delete`, and `Shift`+arrow selection. Pasted text is inserted at the cursor and replaces the current selection. Press `?` for controls and the recommended action on the current screen; press `?` again for the complete shortcut reference.
+
+Resume extraction stays local. JobOS preserves an imported PDF or DOCX under private `.jobos/` state, stores the reviewed structured revision in SQLite, and writes readable `current.md`, `current-source.md`, and YAML projections under `jobos-workspace/profiles/<profile-id>/resume/`. The Markdown files are projections; use JobOS to make reviewed changes so revision history remains intact.
 
 Primary controls:
 

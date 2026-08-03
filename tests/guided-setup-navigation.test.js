@@ -226,7 +226,7 @@ test('resume paste and path preview, supported-format guidance, import, and imme
   tui.onKeypress('j', { name: 'j' });
   enter(tui);
   assert.equal(tui.state.mode, 'setup-resume-path');
-  typeText(tui, path.join(workspace(), 'resume.pdf'));
+  typeText(tui, path.join(workspace(), 'resume.rtf'));
   enter(tui);
   assert.equal(tui.state.mode, 'setup-resume-path', 'invalid path keeps the path input open');
   assert.ok(tui.state.error && /not supported/i.test(tui.state.error), 'unsupported format guidance is shown');
@@ -372,6 +372,46 @@ test('raw mouse reports are isolated from numeric setup shortcuts', async () => 
   ], 'keyboard bytes around a mouse report preserve their order');
 });
 
+test('real bracketed multiline paste stays in the resume field until the user presses Enter', async () => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen');
+  tui.state.setupProfileId = profile.profile.id;
+  tui.beginSetupSource('resume');
+  enter(tui);
+
+  const midpoint = Math.floor(RESUME_TEXT.length / 2);
+  tui.onRawInput(`\x1b[200~${RESUME_TEXT.slice(0, midpoint)}`);
+  assert.equal(tui.state.input, '', 'an incomplete bracketed paste is buffered');
+  tui.onRawInput(`${RESUME_TEXT.slice(midpoint)}\x1b[201~`);
+
+  assert.equal(tui.state.mode, 'setup-resume-paste');
+  assert.equal(tui.state.overlay, 'setup-resume-source');
+  assert.equal(tui.state.input, RESUME_TEXT, 'embedded newlines are inserted instead of submitted');
+  enter(tui);
+  assert.equal(tui.state.overlay, 'setup-resume-preview');
+  assert.equal(tui.state.setupResumePreview.document.identity.email, 'alex@example.com');
+});
+
+test('resume preview shows and corrects a missing parsed email without discarding the import', async () => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen');
+  tui.state.setupProfileId = profile.profile.id;
+  const withoutEmail = RESUME_TEXT.replace('alex@example.com\n', '');
+
+  tui.previewSetupResume({ sourceText: withoutEmail });
+  assert.equal(tui.state.setupResumePreview.validation.valid, false);
+  assert.match(screenOf(tui).join('\n'), /Email: not found/);
+  enter(tui);
+  assert.equal(tui.state.mode, 'setup-resume-edit');
+  assert.equal(tui.state.setupResumeEditField, 'email');
+  typeText(tui, 'alex@example.com');
+  enter(tui);
+
+  assert.equal(tui.state.mode, 'normal');
+  assert.equal(tui.state.setupResumePreview.document.identity.email, 'alex@example.com');
+  assert.equal(tui.state.setupResumePreview.validation.valid, true);
+});
+
 test('file browser keeps a long-list selection visible at compact height', async () => {
   const { store, tui } = await emptyTui({ width: 80, height: 24 });
   for (let index = 0; index < 36; index++) {
@@ -411,6 +451,6 @@ test('short setup dialogs are centered and explanatory copy wraps at minimum wid
   const compact = screenOf(tui, 60, 24);
   assert.ok(compact.every(line => stringWidth(line) <= 60), 'compact dialog never overflows');
   const compactText = compact.map(line => line.replaceAll('║', '').trim()).join(' ');
-  assert.match(compactText, /For PDF or DOCX, copy and paste the text/);
+  assert.match(compactText, /Supported locally: PDF, DOCX/);
   assert.match(compact.join('\n'), /\? help  ·  Q quit/, 'compact footer keeps help and quit visible');
 });

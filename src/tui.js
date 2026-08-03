@@ -22,7 +22,7 @@ import {
   supersedeProof,
   verifyProof
 } from './profiles.js';
-import { createResumeRevision, parseResumeText, readResumeFile, validateResumeDocument } from './resumes.js';
+import { createResumeRevision, normalizeResumeSourceText, parseResumeText, readResumeFile, readResumeFileAsync, validateResumeDocument } from './resumes.js';
 import { importNormalized, importText, importUrl, parseJob } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
@@ -169,19 +169,42 @@ export function parseSgrMouse(value) {
 export function splitRawInput(value) {
   const input = String(value || '');
   const segments = [];
-  const pattern = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+  const pasteStart = '\x1b[200~';
+  const pasteEnd = '\x1b[201~';
+  const mousePattern = /\x1b\[<\d+;\d+;\d+[Mm]/g;
   let cursor = 0;
-  for (const match of input.matchAll(pattern)) {
-    if (match.index > cursor) segments.push({ type: 'key', value: input.slice(cursor, match.index) });
-    segments.push({ type: 'mouse', value: match[0] });
-    cursor = match.index + match[0].length;
+  while (cursor < input.length) {
+    const pasteIndex = input.indexOf(pasteStart, cursor);
+    mousePattern.lastIndex = cursor;
+    const mouse = mousePattern.exec(input);
+    const mouseIndex = mouse?.index ?? -1;
+    const nextIndex = pasteIndex < 0
+      ? mouseIndex
+      : mouseIndex < 0 ? pasteIndex : Math.min(pasteIndex, mouseIndex);
+    if (nextIndex < 0) break;
+    if (nextIndex > cursor) segments.push({ type: 'key', value: input.slice(cursor, nextIndex) });
+    if (nextIndex === pasteIndex) {
+      const endIndex = input.indexOf(pasteEnd, pasteIndex + pasteStart.length);
+      if (endIndex < 0) return { segments, remainder: input.slice(pasteIndex) };
+      segments.push({ type: 'paste', value: input.slice(pasteIndex + pasteStart.length, endIndex) });
+      cursor = endIndex + pasteEnd.length;
+    } else {
+      segments.push({ type: 'mouse', value: mouse[0] });
+      cursor = mouseIndex + mouse[0].length;
+    }
   }
   const tail = input.slice(cursor);
-  const partialIndex = tail.lastIndexOf('\x1b[');
-  const partial = partialIndex >= 0 ? tail.slice(partialIndex) : '';
-  if (partial && /^\x1b\[<?(?:\d*(?:;\d*){0,2})?$/.test(partial)) {
+  let partialIndex = -1;
+  for (let index = tail.lastIndexOf('\x1b'); index >= 0; index = tail.lastIndexOf('\x1b', index - 1)) {
+    const partial = tail.slice(index);
+    if (pasteStart.startsWith(partial) || /^\x1b\[<?(?:\d*(?:;\d*){0,2})?$/.test(partial)) {
+      partialIndex = index;
+      break;
+    }
+  }
+  if (partialIndex >= 0) {
     if (partialIndex > 0) segments.push({ type: 'key', value: tail.slice(0, partialIndex) });
-    return { segments, remainder: partial };
+    return { segments, remainder: tail.slice(partialIndex) };
   }
   if (tail) segments.push({ type: 'key', value: tail });
   return { segments, remainder: '' };
@@ -204,7 +227,7 @@ const SETUP_STEP_LABELS = Object.freeze({
 
 const RESUME_SOURCE_CHOICES = Object.freeze([
   { id: 'paste', label: 'Paste resume text', detail: 'Best for copying from any document.' },
-  { id: 'browse', label: 'Browse this computer', detail: 'Choose TXT, Markdown, JSON, YAML, or YML.' },
+  { id: 'browse', label: 'Browse this computer', detail: 'Choose PDF, DOCX, TXT, Markdown, JSON, or YAML.' },
   { id: 'path', label: 'Enter a file path', detail: 'Use a full or relative path.' }
 ]);
 
@@ -216,8 +239,13 @@ const JOB_SOURCE_CHOICES = Object.freeze([
   { id: 'discovery', label: 'Set up job discovery', detail: 'Watch a company careers page.' }
 ]);
 
-const RESUME_FILE_EXTENSIONS = new Set(['.txt', '.md', '.json', '.yaml', '.yml']);
+const RESUME_FILE_EXTENSIONS = new Set(['.pdf', '.docx', '.txt', '.md', '.json', '.yaml', '.yml']);
 const JOB_FILE_EXTENSIONS = new Set(['.txt', '.md']);
+const RESUME_IDENTITY_FIELDS = Object.freeze({
+  name: 'Candidate name',
+  email: 'Email',
+  phone: 'Phone'
+});
 
 function friendlySetupText(value) {
   return String(value || '')
@@ -1151,7 +1179,7 @@ function overlayPanel(model, state, width, height, color) {
     title = 'SET UP JOBOS · ADD YOUR RESUME';
     body = [
       ...wrap('Choose the easiest way to bring in your resume.', width - 4),
-      ...wrap('Supported: TXT, Markdown, JSON, YAML, and YML. For PDF or DOCX, copy and paste the text.', width - 4),
+      ...wrap('Supported locally: PDF, DOCX, TXT, Markdown, JSON, YAML, and YML. Scanned PDFs need OCR first.', width - 4),
       '',
       ...setupChoiceRows(RESUME_SOURCE_CHOICES, state.overlayIndex, width - 4),
       '',
@@ -1173,7 +1201,7 @@ function overlayPanel(model, state, width, height, color) {
     body = [
       ...wrap(`Folder: ${state.setupBrowseCwd || homedir()}`, width - 4).slice(0, 2),
       state.setupFilePurpose === 'resume'
-        ? 'Supported: TXT, Markdown, JSON, YAML, YML.'
+        ? 'Supported: PDF, DOCX, TXT, Markdown, JSON, YAML, YML.'
         : 'Supported: TXT and Markdown.',
       `Showing ${visible.start + 1}–${visible.start + visible.items.length} of ${items.length}`,
       '',
@@ -1188,15 +1216,20 @@ function overlayPanel(model, state, width, height, color) {
     title = 'SET UP JOBOS · CHECK YOUR RESUME';
     body = [
       `Source: ${preview.label || 'pasted text'}`,
-      `Name: ${document.identity?.name || 'not found'}  ·  Roles found: ${document.experience?.length || 0}  ·  Education: ${document.education?.length || 0}`,
+      `Name: ${document.identity?.name || 'not found'}`,
+      `Email: ${document.identity?.email || 'not found'}  ·  Phone: ${document.identity?.phone || 'not found'}`,
+      `Roles found: ${document.experience?.length || 0}  ·  Education: ${document.education?.length || 0}`,
       `Experience highlights found: ${claims.length}`,
+      ...(preview.validation?.blockers || []).slice(0, 3).map(item => `Needs attention: ${friendlySetupText(item.message)}`),
       ...(preview.validation?.warnings || []).slice(0, 2).map(item => `Please check: ${friendlySetupText(item.message)}`),
       '',
       'PREVIEW',
       ...claims.slice(0, Math.max(2, height - 11)).map(item => `• ${item.summary}`),
       ...(claims.length ? [] : ['No achievement-style claims were found. You can add them after import.']),
       '',
-      'Enter confirms import  ·  Esc changes the source'
+      preview.validation?.valid
+        ? 'Enter imports · N name · E email · P phone · Esc changes source'
+        : 'Enter fixes missing contact · N name · E email · P phone · Esc changes source'
     ];
   } else if (state.overlay === 'setup-proof-review') {
     const items = state.setupProofItems || [];
@@ -1566,7 +1599,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const inputModes = new Set([
     'command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason',
     'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
-    'setup-resume-path', 'setup-resume-paste', 'setup-job-path', 'setup-job-paste',
+    'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-job-path', 'setup-job-paste',
     'setup-job-url', 'setup-discovery'
   ]);
   const setupWorkspace = String(state.overlay || '').startsWith('setup')
@@ -1585,6 +1618,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
               'setup-file': 'Local file path',
               'setup-resume-path': 'Resume file path',
               'setup-resume-paste': 'Resume text',
+              'setup-resume-edit': RESUME_IDENTITY_FIELDS[state.setupResumeEditField] || 'Resume field',
               'setup-job-path': 'Job file path',
               'setup-job-paste': 'Job description',
               'setup-job-url': 'Job URL',
@@ -1714,6 +1748,7 @@ export function defaultTuiState() {
     setupFilePurpose: null,
     setupBrowseCwd: null,
     setupResumePreview: null,
+    setupResumeEditField: null,
     setupJobPreview: null,
     helpContextOverlay: null,
     helpContextIndex: 0,
@@ -1919,7 +1954,10 @@ export class JobosTui {
     const { segments, remainder } = splitRawInput(`${this.mouseInputBuffer}${String(chunk || '')}`);
     this.mouseInputBuffer = remainder;
     for (const segment of segments) {
-      if (segment.type === 'mouse') this.onMouseData(segment.value);
+      if (segment.type === 'paste') this.onKeypress(segment.value, { name: 'paste' });
+      else if (segment.type === 'mouse') {
+        if (this.mouseEnabled) this.onMouseData(segment.value);
+      }
       else this.keypressInput?.write(segment.value);
     }
   }
@@ -3804,32 +3842,118 @@ export class JobosTui {
       if (filePath) {
         const extension = path.extname(filePath).toLowerCase();
         if (!RESUME_FILE_EXTENSIONS.has(extension)) {
-          throw new Error('That file type is not supported. Use TXT, Markdown, JSON, YAML, or YML; paste text from PDF or DOCX.');
+          throw new Error('That file type is not supported. Use PDF, DOCX, TXT, Markdown, JSON, YAML, or YML.');
         }
-        input = readResumeFile(profileId, filePath);
+        if (extension === '.pdf' || extension === '.docx') {
+          this.state.error = null;
+          this.state.status = `Reading ${path.basename(filePath)} locally…`;
+          this.render();
+          void this.previewSetupResumeFile({ profileId, filePath, label });
+          return true;
+        }
+        input = {
+          ...readResumeFile(profileId, filePath),
+          sourceFormat: extension.slice(1) || 'text',
+          sourceName: path.basename(filePath),
+          sourceFilePath: filePath,
+          extraction: { extractor: 'jobos-text', warnings: [] }
+        };
       } else {
-        input = { sourceText: String(sourceText), document: parseResumeText(profileId, sourceText) };
+        const normalizedSource = normalizeResumeSourceText(sourceText);
+        input = { sourceText: normalizedSource, document: parseResumeText(profileId, normalizedSource), sourceFormat: 'paste', sourceName: 'pasted resume text', extraction: { extractor: 'jobos-text', warnings: [] } };
       }
-      const validation = validateResumeDocument(input.document);
-      this.state.setupResumePreview = {
-        ...input,
-        filePath,
-        label: label || filePath || 'pasted resume text',
-        validation,
-        claims: structuredProofs(profileId, input.sourceText, label || filePath || 'pasted resume')
-      };
-      this.state.overlay = 'setup-resume-preview';
-      this.state.overlayIndex = 0;
-      this.state.mode = 'normal';
-      this.setInput('');
-      this.state.error = validation.valid ? null : 'Resume details need attention';
-      this.state.status = validation.valid
-        ? 'Review the extraction preview · Enter imports · Esc chooses another source'
-        : `Resume cannot be imported yet · ${friendlySetupText(validation.blockers[0]?.message)}`;
+      this.finishSetupResumePreview({ profileId, input, filePath, label });
     } catch (error) {
       this.state.error = error.message;
       this.state.status = error.message;
     }
+    this.render();
+    return true;
+  }
+
+  async previewSetupResumeFile({ profileId, filePath, label }) {
+    try {
+      const input = await readResumeFileAsync(profileId, filePath);
+      this.finishSetupResumePreview({ profileId, input, filePath, label });
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = error.message;
+      this.render();
+    }
+  }
+
+  finishSetupResumePreview({ profileId, input, filePath = '', label = '' }) {
+    const validation = validateResumeDocument(input.document);
+    this.state.setupResumePreview = {
+      ...input,
+      filePath,
+      label: label || filePath || 'pasted resume text',
+      validation,
+      claims: structuredProofs(profileId, input.sourceText, label || filePath || 'pasted resume')
+    };
+    this.state.overlay = 'setup-resume-preview';
+    this.state.overlayIndex = 0;
+    this.state.mode = 'normal';
+    this.setInput('');
+    this.state.error = validation.valid ? null : 'Resume details need attention';
+    this.state.status = validation.valid
+      ? 'Review the extraction preview · Enter imports · Esc chooses another source'
+      : `Resume needs a correction · ${friendlySetupText(validation.blockers[0]?.message)}`;
+    this.render();
+  }
+
+  beginSetupResumeCorrection(field = null) {
+    const preview = this.state.setupResumePreview;
+    if (!preview?.document?.identity) return false;
+    const blockerField = preview.validation?.blockers
+      ?.map(item => String(item.field || ''))
+      .find(item => item.startsWith('identity.'))
+      ?.slice('identity.'.length);
+    const selected = field || blockerField;
+    if (!Object.hasOwn(RESUME_IDENTITY_FIELDS, selected)) {
+      this.state.error = 'Resume details need attention';
+      this.state.status = preview.validation?.blockers?.[0]?.message || 'Choose a corrected source and try again.';
+      this.render();
+      return true;
+    }
+    this.state.setupResumeEditField = selected;
+    this.state.setupReturnOverlay = 'setup-resume-preview';
+    this.state.mode = 'setup-resume-edit';
+    this.setInput(preview.document.identity[selected] || '');
+    this.state.error = null;
+    this.state.status = `Correct ${RESUME_IDENTITY_FIELDS[selected].toLowerCase()} · Enter saves · Esc cancels`;
+    this.render();
+    return true;
+  }
+
+  commitSetupResumeCorrection() {
+    const field = this.state.setupResumeEditField;
+    const value = String(this.state.input || '').trim();
+    if (!Object.hasOwn(RESUME_IDENTITY_FIELDS, field)) return false;
+    if (!value) {
+      this.state.error = `${RESUME_IDENTITY_FIELDS[field]} is required.`;
+      this.state.status = this.state.error;
+      this.render();
+      return true;
+    }
+    if (field === 'email' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) {
+      this.state.error = 'Enter a complete email address.';
+      this.state.status = this.state.error;
+      this.render();
+      return true;
+    }
+    const preview = this.state.setupResumePreview;
+    preview.document.identity[field] = value;
+    preview.document.identity.verificationStatus = 'needs_verification';
+    preview.validation = validateResumeDocument(preview.document);
+    this.state.mode = 'normal';
+    this.state.setupResumeEditField = null;
+    this.state.setupReturnOverlay = null;
+    this.setInput('');
+    this.state.error = preview.validation.valid ? null : 'Resume details need attention';
+    this.state.status = preview.validation.valid
+      ? 'Resume details updated · review the extraction, then Enter imports'
+      : `Saved · ${friendlySetupText(preview.validation.blockers[0]?.message)}`;
     this.render();
     return true;
   }
@@ -3847,7 +3971,11 @@ export class JobosTui {
       createResumeRevision(this.store, {
         profileId,
         document: preview.document,
-        sourceText: preview.sourceText
+        sourceText: preview.sourceText,
+        sourceFormat: preview.sourceFormat,
+        sourceName: preview.sourceName,
+        sourceFilePath: preview.sourceFilePath,
+        extraction: preview.extraction
       });
       importResumeProofCandidates(this.store, profileId, preview.sourceText, preview.label);
       this.state.mode = 'normal';
@@ -4040,7 +4168,12 @@ export class JobosTui {
 
     if (this.state.overlay === 'setup-resume-preview') {
       if (key.name === 'escape') return this.beginSetupSource('resume');
-      if (isEnter) return this.confirmSetupResume();
+      if (value === 'n') return this.beginSetupResumeCorrection('name');
+      if (value === 'e') return this.beginSetupResumeCorrection('email');
+      if (value === 'p') return this.beginSetupResumeCorrection('phone');
+      if (isEnter) return this.state.setupResumePreview?.validation?.valid
+        ? this.confirmSetupResume()
+        : this.beginSetupResumeCorrection();
       if (value === '?') return this.openHelp();
       return true;
     }
@@ -4532,6 +4665,7 @@ export class JobosTui {
         this.state.mode = 'normal';
         this.state.setupFormAction = null;
         this.state.setupProofId = null;
+        this.state.setupResumeEditField = null;
         this.state.setupReturnOverlay = null;
         this.setInput('');
         if (returnOverlay) this.state.overlay = returnOverlay;
@@ -4593,6 +4727,7 @@ export class JobosTui {
       const text = this.state.input.trim();
       const mode = this.state.mode;
       if (['setup-profile', 'setup-proof'].includes(mode)) return this.commitSetupForm();
+      if (mode === 'setup-resume-edit') return this.commitSetupResumeCorrection();
       if (mode === 'setup-resume-path') return this.previewSetupResume({ filePath: text, label: path.basename(text) });
       if (mode === 'setup-resume-paste') return this.previewSetupResume({ sourceText: this.state.input, label: 'pasted resume text' });
       if (mode === 'setup-job-path') return this.importSetupJobFile(text);
@@ -4787,7 +4922,7 @@ export class JobosTui {
       'review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm',
       'reject-confirm', 'reject-note', 'suppress-reason', 'build-network-field',
       'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
-      'setup-resume-path', 'setup-resume-paste', 'setup-job-path', 'setup-job-paste',
+      'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-job-path', 'setup-job-paste',
       'setup-job-url', 'setup-discovery'
     ].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
@@ -4875,19 +5010,18 @@ export class JobosTui {
 
   async start() {
     if (!this.stdin.isTTY || !this.stdout.isTTY) throw Error('JobOS TUI requires a terminal. Use `jobos tui --snapshot` for a non-interactive state view.');
-    if (this.mouseEnabled) {
-      this.keypressInput = new PassThrough();
-      readline.emitKeypressEvents(this.keypressInput);
-      this.keypressInput.on('keypress', this.boundKeypress);
-      this.stdin.on('data', this.boundRawInput);
-    } else {
-      readline.emitKeypressEvents(this.stdin);
-      this.stdin.on('keypress', this.boundKeypress);
-    }
+    this.keypressInput = new PassThrough();
+    readline.emitKeypressEvents(this.keypressInput);
+    this.keypressInput.on('keypress', this.boundKeypress);
+    this.stdin.on('data', this.boundRawInput);
+    // Keep a direct listener for embedders and test terminals that emit
+    // semantic keypress events themselves. Real terminal bytes still travel
+    // through the raw bracketed-paste parser above.
+    this.stdin.on('keypress', this.boundKeypress);
     this.stdin.setRawMode(true);
     this.stdin.resume();
     this.stdout.on('resize', this.boundResize);
-    this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
+    this.stdout.write(`${ESC}?1049h${ESC}?25l${ESC}?2004h${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
     this.render();
     this.refreshTimer = setInterval(() => {
       if (!this.state.busy && !this.state.editorActive) {
@@ -4913,20 +5047,17 @@ export class JobosTui {
     if (this.stopped) return;
     this.stopped = true;
     clearInterval(this.refreshTimer);
-    if (this.mouseEnabled) {
-      this.stdin.off('data', this.boundRawInput);
-      this.keypressInput?.off('keypress', this.boundKeypress);
-      this.keypressInput?.destroy();
-      this.keypressInput = null;
-    } else {
-      this.stdin.off('keypress', this.boundKeypress);
-    }
+    this.stdin.off('data', this.boundRawInput);
+    this.stdin.off('keypress', this.boundKeypress);
+    this.keypressInput?.off('keypress', this.boundKeypress);
+    this.keypressInput?.destroy();
+    this.keypressInput = null;
     this.stdout.off('resize', this.boundResize);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
     if (this.client) await this.client.stop();
     await this.sessionPersistence.catch(() => {});
-    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?25h${ESC}?1049l`);
+    this.stdout.write(`${this.mouseEnabled ? `${ESC}?1000l${ESC}?1006l` : ''}${ESC}?2004l${ESC}?25h${ESC}?1049l`);
     this.resolveStop?.();
   }
 }

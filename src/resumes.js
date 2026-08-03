@@ -2,9 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
+import { load } from 'cheerio';
+import mammoth from 'mammoth';
 import { all, audit, one, run, save } from './db.js';
 import { id, now, parseJson } from './utils.js';
-import { writeYaml } from './workspace.js';
+import { writeMd, writeYaml } from './workspace.js';
 
 export const RESUME_SCHEMA_VERSION = 1;
 export const RESUME_VERIFICATION_STATUSES = new Set(['verified', 'needs_verification', 'rejected']);
@@ -118,6 +120,21 @@ function canonicalSection(value) {
   return '';
 }
 function cleanBullet(line) { return String(line).replace(/^\s*[-*•]\s*/, '').trim(); }
+const EMAIL_PATTERN = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/i;
+
+export function normalizeResumeSourceText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u00A0\u202F]/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .replace(/([A-Z0-9.!#$%&'*+/=?^_`{|}~-]+)\s*(?:\n\s*)?@\s*(?:\n\s*)?([A-Z0-9-]+(?:\s*\.\s*[A-Z0-9-]+)+)/gi,
+      (_match, local, domain) => `${local}@${domain.replace(/\s+/g, '')}`)
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim();
+}
+
 function parseDateRange(value) {
   const source = text(value);
   const match = source.match(/((?:19|20)\d{2}(?:-\d{2})?|[A-Za-z]{3,9}\s+(?:19|20)\d{2})\s*(?:-|–|—|to)\s*(Present|Current|(?:19|20)\d{2}(?:-\d{2})?|[A-Za-z]{3,9}\s+(?:19|20)\d{2})/i);
@@ -126,12 +143,14 @@ function parseDateRange(value) {
 }
 
 export function parseResumeText(profileId, sourceText) {
-  const rawLines = String(sourceText || '').split(/\r?\n/);
+  const normalizedSource = normalizeResumeSourceText(sourceText);
+  const rawLines = normalizedSource.split('\n');
   const nonempty = rawLines.map(text).filter(Boolean);
   const identity = { name: '', email: '', phone: '', location: '', links: [], verificationStatus: 'needs_verification' };
-  const emailLine = nonempty.find(line => /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(line));
+  const emailMatch = normalizedSource.match(EMAIL_PATTERN);
+  const emailLine = emailMatch ? nonempty.find(line => line.includes(emailMatch[0])) : null;
   const phoneLine = nonempty.find(line => /(?:\+?\d[\d ().-]{7,}\d)/.test(line));
-  identity.email = emailLine?.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/)?.[0] || '';
+  identity.email = emailMatch?.[0] || '';
   identity.phone = phoneLine?.match(/(?:\+?\d[\d ().-]{7,}\d)/)?.[0] || '';
   const firstHeadingIndex = rawLines.findIndex(line => Boolean(headingName(line)));
   const headerLines = rawLines.slice(0, firstHeadingIndex < 0 ? Math.min(rawLines.length, 6) : firstHeadingIndex).map(text).filter(Boolean);
@@ -217,31 +236,179 @@ export function readResumeFile(profileId, filePath) {
     const parsed = ext === '.json' ? JSON.parse(sourceText) : YAML.parse(sourceText);
     return { sourceText, document: normalizeResumeDocument(profileId, parsed) };
   }
-  return { sourceText, document: parseResumeText(profileId, sourceText) };
+  const normalizedSource = normalizeResumeSourceText(sourceText);
+  return { sourceText: normalizedSource, document: parseResumeText(profileId, normalizedSource) };
+}
+
+function docxHtmlToMarkdown(html) {
+  const $ = load(`<body>${String(html || '')}</body>`);
+  const lines = [];
+  $('body').find('h1,h2,h3,h4,h5,h6,p,li,tr').each((_index, element) => {
+    const item = $(element);
+    const tag = String(element.tagName || '').toLowerCase();
+    if (tag === 'p' && item.closest('li,tr').length) return;
+    if (tag === 'li' && item.parents('li').length) return;
+    const value = tag === 'tr'
+      ? item.find('th,td').map((_cellIndex, cell) => $(cell).text().replace(/\s+/g, ' ').trim()).get().filter(Boolean).join(' | ')
+      : item.text().replace(/\s+/g, ' ').trim();
+    if (!value) return;
+    if (/^h[1-6]$/.test(tag)) lines.push(`${'#'.repeat(Math.min(3, Number(tag[1])))} ${value}`);
+    else if (tag === 'li') lines.push(`- ${value}`);
+    else lines.push(value);
+  });
+  return normalizeResumeSourceText(lines.join('\n'));
+}
+
+async function extractDocxText(filePath) {
+  const result = await mammoth.convertToHtml({ path: filePath }, {
+    externalFileAccess: false,
+    convertImage: mammoth.images.imgElement(() => ({ src: '' }))
+  });
+  const sourceText = docxHtmlToMarkdown(result.value);
+  if (!sourceText) throw Object.assign(new Error('No readable text was found in that DOCX file.'), { code: 'resume_text_extraction_empty' });
+  return {
+    sourceText,
+    extraction: {
+      extractor: 'mammoth',
+      warnings: (result.messages || []).map(message => String(message.message || message)).filter(Boolean)
+    }
+  };
+}
+
+async function extractPdfText(filePath) {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const data = new Uint8Array(fs.readFileSync(filePath));
+  const loadingTask = getDocument({ data, isEvalSupported: false, useSystemFonts: true });
+  const pdf = await loadingTask.promise;
+  const pages = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const lines = [];
+      let line = '';
+      let lastY = null;
+      for (const item of content.items || []) {
+        if (!item || typeof item.str !== 'string') continue;
+        const y = Number(item.transform?.[5]);
+        if (line && Number.isFinite(y) && Number.isFinite(lastY) && Math.abs(y - lastY) > 2) {
+          lines.push(line.trim());
+          line = '';
+        }
+        const value = item.str.trim();
+        if (value) line += `${line && !/^[,.;:!?)]/.test(value) ? ' ' : ''}${value}`;
+        if (item.hasEOL && line) {
+          lines.push(line.trim());
+          line = '';
+        }
+        if (Number.isFinite(y)) lastY = y;
+      }
+      if (line) lines.push(line.trim());
+      pages.push(lines.filter(Boolean).join('\n'));
+      page.cleanup();
+    }
+  } finally {
+    await pdf.destroy();
+  }
+  const sourceText = normalizeResumeSourceText(pages.filter(Boolean).join('\n\n'));
+  if (sourceText.replace(/[^\p{L}\p{N}]/gu, '').length < 20) {
+    throw Object.assign(new Error('No readable text layer was found in that PDF. It may be a scanned document; run local OCR or upload a text-based PDF, DOCX, TXT, or Markdown file.'), { code: 'resume_text_extraction_empty' });
+  }
+  return { sourceText, extraction: { extractor: 'pdfjs-dist', pageCount: pages.length, warnings: [] } };
+}
+
+export async function readResumeFileAsync(profileId, filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.pdf', '.docx'].includes(ext)) {
+    const input = readResumeFile(profileId, filePath);
+    return { ...input, sourceFormat: ext.slice(1) || 'text', sourceName: path.basename(filePath), sourceFilePath: filePath, extraction: { extractor: 'jobos-text', warnings: [] } };
+  }
+  const extracted = ext === '.pdf' ? await extractPdfText(filePath) : await extractDocxText(filePath);
+  return {
+    ...extracted,
+    document: parseResumeText(profileId, extracted.sourceText),
+    sourceFormat: ext.slice(1),
+    sourceName: path.basename(filePath),
+    sourceFilePath: filePath
+  };
 }
 
 export function currentResume(s, profileId) {
-  const row = one(s, 'SELECT * FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [profileId]);
-  return row ? { ...row, document: parseJson(row.document_json, null), validation: validateResumeDocument(parseJson(row.document_json, null)) } : null;
+  const row = one(s, `SELECT r.*,COALESCE(i.source_format,'text') AS source_format,COALESCE(i.source_name,'') AS source_name,COALESCE(i.source_archive_path,'') AS source_archive_path,COALESCE(i.extraction_json,'{}') AS extraction_json
+    FROM profile_resume_revisions r LEFT JOIN resume_source_imports i ON i.resume_id=r.id WHERE r.profile_id=? AND r.is_current=1`, [profileId]);
+  return row ? { ...row, document: parseJson(row.document_json, null), extraction: parseJson(row.extraction_json, {}), validation: validateResumeDocument(parseJson(row.document_json, null)) } : null;
 }
 export function getResume(s, profileId, revision = null) {
-  const row = revision == null ? one(s, 'SELECT * FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [profileId]) : one(s, 'SELECT * FROM profile_resume_revisions WHERE profile_id=? AND revision=?', [profileId, revision]);
-  return row ? { ...row, document: parseJson(row.document_json, null), validation: validateResumeDocument(parseJson(row.document_json, null)) } : null;
+  const select = `SELECT r.*,COALESCE(i.source_format,'text') AS source_format,COALESCE(i.source_name,'') AS source_name,COALESCE(i.source_archive_path,'') AS source_archive_path,COALESCE(i.extraction_json,'{}') AS extraction_json
+    FROM profile_resume_revisions r LEFT JOIN resume_source_imports i ON i.resume_id=r.id`;
+  const row = revision == null ? one(s, `${select} WHERE r.profile_id=? AND r.is_current=1`, [profileId]) : one(s, `${select} WHERE r.profile_id=? AND r.revision=?`, [profileId, revision]);
+  return row ? { ...row, document: parseJson(row.document_json, null), extraction: parseJson(row.extraction_json, {}), validation: validateResumeDocument(parseJson(row.document_json, null)) } : null;
 }
 export function listResumeRevisions(s, profileId) {
-  return all(s, 'SELECT * FROM profile_resume_revisions WHERE profile_id=? ORDER BY revision', [profileId]).map(row => ({ ...row, document: parseJson(row.document_json, null) }));
+  return all(s, `SELECT r.*,COALESCE(i.source_format,'text') AS source_format,COALESCE(i.source_name,'') AS source_name,COALESCE(i.source_archive_path,'') AS source_archive_path,COALESCE(i.extraction_json,'{}') AS extraction_json
+    FROM profile_resume_revisions r LEFT JOIN resume_source_imports i ON i.resume_id=r.id WHERE r.profile_id=? ORDER BY r.revision`, [profileId]).map(row => ({ ...row, document: parseJson(row.document_json, null), extraction: parseJson(row.extraction_json, {}) }));
+}
+
+function resumeMarkdown(document) {
+  const identity = document.identity || {};
+  const lines = [
+    `# ${identity.name || 'Resume'}`,
+    '',
+    [identity.email, identity.phone, identity.location].filter(Boolean).join(' · ')
+  ];
+  for (const link of identity.links || []) if (link.url) lines.push(`- [${link.label || link.url}](${link.url})`);
+  if (document.summary?.text) lines.push('', '## Summary', '', document.summary.text);
+  if (document.experience?.length) {
+    lines.push('', '## Experience');
+    for (const entry of document.experience) {
+      lines.push('', `### ${entry.title}${entry.employer ? ` — ${entry.employer}` : ''}`);
+      const details = [entry.location, [entry.dateSource?.startText, entry.dateSource?.endText].filter(Boolean).join(' – ')].filter(Boolean).join(' · ');
+      if (details) lines.push('', details);
+      for (const bullet of entry.bullets || []) if (bullet.text) lines.push(`- ${bullet.text}`);
+    }
+  }
+  const simpleSections = [
+    ['Skills', document.skills, item => [item.name, item.category].filter(Boolean).join(' — ')],
+    ['Education', document.education, item => [item.institution, item.degree, item.field, item.location].filter(Boolean).join(' — ')],
+    ['Credentials', document.credentials, item => [item.name, item.issuer, item.date].filter(Boolean).join(' — ')],
+    ['Projects', document.projects, item => [item.name, item.description, item.url].filter(Boolean).join(' — ')]
+  ];
+  for (const [title, items, format] of simpleSections) {
+    if (!items?.length) continue;
+    lines.push('', `## ${title}`, '');
+    for (const item of items) {
+      const value = format(item);
+      if (value) lines.push(`- ${value}`);
+      for (const bullet of item.bullets || []) if (bullet.text) lines.push(`  - ${bullet.text}`);
+    }
+  }
+  for (const section of document.additionalSections || []) {
+    lines.push('', `## ${section.title}`, '');
+    for (const entry of section.entries || []) lines.push(`- ${typeof entry === 'string' ? entry : JSON.stringify(entry)}`);
+  }
+  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 }
 
 export function syncResume(s, profileId) {
   const revisions = listResumeRevisions(s, profileId);
   if (!revisions.length) return;
   const directory = path.join(s.p.profiles, profileId, 'resume');
-  for (const revision of revisions) writeYaml(path.join(directory, 'revisions', `${revision.revision}.yaml`), { id: revision.id, profileId, revision: revision.revision, schemaVersion: revision.schema_version, sourceTextHash: revision.source_text_hash, verificationStatus: revision.verification_status, supersedesResumeId: revision.supersedes_resume_id || null, isCurrent: Boolean(revision.is_current), createdAt: revision.created_at, reviewedAt: revision.reviewed_at || null, document: revision.document });
+  for (const revision of revisions) {
+    const source = { format: revision.source_format, name: revision.source_name, archivePath: revision.source_archive_path || null, extraction: revision.extraction };
+    writeYaml(path.join(directory, 'revisions', `${revision.revision}.yaml`), { id: revision.id, profileId, revision: revision.revision, schemaVersion: revision.schema_version, sourceTextHash: revision.source_text_hash, source, verificationStatus: revision.verification_status, supersedesResumeId: revision.supersedes_resume_id || null, isCurrent: Boolean(revision.is_current), createdAt: revision.created_at, reviewedAt: revision.reviewed_at || null, document: revision.document });
+    writeMd(path.join(directory, 'revisions', `${revision.revision}.md`), resumeMarkdown(revision.document));
+    writeMd(path.join(directory, 'revisions', `${revision.revision}-source.md`), `# Extracted resume source\n\n> Generated from ${revision.source_name || revision.source_format || 'resume input'}. Edit the reviewed resume through JobOS so changes create a revision.\n\n${revision.source_text}`);
+  }
   const current = revisions.find(revision => revision.is_current);
-  if (current) writeYaml(path.join(directory, 'current.yaml'), { id: current.id, profileId, revision: current.revision, schemaVersion: current.schema_version, sourceTextHash: current.source_text_hash, verificationStatus: current.verification_status, createdAt: current.created_at, reviewedAt: current.reviewed_at || null, document: current.document, validation: validateResumeDocument(current.document) });
+  if (current) {
+    const source = { format: current.source_format, name: current.source_name, archivePath: current.source_archive_path || null, extraction: current.extraction };
+    writeYaml(path.join(directory, 'current.yaml'), { id: current.id, profileId, revision: current.revision, schemaVersion: current.schema_version, sourceTextHash: current.source_text_hash, source, verificationStatus: current.verification_status, createdAt: current.created_at, reviewedAt: current.reviewed_at || null, document: current.document, validation: validateResumeDocument(current.document) });
+    writeMd(path.join(directory, 'current.md'), resumeMarkdown(current.document));
+    writeMd(path.join(directory, 'current-source.md'), `# Extracted resume source\n\n> Generated from ${current.source_name || current.source_format || 'resume input'}. Edit the reviewed resume through JobOS so changes create a revision.\n\n${current.source_text}`);
+  }
 }
 
-export function createResumeRevision(s, { profileId, document, sourceText = '', verificationStatus = null, reviewedAt = null, persist = true }) {
+export function createResumeRevision(s, { profileId, document, sourceText = '', sourceFormat = 'text', sourceName = '', sourceFilePath = '', extraction = {}, verificationStatus = null, reviewedAt = null, persist = true }) {
   if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
   const normalized = normalizeResumeDocument(profileId, document);
   const validation = validateResumeDocument(normalized);
@@ -252,8 +419,17 @@ export function createResumeRevision(s, { profileId, document, sourceText = '', 
   const resumeId = id('resume', `${profileId}:${revision}:${sourceHash(sourceText)}:${JSON.stringify(normalized)}`);
   const status = verificationStatus || (validation.warnings.some(warning => warning.code === 'resume_source_unverified') ? 'needs_verification' : 'verified');
   if (!RESUME_VERIFICATION_STATUSES.has(status)) throw Error(`Invalid resume verification status: ${status}`);
+  let sourceArchivePath = '';
+  if (sourceFilePath && ['pdf', 'docx'].includes(String(sourceFormat).toLowerCase())) {
+    const archiveDirectory = path.join(s.p.state, 'resume-sources', profileId);
+    fs.mkdirSync(archiveDirectory, { recursive: true });
+    const archivePath = path.join(archiveDirectory, `${revision}.${String(sourceFormat).toLowerCase()}`);
+    fs.copyFileSync(sourceFilePath, archivePath);
+    sourceArchivePath = path.relative(s.root, archivePath);
+  }
   if (current) run(s, 'UPDATE profile_resume_revisions SET is_current=0 WHERE id=?', [current.id]);
   run(s, 'INSERT INTO profile_resume_revisions (id,profile_id,revision,schema_version,source_text,source_text_hash,document_json,verification_status,supersedes_resume_id,is_current,created_at,reviewed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [resumeId, profileId, revision, RESUME_SCHEMA_VERSION, sourceText, sourceHash(sourceText), JSON.stringify(normalized), status, current?.id || null, 1, at, reviewedAt]);
+  run(s, 'INSERT INTO resume_source_imports (resume_id,source_format,source_name,source_archive_path,extraction_json) VALUES (?,?,?,?,?)', [resumeId, sourceFormat || 'text', sourceName || '', sourceArchivePath, JSON.stringify(extraction || {})]);
   run(s, 'UPDATE profiles SET resume_text=?,updated_at=? WHERE id=?', [sourceText, at, profileId]);
   audit(s, 'resume.revision_created', 'profile_resume_revision', resumeId, { profileId, revision, supersedesResumeId: current?.id || null, verificationStatus: status, valid: validation.valid });
   syncResume(s, profileId);
@@ -261,10 +437,10 @@ export function createResumeRevision(s, { profileId, document, sourceText = '', 
   return getResume(s, profileId, revision);
 }
 
-export function importResume(s, { profileId, filePath, persist = true }) {
-  const input = readResumeFile(profileId, filePath);
+export async function importResume(s, { profileId, filePath, persist = true }) {
+  const input = await readResumeFileAsync(profileId, filePath);
   return createResumeRevision(s, { profileId, ...input, persist });
 }
-export function replaceResume(s, { profileId, filePath }) {
+export async function replaceResume(s, { profileId, filePath }) {
   return importResume(s, { profileId, filePath });
 }
