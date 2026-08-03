@@ -825,7 +825,7 @@ test('W04-LIVE-04 renders fit and posting status separately in CLI domain TUI an
   assert.equal(context.postingLiveness.contract, 'jobos.posting-liveness.v1');
   assert.equal(context.liveness, undefined);
   const model = buildTuiModel(f.s, { profileId: 'profile-test', selectedJobId: f.job.id, at: FIXED_AT });
-  const state = { ...defaultTuiState(), selectedJobId: f.job.id };
+  const state = { ...defaultTuiState(), selectedJobId: f.job.id, detailsExpanded: true };
   const rendered = renderTui(model, state, { width: 140, height: 54, color: false });
   assert.match(rendered, new RegExp(`FIT ${result.overall}/100`));
   assert.match(rendered, /networkAccess: unknown/);

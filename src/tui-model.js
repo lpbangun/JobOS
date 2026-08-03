@@ -88,13 +88,7 @@ function stageState(s, context) {
   ];
 }
 
-function priorityStrip(s, jobs, profileId, at) {
-  const actionRow = profileId ? one(s, `SELECT tasks.*,jobs.company
-    FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id
-    WHERE tasks.profile_id=? AND tasks.status='open' AND tasks.action_kind='application_next_action'
-    ORDER BY CASE WHEN tasks.urgent_at<=? THEN 0 WHEN tasks.due_at<=? THEN 1 ELSE 2 END,
-      tasks.due_at,tasks.id LIMIT 1`, [profileId, at, at]) : null;
-  const action = actionRow ? taskView(actionRow, { nowDate: new Date(at) }) : null;
+function priorityStrip(s, jobs, profileId, at, recommendedAction) {
   const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
     FROM applications JOIN jobs ON jobs.id=applications.job_id
     LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.profile_id=applications.profile_id AND tasks.status='open'
@@ -105,12 +99,10 @@ function priorityStrip(s, jobs, profileId, at) {
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
   return [
     {
-      kind: action?.state || 'action',
-      jobId: action?.jobId || null,
-      taskId: action?.id || null,
-      text: action
-        ? `${action.title}${actionRow.company ? ` · ${actionRow.company}` : ''} · ${action.dueAt.slice(0, 16)}`
-        : 'No current application actions'
+      kind: recommendedAction?.state || 'action',
+      jobId: recommendedAction?.jobId || null,
+      taskId: recommendedAction?.taskId || null,
+      text: recommendedAction?.label || 'Review your workspace and choose the next step'
     },
     {
       kind: 'interview',
@@ -128,6 +120,48 @@ function priorityStrip(s, jobs, profileId, at) {
       text: failure ? `${failure.trigger_name} · ${failure.error || 'failed'} · ${failure.created_at.slice(0, 16)}` : 'No recent source failures'
     }
   ];
+}
+
+function recommendedAction(onboarding, details, jobs, selectedJobId) {
+  const task = jobs.find(job => job.id === selectedJobId)?.next || null;
+  if (task) {
+    return {
+      id: task.id,
+      label: task.title,
+      source: 'task',
+      jobId: selectedJobId,
+      taskId: task.id,
+      state: task.state || null
+    };
+  }
+  if (!onboarding.coreReady && onboarding.nextAction) {
+    return {
+      id: onboarding.nextAction.id,
+      label: onboarding.nextAction.label,
+      source: 'setup',
+      jobId: onboarding.jobId || selectedJobId || null,
+      taskId: null
+    };
+  }
+  const readinessNext = details?.readiness?.nextAction
+    || details?.readiness?.next
+    || details?.readiness?.nextActions?.[0]?.action;
+  if (readinessNext) {
+    return {
+      id: 'application_readiness',
+      label: typeof readinessNext === 'string' ? readinessNext : JSON.stringify(readinessNext),
+      source: 'readiness',
+      jobId: selectedJobId,
+      taskId: null
+    };
+  }
+  return {
+    id: selectedJobId ? 'review_selected_job' : 'continue_setup',
+    label: selectedJobId ? 'Review this job and choose your next step' : 'Continue guided setup',
+    source: selectedJobId ? 'job' : 'setup',
+    jobId: selectedJobId || null,
+    taskId: null
+  };
 }
 
 export function artifactDocs(s, jobId) {
@@ -472,7 +506,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   });
   const memory = memoryProjection(s, { profileId: selectedProfile, at });
   const onboarding = buildOnboardingStatus(s, { profileId, jobId: selectedJobId, asOf: at });
-
+  const nextAction = recommendedAction(onboarding, details, jobs, selectedId);
+  onboarding.recommendedAction = nextAction;
+  const priority = priorityStrip(s, jobs, selectedProfile, at, nextAction);
   return {
     version: 2,
     generatedAt: at,
@@ -487,10 +523,15 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
       drafts: reviews.length,
       interviews: interviewCount
     },
-    priority: priorityStrip(s, jobs, selectedProfile, at),
+    priority,
+    recommendedAction: nextAction,
     jobs,
     selectedJobId: selectedId,
-    selected: details,
+    selected: details ? {
+      ...details,
+      readiness: readiness ? { ...readiness, nextAction: nextAction.label, recommendedAction: nextAction } : null,
+      recommendedAction: nextAction
+    } : null,
     interviews,
     memory,
     onboarding,

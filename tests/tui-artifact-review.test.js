@@ -1374,9 +1374,9 @@ test('T13 — Responsive existing-docs surface', async t => {
   assert.match(screenWide, /resume\.md/,
     'T13: artifact path at width 140');
 
-  // Agent-off placeholder visible alongside content
-  assert.match(screenWide, /agent off|AGENT.*off/,
-    'T13: wide split shows agent/placeholder alongside content');
+  // Assistant-off placeholder visible alongside content
+  assert.match(screenWide, /Assistant (?:is )?offline?/i,
+    'T13: wide split shows assistant/placeholder alongside content');
 
   // ── Intended: Ctrl+A toggles focusTarget in wide docs ──
   tui.state.focusTarget = 'shell';

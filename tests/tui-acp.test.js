@@ -48,7 +48,7 @@ function streams() {
   return { stdin, stdout };
 }
 
-test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agent orientation', async t => {
+test('populated dashboard prioritizes jobs and selected action while technical detail stays disclosed on demand', async t => {
   const { store, profile, proof, jobs } = await seededWorkspace(t);
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id, at: '2026-07-15T12:00:00.000Z' });
   const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready', sessionId: 'session-123' };
@@ -61,14 +61,16 @@ test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agen
   assert.match(screen, /FAILURE/);
   assert.match(screen, /JOBS · today/);
   assert.match(screen, /SELECTED JOB/);
-  assert.match(screen, /AGENT/);
-  assert.match(screen, /Hermes ACP · ready/);
+  assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');
+  assert.doesNotMatch(screen, /Hermes ACP|side-effects:off|TECHNICAL DETAILS/);
   assert.match(screen, /Product Manager 1/);
-  assert.match(screen, new RegExp(proof.id));
-  assert.match(screen, /resume · draft_needs_human_review/);
-  assert.match(screen, /side-effects:off/);
-  assert.match(screen, /p pursue · z score · n network · o docs · q answers · a agent/);
-  assert.match(screen, /i prompt/);
+  assert.match(screen, /e details · p prepare · z score · i ask/);
+
+  const detailed = renderTui(model, { ...state, detailsExpanded: true }, { width: 150, height: 46, color: false });
+  assert.match(detailed, /TECHNICAL DETAILS/);
+  assert.match(detailed, new RegExp(proof.id));
+  assert.match(detailed, /resume · draft_needs_human_review/);
+  assert.match(detailed, /side effects off/);
 });
 
 test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {
@@ -205,7 +207,7 @@ test('review, log, network, documents, answers, discovery, system, and profile s
   for (const [overlay, expected] of Object.entries(expectations)) {
     const screen = renderTui(model, { ...base, overlay }, { width: 120, height: 38, color: false });
     assert.match(screen, expected, `${overlay} overlay did not expose expected state`);
-    assert.match(screen, /A:ready|agent:ready/, `${overlay} replaced the shell header`);
+    assert.match(screen, /local workspace/, `${overlay} replaced the shell header`);
   }
 });
 
@@ -259,17 +261,19 @@ test('compact terminals keep context reachable and switch to a focused chat page
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
   const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
   const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
-  assert.match(dashboard, /FX:OFF/);
+  assert.doesNotMatch(dashboard, /FX:OFF|side-effects/);
   assert.match(dashboard, /JOBS · today/);
   assert.match(dashboard, /SELECTED JOB/);
-  assert.doesNotMatch(dashboard, /┌ AGENT/);
+  assert.doesNotMatch(dashboard, /┌ ASSISTANT/);
+  assert.match(dashboard, /FIT .*STATUS|FIT unknown/);
+  assert.match(dashboard, /NEXT/);
   assert.match(dashboard, /Tab chat/);
   assert.equal(dashboard.split('\n').length, 24);
 
   const chat = renderTui(model, { ...state, focusTarget: 'agent' }, { width: 60, height: 24, color: false });
-  assert.match(chat, /AGENT · FOCUSED/);
-  assert.match(chat, /Hermes ACP · ready/);
-  assert.match(chat, /Press i to prompt/);
+  assert.match(chat, /ASSISTANT · FOCUSED/);
+  assert.match(chat, /Assistant ready/);
+  assert.match(chat, /Press i to type/);
   assert.doesNotMatch(chat, /┌ SELECTED JOB/);
   assert.match(chat, /Tab\/Esc dashboard/);
   assert.equal(chat.split('\n').length, 24);
@@ -289,9 +293,9 @@ test('focused chat owns most wide-terminal real estate and supports scrollback',
     messages
   };
   const screen = renderTui(model, state, { width: 140, height: 34, color: false });
-  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('AGENT · FOCUSED'));
-  assert.ok(panelHeader, 'focused chat includes selected-job context and agent panels');
-  assert.ok(panelHeader.indexOf('┌ AGENT') <= 38, 'agent panel begins within the first 27% of the terminal');
+  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('ASSISTANT · FOCUSED'));
+  assert.ok(panelHeader, 'focused chat includes selected-job context and assistant panels');
+  assert.ok(panelHeader.indexOf('┌ ASSISTANT') <= 45, 'assistant panel owns most of the terminal');
   assert.match(screen, /message-14/);
   assert.doesNotMatch(screen, /message-19/);
   assert.match(screen, /scroll ↑5/);
