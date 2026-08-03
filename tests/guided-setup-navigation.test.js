@@ -11,7 +11,8 @@ import {
   TUI_HANDLED_KEYS,
   TUI_KEYMAP,
   expandKeymapBinding,
-  renderTui
+  renderTui,
+  splitRawInput
 } from '../src/tui.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
@@ -21,7 +22,15 @@ function workspace() {
 }
 
 function output(width = 120, height = 36) {
-  return { columns: width, rows: height, isTTY: false, write() {}, on() {}, off() {} };
+  return {
+    columns: width,
+    rows: height,
+    isTTY: false,
+    writes: [],
+    write(chunk) { this.writes.push(String(chunk)); },
+    on() {},
+    off() {}
+  };
 }
 
 async function emptyTui({ width = 120, height = 36 } = {}) {
@@ -187,7 +196,7 @@ test('profile creation auto-advances to resume and the resume source lists paste
 });
 
 test('resume paste and path preview, supported-format guidance, import, and immediate proof review with verify/reject/add', async () => {
-  const { store, tui } = await emptyTui();
+  const { store, stdout, tui } = await emptyTui();
   const focusedId = () => tui.model.onboarding.steps[tui.state.overlayIndex]?.id;
   const stepTo = id => {
     while (focusedId() !== id) tui.onKeypress('j', { name: 'j' });
@@ -235,9 +244,12 @@ test('resume paste and path preview, supported-format guidance, import, and imme
   assert.equal(tui.state.setupResumePreview.document.identity.name, 'Alex Chen', 'path source previews the resume');
 
   // Confirming the import jumps straight into proof review with the extracted claims.
+  stdout.writes.length = 0;
   enter(tui);
   assert.equal(tui.state.overlay, 'setup-proof-review');
   assert.ok(tui.state.setupProofItems.length >= 2, 'imported claims are queued for human review');
+  assert.equal(stdout.writes.length, 1, 'resume import paints only the populated proof-review frame');
+  assert.doesNotMatch(stdout.writes[0], /No extracted claims remain/, 'atomic import never paints the empty proof state');
   const rejectedBefore = tui.state.setupProofItems.length;
 
   // Verify the first claim.
@@ -259,6 +271,12 @@ test('resume paste and path preview, supported-format guidance, import, and imme
     tui.state.setupProofItems.some(item => item.summary === 'Led quarterly planning'),
     'added highlight appears in the review list'
   );
+  stdout.writes.length = 0;
+  tui.onKeypress('', { name: 'escape' });
+  assert.equal(tui.state.overlay, 'setup');
+  assert.equal(focusedId(), 'intake', 'leaving proof review advances directly to job intake');
+  assert.equal(stdout.writes.length, 1, 'proof-review exit paints only the final focused setup frame');
+  assert.doesNotMatch(stdout.writes[0], /NEXT TASK · Workspace ready/, 'transition never exposes an intermediate workspace focus');
 });
 
 test('input fields support cursor movement, Delete, Home/End, Shift selection, and replacement paste', async () => {
@@ -330,4 +348,69 @@ test('contextual help opens first and render writes zero output for unchanged fr
 
   assert.equal(tui2.render(), false, 'post-update unchanged frame stays silent');
   assert.equal(stdout.buffer, '', 'no bytes written for a settled screen');
+});
+
+test('raw mouse reports are isolated from numeric setup shortcuts', async () => {
+  const { tui, stdout } = await emptyTui();
+  tui.render();
+  stdout.writes.length = 0;
+  const lines = screenOf(tui);
+  const row = lines.findIndex(line => line.includes('About you'));
+  const column = lines[row].indexOf('About you');
+  const report = `\x1b[<0;${column + 1};${row + 1}M`;
+  const forwarded = [];
+  tui.keypressInput = { write(value) { forwarded.push(String(value)); } };
+
+  tui.onRawInput(report);
+
+  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'profile', 'one click selects only its row');
+  assert.deepEqual(forwarded, [], 'mouse coordinates never reach readline as number keys');
+  assert.deepEqual(splitRawInput(`j${report}k`).segments.map(item => [item.type, item.value]), [
+    ['key', 'j'],
+    ['mouse', report],
+    ['key', 'k']
+  ], 'keyboard bytes around a mouse report preserve their order');
+});
+
+test('file browser keeps a long-list selection visible at compact height', async () => {
+  const { store, tui } = await emptyTui({ width: 80, height: 24 });
+  for (let index = 0; index < 36; index++) {
+    writeFileSync(path.join(store.root, `resume-${String(index).padStart(2, '0')}.txt`), `Resume ${index}`, 'utf8');
+  }
+  tui.state.setupFilePurpose = 'resume';
+  const items = tui.setupFiles(store.root, 'resume');
+  tui.state.overlay = 'setup-file-browser';
+  for (let index = 0; index < items.length + 5; index++) tui.onKeypress('', { name: 'down' });
+
+  const selected = items.at(-1);
+  const screen = screenOf(tui, 80, 24).join('\n');
+  assert.equal(tui.state.overlayIndex, items.length - 1, 'selection clamps at the final entry');
+  assert.match(screen, new RegExp(`▶ File  ${selected.label}`), 'the highlighted final entry scrolls into view');
+  assert.match(screen, new RegExp(`Showing \\d+–${items.length} of ${items.length}`), 'visible range communicates scroll position');
+});
+
+test('context help explains blocked prerequisites instead of calling them complete', async () => {
+  const { tui } = await emptyTui({ width: 80, height: 24 });
+  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(item => item.id === 'resume');
+  tui.openHelp();
+  const screen = screenOf(tui, 80, 24).join('\n');
+
+  assert.match(screen, /Select a profile before importing a resume/);
+  assert.match(screen, /Next: Complete profile setup/);
+  assert.doesNotMatch(screen, /This task is done/);
+});
+
+test('short setup dialogs are centered and explanatory copy wraps at minimum width', async () => {
+  const { tui } = await emptyTui();
+  tui.beginSetupSource('resume');
+  const wide = screenOf(tui, 120, 36);
+  const border = wide.find(line => line.includes('ADD YOUR RESUME'));
+  assert.ok(border.indexOf('╔') >= 18, 'short dialog does not consume the full wide terminal');
+  assert.ok(stringWidth(border.trim()) <= 82, 'short dialog uses a compact reading width');
+
+  const compact = screenOf(tui, 60, 24);
+  assert.ok(compact.every(line => stringWidth(line) <= 60), 'compact dialog never overflows');
+  const compactText = compact.map(line => line.replaceAll('║', '').trim()).join(' ');
+  assert.match(compactText, /For PDF or DOCX, copy and paste the text/);
+  assert.match(compact.join('\n'), /\? help  ·  Q quit/, 'compact footer keeps help and quit visible');
 });

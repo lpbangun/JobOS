@@ -2,6 +2,7 @@ import stripAnsiText from 'strip-ansi';
 import stringWidth from 'string-width';
 import sliceAnsi from 'slice-ansi';
 import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { readdirSync, readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
@@ -156,6 +157,32 @@ export function parseSgrMouse(value) {
   return events;
 }
 
+/**
+ * Split raw terminal input before readline sees it. Readline decodes an SGR
+ * mouse report as a series of ordinary keys (including its numeric
+ * coordinates), so mouse reports must never enter its keypress parser.
+ */
+export function splitRawInput(value) {
+  const input = String(value || '');
+  const segments = [];
+  const pattern = /\x1b\[<\d+;\d+;\d+[Mm]/g;
+  let cursor = 0;
+  for (const match of input.matchAll(pattern)) {
+    if (match.index > cursor) segments.push({ type: 'key', value: input.slice(cursor, match.index) });
+    segments.push({ type: 'mouse', value: match[0] });
+    cursor = match.index + match[0].length;
+  }
+  const tail = input.slice(cursor);
+  const partialIndex = tail.lastIndexOf('\x1b[');
+  const partial = partialIndex >= 0 ? tail.slice(partialIndex) : '';
+  if (partial && /^\x1b\[<?(?:\d*(?:;\d*){0,2})?$/.test(partial)) {
+    if (partialIndex > 0) segments.push({ type: 'key', value: tail.slice(0, partialIndex) });
+    return { segments, remainder: partial };
+  }
+  if (tail) segments.push({ type: 'key', value: tail });
+  return { segments, remainder: '' };
+}
+
 const SETUP_STEP_LABELS = Object.freeze({
   workspace: 'Workspace ready',
   profile: 'About you',
@@ -287,8 +314,8 @@ function editableInput(state, color) {
 
 function panel(title, body, width, color) {
   const inner = Math.max(1, width - 2);
-  const topLabel = ` ${title} `;
-  const top = `┌${topLabel}${'─'.repeat(Math.max(0, inner - topLabel.length))}┐`;
+  const topLabel = ` ${crop(title, Math.max(1, inner - 2))} `;
+  const top = `┌${topLabel}${'─'.repeat(Math.max(0, inner - stringWidth(topLabel)))}┐`;
   const rows = body.map(line => {
     const row = `│${fit(line, inner)}│`;
     return paint(row, String(line).includes('▶') ? 'selected' : 'surface', color);
@@ -298,8 +325,8 @@ function panel(title, body, width, color) {
 
 function modalPanel(title, body, width, color) {
   const inner = Math.max(1, width - 2);
-  const topLabel = ` ${title} `;
-  const top = `╔${topLabel}${'═'.repeat(Math.max(0, inner - topLabel.length))}╗`;
+  const topLabel = ` ${crop(title, Math.max(1, inner - 2))} `;
+  const top = `╔${topLabel}${'═'.repeat(Math.max(0, inner - stringWidth(topLabel)))}╗`;
   const rows = body.map(line => {
     const row = `║${fit(line, inner)}║`;
     return paint(row, String(line).includes('▶') ? 'selected' : 'surface', color);
@@ -407,39 +434,30 @@ function documentDiff(before, after, width) {
 function headerLine(model, state, width, color) {
   const agentState = state.agentOn ? state.agentState : 'off';
   const profile = model.profile?.name || 'no profile';
-  if (width < 140) {
-    const compact = ` JOBOS · ${profile} · A:${agentState} · FX:OFF · side-effects:off · ${model.counts.open} open  ${model.counts.due} due  ${model.counts.drafts} drafts `;
-    return paint(fit(compact, width), 'header', color);
+  const counts = `${model.counts.open} open · ${model.counts.due} due · ${model.counts.drafts} drafts`;
+  if (width < 100) {
+    return paint(fit(` JOBOS · ${profile} · FX:OFF · ${counts} · A:${agentState} `, width), 'header', color);
   }
-  const counts = `${model.counts.open} open  ·  ${model.counts.high} high fit  ·  ${model.counts.due} due  ·  ${model.counts.drafts} drafts`;
-  const left = ` JOBOS · ${profile} `;
-  const right = ` ${counts}  ·  A:${agentState}  ·  FX:OFF · side-effects:off · local workspace `;
-  const gap = Math.max(1, width - left.length - right.length);
+  const left = ` JOBOS · ${profile}`;
+  const right = `${counts} · A:${agentState} · FX:OFF · side-effects:off · local `;
+  const gap = Math.max(1, width - stringWidth(left) - stringWidth(right));
   return paint(fit(`${left}${' '.repeat(gap)}${right}`, width), 'header', color);
 }
 
 function priorityLines(model, state, width, color) {
-  const focused = state.stripIndex || 0;
+  const focused = Math.max(0, Math.min(model.priority.length - 1, state.stripIndex || 0));
+  const item = model.priority[focused];
+  if (!item) return [];
+  const tone = item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn');
   if (width < 90) {
-    const item = model.priority[focused] || model.priority[0];
-    if (!item) return [];
-    const prefix = `[${focused + 1}/${model.priority.length}] ${item.kind.toUpperCase()}`;
-    return [paint(fit(`▶ ${prefix} · ${item.text} · ←/→`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color)];
+    return [paint(fit(` ▶ ${item.kind.toUpperCase()} ${focused + 1}/${model.priority.length} · ${item.text} · ←/→`, width), tone, color)];
   }
-  if (width < 100) {
-    return model.priority.map((item, index) => paint(fit(`${index === focused ? '▶' : ' '}[${item.kind.toUpperCase()}] ${item.text}`, width), item.kind === 'failure' ? 'bad' : (item.kind === 'new' ? 'green' : 'warn'), color));
-  }
-  const gap = 1;
-  const cardWidth = Math.floor((width - gap * 3) / 4);
-  const cards = model.priority.map((item, index) => {
-    const label = `${index === focused ? '▶ ' : ''}${item.kind.toUpperCase()}`;
-    return [
-      paint(`┌${fit(` ${label} `, cardWidth - 2, 'left')}┐`, item.kind === 'failure' ? 'bad' : 'green', color),
-      `│${fit(item.text, cardWidth - 2)}│`,
-      paint(`└${'─'.repeat(cardWidth - 2)}┘`, item.kind === 'failure' ? 'bad' : 'green', color)
-    ];
-  });
-  return mergeColumns(cards, cards.map(() => cardWidth), color, ' ');
+  const queue = model.priority.map(entry => entry.kind.toUpperCase()).join(' · ');
+  return [
+    paint(fit(` PRIORITY  ${focused + 1} of ${model.priority.length}  ·  use ←/→ to review`, width), 'header', color),
+    paint(fit(` ▶ ${item.kind.toUpperCase()}  ${item.text}`, width), tone, color),
+    paint(fit(` QUEUE  ${queue}`, width), 'muted', color)
+  ];
 }
 
 function listPanel(model, state, width, height, color) {
@@ -452,17 +470,16 @@ function listPanel(model, state, width, height, color) {
     body.push('', ...(model.empty.noJobs ? ['No jobs yet.', 'Workspace healthy and empty.'] : [`No jobs in filter: ${state.filter}`]), '', 'Press d for daily discovery', 'Press g for guided job intake.');
   } else {
     const selectedId = model.selectedJobId;
-    const maxCards = Math.max(1, Math.floor((height - 5) / 4));
+    const maxCards = Math.max(1, Math.floor((height - 4) / 3));
     let start = Math.max(0, jobs.findIndex(job => job.id === selectedId) - Math.floor(maxCards / 2));
     start = Math.min(start, Math.max(0, jobs.length - maxCards));
     for (const job of jobs.slice(start, start + maxCards)) {
       const selected = job.id === selectedId;
       const fitScore = fitLabel(job.fit);
       const title = `${selected ? '▶' : ' '} ${job.title}`;
-      body.push(paint(crop(`${title}  ${fitScore}${job.highFit ? ' high' : ''}`, width - 4), selected ? 'selected' : 'reset', color));
-      body.push(crop(`  ${job.company} · ${job.location || 'location —'} · posting:${job.postingLiveness?.status || 'uncertain'} · ${job.stageSource}:${job.stage}`, width - 4));
-      body.push(paint(crop(`  next ${job.next?.title || 'No open task'}`, width - 4), job.next ? 'warn' : 'muted', color));
-      body.push(paint(crop(`  ${job.signals.proofs} proofs · ${job.signals.artifacts} drafts · path ${job.signals.path}`, width - 4), 'muted', color));
+      body.push(paint(crop(`${title}  ·  ${fitScore}${job.highFit ? ' · high fit' : ''}`, width - 4), selected ? 'selected' : 'reset', color));
+      body.push(crop(`  ${job.company} · ${job.location || 'location not listed'}`, width - 4));
+      body.push(paint(crop(`  ${job.stage} · next: ${job.next?.title || 'nothing due'}`, width - 4), job.next ? 'warn' : 'muted', color));
     }
   }
   return panel(`JOBS · ${state.filter}`, body.slice(0, Math.max(1, height - 2)), width, color);
@@ -498,39 +515,44 @@ function postingStatusLines(item, width) {
 }
 function detailPanel(model, width, height, color) {
   const item = model.selected;
-  if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'JobOS will show real local state here after import.'], width, color);
+  if (!item) return panel('SELECTED JOB', ['No job selected.', '', 'Choose a job to see fit, evidence, and the next action.'], width, color);
   const fitScore = fitLabel(item.fit);
   const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.scoreStatus} · coverage ${item.fit.evidenceCoverage ?? '—'}%` : 'not scored';
   const next = item.next[0];
-  const compensation = item.job.compensation?.text || 'compensation —';
-  const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(',') : 'type —';
+  const compensation = item.job.compensation?.text || 'compensation not listed';
+  const employmentTypes = item.job.employmentTypes?.length ? item.job.employmentTypes.join(', ') : 'type not listed';
   const proofs = item.proofs.length ? item.proofs.map(proof => `${proof.id} ${proof.summary}`) : ['No matched proof IDs yet'];
-  const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No artifacts — pursue to stage drafts'];
+  const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No drafts yet'];
   const stages = item.stages.map(stage => `${stage.name}:${stage.state}`).join('  ');
+  const applicationStatus = item.job.applicationStatus || 'not started';
+  const pathSummary = item.path ? `${item.path.strength} · ${item.path.channel || 'channel not recorded'}` : 'No warm path yet';
   const lines = [
     paint(`${item.job.title}`, 'green', color),
-    `${item.job.company} · ${item.job.location || 'location —'} · ${item.job.id}`,
-    `discovery:${item.job.discoveryStatus} · application:${item.job.applicationStatus || 'not-started'}`,
-    `${item.job.workModel || 'unknown'} · ${employmentTypes} · ${item.job.department || 'department —'} · ${compensation}`,
-    paint(`FIT ${fitScore} · ${fitMeta}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
-    paint('FIT DIMENSIONS', 'cyan', color),
+    `${item.job.company} · ${item.job.location || 'location not listed'}`,
+    `${item.job.workModel || 'work model unknown'} · ${employmentTypes} · ${compensation}`,
+    '',
+    paint(`FIT ${fitScore}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    `STATUS  ${applicationStatus} · ${item.job.discoveryStatus}`,
+    `PROOFS  ${item.proofs.length} matched · DRAFTS  ${item.docs.length} · NETWORK  ${pathSummary}`,
+    '',
+    paint('NEXT', 'cyan', color),
+    next ? `${next.state ? `${next.state.toUpperCase()} · ` : ''}${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
+    ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color)),
+    '',
+    paint('EVIDENCE & READINESS', 'cyan', color),
+    `FIT DETAILS  ${fitMeta}`,
     ...fitDimensionLines(item.fit, width - 4),
     paint(constraintLine(item.fit, width - 4), 'cyan', color),
     ...postingStatusLines(item, width - 4).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
     ...wrap(item.narrative, width - 4).slice(0, 3),
     ...readinessLines(item.readiness, width - 4, color),
     ...policyLines(item.policy, width - 4, color),
-    paint('NEXT', 'cyan', color),
-    next ? `${next.state ? `${next.state.toUpperCase()} · ` : ''}${next.title}${next.dueAt ? ` · ${next.dueAt}` : ''}` : 'No open task',
-    paint('PROOFS', 'cyan', color),
+    paint('MATCHED PROOFS', 'cyan', color),
     ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
-    paint('PATH', 'cyan', color),
-    item.path ? `${item.path.strength} · ${item.path.channel || 'channel —'} · ${JSON.stringify(item.path.reasoning)}` : 'No warm path yet',
     paint('ARTIFACTS', 'cyan', color),
     ...artifacts.flatMap(value => wrap(value, width - 4)).slice(0, 4),
     paint('PURSUE STAGES', 'cyan', color),
     ...wrap(stages, width - 4).slice(0, 3),
-    ...wrap(detailHints(), width - 4).map(line => paint(line, 'green', color))
   ];
   return panel('SELECTED JOB', lines.slice(0, Math.max(1, height - 2)), width, color);
 }
@@ -548,7 +570,16 @@ function agentPanel(model, state, width, height, color) {
     history.push(paint(`${label}>`, message.role === 'tool' ? 'warn' : 'cyan', color));
     history.push(...wrap(message.text, width - 4));
   }
-  if (!history.length) history.push('Agent pane is on by default.', 'Press i to prompt. Tab expands chat.', 'Press c to reconnect after a failure.');
+  if (!history.length) history.push(
+    'Ask JobOS in plain language.',
+    '',
+    'Try:',
+    '• What should I work on next?',
+    '• Compare this role with my experience.',
+    '• Help me prepare this application.',
+    '',
+    'Press i to prompt. Tab expands chat.'
+  );
   const composer = [];
   if (state.mode === 'agent') composer.push('', paint(`> ${editableInput(state, color)}`, 'green', color));
   else if (state.agentState === 'working') composer.push('', paint('working · navigation remains active · x cancels', 'warn', color));
@@ -705,6 +736,71 @@ function visibleWindow(items, selectedIndex, limit) {
   return { start, items: items.slice(start, start + size) };
 }
 
+function centeredRows(rows, width) {
+  const rowWidth = Math.min(width, Math.max(1, ...rows.map(row => stringWidth(row))));
+  const left = Math.max(0, Math.floor((width - rowWidth) / 2));
+  return rows.map(row => fit(`${' '.repeat(left)}${row}`, width));
+}
+
+function centeredSurface(rows, width, height, color) {
+  const visible = rows.slice(0, height);
+  const top = Math.max(0, Math.floor((height - visible.length) / 3));
+  const output = Array.from({ length: top }, () => paint(fit('', width), 'surface', color));
+  output.push(...centeredRows(visible, width));
+  while (output.length < height) output.push(paint(fit('', width), 'surface', color));
+  return output.slice(0, height);
+}
+
+function setupChoiceRows(items, selectedIndex, width) {
+  return items.flatMap((item, index) => {
+    const prefix = index === selectedIndex ? '▶ ' : '  ';
+    const line = `${prefix}${item.label}  ·  ${item.detail}`;
+    return wrap(line, width).map((part, lineIndex) => lineIndex === 0 ? part : `    ${part}`);
+  });
+}
+
+function setupRecommendation(item, width) {
+  if (!item) return ['Choose an item, then press Enter.'];
+  if (item.actions?.[0]) return wrap(`Press Enter to ${friendlySetupText(item.actions[0].label).toLowerCase()}.`, width);
+  if (item.status === 'complete') return ['This task is done. Press Down to move to the next task.'];
+  const blocker = item.blockers?.[0];
+  if (blocker) {
+    const reason = friendlySetupText(blocker.message || item.summary);
+    const recovery = friendlySetupText(blocker.recovery || blocker.remediation || '');
+    return wrap(`${reason}${recovery ? ` Next: ${recovery}` : ''}`, width);
+  }
+  return wrap(friendlySetupText(item.summary || 'This optional task can wait.'), width);
+}
+
+function welcomePanel(model, width, height, color) {
+  const noProfile = model.empty.noProfile;
+  const body = noProfile
+    ? [
+        paint('A private workspace for your job search.', 'green', color),
+        '',
+        'Start with a short guided setup. You can change everything later.',
+        '',
+        paint('g  Start guided setup', 'selected', color),
+        'Your information stays in this local workspace.',
+        '',
+        'No profile yet.',
+        'CLI option: jobos profile create "Your focus"'
+      ]
+    : [
+        paint('Your workspace is ready.', 'green', color),
+        '',
+        'Add one role to see fit, evidence, drafts, and next steps here.',
+        '',
+        paint('g  Add your first job', 'selected', color),
+        'd  Run daily discovery',
+        '',
+        'No jobs yet.',
+        'Workspace healthy and empty.'
+      ];
+  const panelWidth = Math.min(width, 84);
+  return centeredSurface(modalPanel(noProfile ? 'WELCOME TO JOBOS' : 'START YOUR JOB SEARCH', body, panelWidth, color), width, height, color);
+}
+
 function keyHints(scope) {
   return (TUI_KEYMAP[scope] || TUI_KEYMAP.global).map(([key, label]) => `${key} ${label}`).join(' · ');
 }
@@ -835,7 +931,12 @@ function overlayPanel(model, state, width, height, color) {
         const selectedStep = visible.start + offset === state.overlayIndex;
         const marker = item.status === 'complete' ? '✓' : (item.status === 'blocked' ? '!' : '·');
         const position = item.required ? String(requiredIndex.get(item.id)) : 'later';
-        const status = item.status === 'complete' ? 'done' : (item.status === 'blocked' ? 'needs action' : 'ready');
+        const status = item.status === 'complete' ? 'done'
+          : item.status === 'blocked' ? 'needs action'
+            : item.status === 'optional_ready' ? 'set up'
+              : item.status === 'optional_incomplete' ? 'optional'
+                : ['unavailable', 'misconfigured'].includes(item.status) ? 'unavailable'
+                  : 'ready';
         return `${selectedStep ? '▶' : ' '} ${marker} ${position}  ${setupStepLabel(item.id)}  ·  ${status}`;
       })
     ];
@@ -843,7 +944,10 @@ function overlayPanel(model, state, width, height, color) {
     if (focused) {
       body.push('', `NEXT TASK · ${setupStepLabel(focused.id)}`);
       body.push(...wrap(friendlySetupText(focused.summary), Math.max(20, width - 4)).slice(0, 2));
-      if (focused.blockers[0]) body.push(...wrap(`What to do: ${friendlySetupText(focused.blockers[0].remediation || focused.blockers[0].message)}`, width - 4).slice(0, 2));
+      if (focused.blockers[0]) {
+        const recovery = focused.blockers[0].recovery || focused.blockers[0].remediation || focused.blockers[0].message;
+        body.push(...wrap(`What to do: ${friendlySetupText(recovery)}`, width - 4).slice(0, 2));
+      }
       if (focused.actions[0]) body.push(`ENTER · ${friendlySetupText(focused.actions[0].label)}`);
       else if (focused.status === 'complete') body.push('This step is finished. Move down to continue.');
     }
@@ -851,45 +955,50 @@ function overlayPanel(model, state, width, height, color) {
   } else if (state.overlay === 'setup-action-picker') {
     title = `SET UP JOBOS · CHOOSE HOW TO ${setupStepLabel(state.setupActionStepId).toUpperCase()}`;
     const items = state.setupActionItems || [];
-    body = items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${friendlySetupText(item.label)}`);
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(2, height - 5));
+    body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${friendlySetupText(item.label)}`);
     body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
   } else if (state.overlay === 'setup-profile-picker') {
     title = 'SET UP JOBOS · CHOOSE YOUR PROFILE';
-    body = model.profiles.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
+    const visible = visibleWindow(model.profiles, state.overlayIndex, Math.max(2, height - 5));
+    body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.name} · ${item.id}`);
     body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
   } else if (state.overlay === 'setup-job-picker') {
     title = 'SET UP JOBOS · CHOOSE A JOB';
-    body = model.jobs.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company}`);
+    const visible = visibleWindow(model.jobs, state.overlayIndex, Math.max(2, height - 5));
+    body = visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.title} · ${item.company}`);
     body.push('', '↑/↓ choose  ·  Enter continue  ·  Esc go back');
   } else if (state.overlay === 'setup-resume-source') {
     title = 'SET UP JOBOS · ADD YOUR RESUME';
     body = [
-      'Choose the easiest way to bring in your resume.',
-      'Supported files: TXT, Markdown, JSON, YAML, and YML.',
-      'PDF and DOCX are not read as text; copy and paste their text instead.',
+      ...wrap('Choose the easiest way to bring in your resume.', width - 4),
+      ...wrap('Supported: TXT, Markdown, JSON, YAML, and YML. For PDF or DOCX, copy and paste the text.', width - 4),
       '',
-      ...RESUME_SOURCE_CHOICES.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label}  ·  ${item.detail}`),
+      ...setupChoiceRows(RESUME_SOURCE_CHOICES, state.overlayIndex, width - 4),
       '',
       '↑/↓ choose  ·  Enter continue  ·  Esc go back'
     ];
   } else if (state.overlay === 'setup-job-source') {
     title = 'SET UP JOBOS · ADD A JOB';
     body = [
-      'Add a posting now or set up discovery for later.',
+      ...wrap('Add a posting now or set up discovery for later.', width - 4),
       '',
-      ...JOB_SOURCE_CHOICES.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.label}  ·  ${item.detail}`),
+      ...setupChoiceRows(JOB_SOURCE_CHOICES, state.overlayIndex, width - 4),
       '',
       '↑/↓ choose  ·  Enter continue  ·  Esc go back'
     ];
   } else if (state.overlay === 'setup-file-browser') {
     title = `SET UP JOBOS · CHOOSE A ${state.setupFilePurpose === 'resume' ? 'RESUME' : 'JOB'} FILE`;
+    const items = state.setupFileItems || [];
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(3, height - 8));
     body = [
-      `Folder: ${state.setupBrowseCwd || process.cwd()}`,
+      ...wrap(`Folder: ${state.setupBrowseCwd || process.cwd()}`, width - 4).slice(0, 2),
       state.setupFilePurpose === 'resume'
-        ? 'Supported: TXT, Markdown, JSON, YAML, YML. PDF/DOCX: paste the text instead.'
+        ? 'Supported: TXT, Markdown, JSON, YAML, YML.'
         : 'Supported: TXT and Markdown.',
+      `Showing ${visible.start + 1}–${visible.start + visible.items.length} of ${items.length}`,
       '',
-      ...(state.setupFileItems || []).map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.kind === 'directory' ? 'Folder' : 'File'}  ${item.label}${item.supported === false ? '  ·  not supported' : ''}`),
+      ...visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.kind === 'directory' ? 'Folder' : 'File'}  ${item.label}`),
       '',
       '↑/↓ choose  ·  Enter open  ·  Esc go back'
     ];
@@ -912,13 +1021,14 @@ function overlayPanel(model, state, width, height, color) {
     ];
   } else if (state.overlay === 'setup-proof-review') {
     const items = state.setupProofItems || [];
+    const visible = visibleWindow(items, state.overlayIndex, Math.max(2, height - 7));
     title = 'SET UP JOBOS · REVIEW YOUR EXPERIENCE HIGHLIGHTS';
     body = [
-      'Confirm only claims you can support. JobOS will never invent achievements.',
-      'Enter/V verify  ·  E edit  ·  R reject  ·  A add another  ·  Esc continue',
+      ...wrap('Confirm only claims you can support. JobOS will never invent achievements.', width - 4),
+      ...wrap('Enter/V verify  ·  E edit  ·  R reject  ·  A add another  ·  Esc continue', width - 4),
       '',
       ...(items.length
-        ? items.map((item, index) => `${index === state.overlayIndex ? '▶' : ' '} ${item.verification_status === 'verified' ? '✓' : '!'} ${item.summary}`)
+        ? visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.verification_status === 'verified' ? '✓' : '!'} ${item.summary}`)
         : ['No extracted claims remain. Press A to add one in your own words.'])
     ];
   } else if (state.overlay === 'review') {
@@ -1128,9 +1238,7 @@ function overlayPanel(model, state, width, height, color) {
       : [
           'RECOMMENDED NEXT ACTION',
           ...(context.startsWith('setup') && setupItem
-            ? wrap(setupItem.actions?.[0]
-              ? `Press Enter to ${friendlySetupText(setupItem.actions[0].label).toLowerCase()}.`
-              : 'This task is done. Press Down to move to the next task.', width - 4)
+            ? setupRecommendation(setupItem, width - 4)
             : ['Use ↑/↓ to choose an item, then press Enter.']),
           '',
           'CONTROLS FOR THIS SCREEN',
@@ -1272,17 +1380,22 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
     || (state.overlay === 'help' && String(state.helpContextOverlay || '').startsWith('setup'));
   const extraPrompt = inputModes.has(state.mode) || state.mode === 'stage' || Boolean(state.pendingConfirm);
   if (setupWorkspace) {
-    const setupFooter = ' ↑/↓ choose  ·  Enter continue  ·  ? help  ·  Esc back  ·  Q quit';
-    const trailingRows = 2 + (extraPrompt ? 1 : 0);
+    const setupFooters = safeWidth >= 76
+      ? [' ↑/↓ choose  ·  Enter continue  ·  ? help  ·  Esc back  ·  Q quit']
+      : [' ↑/↓ choose  ·  Enter continue  ·  Esc back', ' ? help  ·  Q quit'];
+    const trailingRows = 1 + setupFooters.length + (extraPrompt ? 1 : 0);
     const bodyHeight = Math.max(4, safeHeight - trailingRows - 2);
+    const compactHeader = safeWidth < 76;
+    const panelWidths = new Set(['setup-resume-source', 'setup-job-source', 'setup-action-picker', 'setup-profile-picker', 'setup-job-picker']);
+    const preferredWidth = panelWidths.has(state.overlay) ? 82
+      : ['setup-file-browser', 'setup-resume-preview', 'setup-proof-review'].includes(state.overlay) ? 104 : 96;
+    const panelWidth = Math.min(safeWidth, preferredWidth);
+    const setupPanel = overlayPanel(model, state, panelWidth, bodyHeight, color);
     const lines = [
-      paint(fit(' JOBOS  /  GUIDED SETUP                                      local and private ', safeWidth), 'header', color),
-      paint(fit(' Complete one clear task at a time. Your dashboard is waiting behind this workspace. ', safeWidth), 'muted', color),
-      ...overlayPanel(model, state, safeWidth, bodyHeight, color)
+      paint(fit(compactHeader ? ' JOBOS / GUIDED SETUP · LOCAL & PRIVATE ' : ' JOBOS  /  GUIDED SETUP                                      local and private ', safeWidth), 'header', color),
+      paint(fit(compactHeader ? ' One clear task at a time. ' : ' Complete one clear task at a time. Your dashboard is waiting behind this workspace. ', safeWidth), 'muted', color),
+      ...centeredSurface(setupPanel, safeWidth, bodyHeight, color)
     ];
-    while (lines.length < safeHeight - trailingRows) {
-      lines.push(paint(fit('', safeWidth), 'surface', color));
-    }
     if (state.pendingConfirm) {
       lines.push(paint(fit('Review this action  ·  Enter/y confirm  ·  n/Esc cancel', safeWidth), 'warn', color));
     } else if (inputModes.has(state.mode)) {
@@ -1301,14 +1414,17 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
       lines.push(paint(fit(`${labels[state.mode] || 'Input'}: ${editableInput(state, color)}`, safeWidth), 'selected', color));
     }
     lines.push(paint(fit(crop(state.status || 'ready', safeWidth), safeWidth), state.error ? 'bad' : 'muted', color));
-    lines.push(paint(fit(setupFooter, safeWidth), 'header', color));
+    lines.push(...setupFooters.map(footer => paint(fit(footer, safeWidth), 'header', color)));
     return lines.slice(0, safeHeight).join('\n');
   }
   const footers = footerLines(safeWidth, state);
-  const lines = [headerLine(model, state, safeWidth, color), ...priorityLines(model, state, safeWidth, color)];
+  const emptyDashboard = !state.overlay && (model.empty.noProfile || model.empty.noJobs);
+  const lines = [headerLine(model, state, safeWidth, color), ...(emptyDashboard ? [] : priorityLines(model, state, safeWidth, color))];
   const trailingRows = footers.length + 1 + (extraPrompt ? 1 : 0);
   const bodyHeight = Math.max(4, safeHeight - lines.length - trailingRows);
-  if (state.overlay === 'docs' && safeWidth >= 116) {
+  if (emptyDashboard) {
+    lines.push(...welcomePanel(model, safeWidth, bodyHeight, color));
+  } else if (state.overlay === 'docs' && safeWidth >= 116) {
     const sideWidth = Math.max(38, Math.floor(safeWidth * 0.36));
     const docsWidth = safeWidth - sideWidth - 1;
     const side = state.agentOn
@@ -1460,11 +1576,14 @@ export class JobosTui {
     this.refreshTimer = null;
     this.boundKeypress = (value, key) => this.onKeypress(value, key);
     this.boundMouseData = chunk => this.onMouseData(chunk);
+    this.boundRawInput = chunk => this.onRawInput(chunk);
     this.boundResize = () => this.render();
     this.stopped = false;
     this.notedArtifactIds = new Set();
     this.parseEditorCommand = parseEditorCommand;
     this.lastScreen = null;
+    this.keypressInput = null;
+    this.mouseInputBuffer = '';
   }
   selectedDocument() {
     const docs = this.model.selected?.docs || [];
@@ -1580,6 +1699,15 @@ export class JobosTui {
     return true;
   }
 
+  onRawInput(chunk) {
+    const { segments, remainder } = splitRawInput(`${this.mouseInputBuffer}${String(chunk || '')}`);
+    this.mouseInputBuffer = remainder;
+    for (const segment of segments) {
+      if (segment.type === 'mouse') this.onMouseData(segment.value);
+      else this.keypressInput?.write(segment.value);
+    }
+  }
+
   onMouseData(chunk) {
     for (const event of parseSgrMouse(chunk)) {
       if (event.button === 64 || event.button === 65) {
@@ -1629,13 +1757,10 @@ export class JobosTui {
       }
       if (this.state.overlay) continue;
       const { width, height } = this.dimensions();
-      if (event.y >= 1 && event.y <= (width < 90 ? 1 : 4)) {
-        const count = this.model.priority?.length || 0;
-        if (count) {
-          this.state.stripIndex = width < 100
-            ? Math.min(count - 1, Math.max(0, event.y - 1))
-            : Math.min(count - 1, Math.floor((event.x - 1) / Math.max(1, width / count)));
-          this.state.status = `Priority selected: ${this.model.priority[this.state.stripIndex].kind} · Enter jumps`;
+      if (event.y >= 1 && event.y <= (width < 90 ? 1 : 3)) {
+        const item = this.model.priority?.[this.state.stripIndex || 0];
+        if (item) {
+          this.state.status = `Priority selected: ${item.kind} · use ←/→ to review · Enter jumps`;
           this.render();
         }
         continue;
@@ -1754,7 +1879,7 @@ export class JobosTui {
     return updates.length > 0;
   }
 
-  refresh({ disk = true } = {}) {
+  refresh({ disk = true, render = true } = {}) {
     if (this.state.editorActive) return false;
     const previousModel = this.model;
     const previousArtifactId = this.state.selectedArtifactId;
@@ -1793,7 +1918,7 @@ export class JobosTui {
       if (this.dimensions().width < 116) this.state.focusTarget = 'viewer';
     }
     this.applyPendingAutoOpen();
-    this.render();
+    if (render) this.render();
   }
 
   setSelectedArtifact(artifactId, { reset = true } = {}) {
@@ -3375,9 +3500,9 @@ export class JobosTui {
     if (value === 'V' || value === 'D') {
       this.state.docsView = this.state.docsView === 'diff' ? 'document' : 'diff';
       this.state.docsDiff = this.state.docsView === 'diff';
-      const doc = this.selectedDocument();
+      const doc = selectedDoc(this.model, this.state).doc;
       this.state.status = this.state.docsView === 'diff'
-        ? (doc?.previousDraft ? 'Previous draft comparison.' : 'First draft — no previous draft to compare.')
+        ? (doc?.previousDraft ? 'Previous draft diff.' : 'First draft · no previous draft.')
         : 'Document view.';
       this.render();
       return true;
@@ -3399,8 +3524,8 @@ export class JobosTui {
     this.setInput('');
     this.state.error = null;
     this.state.status = kind === 'resume'
-      ? 'Choose paste, browse, or a file path · supported formats are shown above'
-      : 'Choose how you want to add jobs';
+      ? 'Choose a resume source above.'
+      : 'Choose how you want to add jobs.';
     this.render();
     return true;
   }
@@ -3459,12 +3584,12 @@ export class JobosTui {
         sourceText: preview.sourceText
       });
       importResumeProofCandidates(this.store, profileId, preview.sourceText, preview.label);
-      this.state.overlay = 'setup-proof-review';
-      this.state.overlayIndex = 0;
       this.state.mode = 'normal';
       this.setInput('');
-      this.refresh({ disk: false });
+      this.refresh({ disk: false, render: false });
       this.refreshSetupProofItems();
+      this.state.overlay = 'setup-proof-review';
+      this.state.overlayIndex = 0;
       this.state.error = null;
       this.state.status = this.state.setupProofItems.length
         ? 'Resume imported · review each extracted highlight now'
@@ -3481,10 +3606,10 @@ export class JobosTui {
   finishSetupJobImport(result, label = 'Job') {
     this.state.setupJobId = result.job.id;
     this.state.selectedJobId = result.job.id;
-    this.state.overlay = 'setup';
     this.state.mode = 'normal';
     this.setInput('');
-    this.refresh({ disk: false });
+    this.refresh({ disk: false, render: false });
+    this.state.overlay = 'setup';
     this.focusNextSetupAction();
     this.state.error = null;
     this.state.status = `${label} added · the next task is highlighted`;
@@ -3658,8 +3783,8 @@ export class JobosTui {
       const items = this.state.setupProofItems || [];
       const item = items[this.state.overlayIndex];
       if (key.name === 'escape') {
+        this.refresh({ disk: false, render: false });
         this.state.overlay = 'setup';
-        this.refresh({ disk: false });
         this.focusNextSetupAction();
         this.state.status = 'Experience highlights reviewed · the next task is highlighted';
         this.render();
@@ -3669,14 +3794,14 @@ export class JobosTui {
         this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
       } else if ((isEnter || value === 'V') && item) {
         verifyProof(this.store, item.id);
+        this.refresh({ disk: false, render: false });
         this.refreshSetupProofItems();
-        this.refresh({ disk: false });
         this.state.overlay = 'setup-proof-review';
         this.state.status = 'Highlight verified · review another, add one, or press Esc to continue';
       } else if (value === 'R' && item) {
         rejectProof(this.store, item.id);
+        this.refresh({ disk: false, render: false });
         this.refreshSetupProofItems();
-        this.refresh({ disk: false });
         this.state.overlay = 'setup-proof-review';
         this.state.status = 'Highlight rejected and excluded';
       } else if (value === 'E' && item) {
@@ -3733,8 +3858,8 @@ export class JobosTui {
           this.state.setupJobId = items[this.state.overlayIndex].id;
           this.state.selectedJobId = items[this.state.overlayIndex].id;
         }
+        this.refresh({ disk: false, render: false });
         this.state.overlay = 'setup';
-        this.refresh({ disk: false });
         this.focusNextSetupAction();
         this.state.status = 'Selection saved · the next task is highlighted';
       } else if (value === '?') return this.openHelp();
@@ -4457,11 +4582,17 @@ export class JobosTui {
 
   async start() {
     if (!this.stdin.isTTY || !this.stdout.isTTY) throw Error('JobOS TUI requires a terminal. Use `jobos tui --snapshot` for a non-interactive state view.');
-    readline.emitKeypressEvents(this.stdin);
+    if (this.mouseEnabled) {
+      this.keypressInput = new PassThrough();
+      readline.emitKeypressEvents(this.keypressInput);
+      this.keypressInput.on('keypress', this.boundKeypress);
+      this.stdin.on('data', this.boundRawInput);
+    } else {
+      readline.emitKeypressEvents(this.stdin);
+      this.stdin.on('keypress', this.boundKeypress);
+    }
     this.stdin.setRawMode(true);
     this.stdin.resume();
-    this.stdin.on('keypress', this.boundKeypress);
-    if (this.mouseEnabled) this.stdin.on('data', this.boundMouseData);
     this.stdout.on('resize', this.boundResize);
     this.stdout.write(`${ESC}?1049h${ESC}?25l${this.mouseEnabled ? `${ESC}?1000h${ESC}?1006h` : ''}`);
     this.render();
@@ -4489,8 +4620,14 @@ export class JobosTui {
     if (this.stopped) return;
     this.stopped = true;
     clearInterval(this.refreshTimer);
-    this.stdin.off('keypress', this.boundKeypress);
-    if (this.mouseEnabled) this.stdin.off('data', this.boundMouseData);
+    if (this.mouseEnabled) {
+      this.stdin.off('data', this.boundRawInput);
+      this.keypressInput?.off('keypress', this.boundKeypress);
+      this.keypressInput?.destroy();
+      this.keypressInput = null;
+    } else {
+      this.stdin.off('keypress', this.boundKeypress);
+    }
     this.stdout.off('resize', this.boundResize);
     if (this.stdin.isTTY) this.stdin.setRawMode(false);
     this.stdin.pause?.();
