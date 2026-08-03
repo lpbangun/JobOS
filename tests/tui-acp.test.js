@@ -56,9 +56,9 @@ test('populated dashboard prioritizes jobs and selected action while technical d
 
   assert.match(screen, /JOBOS · PM EdTech/);
   assert.match(screen, /ACTION/);
-  assert.match(screen, /INTERVIEW/);
+  assert.doesNotMatch(screen, /QUEUE .*INTERVIEW/, 'empty interview category is not navigable');
   assert.match(screen, /NEW/);
-  assert.match(screen, /FAILURE/);
+  assert.doesNotMatch(screen, /QUEUE .*FAILURE/, 'empty failure category is not navigable');
   assert.match(screen, /JOBS · today/);
   assert.match(screen, /SELECTED JOB/);
   assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');
@@ -68,9 +68,10 @@ test('populated dashboard prioritizes jobs and selected action while technical d
 
   const detailed = renderTui(model, { ...state, detailsExpanded: true }, { width: 150, height: 46, color: false });
   assert.match(detailed, /TECHNICAL DETAILS/);
-  assert.match(detailed, new RegExp(proof.id));
-  assert.match(detailed, /resume · draft_needs_human_review/);
   assert.match(detailed, /side effects off/);
+  const lowerDetails = renderTui(model, { ...state, detailsExpanded: true, detailsScroll: Number.MAX_SAFE_INTEGER }, { width: 150, height: 46, color: false });
+  assert.match(lowerDetails, new RegExp(proof.id));
+  assert.match(lowerDetails, /resume · draft_needs_human_review/);
 });
 
 test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {

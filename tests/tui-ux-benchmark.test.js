@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import stringWidth from 'string-width';
-import { openStore } from '../src/db.js';
+import { openStore, run } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { createArtifact } from '../src/artifacts.js';
@@ -183,29 +183,33 @@ test('UX-BENCH-05 populated dashboard presents decision summary before hidden te
   assert.doesNotMatch(render(tui.model, tui.state, 120, 36).join('\n'), /TECHNICAL DETAILS/, 'details hidden again after collapse');
 });
 
-test('UX-BENCH-06 priority hierarchy is a single strip rather than four competing boxes', async t => {
+test('UX-BENCH-06 priority hierarchy navigates only actionable categories', async t => {
   const { model, profile, job } = await fixture(t, { withJob: true });
   const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 140, 42);
-  assert.match(lines[1], /PRIORITY  1 of 4/);
+  assert.deepEqual(model.priority.map(item => item.kind), ['action', 'new']);
+  assert.match(lines[1], /PRIORITY  1 of 2/);
   assert.match(lines[2], /▶ ACTION/);
-  assert.match(lines[3], /QUEUE  ACTION · INTERVIEW · NEW · FAILURE/);
+  assert.match(lines[3], /QUEUE  ACTION · NEW/);
+  assert.doesNotMatch(lines[3], /INTERVIEW|FAILURE/, 'empty categories do not consume navigation positions');
   assert.ok(lines.slice(1, 4).every(line => !line.includes('┌') && !line.includes('┐')), 'priority hierarchy avoids card chrome');
   const tui = new JobosTui((await fixture(t, { withJob: true })).store, { connectAgent: false, stdout: output(140, 42), now: () => new Date(AS_OF) });
   tui.state.profileId = profile.id;
   tui.state.selectedJobId = job.id;
   tui.model = model;
-  for (let index = 0; index < 4; index++) tui.onKeypress('', { name: 'right' });
-  assert.equal(tui.state.stripIndex, 0, 'strip cycles through the four cards and wraps to the start');
+  for (let index = 0; index < 2; index++) tui.onKeypress('', { name: 'right' });
+  assert.equal(tui.state.stripIndex, 0, 'strip cycles through actionable cards and wraps to the start');
   tui.onKeypress('', { name: 'right' });
-  assert.equal(tui.state.stripIndex, 1, 'strip continues to the second card after wrap');
+  assert.equal(tui.state.stripIndex, 1, 'strip continues to the second actionable card after wrap');
 });
 
-test('UX-BENCH-07 minimum-size navigation keeps dashboard, chat, setup, help, and quit reachable', async t => {
+test('UX-BENCH-07 minimum-size navigation keeps action, dashboard, chat, setup, help, and quit reachable', async t => {
   const { model, profile, job } = await fixture(t, { withJob: true });
   const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id };
-  const dashboard = render(model, base, 60, 24).join('\n');
+  const dashboard = render(model, base, 60, 20).join('\n');
+  assert.match(dashboard, /▶ NEXT/, 'minimum selected-job panel retains the recommended action');
+  assert.match(dashboard, /e details/, 'minimum selected-job panel retains technical disclosure');
   for (const label of ['Tab chat', 'g setup', '? help', 'Q quit']) assert.match(dashboard, new RegExp(label.replace('?', '\\?')));
-  const chat = render(model, { ...base, focusTarget: 'agent' }, 60, 24).join('\n');
+  const chat = render(model, { ...base, focusTarget: 'agent' }, 60, 20).join('\n');
   assert.match(chat, /ASSISTANT · FOCUSED/);
   assert.match(chat, /Tab\/Esc dashboard/);
 });
@@ -484,4 +488,84 @@ test('UX-BENCH-16 artifact evidence stays hidden until the docs surface expands 
   assert.match(shown, /EVIDENCE/, 'expanded docs surface shows evidence');
   assert.match(shown, /WARNINGS/, 'expanded docs surface shows warnings');
   assert.doesNotMatch(shown, /TECHNICAL DETAILS/, 'docs evidence is a separate surface from dashboard technical details');
+});
+
+test('UX-BENCH-17 standard dashboard fills vertical space with useful decision context', async t => {
+  const { model, profile, job } = await fixture(t, { withJob: true });
+  const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 120, 36);
+  const text = lines.join('\n');
+  assert.match(text, /WORKSPACE PULSE/);
+  assert.match(text, /APPLICATION PATH/);
+  assert.match(text, /ACTIVE PRIORITIES/);
+  const bottom = lines.findIndex(line => line.startsWith('└'));
+  assert.ok(bottom >= 30, `dashboard content reaches the lower workspace instead of ending near the midpoint: row ${bottom}`);
+  assert.ok(lines.slice(18, bottom).some(line => /WORKFLOW STATUS|APPLICATION PATH|ACTIVE PRIORITIES/.test(line)), 'lower rows contain actionable context rather than only panel padding');
+});
+
+test('UX-BENCH-18 focused technical details scroll without changing jobs and preserve full text', async t => {
+  const { root, store, profile, job } = await fixture(t, { withJob: true });
+  const tailMarker = 'reason_code_tail_marker_7f31';
+  for (let index = 0; index < 6; index++) {
+    createArtifact(store, {
+      profileId: profile.id,
+      jobId: job.id,
+      type: index % 2 ? 'cover_letter' : 'resume',
+      path: `artifact-${index}-${'evidence-'.repeat(8)}.md`,
+      title: `Draft ${index}`,
+      content: `Draft ${index}`,
+      evidence: [`proof_${index}`]
+    });
+  }
+  const secondPath = path.join(root, 'second-role.md');
+  writeFileSync(secondPath, 'Title: Staff Product Manager\nCompany: Southstar Labs\nLocation: Remote\n\nOwn the platform roadmap.');
+  const second = importText(store, { profileId: profile.id, filePath: secondPath }).job;
+  run(store, 'UPDATE jobs SET description=? WHERE id=?', [
+    `${'Source-backed posting detail '.repeat(30)}${tailMarker}`,
+    job.id
+  ]);
+  const refreshed = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
+  assert.match(refreshed.selected.postingText, new RegExp(tailMarker), 'model preserves posting text beyond the former 280-character cutoff');
+  const longModel = {
+    ...refreshed,
+    selected: {
+      ...refreshed.selected,
+      readiness: {
+        ...refreshed.selected.readiness,
+        blockers: [{
+          code: 'evidence_chain_incomplete',
+          reason: `${'source evidence must remain inspectable '.repeat(10)}${tailMarker}`
+        }]
+      }
+    }
+  };
+  const tui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
+  tui.state.profileId = profile.id;
+  tui.state.selectedJobId = job.id;
+  tui.model = longModel;
+  tui.render();
+  tui.onKeypress('e', { name: 'e' });
+  assert.equal(tui.state.focusTarget, 'details', 'opening disclosure explicitly focuses its scroll owner');
+  assert.match(tui.lastScreen, /SELECTED JOB · DETAILS · FOCUSED/, 'focused panel is visibly named');
+  const selectedBeforeScroll = tui.state.selectedJobId;
+  const pages = [tui.lastScreen];
+  for (let index = 0; index < 12; index++) {
+    tui.onKeypress('', { name: 'pagedown' });
+    pages.push(tui.lastScreen);
+  }
+  const technicalText = pages.join('\n');
+  assert.equal(tui.state.selectedJobId, selectedBeforeScroll, 'detail scrolling never changes the global job selection');
+  assert.match(technicalText, /ARTIFACTS/, 'scroll reaches artifacts below the initial viewport');
+  assert.match(technicalText, /PURSUE STAGES/, 'scroll reaches pursue stages below the initial viewport');
+  assert.match(technicalText, new RegExp(tailMarker), 'wrapped posting and readiness diagnostics retain their tail evidence');
+  assert.doesNotMatch(technicalText, /…/, 'expanded technical text wraps instead of using destructive ellipses');
+
+  tui.onKeypress('', { name: 'escape' });
+  assert.equal(tui.state.focusTarget, 'shell', 'Escape visibly restores global navigation while leaving disclosure open');
+  assert.doesNotMatch(tui.lastScreen, /DETAILS · FOCUSED/, 'unfocused disclosure drops the focus marker');
+  const details = tui.lastFrame.sections.details;
+  tui.onMouseData(`\x1b[<0;${details.x + 2};${details.y + 2}M`);
+  assert.equal(tui.state.focusTarget, 'details', 'clicking the expanded panel gives it the same visible focus');
+  tui.onKeypress('', { name: 'escape' });
+  tui.onKeypress('', { name: 'down' });
+  assert.equal(tui.state.selectedJobId, second.id, 'job navigation resumes after details explicitly releases focus');
 });

@@ -104,22 +104,23 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction) {
       taskId: recommendedAction?.taskId || null,
       text: recommendedAction?.label || 'Review your workspace and choose the next step'
     },
-    {
+    interview ? {
       kind: 'interview',
-      jobId: interview?.job_id || null,
-      text: interview ? `${interview.title || 'Interview prep'} · ${interview.company}${interview.due_at ? ` · ${interview.due_at.slice(0, 16)}` : ''}` : 'No interviews scheduled'
-    },
-    {
+      jobId: interview.job_id,
+      text: `${interview.title || 'Interview prep'} · ${interview.company}${interview.due_at ? ` · ${interview.due_at.slice(0, 16)}` : ''}`
+    } : null,
+    newJobs.length ? {
       kind: 'new',
-      jobId: newJobs[0]?.id || null,
-      text: newJobs.length ? `${newJobs.length} new/imported · ${newJobs.filter(job => job.highFit).length} high-fit` : 'No new jobs this week'
-    },
-    {
+      jobId: newJobs[0].id,
+      text: `${newJobs.length} new/imported · ${newJobs.filter(job => job.highFit).length} high-fit`
+    } : null,
+    failure ? {
       kind: 'failure',
       jobId: null,
-      text: failure ? `${failure.trigger_name} · ${failure.error || 'failed'} · ${failure.created_at.slice(0, 16)}` : 'No recent source failures'
-    }
-  ];
+      target: 'log',
+      text: `${failure.trigger_name} · ${failure.error || 'failed'} · ${failure.created_at.slice(0, 16)}`
+    } : null
+  ].filter(Boolean);
 }
 
 function recommendedAction(onboarding, details, jobs, selectedJobId) {
@@ -401,8 +402,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   const details = selected ? {
     ...selected,
     job: { ...selected.job, ...statusStage(selected.job) },
-    narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
-    requirements: selectedRow ? requirementTextsForJob(selectedRow).slice(0, 6) : [],
+    narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ') || 'No description is stored for this job.',
+    postingText: String(selectedRow?.description || '') || 'No description is stored for this job.',
+    requirements: selectedRow ? requirementTextsForJob(selectedRow) : [],
     compensation: selectedRow?.compensation || '',
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),

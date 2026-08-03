@@ -401,12 +401,20 @@ function readinessLines(readiness, width, color) {
   const localApprovalComplete = readiness?.localApprovalComplete || readiness?.review?.localApprovalComplete;
   const packet = readiness?.packet;
   const packetState = packet?.currentPacketId ? ` · packet ${packet.currency}/${packet.receiptState}` : '';
+  const lineTone = status === 'approved' ? 'green' : (status === 'blocked' ? 'bad' : 'warn');
   const lines = [
-    paint(`READINESS ${status} · ${readiness?.readyForReview ? 'reviewable' : 'not reviewable'}${localApprovalComplete ? ' · locally approved' : ''}${packetState}`, status === 'approved' ? 'green' : (status === 'blocked' ? 'bad' : 'warn'), color),
-    crop(`next ${typeof next === 'string' ? next : JSON.stringify(next)}`, width)
+    ...wrap(`READINESS ${status} · ${readiness?.readyForReview ? 'reviewable' : 'not reviewable'}${localApprovalComplete ? ' · locally approved' : ''}${packetState}`, width)
+      .map(line => paint(line, lineTone, color)),
+    ...wrap(`next ${typeof next === 'string' ? next : JSON.stringify(next)}`, width)
   ];
-  if (blockers.length) lines.push(...wrap(`blockers ${blockers.length} · ${blockers[0].code || blockers[0]}`, width).slice(0, 1).map(line => paint(line, 'bad', color)));
-  if (warnings.length) lines.push(...wrap(`warnings ${warnings.length} · ${warnings[0].code || warnings[0]}`, width).slice(0, 1).map(line => paint(line, 'warn', color)));
+  blockers.forEach((blocker, index) => {
+    const text = typeof blocker === 'string' ? blocker : JSON.stringify(blocker);
+    lines.push(...wrap(`blocker ${index + 1}/${blockers.length} · ${text}`, width).map(line => paint(line, 'bad', color)));
+  });
+  warnings.forEach((warning, index) => {
+    const text = typeof warning === 'string' ? warning : JSON.stringify(warning);
+    lines.push(...wrap(`warning ${index + 1}/${warnings.length} · ${text}`, width).map(line => paint(line, 'warn', color)));
+  });
   return lines;
 }
 
@@ -415,7 +423,9 @@ function policyLines(policy, width, color) {
   if (!values.length) return [paint('POLICY local review gate enforced', 'muted', color)];
   return [
     paint('POLICY', 'cyan', color),
-    ...values.flatMap(([key, value]) => wrap(`${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`, width)).slice(0, 2)
+    ...values.flatMap(([key, value]) => (
+      wrap(`${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`, width)
+    ))
   ];
 }
 
@@ -503,6 +513,26 @@ function listPanel(model, state, width, height, color) {
       }
     }
     if (body.length + 2 < height - 2) body.push('', ...wrap('Next: ↑/↓ choose a role · Enter follows the priority action.', width - 4));
+    if (height >= 20 && body.length < height - 4) {
+      const selected = model.jobs.find(job => job.id === selectedId);
+      const filterCounts = FILTERS.map(name => `${name} ${filteredJobs(model, name).length}`);
+      const pulse = [
+        '',
+        paint('WORKSPACE PULSE', 'cyan', color),
+        `${model.counts.open} open · ${model.counts.due} due · ${model.counts.drafts} drafts`,
+        paint('FILTER COUNTS', 'cyan', color),
+        ...wrap(filterCounts.join(' · '), width - 4),
+        paint('SELECTED SIGNALS', 'cyan', color),
+        selected
+          ? `${selected.signals.artifacts} artifacts · ${selected.signals.proofs} proofs · network ${selected.signals.path}`
+          : 'Choose a role to inspect its signals.',
+        paint('WORKFLOW STATUS', 'cyan', color),
+        ...wrap((model.selected?.stages || []).map(stage => `${stage.name}:${stage.state}`).join(' · ') || 'No workflow stages yet.', width - 4),
+        paint('ACTIVE PRIORITIES', 'cyan', color),
+        ...model.priority.flatMap(item => wrap(`${item.kind.toUpperCase()} · ${item.text}`, width - 4))
+      ];
+      body.push(...pulse.slice(0, Math.max(0, height - 2 - body.length)));
+    }
   }
   return fixedPanel(`JOBS · ${state.filter}`, body, width, height, color);
 }
@@ -513,13 +543,13 @@ function fitDimensionLines(fit, width) {
     const value = dimension.status === 'unknown' ? 'unknown' : `${dimension.score}/100`;
     return `${key}: ${value}`;
   }).join(' · ');
-  return wrap(summary, width).slice(0, 3);
+  return wrap(summary, width);
 }
 
-function constraintLine(fit, width) {
-  if (!fit?.constraints?.length) return crop('CANDIDATE CONSTRAINTS · none recorded', width);
+function constraintLines(fit, width) {
+  if (!fit?.constraints?.length) return wrap('CANDIDATE CONSTRAINTS · none recorded', width);
   const summary = fit.constraints.map(value => `${value.kind}/${value.status}: ${value.reason}`).join(' · ');
-  return crop(`CANDIDATE CONSTRAINTS · ${summary}`, width);
+  return wrap(`CANDIDATE CONSTRAINTS · ${summary}`, width);
 }
 
 function postingStatusLines(item, width) {
@@ -528,25 +558,39 @@ function postingStatusLines(item, width) {
     ? `${posting.status} · ${posting.reasonCodes?.join(', ') || 'no reason codes'}`
     : 'uncertain · not checked';
   const risks = item.fit?.postingRisks?.length
-    ? item.fit.postingRisks.map(value => {
-        const label = value.code.replace(/^posting_risk_/, '').replaceAll('_', ' ');
-        return crop(`${label} (${value.status}): ${value.reason}`, width);
+    ? item.fit.postingRisks.flatMap(value => {
+        const label = String(value.code || 'posting risk').replace(/^posting_risk_/, '').replaceAll('_', ' ');
+        return wrap(`${label} (${value.status}): ${value.reason}`, width);
       })
     : [];
-  return [crop(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width), ...risks];
+  return [
+    ...wrap(`POSTING STATUS / LEGITIMACY · ${status}${risks.length ? '' : ' · no static risks observed'}`, width),
+    ...risks
+  ];
 }
-function detailPanel(model, state, width, height, color) {
+function detailSummaryLines(model, state, width, height, color) {
   const item = model.selected;
-  if (!item) {
-    return fixedPanel('SELECTED JOB', ['No job selected.', '', 'Next: choose a job to see its fit and recommended action.'], width, height, color);
-  }
   const fitScore = fitLabel(item.fit);
   const applicationStatus = item.job.applicationStatus || 'not started';
   const recommended = item.recommendedAction || model.recommendedAction;
   const readinessStatus = item.readiness?.status === 'approved'
     ? 'ready'
     : item.readiness?.readyForReview ? 'ready for review' : 'needs attention';
-  const summary = [
+  const hint = state.detailsExpanded
+    ? (state.focusTarget === 'details' ? 'e hide details · Esc jobs · ↑/↓ scroll' : 'e focus details · p prepare · i ask')
+    : 'e details · p prepare · z score · i ask';
+  const room = Math.max(1, height - 2);
+  if (room <= 6) {
+    const nextRows = wrap(`▶ NEXT · ${recommended?.label || 'Review this job and choose your next step'}`, width)
+      .slice(0, Math.max(1, room - 3));
+    return [
+      paint(`▶ ${item.job.title}`, 'selected', color),
+      paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
+      ...nextRows,
+      paint(hint, 'green', color)
+    ].slice(0, room);
+  }
+  return [
     paint(`▶ ${item.job.title}`, 'selected', color),
     `${item.job.company} · ${item.job.location || 'location not listed'}`,
     '',
@@ -554,35 +598,82 @@ function detailPanel(model, state, width, height, color) {
     paint(`READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
     '',
     paint('▶ NEXT', 'selected', color),
-    ...wrap(recommended?.label || 'Review this job and choose your next step', width - 4).slice(0, 3),
+    ...wrap(recommended?.label || 'Review this job and choose your next step', width).slice(0, 3),
     '',
-    paint(`${state.detailsExpanded ? 'e hide details' : 'e details'} · p prepare · z score · i ask`, 'green', color)
+    paint(hint, 'green', color)
   ];
-  if (!state.detailsExpanded) return fixedPanel('SELECTED JOB', summary, width, height, color);
+}
 
+function decisionOverviewLines(item, width, color) {
+  const requirements = (item.requirements || []).slice(0, 3);
+  const lines = [
+    '',
+    paint('ROLE BRIEF', 'cyan', color),
+    ...wrap([item.workModel, item.compensation].filter(Boolean).join(' · ') || item.narrative, width).slice(0, 3)
+  ];
+  if (requirements.length) {
+    lines.push(
+      paint('KEY REQUIREMENTS', 'cyan', color),
+      ...requirements.flatMap(value => wrap(`• ${value}`, width))
+    );
+  }
+  lines.push(
+    paint('APPLICATION PATH', 'cyan', color),
+    ...item.stages.map(stage => `${stage.state === 'empty' ? '○' : '●'} ${stage.name} · ${stage.state}`),
+    paint('MATERIALS', 'cyan', color),
+    `${item.docs.length} artifacts · ${item.proofs.length} matched proofs`
+  );
+  return lines;
+}
+
+function technicalDetailLines(item, state, width, color) {
   const fitMeta = item.fit ? `${item.fit.mode} · ${item.fit.scoreStatus} · coverage ${item.fit.evidenceCoverage ?? '—'}%` : 'not scored';
   const proofs = item.proofs.length ? item.proofs.map(proof => `${proof.id} ${proof.summary}`) : ['No matched proof IDs yet'];
   const artifacts = item.docs.length ? item.docs.map(doc => `${doc.type} · ${doc.approvalStatus} · r${doc.revision} · ${doc.path}`) : ['No drafts yet'];
-  const stages = item.stages.map(stage => `${stage.name}:${stage.state}`).join('  ');
-  const diagnostics = [
+  return [
     '',
     paint('TECHNICAL DETAILS', 'cyan', color),
-    `JOB ID ${item.job.id}`,
-    `RUNTIME FX off · side effects off · agent ${state.agentState}${state.sessionId ? ` · session ${state.sessionId}` : ''}`,
-    `FIT DETAILS ${fitMeta}`,
-    ...fitDimensionLines(item.fit, width - 4),
-    paint(constraintLine(item.fit, width - 4), 'cyan', color),
-    ...postingStatusLines(item, width - 4).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
-    ...readinessLines(item.readiness, width - 4, color),
-    ...policyLines(item.policy, width - 4, color),
+    ...wrap(`JOB ID ${item.job.id}`, width),
+    ...wrap(`RUNTIME FX off · side effects off · agent ${state.agentState}${state.sessionId ? ` · session ${state.sessionId}` : ''}`, width),
+    ...wrap(`FIT DETAILS ${fitMeta}`, width),
+    ...fitDimensionLines(item.fit, width),
+    ...constraintLines(item.fit, width).map(line => paint(line, 'cyan', color)),
+    ...postingStatusLines(item, width).map((line, index) => paint(line, index === 0 ? 'cyan' : 'reset', color)),
+    paint('POSTING TEXT', 'cyan', color),
+    ...wrap(item.postingText || item.narrative || 'No description is stored for this job.', width),
+    paint('POSTING REQUIREMENTS', 'cyan', color),
+    ...(item.requirements?.length
+      ? item.requirements.flatMap(value => wrap(value, width))
+      : ['No structured requirements are stored.']),
+    ...readinessLines(item.readiness, width, color),
+    ...policyLines(item.policy, width, color),
     paint('MATCHED PROOFS', 'cyan', color),
-    ...proofs.flatMap(value => wrap(value, width - 4)).slice(0, 4),
+    ...proofs.flatMap(value => wrap(value, width)),
     paint('ARTIFACTS', 'cyan', color),
-    ...artifacts.flatMap(value => wrap(value, width - 4)).slice(0, 4),
+    ...artifacts.flatMap(value => wrap(value, width)),
     paint('PURSUE STAGES', 'cyan', color),
-    ...wrap(stages, width - 4).slice(0, 3)
+    ...item.stages.flatMap(stage => wrap(`${stage.name}:${stage.state}`, width))
   ];
-  return fixedPanel('SELECTED JOB · DETAILS', [...summary, ...diagnostics], width, height, color);
+}
+
+function detailPanel(model, state, width, height, color) {
+  const item = model.selected;
+  if (!item) {
+    return fixedPanel('SELECTED JOB', ['No job selected.', '', 'Next: choose a job to see its fit and recommended action.'], width, height, color);
+  }
+  const contentWidth = Math.max(8, width - 4);
+  const summary = detailSummaryLines(model, state, contentWidth, height, color);
+  if (!state.detailsExpanded) {
+    return fixedPanel('SELECTED JOB', [...summary, ...decisionOverviewLines(item, contentWidth, color)], width, height, color);
+  }
+  const body = [...summary, ...technicalDetailLines(item, state, contentWidth, color)];
+  const room = Math.max(1, height - 2);
+  const scrollMax = Math.max(0, body.length - room);
+  const scroll = Math.max(0, Math.min(scrollMax, Number(state.detailsScroll || 0)));
+  const end = Math.min(body.length, scroll + room);
+  const focused = state.focusTarget === 'details';
+  const title = `SELECTED JOB · DETAILS${focused ? ' · FOCUSED' : ''} · rows ${scroll + 1}-${end}/${body.length}`;
+  return fixedPanel(title, body.slice(scroll, end), width, height, color);
 }
 
 function agentPanel(model, state, width, height, color) {
@@ -1365,6 +1456,18 @@ function overlayPanel(model, state, width, height, color) {
 }
 
 function footerLines(width, state) {
+  if (state.focusTarget === 'details') {
+    if (width >= 90) {
+      return [
+        ' DETAILS FOCUSED · ↑/↓ or j/k scroll · PgUp/PgDn page · e hide · Esc jobs · Tab chat',
+        ' g setup · ? help · Q quit'
+      ];
+    }
+    return [
+      ' DETAILS FOCUSED · ↑/↓ scroll · e hide · Esc jobs',
+      ' Tab chat · g setup · ? help · Q quit'
+    ];
+  }
   if (state.focusTarget === 'agent') {
     if (width >= 90) {
       return [
@@ -1489,9 +1592,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
       lines.push(...agentPanel(model, state, safeWidth, bodyHeight, color));
     }
   } else if (safeWidth >= 90) {
-    const contentHeight = state.detailsExpanded
-      ? bodyHeight
-      : Math.min(bodyHeight, Math.max(16, 10 + Math.min(model.jobs.length, 3) * 5));
+    const contentHeight = state.detailsExpanded ? bodyHeight : Math.min(bodyHeight, 29);
     const listWidth = Math.max(42, Math.floor(safeWidth * 0.44));
     const detailWidth = safeWidth - listWidth - 1;
     lines.push(...mergeColumns([
@@ -1536,6 +1637,7 @@ export function defaultTuiState() {
     docsQuery: '',
     docsMatchIndex: 0,
     docsView: 'document',
+    detailsScroll: 0,
     docsEvidenceExpanded: false,
     detailsExpanded: false,
     focusTarget: 'shell',
@@ -1737,6 +1839,24 @@ export class JobosTui {
     return true;
   }
 
+  scrollDetails(delta) {
+    const section = this.lastFrame?.sections?.details;
+    const scrollMax = Math.max(0, Number(section?.scrollMax || 0));
+    this.state.detailsScroll = Math.max(0, Math.min(scrollMax, Number(this.state.detailsScroll || 0) + delta));
+    this.state.status = this.state.detailsScroll
+      ? `Technical details · row ${this.state.detailsScroll + 1}`
+      : 'Technical details · top';
+    this.render();
+    return true;
+  }
+
+  leaveDetailsFocus() {
+    this.state.focusTarget = 'shell';
+    this.state.status = 'Dashboard job navigation restored · e returns to technical details.';
+    this.render();
+    return true;
+  }
+
   onRawInput(chunk) {
     const { segments, remainder } = splitRawInput(`${this.mouseInputBuffer}${String(chunk || '')}`);
     this.mouseInputBuffer = remainder;
@@ -1748,6 +1868,11 @@ export class JobosTui {
 
   onMouseData(chunk) {
     for (const event of parseSgrMouse(chunk)) {
+      const frame = this.lastFrame;
+      const details = frame?.sections?.details;
+      const overDetails = Boolean(details
+        && event.y >= details.y && event.y <= details.bottom
+        && event.x >= details.x && event.x < details.x + details.width);
       if (event.button === 64 || event.button === 65) {
         const delta = event.button === 64 ? -1 : 1;
         if (this.state.overlay && overlayItems(this.model, this.state).length) {
@@ -1756,13 +1881,16 @@ export class JobosTui {
           this.render();
         } else if (this.state.focusTarget === 'agent') {
           this.scrollAgent(event.button === 64 ? 3 : -3);
+        } else if (this.state.detailsExpanded && overDetails) {
+          this.state.focusTarget = 'details';
+          this.scrollDetails(delta * 3);
         } else {
+          if (this.state.focusTarget === 'details') this.state.focusTarget = 'shell';
           this.moveSelection(delta);
         }
         continue;
       }
       if (!event.pressed || event.button !== 0) continue;
-      const frame = this.lastFrame;
       const overlayHit = frame?.overlayHits?.find(hit => (
         hit.y === event.y && event.x >= hit.x && event.x < hit.x + hit.width
       ));
@@ -1787,12 +1915,19 @@ export class JobosTui {
           this.state.overlayIndex = 0;
           this.render();
         } else {
+          this.state.focusTarget = 'shell';
           this.state.filter = filterHit.filter;
           this.refresh({ disk: false });
         }
         continue;
       }
       if (this.state.overlay) continue;
+      if (this.state.detailsExpanded && overDetails) {
+        this.state.focusTarget = 'details';
+        this.state.status = 'Technical details focused · ↑/↓ or mouse wheel scrolls; Esc restores job navigation.';
+        this.render();
+        continue;
+      }
       const { width } = this.dimensions();
       if (event.y >= 1 && event.y <= (width < 90 ? 2 : 3)) {
         if (this.model.priority?.[this.state.stripIndex || 0]) this.jumpToStripJob();
@@ -1823,6 +1958,20 @@ export class JobosTui {
     const plain = stripAnsiText(screen).split('\n');
     const jobsY = plain.findIndex(line => line.includes('┌ JOBS ·'));
     const jobsBottom = jobsY < 0 ? -1 : plain.findIndex((line, index) => index > jobsY && line.startsWith('└'));
+    const detailsY = plain.findIndex(line => line.includes('┌ SELECTED JOB'));
+    const detailsX = detailsY < 0 ? -1 : plain[detailsY].indexOf('┌ SELECTED JOB');
+    const detailsRight = detailsX < 0 ? -1 : plain[detailsY].indexOf('┐', detailsX);
+    const detailsBottom = detailsY < 0 || detailsX < 0
+      ? -1
+      : plain.findIndex((line, index) => index > detailsY && line[detailsX] === '└');
+    const detailsRange = detailsY < 0 ? null : plain[detailsY].match(/rows (\d+)-(\d+)\/(\d+)/);
+    const detailsSection = detailsY < 0 ? null : {
+      y: detailsY,
+      x: detailsX,
+      width: Math.max(1, (detailsRight < 0 ? dimensions.width : detailsRight + 1) - detailsX),
+      bottom: detailsBottom < 0 ? dimensions.height - 1 : detailsBottom,
+      scrollMax: detailsRange ? Math.max(0, Number(detailsRange[3]) - (Number(detailsRange[2]) - Number(detailsRange[1]) + 1)) : 0
+    };
     const jobs = filteredJobs(this.model, this.state.filter);
     const hits = jobsY < 0 ? [] : jobs.map(job => ({
       id: job.id,
@@ -1886,6 +2035,7 @@ export class JobosTui {
       filterHits,
       sections: {
         jobs: jobsY < 0 ? null : { y: jobsY, bottom: jobsBottom < 0 ? dimensions.height : jobsBottom, hits },
+        details: detailsSection,
         footer: { y: Math.max(0, plain.length - footers.length), lines: footers }
       }
     };
@@ -1929,6 +2079,8 @@ export class JobosTui {
       this.state.profileId = this.model.profileId;
       this.state.selectedJobId = this.model.selectedJobId;
     }
+    this.state.stripIndex = Math.max(0, Math.min(this.state.stripIndex || 0, Math.max(0, this.model.priority.length - 1)));
+    if (previousModel?.selectedJobId !== this.model.selectedJobId) this.state.detailsScroll = 0;
 
     const docs = this.model.selected?.docs || [];
     const shouldClampArtifact = Boolean(this.state.selectedArtifactId) || this.state.overlay === 'review' || this.state.overlay === 'docs';
@@ -2063,6 +2215,7 @@ export class JobosTui {
     if (index < 0) index = 0;
     index = (index + delta + jobs.length) % jobs.length;
     this.state.selectedJobId = jobs[index].id;
+    this.state.detailsScroll = 0;
     this.refresh({ disk: false });
   }
 
@@ -2647,12 +2800,16 @@ export class JobosTui {
     const items = this.model.priority || [];
     if (!items.length) return;
     this.state.stripIndex = ((this.state.stripIndex || 0) + delta + items.length) % items.length;
-    this.state.status = `Priority: ${items[this.state.stripIndex].kind} · Enter jumps to its job`;
+    this.state.status = `Priority: ${items[this.state.stripIndex].kind} · Enter opens it`;
     this.render();
   }
 
   jumpToStripJob() {
     const item = (this.model.priority || [])[this.state.stripIndex || 0];
+    if (item?.target === 'log') {
+      this.openOverlay('log');
+      return;
+    }
     if (!item?.jobId) {
       this.state.status = `No linked job on the ${item?.kind || 'strip'} card.`;
       this.render();
@@ -2670,6 +2827,8 @@ export class JobosTui {
       return;
     }
     this.state.overlay = null;
+    this.state.focusTarget = 'shell';
+    this.state.detailsScroll = 0;
     this.state.filter = 'all'; // load-bearing: the main list only renders filteredJobs
     this.state.selectedJobId = jobId;
     this.refresh({ disk: false });
@@ -4510,6 +4669,21 @@ export class JobosTui {
   onKeypress(value, key = {}) {
     if (key.ctrl && key.name === 'c') return void this.stop();
     if (value === 'Q' || (key.shift && key.name === 'q')) return void this.stop();
+    if (!this.state.overlay && this.state.focusTarget === 'details' && this.state.mode === 'normal') {
+      if (key.name === 'escape') return this.leaveDetailsFocus();
+      if (value === 'e') {
+        this.state.detailsExpanded = false;
+        this.state.detailsScroll = 0;
+        this.state.focusTarget = 'shell';
+        this.state.status = 'Technical details hidden.';
+        this.render();
+        return true;
+      }
+      if (key.name === 'up' || value === 'k') return this.scrollDetails(-1);
+      if (key.name === 'down' || value === 'j') return this.scrollDetails(1);
+      if (key.name === 'pageup') return this.scrollDetails(-Math.max(1, this.dimensions().height - 12));
+      if (key.name === 'pagedown') return this.scrollDetails(Math.max(1, this.dimensions().height - 12));
+    }
     if (!this.state.overlay && this.state.focusTarget === 'agent' && this.state.mode === 'normal') {
       if (key.name === 'escape' || key.name === 'tab') return this.toggleAgentFocus();
       if (key.name === 'up' || key.name === 'pageup' || value === 'k') return this.scrollAgent(key.name === 'pageup' ? 10 : 1);
@@ -4593,8 +4767,15 @@ export class JobosTui {
     else if (value === 'v') this.openOverlay('profile');
     else if (value === 'b') this.openOverlay('build-network');
     else if (value === 'e') {
-      this.state.detailsExpanded = !this.state.detailsExpanded;
-      this.state.status = this.state.detailsExpanded ? 'Technical details shown.' : 'Technical details hidden.';
+      if (this.state.detailsExpanded) {
+        this.state.focusTarget = 'details';
+        this.state.status = 'Technical details focused · ↑/↓ scrolls; Esc restores job navigation.';
+      } else {
+        this.state.detailsExpanded = true;
+        this.state.detailsScroll = 0;
+        this.state.focusTarget = 'details';
+        this.state.status = 'Technical details shown and focused · ↑/↓ scrolls; Esc restores job navigation.';
+      }
       this.render();
     }
     else if (value === 'p') void this.runAction('pursue');
