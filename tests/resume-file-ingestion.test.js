@@ -6,7 +6,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import { openStore } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
-import { importResume, normalizeResumeSourceText, parseResumeText, readResumeFileAsync } from '../src/resumes.js';
+import { importResume, normalizeResumeDocument, normalizeResumeSourceText, parseResumeText, readResumeFileAsync, validateResumeDocument } from '../src/resumes.js';
 
 const RESUME_LINES = [
   'Alex Chen',
@@ -77,6 +77,107 @@ test('resume normalization reconnects common copy/paste email artifacts', () => 
   const normalized = normalizeResumeSourceText(source);
   const document = parseResumeText('alex', normalized);
   assert.equal(document.identity.email, 'alex@example.com');
+});
+
+test('stacked and unbulleted experience text auto-fills complete roles without turning details into invalid jobs', () => {
+  const source = [
+    'ALEX CHEN',
+    'alex@example.com | +1 555 0100 | Berlin, Germany',
+    '',
+    'WORK EXPERIENCE',
+    'Acme Corp',
+    'Senior Software Engineer',
+    'January 2020 – Present',
+    'Berlin, Germany',
+    'Built a distributed scheduler that handles one million events daily',
+    'Led the migration of the deployment pipeline',
+    '',
+    'Product Engineer',
+    'Beta GmbH',
+    '2018 - 2020',
+    'Shipped a customer platform used across three regions'
+  ].join('\n');
+
+  const document = parseResumeText('alex', source);
+
+  assert.deepEqual(document.experience.map(entry => [entry.title, entry.employer]), [
+    ['Senior Software Engineer', 'Acme Corp'],
+    ['Product Engineer', 'Beta GmbH']
+  ]);
+  assert.deepEqual(document.experience[0].bullets.map(item => item.text), [
+    'Built a distributed scheduler that handles one million events daily',
+    'Led the migration of the deployment pipeline'
+  ]);
+  assert.equal(validateResumeDocument(document).valid, true);
+});
+
+test('common inline role formats and JSON Resume uploads normalize into editable canonical fields', () => {
+  const textDocument = parseResumeText('alex', [
+    'Alex Chen',
+    'alex@example.com',
+    '+1 555 0100',
+    'EXPERIENCE',
+    'Senior Engineer at Acme Corp | Jan 2020 - Present',
+    'Built a scheduler',
+    'Beta GmbH — Product Engineer — 2018 - 2020',
+    'Shipped a platform'
+  ].join('\n'));
+  assert.deepEqual(textDocument.experience.map(entry => [entry.title, entry.employer]), [
+    ['Senior Engineer', 'Acme Corp'],
+    ['Product Engineer', 'Beta GmbH']
+  ]);
+
+  const jsonDocument = normalizeResumeDocument('alex', {
+    basics: {
+      name: 'Alex Chen',
+      email: 'alex@example.com',
+      phone: '+1 555 0100',
+      location: { city: 'Berlin', countryCode: 'DE' }
+    },
+    work: [{ name: 'Acme Corp', position: 'Senior Engineer', startDate: '2020', endDate: '2024', highlights: ['Built a scheduler'] }],
+    skills: [{ name: 'Engineering', keywords: ['JavaScript', 'SQL'] }]
+  });
+  assert.equal(jsonDocument.identity.location, 'Berlin, DE');
+  assert.equal(jsonDocument.experience[0].employer, 'Acme Corp');
+  assert.equal(jsonDocument.experience[0].title, 'Senior Engineer');
+  assert.equal(jsonDocument.experience[0].bullets[0].text, 'Built a scheduler');
+  assert.equal(jsonDocument.skills[0].category, 'JavaScript, SQL');
+});
+
+test('title-case PDF headings and employer lines that include dates are inferred', () => {
+  const document = parseResumeText('alex', [
+    'Alex Chen',
+    'alex@example.com',
+    '+1 555 0100',
+    'Work Experience',
+    'Senior Engineer',
+    'Acme Corp | Berlin, Germany | January 2020 - Present',
+    'Built a scheduler used by the entire company',
+    'Education',
+    'State University'
+  ].join('\n'));
+
+  assert.equal(document.identity.name, 'Alex Chen');
+  assert.equal(document.experience.length, 1);
+  assert.equal(document.experience[0].title, 'Senior Engineer');
+  assert.equal(document.experience[0].employer, 'Acme Corp');
+  assert.equal(document.experience[0].location, 'Berlin, Germany');
+  assert.equal(document.experience[0].dateSource.startText, 'January 2020');
+  assert.deepEqual(document.experience[0].bullets.map(item => item.text), ['Built a scheduler used by the entire company']);
+});
+
+test('Markdown subheadings become role text rather than part of the title', () => {
+  const document = parseResumeText('alex', [
+    '# Alex Chen',
+    'alex@example.com',
+    '+1 555 0100',
+    '## Experience',
+    '### Senior Engineer — Acme Corp',
+    '- Built a scheduler'
+  ].join('\n'));
+
+  assert.equal(document.experience[0].title, 'Senior Engineer');
+  assert.equal(document.experience[0].employer, 'Acme Corp');
 });
 
 test('PDF and DOCX files are extracted locally into the canonical resume shape', async () => {

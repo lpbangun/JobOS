@@ -412,6 +412,34 @@ test('resume preview shows and corrects a missing parsed email without discardin
   assert.equal(tui.state.setupResumePreview.validation.valid, true);
 });
 
+test('resume preview lets the user correct extracted text and re-runs auto-fill for an ambiguous role', async () => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen');
+  tui.state.setupProfileId = profile.profile.id;
+  const ambiguous = [
+    'Alex Chen',
+    'alex@example.com',
+    '+1 555 0100',
+    'EXPERIENCE',
+    'Independent consultant',
+    'Built a distributed scheduler that handles one million events daily'
+  ].join('\n');
+
+  tui.previewSetupResume({ sourceText: ambiguous });
+  assert.equal(tui.state.setupResumePreview.validation.valid, false);
+  enter(tui);
+  assert.equal(tui.state.mode, 'setup-resume-text', 'a non-contact parsing blocker opens the extracted text editor');
+
+  tui.state.input = ambiguous.replace('Independent consultant', 'Consultant | Independent');
+  enter(tui);
+
+  assert.equal(tui.state.mode, 'normal');
+  assert.equal(tui.state.setupResumePreview.validation.valid, true);
+  assert.equal(tui.state.setupResumePreview.document.experience[0].title, 'Consultant');
+  assert.equal(tui.state.setupResumePreview.document.experience[0].employer, 'Independent');
+  assert.equal(tui.state.setupResumePreview.extraction.correctedInOnboarding, true);
+});
+
 test('file browser keeps a long-list selection visible at compact height', async () => {
   const { store, tui } = await emptyTui({ width: 80, height: 24 });
   for (let index = 0; index < 36; index++) {

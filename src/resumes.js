@@ -59,8 +59,48 @@ function normalizeNamedEntry(profileId, prefix, entry, index, fields) {
   return output;
 }
 
+function resumeInputShape(input) {
+  const basics = input.basics || {};
+  const locationText = value => {
+    if (!value || typeof value !== 'object') return value;
+    return [value.address, value.city, value.region, value.countryCode || value.country]
+      .map(text).filter(Boolean).join(', ');
+  };
+  const identitySource = input.identity || {
+    name: input.name ?? basics.name,
+    email: input.email ?? basics.email,
+    phone: input.phone ?? basics.phone,
+    location: locationText(input.location ?? basics.location),
+    links: input.links ?? basics.profiles?.map(profile => ({
+      label: profile.network || profile.username || 'Link',
+      url: profile.url
+    }))
+  };
+  const identity = { ...identitySource, location: locationText(identitySource.location) };
+  const experience = input.experience ?? input.experiences ?? input.workExperience ?? input.work ?? [];
+  return {
+    ...input,
+    identity,
+    summary: input.summary ?? basics.summary ?? '',
+    experience: list(experience).map(entry => ({
+      ...entry,
+      employer: entry?.employer ?? entry?.company ?? entry?.organization ?? entry?.name,
+      title: entry?.title ?? entry?.position ?? entry?.role,
+      location: locationText(entry?.location),
+      startDate: entry?.startDate ?? entry?.start,
+      endDate: entry?.endDate ?? entry?.end,
+      bullets: entry?.bullets ?? entry?.highlights ?? entry?.achievements ?? entry?.responsibilities ?? []
+    })),
+    education: input.education ?? input.educations ?? [],
+    skills: input.skills ?? input.competencies ?? [],
+    credentials: input.credentials ?? input.certificates ?? input.certifications ?? [],
+    projects: input.projects ?? input.portfolio ?? []
+  };
+}
+
 export function normalizeResumeDocument(profileId, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Resume document must be an object');
+  input = resumeInputShape(input);
   const identity = input.identity || {};
   const summary = typeof input.summary === 'string' ? { text: input.summary } : (input.summary || {});
   return {
@@ -85,9 +125,22 @@ export function normalizeResumeDocument(profileId, input = {}) {
       verificationStatus: verification(summary.verificationStatus, 'needs_verification')
     },
     experience: list(input.experience).map((entry, index) => normalizeExperience(profileId, entry, index)),
-    education: list(input.education).map((entry, index) => normalizeNamedEntry(profileId, 'education', entry, index, ['institution', 'degree', 'field', 'location', 'startDate', 'endDate'])),
-    skills: list(input.skills).map((entry, index) => normalizeNamedEntry(profileId, 'skill', entry, index, ['name', 'category'])),
-    credentials: list(input.credentials).map((entry, index) => normalizeNamedEntry(profileId, 'credential', entry, index, ['name', 'issuer', 'date'])),
+    education: list(input.education).map((entry, index) => normalizeNamedEntry(profileId, 'education', {
+      ...entry,
+      institution: entry?.institution ?? entry?.school,
+      degree: entry?.degree ?? entry?.studyType,
+      field: entry?.field ?? entry?.area
+    }, index, ['institution', 'degree', 'field', 'location', 'startDate', 'endDate'])),
+    skills: list(input.skills).flatMap(entry => {
+      if (typeof entry === 'string') return [entry];
+      if (entry?.name) return [{ ...entry, category: entry.category ?? list(entry.keywords).join(', ') }];
+      return list(entry?.keywords).map(name => ({ name, category: entry?.category || '' }));
+    }).map((entry, index) => normalizeNamedEntry(profileId, 'skill', entry, index, ['name', 'category'])),
+    credentials: list(input.credentials).map((entry, index) => normalizeNamedEntry(profileId, 'credential', {
+      ...entry,
+      issuer: entry?.issuer ?? entry?.organization,
+      date: entry?.date ?? entry?.startDate
+    }, index, ['name', 'issuer', 'date'])),
     projects: list(input.projects).map((entry, index) => {
       const normalized = normalizeNamedEntry(profileId, 'project', entry, index, ['name', 'description', 'url']);
       normalized.bullets = list(entry?.bullets).map((bullet, bulletIndex) => normalizeBullet(profileId, bullet, normalized.id, bulletIndex));
@@ -106,21 +159,39 @@ function headingName(line) {
   const markdown = String(line).match(/^#{1,3}\s+(.+)$/);
   if (markdown) return markdown[1].trim();
   const plain = String(line).trim();
+  if (/^(?:professional summary|summary|profile|objective|work experience|professional experience|career experience|experience|employment|employment history|work history|career history|professional background|education|academic background|education and training|technical skills|professional skills|skills|core competencies|expertise|technical stack|tools and technologies|credentials|certifications|licenses|certificates|qualifications|selected projects|personal projects|professional projects|projects|portfolio|selected work|awards?|honors?|publications?|languages?|volunteer(?:ing| experience)?|community|leadership|interests?|activities|associations?|memberships?|references?)\s*:?$/i.test(plain)) return plain.replace(/\s*:$/, '');
   if (/^[A-Z][A-Z &/]{2,40}$/.test(plain)) return plain;
   return '';
 }
 function canonicalSection(value) {
   const key = value.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
   if (/^(professional )?summary|profile|objective$/.test(key)) return 'summary';
-  if (/^(work |professional )?experience|employment( history)?$/.test(key)) return 'experience';
-  if (/^education|academic background$/.test(key)) return 'education';
-  if (/^(technical )?skills|core competencies$/.test(key)) return 'skills';
-  if (/^credentials|certifications|licenses$/.test(key)) return 'credentials';
-  if (/^(selected )?projects$/.test(key)) return 'projects';
+  if (/^(work |professional |career )?experience|employment( history)?|work history|career history|professional background$/.test(key)) return 'experience';
+  if (/^education|academic background|education and training$/.test(key)) return 'education';
+  if (/^(technical |professional )?skills|core competencies|expertise|technical stack|tools and technologies$/.test(key)) return 'skills';
+  if (/^credentials|certifications|licenses|certificates|qualifications$/.test(key)) return 'credentials';
+  if (/^(selected |personal |professional )?projects|portfolio|selected work$/.test(key)) return 'projects';
   return '';
 }
 function cleanBullet(line) { return String(line).replace(/^\s*[-*•]\s*/, '').trim(); }
 const EMAIL_PATTERN = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/i;
+const MONTH_PATTERN = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\.?';
+const DATE_PART_PATTERN = `(?:${MONTH_PATTERN}\\s+(?:19|20)\\d{2}|(?:0?[1-9]|1[0-2])[/.](?:19|20)\\d{2}|(?:19|20)\\d{2}(?:[-/.](?:0?[1-9]|1[0-2]))?)`;
+const ROLE_PATTERN = /\b(?:engineer|developer|manager|director|designer|analyst|consultant|specialist|coordinator|administrator|architect|scientist|researcher|recruiter|producer|strategist|executive|officer|president|founder|owner|partner|associate|assistant|intern|lead|head|principal|product|marketing|sales|operations|teacher|educator|writer|editor)\b/i;
+const EMPLOYER_PATTERN = /\b(?:inc\.?|llc|ltd\.?|corp(?:oration)?\.?|company|co\.?|gmbh|ag|plc|group|studio|studios|labs?|systems?|solutions?|technologies|university|college|school|institute|foundation|agency|partners?)\b/i;
+
+function isAdditionalSection(value) {
+  const key = value.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
+  return /^(awards?|honors?|publications?|languages?|volunteer(?:ing| experience)?|community|leadership|interests?|activities|associations?|memberships?|references?)$/.test(key);
+}
+
+function sectionHeading(line, { insideSection = false } = {}) {
+  const heading = headingName(line);
+  if (!heading) return '';
+  if (canonicalSection(heading) || isAdditionalSection(heading)) return heading;
+  const level = String(line).match(/^(#{1,3})\s+/)?.[1].length || 0;
+  return !insideSection && level > 0 && level <= 2 ? heading : '';
+}
 
 export function normalizeResumeSourceText(value) {
   return String(value || '')
@@ -137,9 +208,145 @@ export function normalizeResumeSourceText(value) {
 
 function parseDateRange(value) {
   const source = text(value);
-  const match = source.match(/((?:19|20)\d{2}(?:-\d{2})?|[A-Za-z]{3,9}\s+(?:19|20)\d{2})\s*(?:-|–|—|to)\s*(Present|Current|(?:19|20)\d{2}(?:-\d{2})?|[A-Za-z]{3,9}\s+(?:19|20)\d{2})/i);
-  if (!match) return { startDate: null, endDate: null, dateSource: { startText: source, endText: '', verificationStatus: 'needs_verification' } };
-  return { startDate: match[1], endDate: /present|current/i.test(match[2]) ? null : match[2], dateSource: { startText: match[1], endText: match[2], verificationStatus: /^\d{4}(?:-\d{2})?$/.test(match[1]) && (/present|current/i.test(match[2]) || /^\d{4}(?:-\d{2})?$/.test(match[2])) ? 'verified' : 'needs_verification' } };
+  const range = new RegExp(`(${DATE_PART_PATTERN})\\s*(?:-|–|—|to|through)\\s*(Present|Current|Now|${DATE_PART_PATTERN})`, 'i');
+  const match = source.match(range);
+  if (match) return { matched: true, startDate: match[1], endDate: /present|current|now/i.test(match[2]) ? null : match[2], dateSource: { startText: match[1], endText: match[2], verificationStatus: /^\d{4}(?:-\d{1,2})?$/.test(match[1]) && (/present|current|now/i.test(match[2]) || /^\d{4}(?:-\d{1,2})?$/.test(match[2])) ? 'verified' : 'needs_verification' } };
+  const single = source.match(new RegExp(`\\b(${DATE_PART_PATTERN})\\b`, 'i'));
+  if (single) return { matched: true, startDate: single[1], endDate: null, dateSource: { startText: single[1], endText: '', verificationStatus: 'needs_verification' } };
+  return { matched: false, startDate: null, endDate: null, dateSource: { startText: '', endText: '', verificationStatus: 'needs_verification' } };
+}
+
+function isDateLine(value) {
+  const dates = parseDateRange(value);
+  if (!dates.matched) return false;
+  const remainder = text(value)
+    .replace(new RegExp(DATE_PART_PATTERN, 'ig'), '')
+    .replace(/present|current|now|through|to/ig, '')
+    .replace(/[-–—|,()[\].]/g, '')
+    .trim();
+  return !remainder || /^(remote|hybrid|on[ -]?site)$/i.test(remainder);
+}
+
+function isLocation(value) {
+  const source = text(value);
+  return /^(?:remote|hybrid|on[ -]?site)$/i.test(source)
+    || /^[\p{L} .'-]+,\s*(?:[A-Z]{2}|[\p{L} .'-]+)$/u.test(source);
+}
+
+function roleScore(value) {
+  const source = text(value);
+  return (ROLE_PATTERN.test(source) ? 4 : 0) + (/\b(?:senior|sr\.?|junior|jr\.?|chief|vp|vice president)\b/i.test(source) ? 2 : 0) - (EMPLOYER_PATTERN.test(source) ? 2 : 0);
+}
+
+function employerScore(value) {
+  const source = text(value);
+  return (EMPLOYER_PATTERN.test(source) ? 4 : 0) + (/^[A-Z][\p{L}\d&.' -]+$/u.test(source) ? 1 : 0) - (ROLE_PATTERN.test(source) ? 2 : 0);
+}
+
+function inferTitleEmployer(values) {
+  const candidates = values.map(text).filter(value => value && !isDateLine(value) && !isLocation(value));
+  if (candidates.length < 2) return null;
+  const [first, second] = candidates;
+  const firstTitle = roleScore(first);
+  const secondTitle = roleScore(second);
+  const firstEmployer = employerScore(first);
+  const secondEmployer = employerScore(second);
+  if (secondTitle > firstTitle || firstEmployer > secondEmployer + 1) return { title: second, employer: first };
+  return { title: first, employer: second };
+}
+
+function experienceHeader(value) {
+  const source = cleanBullet(value);
+  const dates = parseDateRange(source);
+  let parts = source.split(/\s*(?:\||\t|—|–)\s*/).map(text).filter(Boolean);
+  parts = parts.filter(part => !isDateLine(part));
+  let inferred = inferTitleEmployer(parts);
+  if (!inferred) {
+    const at = source.match(/^(.+?)\s+at\s+(.+?)(?=\s+(?:\||—|–)\s*|$)/i);
+    if (at) inferred = { title: text(at[1]), employer: text(at[2]) };
+  }
+  if (!inferred) {
+    const withoutDates = dates.matched ? source.replace(new RegExp(`${DATE_PART_PATTERN}\\s*(?:-|–|—|to|through)\\s*(?:Present|Current|Now|${DATE_PART_PATTERN})`, 'ig'), '') : source;
+    const comma = withoutDates.split(/\s*,\s*/).map(text).filter(Boolean);
+    if (comma.length === 2 && (ROLE_PATTERN.test(comma[0]) || EMPLOYER_PATTERN.test(comma[1]))) inferred = { title: comma[0], employer: comma[1] };
+  }
+  if (!inferred?.title || !inferred?.employer) return null;
+  const location = parts.find(part => isLocation(part)) || '';
+  return { ...inferred, location, ...dates, verificationStatus: 'needs_verification', bullets: [] };
+}
+
+function headerComponents(value) {
+  const source = text(value);
+  const dates = parseDateRange(source);
+  const withoutRange = dates.matched
+    ? source
+      .replace(new RegExp(`${DATE_PART_PATTERN}\\s*(?:-|–|—|to|through)\\s*(?:Present|Current|Now|${DATE_PART_PATTERN})`, 'ig'), '')
+      .replace(new RegExp(DATE_PART_PATTERN, 'ig'), '')
+    : source;
+  return withoutRange.split(/\s*(?:\||\t|—|–)\s*/).map(text).filter(value => value && !isLocation(value));
+}
+
+function parseExperienceSection(lines) {
+  const experience = [];
+  const unparsed = [];
+  let active = null;
+  for (let index = 0; index < lines.length;) {
+    const line = text(lines[index]);
+    if (!line) { index++; continue; }
+    if (/^[-*•]\s+/.test(line)) {
+      const value = cleanBullet(line);
+      if (active) active.bullets.push({ text: value, proofPointIds: [], verificationStatus: 'needs_verification' });
+      else unparsed.push(value);
+      index++;
+      continue;
+    }
+    const inline = experienceHeader(line);
+    if (inline) {
+      active = inline;
+      experience.push(active);
+      index++;
+      continue;
+    }
+    const nextLine = text(lines[index + 1]);
+    const nextDates = parseDateRange(nextLine);
+    if (nextLine && nextDates.matched && !parseDateRange(line).matched && !experienceHeader(nextLine)) {
+      const inferred = inferTitleEmployer([line, ...headerComponents(nextLine)]);
+      if (inferred && (ROLE_PATTERN.test(line) || ROLE_PATTERN.test(headerComponents(nextLine).join(' ')))) {
+        const location = nextLine.split(/\s*(?:\||\t|—|–)\s*/).map(text).find(isLocation) || '';
+        active = { ...inferred, location, ...nextDates, verificationStatus: 'needs_verification', bullets: [] };
+        experience.push(active);
+        index += 2;
+        continue;
+      }
+    }
+    let dateIndex = -1;
+    for (let offset = 1; offset <= 3 && index + offset < lines.length; offset++) {
+      if (/^[-*•]\s+/.test(lines[index + offset])) break;
+      if (isDateLine(lines[index + offset])) { dateIndex = index + offset; break; }
+    }
+    if (dateIndex >= 0) {
+      const allHeaderParts = lines.slice(index, dateIndex).flatMap(value => text(value).split(/\s*(?:\||\t|—|–)\s*/)).filter(value => value && !isLocation(value));
+      const headerParts = allHeaderParts.slice(-2);
+      const inferred = inferTitleEmployer(headerParts);
+      if (inferred) {
+        for (const detail of allHeaderParts.slice(0, -2)) {
+          if (active) active.bullets.push({ text: cleanBullet(detail), proofPointIds: [], verificationStatus: 'needs_verification' });
+          else unparsed.push(cleanBullet(detail));
+        }
+        const location = lines.slice(index, dateIndex).flatMap(value => text(value).split(/\s*(?:\||\t|—|–)\s*/)).find(isLocation) || '';
+        active = { ...inferred, location, ...parseDateRange(lines[dateIndex]), verificationStatus: 'needs_verification', bullets: [] };
+        experience.push(active);
+        index = dateIndex + 1;
+        continue;
+      }
+    }
+    if (isDateLine(line) && active && !active.dateSource?.startText) Object.assign(active, parseDateRange(line));
+    else if (isLocation(line) && active && !active.location) active.location = line;
+    else if (active) active.bullets.push({ text: cleanBullet(line), proofPointIds: [], verificationStatus: 'needs_verification' });
+    else unparsed.push(cleanBullet(line));
+    index++;
+  }
+  return { experience, unparsed };
 }
 
 export function parseResumeText(profileId, sourceText) {
@@ -152,23 +359,30 @@ export function parseResumeText(profileId, sourceText) {
   const phoneLine = nonempty.find(line => /(?:\+?\d[\d ().-]{7,}\d)/.test(line));
   identity.email = emailMatch?.[0] || '';
   identity.phone = phoneLine?.match(/(?:\+?\d[\d ().-]{7,}\d)/)?.[0] || '';
-  const firstHeadingIndex = rawLines.findIndex(line => Boolean(headingName(line)));
-  const headerLines = rawLines.slice(0, firstHeadingIndex < 0 ? Math.min(rawLines.length, 6) : firstHeadingIndex).map(text).filter(Boolean);
-  identity.name = headerLines.find(line => line !== emailLine && line !== phoneLine && !/^https?:\/\//i.test(line)) || '';
-  const locationCandidate = headerLines.find(line => line !== identity.name && line !== emailLine && line !== phoneLine && !/^https?:\/\//i.test(line));
+  const firstHeadingIndex = rawLines.findIndex(line => Boolean(canonicalSection(headingName(line))));
+  const headerLines = rawLines.slice(0, firstHeadingIndex < 0 ? Math.min(rawLines.length, 8) : firstHeadingIndex).map(line => text(line).replace(/^#{1,3}\s+/, '')).filter(Boolean);
+  const contactFree = value => text(value)
+    .replace(EMAIL_PATTERN, '')
+    .replace(/(?:\+?\d[\d ().-]{7,}\d)/, '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .split(/\s*[|•]\s*/)
+    .map(text)
+    .filter(Boolean);
+  const headerParts = headerLines.flatMap(contactFree);
+  identity.name = headerParts.find(line => !isLocation(line) && !/^(?:curriculum vitae|resume|cv)$/i.test(line)) || '';
+  const locationCandidate = headerParts.find(line => line !== identity.name && isLocation(line));
   identity.location = locationCandidate || '';
-  for (const line of headerLines) for (const match of line.matchAll(/https?:\/\/[^\s|]+/g)) identity.links.push({ label: 'Link', url: match[0], verificationStatus: 'verified' });
+  for (const line of headerLines) for (const match of line.matchAll(/(?:https?:\/\/|www\.)[^\s|]+/g)) identity.links.push({ label: 'Link', url: match[0], verificationStatus: 'verified' });
   if (identity.name && identity.email && identity.phone) identity.verificationStatus = 'verified';
 
   const sections = [];
   let current = { title: 'Unsectioned', key: '', lines: [] };
   for (const raw of rawLines.slice(firstHeadingIndex < 0 ? 0 : firstHeadingIndex)) {
-    const heading = headingName(raw);
-    const level = String(raw).match(/^(#{1,3})\s+/)?.[1].length || 1;
-    if (heading && !(level >= 3 && current.key)) {
+    const heading = sectionHeading(raw, { insideSection: Boolean(current.key) });
+    if (heading) {
       if (current.lines.some(line => text(line))) sections.push(current);
       current = { title: heading, key: canonicalSection(heading), lines: [] };
-    } else current.lines.push(heading || raw);
+    } else current.lines.push(String(raw).match(/^#{3,6}\s+(.+)$/)?.[1] || raw);
   }
   if (current.lines.some(line => text(line))) sections.push(current);
 
@@ -177,23 +391,32 @@ export function parseResumeText(profileId, sourceText) {
     const lines = section.lines.map(text).filter(Boolean);
     if (section.key === 'summary') document.summary = { text: lines.join(' '), verificationStatus: 'needs_verification' };
     else if (section.key === 'skills') document.skills = lines.flatMap(line => cleanBullet(line).split(/[,|;]/)).map(name => ({ name: text(name), category: '', verificationStatus: 'needs_verification' })).filter(entry => entry.name);
-    else if (section.key === 'education') document.education = lines.map(line => ({ institution: cleanBullet(line), degree: '', field: '', location: '', startDate: '', endDate: '', verificationStatus: 'needs_verification' }));
+    else if (section.key === 'education') document.education = lines.filter(line => !isDateLine(line)).map(line => ({ institution: cleanBullet(line), degree: '', field: '', location: '', startDate: '', endDate: '', verificationStatus: 'needs_verification' }));
     else if (section.key === 'credentials') document.credentials = lines.map(line => ({ name: cleanBullet(line), issuer: '', date: '', verificationStatus: 'needs_verification' }));
-    else if (section.key === 'projects') document.projects = lines.map(line => ({ name: cleanBullet(line), description: '', url: '', bullets: [], verificationStatus: 'needs_verification' }));
-    else if (section.key === 'experience') {
+    else if (section.key === 'projects') {
       let active = null;
       for (const line of lines) {
-        if (/^[-*•]\s+/.test(line) && active) active.bullets.push({ text: cleanBullet(line), proofPointIds: [], verificationStatus: 'needs_verification' });
+        if (/^[-*•]\s+/.test(line) && active) active.bullets.push({ text: cleanBullet(line), verificationStatus: 'needs_verification' });
         else {
-          const parts = line.split(/\s+(?:\||—|–)\s+/).map(text);
-          const dates = parseDateRange(line);
-          active = { title: parts[0] || line, employer: parts[1] || '', location: parts.length > 3 ? parts[2] : '', ...dates, verificationStatus: parts[1] ? 'needs_verification' : 'needs_verification', bullets: [] };
-          document.experience.push(active);
+          active = { name: cleanBullet(line), description: '', url: '', bullets: [], verificationStatus: 'needs_verification' };
+          document.projects.push(active);
         }
       }
+    }
+    else if (section.key === 'experience') {
+      const parsed = parseExperienceSection(lines);
+      document.experience.push(...parsed.experience);
+      if (parsed.unparsed.length) document.additionalSections.push({ title: 'Unparsed experience details', entries: parsed.unparsed, verificationStatus: 'needs_verification' });
     } else if (lines.length) document.additionalSections.push({ title: section.title, entries: lines.map(cleanBullet), verificationStatus: 'needs_verification' });
   }
   return normalizeResumeDocument(profileId, document);
+}
+
+export function parseResumeSource(profileId, sourceText, sourceFormat = 'text') {
+  const format = String(sourceFormat || 'text').toLowerCase().replace(/^\./, '');
+  if (format === 'json') return normalizeResumeDocument(profileId, JSON.parse(String(sourceText || '')));
+  if (format === 'yaml' || format === 'yml') return normalizeResumeDocument(profileId, YAML.parse(String(sourceText || '')));
+  return parseResumeText(profileId, sourceText);
 }
 
 export function validateResumeDocument(document, { requireComplete = true } = {}) {
@@ -232,10 +455,7 @@ function invalidResumeError(validation) {
 export function readResumeFile(profileId, filePath) {
   const sourceText = fs.readFileSync(filePath, 'utf8');
   const ext = path.extname(filePath).toLowerCase();
-  if (ext === '.json' || ext === '.yaml' || ext === '.yml') {
-    const parsed = ext === '.json' ? JSON.parse(sourceText) : YAML.parse(sourceText);
-    return { sourceText, document: normalizeResumeDocument(profileId, parsed) };
-  }
+  if (ext === '.json' || ext === '.yaml' || ext === '.yml') return { sourceText, document: parseResumeSource(profileId, sourceText, ext) };
   const normalizedSource = normalizeResumeSourceText(sourceText);
   return { sourceText: normalizedSource, document: parseResumeText(profileId, normalizedSource) };
 }

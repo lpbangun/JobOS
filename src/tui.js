@@ -22,7 +22,7 @@ import {
   supersedeProof,
   verifyProof
 } from './profiles.js';
-import { createResumeRevision, normalizeResumeSourceText, parseResumeText, readResumeFile, readResumeFileAsync, validateResumeDocument } from './resumes.js';
+import { createResumeRevision, normalizeResumeSourceText, parseResumeSource, parseResumeText, readResumeFile, readResumeFileAsync, validateResumeDocument } from './resumes.js';
 import { importNormalized, importText, importUrl, parseJob } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
@@ -1213,6 +1213,7 @@ function overlayPanel(model, state, width, height, color) {
     const preview = state.setupResumePreview || {};
     const document = preview.document || {};
     const claims = preview.claims || [];
+    const roles = document.experience || [];
     title = 'SET UP JOBOS · CHECK YOUR RESUME';
     body = [
       `Source: ${preview.label || 'pasted text'}`,
@@ -1223,13 +1224,17 @@ function overlayPanel(model, state, width, height, color) {
       ...(preview.validation?.blockers || []).slice(0, 3).map(item => `Needs attention: ${friendlySetupText(item.message)}`),
       ...(preview.validation?.warnings || []).slice(0, 2).map(item => `Please check: ${friendlySetupText(item.message)}`),
       '',
+      'AUTO-FILLED ROLES',
+      ...roles.slice(0, 3).map(item => `• ${item.title} · ${item.employer}${item.dateSource?.startText ? ` · ${item.dateSource.startText}–${item.dateSource.endText || 'Present'}` : ''}`),
+      ...(roles.length ? [] : ['No complete role was found. Press T to correct the extracted text.']),
+      '',
       'PREVIEW',
-      ...claims.slice(0, Math.max(2, height - 11)).map(item => `• ${item.summary}`),
+      ...claims.slice(0, Math.max(2, height - 16)).map(item => `• ${item.summary}`),
       ...(claims.length ? [] : ['No achievement-style claims were found. You can add them after import.']),
       '',
       preview.validation?.valid
-        ? 'Enter imports · N name · E email · P phone · Esc changes source'
-        : 'Enter fixes missing contact · N name · E email · P phone · Esc changes source'
+        ? 'Enter imports · T edit extracted text · N name · E email · P phone'
+        : 'Enter fixes the first issue · T edit extracted text · N/E/P contact · Esc source'
     ];
   } else if (state.overlay === 'setup-proof-review') {
     const items = state.setupProofItems || [];
@@ -1599,7 +1604,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
   const inputModes = new Set([
     'command', 'review-note', 'stage-note', 'docs-search', 'suppress-reason',
     'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
-    'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-job-path', 'setup-job-paste',
+    'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-resume-text', 'setup-job-path', 'setup-job-paste',
     'setup-job-url', 'setup-discovery'
   ]);
   const setupWorkspace = String(state.overlay || '').startsWith('setup')
@@ -1619,6 +1624,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
               'setup-resume-path': 'Resume file path',
               'setup-resume-paste': 'Resume text',
               'setup-resume-edit': RESUME_IDENTITY_FIELDS[state.setupResumeEditField] || 'Resume field',
+              'setup-resume-text': 'Extracted resume text',
               'setup-job-path': 'Job file path',
               'setup-job-paste': 'Job description',
               'setup-job-url': 'Job URL',
@@ -3911,10 +3917,7 @@ export class JobosTui {
       ?.slice('identity.'.length);
     const selected = field || blockerField;
     if (!Object.hasOwn(RESUME_IDENTITY_FIELDS, selected)) {
-      this.state.error = 'Resume details need attention';
-      this.state.status = preview.validation?.blockers?.[0]?.message || 'Choose a corrected source and try again.';
-      this.render();
-      return true;
+      return this.beginSetupResumeTextCorrection();
     }
     this.state.setupResumeEditField = selected;
     this.state.setupReturnOverlay = 'setup-resume-preview';
@@ -3922,6 +3925,57 @@ export class JobosTui {
     this.setInput(preview.document.identity[selected] || '');
     this.state.error = null;
     this.state.status = `Correct ${RESUME_IDENTITY_FIELDS[selected].toLowerCase()} · Enter saves · Esc cancels`;
+    this.render();
+    return true;
+  }
+
+  beginSetupResumeTextCorrection() {
+    const preview = this.state.setupResumePreview;
+    if (!preview) return false;
+    this.state.setupReturnOverlay = 'setup-resume-preview';
+    this.state.mode = 'setup-resume-text';
+    this.setInput(preview.sourceText || '');
+    this.state.error = null;
+    this.state.status = 'Correct any extracted text · keep role, employer, and dates on nearby lines · Enter re-parses · Esc cancels';
+    this.render();
+    return true;
+  }
+
+  commitSetupResumeTextCorrection() {
+    const preview = this.state.setupResumePreview;
+    const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
+    const sourceText = normalizeResumeSourceText(this.state.input);
+    if (!preview || !profileId || !sourceText) {
+      this.state.error = 'Resume text is required.';
+      this.state.status = this.state.error;
+      this.render();
+      return true;
+    }
+    const previousIdentity = preview.document?.identity || {};
+    let document;
+    try {
+      document = parseResumeSource(profileId, sourceText, preview.sourceFormat);
+    } catch (error) {
+      this.state.error = `Corrected ${String(preview.sourceFormat || 'resume').toUpperCase()} is not valid: ${error.message}`;
+      this.state.status = this.state.error;
+      this.render();
+      return true;
+    }
+    for (const field of Object.keys(RESUME_IDENTITY_FIELDS)) {
+      if (!document.identity[field] && previousIdentity[field]) document.identity[field] = previousIdentity[field];
+    }
+    preview.sourceText = sourceText;
+    preview.document = document;
+    preview.validation = validateResumeDocument(document);
+    preview.claims = structuredProofs(profileId, sourceText, preview.label || 'corrected resume text');
+    preview.extraction = { ...(preview.extraction || {}), correctedInOnboarding: true };
+    this.state.mode = 'normal';
+    this.state.setupReturnOverlay = null;
+    this.setInput('');
+    this.state.error = preview.validation.valid ? null : 'Resume details need attention';
+    this.state.status = preview.validation.valid
+      ? 'Resume re-parsed and auto-filled · review the roles, then Enter imports'
+      : `Text saved · ${friendlySetupText(preview.validation.blockers[0]?.message)}`;
     this.render();
     return true;
   }
@@ -4171,6 +4225,7 @@ export class JobosTui {
       if (value === 'n') return this.beginSetupResumeCorrection('name');
       if (value === 'e') return this.beginSetupResumeCorrection('email');
       if (value === 'p') return this.beginSetupResumeCorrection('phone');
+      if (value === 't') return this.beginSetupResumeTextCorrection();
       if (isEnter) return this.state.setupResumePreview?.validation?.valid
         ? this.confirmSetupResume()
         : this.beginSetupResumeCorrection();
@@ -4728,6 +4783,7 @@ export class JobosTui {
       const mode = this.state.mode;
       if (['setup-profile', 'setup-proof'].includes(mode)) return this.commitSetupForm();
       if (mode === 'setup-resume-edit') return this.commitSetupResumeCorrection();
+      if (mode === 'setup-resume-text') return this.commitSetupResumeTextCorrection();
       if (mode === 'setup-resume-path') return this.previewSetupResume({ filePath: text, label: path.basename(text) });
       if (mode === 'setup-resume-paste') return this.previewSetupResume({ sourceText: this.state.input, label: 'pasted resume text' });
       if (mode === 'setup-job-path') return this.importSetupJobFile(text);
@@ -4782,7 +4838,7 @@ export class JobosTui {
       return true;
     }
     if (!key.ctrl && !key.meta && value) {
-      const multiline = ['setup-resume-paste', 'setup-job-paste'].includes(this.state.mode);
+      const multiline = ['setup-resume-paste', 'setup-resume-text', 'setup-job-paste'].includes(this.state.mode);
       const inserted = String(value)
         .replace(/\r\n?/g, '\n')
         .split('')
@@ -4922,7 +4978,7 @@ export class JobosTui {
       'review-note', 'stage-note', 'docs-search', 'command', 'agent', 'approve-confirm',
       'reject-confirm', 'reject-note', 'suppress-reason', 'build-network-field',
       'setup-profile', 'setup-file', 'setup-proof', 'setup-calibration',
-      'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-job-path', 'setup-job-paste',
+      'setup-resume-path', 'setup-resume-paste', 'setup-resume-edit', 'setup-resume-text', 'setup-job-path', 'setup-job-paste',
       'setup-job-url', 'setup-discovery'
     ].includes(this.state.mode)) return this.onInputKey(value, key);
     if (this.state.mode === 'stage') return this.onStageKey(value, key);
