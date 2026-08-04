@@ -636,7 +636,9 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (flags.agent && group !== 'tui') process.env.JOBOS_AGENT = String(flags.agent);
+  // In interactive TUI/setup commands, --agent off controls the embedded ACP
+  // pane. It must not also become the noninteractive generation adapter name.
+  if (flags.agent && !['tui', 'setup'].includes(group)) process.env.JOBOS_AGENT = String(flags.agent);
   if (flags.workspace) process.env.JOBOS_WORKSPACE = path.resolve(String(flags.workspace));
   const boot = bootstrapInfo(flags);
   const s = await openStore(flags);

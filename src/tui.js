@@ -22,7 +22,7 @@ import {
   supersedeProof,
   verifyProof
 } from './profiles.js';
-import { createResumeRevision, normalizeResumeSourceText, parseResumeSource, parseResumeText, readResumeFile, readResumeFileAsync, validateResumeDocument } from './resumes.js';
+import { createResumeRevision, normalizeResumeSourceText, parseResumeSource, parseResumeText, readResumeFile, readResumeFileAsync, validateResumeDocument, verifyResumeDocument } from './resumes.js';
 import { importNormalized, importText, importUrl, parseJob } from './jobs.js';
 import { createResearchRun, executeResearchRun } from './research/runs.js';
 import { suppressContact, promoteStakeholder } from './research/contacts.js';
@@ -195,12 +195,17 @@ export function splitRawInput(value) {
   }
   const tail = input.slice(cursor);
   let partialIndex = -1;
-  for (let index = tail.lastIndexOf('\x1b'); index >= 0; index = tail.lastIndexOf('\x1b', index - 1)) {
-    const partial = tail.slice(index);
+  let escapeIndex = tail.lastIndexOf('\x1b');
+  while (escapeIndex >= 0) {
+    const partial = tail.slice(escapeIndex);
     if (pasteStart.startsWith(partial) || /^\x1b\[<?(?:\d*(?:;\d*){0,2})?$/.test(partial)) {
-      partialIndex = index;
+      partialIndex = escapeIndex;
       break;
     }
+    // String.lastIndexOf(value, -1) searches from index 0, so an ordinary
+    // completed escape sequence at offset 0 would otherwise loop forever.
+    if (escapeIndex === 0) break;
+    escapeIndex = tail.lastIndexOf('\x1b', escapeIndex - 1);
   }
   if (partialIndex >= 0) {
     if (partialIndex > 0) segments.push({ type: 'key', value: tail.slice(0, partialIndex) });
@@ -1813,6 +1818,7 @@ export class JobosTui {
     this.lastScreen = null;
     this.keypressInput = null;
     this.mouseInputBuffer = '';
+    this.rawInputFlushTimer = null;
   }
   selectedDocument() {
     const docs = this.model.selected?.docs || [];
@@ -1957,6 +1963,8 @@ export class JobosTui {
   }
 
   onRawInput(chunk) {
+    clearTimeout(this.rawInputFlushTimer);
+    this.rawInputFlushTimer = null;
     const { segments, remainder } = splitRawInput(`${this.mouseInputBuffer}${String(chunk || '')}`);
     this.mouseInputBuffer = remainder;
     for (const segment of segments) {
@@ -1966,6 +1974,25 @@ export class JobosTui {
       }
       else this.keypressInput?.write(segment.value);
     }
+    if (this.mouseInputBuffer) {
+      // A lone Esc and a split terminal control sequence have the same prefix.
+      // Give the terminal a brief chance to deliver the remaining bytes, then
+      // forward the pending byte(s) so Esc never leaves the UI input-locked.
+      this.rawInputFlushTimer = setTimeout(() => this.flushRawInputBuffer(), 75);
+      this.rawInputFlushTimer.unref?.();
+    }
+  }
+
+  flushRawInputBuffer() {
+    clearTimeout(this.rawInputFlushTimer);
+    this.rawInputFlushTimer = null;
+    const pending = this.mouseInputBuffer;
+    this.mouseInputBuffer = '';
+    if (!pending || this.stopped) return;
+    // Readline also waits for a suffix after a bare escape byte, so routing it
+    // back through that parser would recreate the same lock one layer later.
+    if (pending === '\x1b') this.onKeypress('', { name: 'escape' });
+    else this.keypressInput?.write(pending);
   }
 
   onMouseData(chunk) {
@@ -2626,6 +2653,8 @@ export class JobosTui {
       this.state.status = `${decision} failed: ${error.message}`;
       this.render();
     } finally {
+      this.state.mode = 'normal';
+      this.setInput('');
       this.state.busy = null;
       this.render();
     }
@@ -4022,6 +4051,12 @@ export class JobosTui {
     }
     try {
       const profileId = this.state.setupProfileId || this.model.onboarding.profileId;
+      // Reaching this action means the user reviewed the extracted identity,
+      // roles, and warnings on the preview screen and explicitly confirmed it.
+      // Persist that trusted confirmation so later artifact review is not
+      // blocked by fields onboarding gave the user no way to verify.
+      preview.document = verifyResumeDocument(preview.document);
+      preview.validation = validateResumeDocument(preview.document);
       createResumeRevision(this.store, {
         profileId,
         document: preview.document,
@@ -4029,7 +4064,9 @@ export class JobosTui {
         sourceFormat: preview.sourceFormat,
         sourceName: preview.sourceName,
         sourceFilePath: preview.sourceFilePath,
-        extraction: preview.extraction
+        extraction: preview.extraction,
+        verificationStatus: 'verified',
+        reviewedAt: this.now().toISOString()
       });
       importResumeProofCandidates(this.store, profileId, preview.sourceText, preview.label);
       this.state.mode = 'normal';
@@ -4515,6 +4552,7 @@ export class JobosTui {
     }
     if (actionId === 'import_resume' || actionId === 'replace_resume') return this.beginSetupSource('resume');
     if (actionId === 'import_local_job') return this.beginSetupSource('job');
+    if (actionId === 'review_materials') return this.openOverlay('review');
     if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
       const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
       this.state.mode = 'setup-proof';
@@ -5103,6 +5141,9 @@ export class JobosTui {
     if (this.stopped) return;
     this.stopped = true;
     clearInterval(this.refreshTimer);
+    clearTimeout(this.rawInputFlushTimer);
+    this.rawInputFlushTimer = null;
+    this.mouseInputBuffer = '';
     this.stdin.off('data', this.boundRawInput);
     this.stdin.off('keypress', this.boundKeypress);
     this.keypressInput?.off('keypress', this.boundKeypress);

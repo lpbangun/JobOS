@@ -190,7 +190,9 @@ function sectionHeading(line, { insideSection = false } = {}) {
   if (!heading) return '';
   if (canonicalSection(heading) || isAdditionalSection(heading)) return heading;
   const level = String(line).match(/^(#{1,3})\s+/)?.[1].length || 0;
-  return !insideSection && level > 0 && level <= 2 ? heading : '';
+  // Unknown H1/H2 headings still delimit preserved custom sections, even
+  // after Experience. H3 headings inside Experience remain role headers.
+  return level > 0 && level <= 2 ? heading : '';
 }
 
 export function normalizeResumeSourceText(value) {
@@ -441,6 +443,20 @@ export function validateResumeDocument(document, { requireComplete = true } = {}
   inspect(document);
   if (uncertain.length) warnings.push({ code: 'resume_source_unverified', entryIds: [...new Set(uncertain)], message: 'Imported fields require human verification or correction.' });
   return { valid: blockers.length === 0, schemaVersion: RESUME_SCHEMA_VERSION, blockers, warnings };
+}
+
+export function verifyResumeDocument(document) {
+  const verified = structuredClone(document);
+  const visit = value => {
+    if (!value || typeof value !== 'object') return;
+    if (Object.hasOwn(value, 'verificationStatus')) value.verificationStatus = 'verified';
+    for (const child of Object.values(value)) {
+      if (Array.isArray(child)) child.forEach(visit);
+      else if (child && typeof child === 'object') visit(child);
+    }
+  };
+  visit(verified);
+  return verified;
 }
 function invalidResumeError(validation) {
   const first = validation.blockers[0];

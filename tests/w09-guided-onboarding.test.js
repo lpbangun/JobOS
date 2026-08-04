@@ -270,6 +270,32 @@ test('W09-JOURNEY-03 materials completion matrix does not alias ready-for-review
   for (const status of ['materials-ready', 'form-ready', 'form-blocked']) assert.equal(isOnboardingMaterialsComplete({ status }), true, status);
   assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', materialsStatus: 'approved' }), true);
   assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', localApprovalComplete: true }), true);
+  assert.equal(isOnboardingMaterialsComplete({
+    status: 'blocked',
+    review: { requiredArtifactIds: ['resume-1', 'cover-1'], approvedArtifactIds: ['resume-1', 'cover-1'] }
+  }), true, 'reviewing every exact draft can finish onboarding while application readiness remains blocked');
+});
+
+test('provider-free insufficient-evidence fit is a completed check, not an endless rescore loop', async () => {
+  const { buildOnboardingStatus } = await import('../src/onboarding.js');
+  const s = await openStore({ workspace: root() });
+  const profileId = createProfile(s, 'Provider Free').profile.id;
+  const job = localJob(s, profileId, 'provider-free');
+  s.db.run('UPDATE jobs SET fit_score=NULL,score_json=? WHERE id=?', [JSON.stringify({
+    contract: 'jobos.fit-score.v1',
+    jobId: job.id,
+    profileId,
+    overall: null,
+    scoreStatus: 'insufficient_evidence',
+    dimensions: {}
+  }), job.id]);
+
+  const status = buildOnboardingStatus(s, { profileId, jobId: job.id, asOf: AS_OF });
+  const decision = status.steps.find(step => step.id === 'decision');
+  assert.equal(decision.status, 'complete');
+  assert.equal(decision.evidence.fitPersisted, true);
+  assert.match(decision.summary, /evidence remains insufficient/i);
+  assert.equal(status.nextAction?.id, 'import_resume', 'the check advances without hiding earlier required setup');
 });
 
 test('W09-RESUME-02 proof recovery exposes verify, replace, retire, and add routes', async () => {

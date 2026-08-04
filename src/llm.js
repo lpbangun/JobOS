@@ -1,5 +1,10 @@
 import { AGENT_PROTOCOL_VERSION, runAgent } from './agents.js';
 
+function configuredAgentName(env = process.env) {
+  const value = String(env.JOBOS_AGENT || '').trim();
+  return ['off', 'false', 'none', '0'].includes(value.toLowerCase()) ? '' : value;
+}
+
 function cleanBaseUrl(url) {
   return String(url || '').replace(/\/+$/, '');
 }
@@ -17,7 +22,7 @@ function extractJson(text) {
 }
 
 export function llmConfig(env = process.env, route) {
-  const agent = String(env.JOBOS_AGENT || '').trim();
+  const agent = configuredAgentName(env);
   if (agent && !route) {
     const rawAgentTimeout = Number(env.JOBOS_AGENT_TIMEOUT_MS || 120000);
     const timeoutMs = Number.isFinite(rawAgentTimeout) && rawAgentTimeout >= 1000 ? rawAgentTimeout : 120000;
@@ -114,7 +119,7 @@ async function postAnthropic(cfg, messages, temperature, maxTokens) {
  
 
 export async function generateJson({ system = '', user = '', schemaName = 'jobos_json', schema, stage = schemaName, temperature = 0.2, maxTokens = 2200, env = process.env, workspace, route } = {}) {
-  const agentName = String(env.JOBOS_AGENT || '').trim();
+  const agentName = configuredAgentName(env);
   if (agentName && !route) {
     const cfg = llmConfig(env);
     const result = await runAgent(agentName, {

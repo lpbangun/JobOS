@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import stringWidth from 'string-width';
 import { openStore } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
+import { llmConfig } from '../src/llm.js';
 import {
   JobosTui,
   TUI_HANDLED_KEYS,
@@ -16,6 +19,13 @@ import {
 } from '../src/tui.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
+
+test('--agent off remains deterministic degraded mode instead of naming a batch agent', () => {
+  const config = llmConfig({ JOBOS_AGENT: 'off' });
+  assert.equal(config.configured, false);
+  assert.equal(config.degradedMode, true);
+  assert.notEqual(config.provider, 'agent');
+});
 
 function workspace() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-setup-navigation-'));
@@ -248,6 +258,10 @@ test('resume paste and path preview, supported-format guidance, import, and imme
   enter(tui);
   assert.equal(tui.state.overlay, 'setup-proof-review');
   assert.ok(tui.state.setupProofItems.length >= 2, 'imported claims are queued for human review');
+  const persistedResume = store.db.exec("SELECT verification_status,reviewed_at,document_json FROM profile_resume_revisions WHERE is_current=1")[0].values[0];
+  assert.equal(persistedResume[0], 'verified', 'confirming the extraction records the trusted resume review');
+  assert.ok(persistedResume[1], 'the trusted resume review has a timestamp');
+  assert.doesNotMatch(persistedResume[2], /needs_verification/, 'confirmed extracted fields no longer dead-end later artifact approval');
   assert.equal(stdout.writes.length, 1, 'resume import paints only the populated proof-review frame');
   assert.doesNotMatch(stdout.writes[0], /No extracted claims remain/, 'atomic import never paints the empty proof state');
   const rejectedBefore = tui.state.setupProofItems.length;
@@ -372,6 +386,46 @@ test('raw mouse reports are isolated from numeric setup shortcuts', async () => 
   ], 'keyboard bytes around a mouse report preserve their order');
 });
 
+test('raw Esc is released promptly and does not swallow later onboarding keys or Q', async () => {
+  const { tui } = await emptyTui();
+  const input = new PassThrough();
+  readline.emitKeypressEvents(input);
+  input.on('keypress', tui.boundKeypress);
+  tui.keypressInput = input;
+
+  tui.state.overlay = 'setup-proof-review';
+  tui.state.mode = 'setup-proof';
+  tui.state.setupReturnOverlay = 'setup-proof-review';
+  tui.setInput('Draft highlight');
+
+  tui.onRawInput('\x1b');
+  assert.equal(tui.state.mode, 'setup-proof', 'a possible control-sequence prefix waits briefly');
+  tui.flushRawInputBuffer();
+  assert.equal(tui.state.mode, 'normal', 'a lone Esc reaches the active onboarding editor');
+  assert.equal(tui.state.overlay, 'setup-proof-review', 'Esc returns to the experience review');
+
+  let quit = false;
+  tui.stop = () => { quit = true; };
+  tui.onRawInput('Q');
+  assert.equal(quit, true, 'Q still quits after Esc instead of being swallowed by stale input');
+  input.destroy();
+});
+
+test('split arrow-key bytes are reassembled before onboarding navigation', async () => {
+  const { tui } = await emptyTui();
+  const input = new PassThrough();
+  readline.emitKeypressEvents(input);
+  input.on('keypress', tui.boundKeypress);
+  tui.keypressInput = input;
+
+  const before = tui.state.overlayIndex;
+  tui.onRawInput('\x1b[');
+  assert.equal(tui.state.overlayIndex, before, 'an incomplete arrow sequence waits for its final byte');
+  tui.onRawInput('B');
+  assert.equal(tui.state.overlayIndex, before + 1, 'the completed down-arrow sequence moves setup focus');
+  input.destroy();
+});
+
 test('real bracketed multiline paste stays in the resume field until the user presses Enter', async () => {
   const { store, tui } = await emptyTui();
   const profile = createProfile(store, 'Alex Chen');
@@ -466,6 +520,13 @@ test('context help explains blocked prerequisites instead of calling them comple
   assert.match(screen, /Select a profile before importing a resume/);
   assert.match(screen, /Next: Complete profile setup/);
   assert.doesNotMatch(screen, /This task is done/);
+});
+
+test('the setup review-materials action opens the actionable review queue', async () => {
+  const { tui } = await emptyTui();
+  tui.state.overlay = 'setup';
+  tui.openSetupAction({ id: 'materials', actions: [{ id: 'review_materials', label: 'Review exact revisions' }] });
+  assert.equal(tui.state.overlay, 'review');
 });
 
 test('short setup dialogs are centered and explanatory copy wraps at minimum width', async () => {

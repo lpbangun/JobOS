@@ -12,10 +12,14 @@ const OPTIONAL_IDS = ['source', 'calibration', 'provider', 'browser', 'network']
 const MATERIALS_COMPLETE = new Set(['materials-ready', 'form-ready', 'form-blocked']);
 
 export function isOnboardingMaterialsComplete(readiness) {
+  const required = readiness?.review?.requiredArtifactIds || [];
+  const approved = new Set(readiness?.review?.approvedArtifactIds || []);
+  const exactDraftsReviewed = required.length > 0 && required.every(id => approved.has(id));
   return Boolean(readiness && (
     readiness.localApprovalComplete === true
     || readiness.materialsStatus === 'approved'
     || MATERIALS_COMPLETE.has(readiness.status)
+    || exactDraftsReviewed
   ));
 }
 
@@ -74,7 +78,7 @@ function selectedJob(s, profileId, requested) {
 
 function scoreIsCurrent(job, profileId) {
   const score = parseJson(job?.score_json, null);
-  if (!score || job.fit_score == null) return false;
+  if (!score) return false;
   if (score.jobId && score.jobId !== job.id) return false;
   if (score.profileId && score.profileId !== profileId) return false;
   return score.contract === 'jobos.fit-score.v1' || score.contract === 'jobos.fit-score.v2' || Boolean(score.dimensions || score.components);
@@ -166,6 +170,7 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
 
   const ambiguousJobs = jobs.length > 1 && !jobId;
   const expired = job?.liveness_status === 'expired';
+  const fitResult = parseJson(job?.score_json, null);
   const scored = scoreIsCurrent(job, pid);
   const decisionComplete = Boolean(job && !expired && scored);
   let decisionBlockers = [];
@@ -176,7 +181,8 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     ? [action('select_job', 'Select job', `jobos setup --profile ${pid} --job <job-id>`, { mutates: false })]
     : job && !expired && !scored ? [action('score_job', 'Score job', `jobos score ${jid} --profile ${pid} --json`)]
       : expired ? [action('select_current_job', 'Select current job', `jobos setup --profile ${pid} --job <job-id>`, { mutates: false })] : [];
-  steps.push(step('decision', 'derived', true, decisionComplete ? 'complete' : 'blocked', decisionComplete ? (job.liveness_status === 'uncertain' ? 'Fit is scored; posting liveness remains uncertain.' : 'Current fit decision is available.') : decisionBlockers[0].message,
+  const insufficientFit = scored && fitResult?.scoreStatus === 'insufficient_evidence';
+  steps.push(step('decision', 'derived', true, decisionComplete ? 'complete' : 'blocked', decisionComplete ? (insufficientFit ? 'Fit check is saved; evidence remains insufficient for a numeric score.' : job.liveness_status === 'uncertain' ? 'Fit is scored; posting liveness remains uncertain.' : 'Current fit decision is available.') : decisionBlockers[0].message,
     decisionBlockers, decisionActions, { selectedJobId: jid, livenessStatus: job?.liveness_status || null, livenessCheckedAt: job?.liveness_checked_at || null, fitPersisted: scored, uncertaintyWarning: job?.liveness_status === 'uncertain' }));
 
   const readiness = readinessProjection(s, pid, job);
@@ -186,7 +192,8 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     : materialsComplete ? []
       : readinessBlockers.length ? readinessBlockers.map(item => blocker(item.code, item.message, item.nextAction))
         : [blocker('materials_review_required', 'Current artifact revisions require local human review.', readiness?.nextAction || 'Review exact current artifact revisions.')];
-  const materialAction = readiness?.review?.pendingArtifactIds?.length
+  const regenerationNeeded = readinessBlockers.some(item => /\btailor resume\b/i.test(String(item.nextAction || '')));
+  const materialAction = readiness?.review?.pendingArtifactIds?.length && !regenerationNeeded
     ? action('review_materials', 'Review exact revisions', `jobos artifacts queue --profile ${pid} --job ${jid} --json`)
     : decisionComplete ? action('pursue_job', 'Prepare application materials', `jobos pursue ${jid} --profile ${pid} --json`) : null;
   steps.push(step('materials', 'derived', true, materialsComplete ? 'complete' : 'blocked', materialsComplete ? 'Local application materials are approved.' : 'Application materials are incomplete.', materialBlockers, materialAction ? [materialAction] : [],
