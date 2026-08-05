@@ -7,7 +7,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { buildTuiModel } from './tui-model.js';
-import { callDomainTool, DOMAIN_TOOLS, selectedJobContext } from './domain-tools.js';
+import { callDomainTool, DOMAIN_TOOLS, profileAgentContext, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
 import {
@@ -79,7 +79,7 @@ export const TUI_KEYMAP = Object.freeze({
     ['Tab', 'focus-chat'], ['←/→', 'priority'], ['Enter', 'jump']
   ]),
   review: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
-  docs: Object.freeze([['↑/↓', 'artifact'], ['j/k', 'artifact'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['PgUp/PgDn', 'scroll'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
+  docs: Object.freeze([['↑/↓', 'document'], ['j/k', 'document'], ['PgUp/PgDn', 'scroll'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
   discovery: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
   network: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
@@ -219,8 +219,8 @@ const SETUP_STEP_LABELS = Object.freeze({
   workspace: 'Workspace ready',
   profile: 'About you',
   resume: 'Your resume',
-  proofs: 'Experience highlights',
-  intake: 'Add a job',
+  proofs: 'Validate experience highlights',
+  intake: 'Add a job you like',
   decision: 'Check the fit',
   materials: 'Application drafts',
   source: 'Job discovery',
@@ -1091,8 +1091,11 @@ function docsPanel(model, state, width, height, color) {
   const innerWidth = Math.min(width - 4, 110);
   const content = documentLines(doc, state, innerWidth, color);
   const scroll = state.docsView === 'diff' ? state.docsDiffScroll : state.docsScroll;
+  const documentList = docs.map((item, itemIndex) => `${itemIndex === index ? '▶' : ' '} ${itemIndex + 1}. ${item.title}`);
   const meta = [
-    docs.map((item, itemIndex) => `${itemIndex === index ? '▶' : ' '} ${item.title}`).join('  ·  '),
+    'YOUR DOCUMENTS · ↑/↓ or j/k selects · PgUp/PgDn scrolls contents',
+    ...documentList,
+    '',
     `${index + 1}/${docs.length} · ${doc.title} · ${doc.approvalStatus}`,
     `${doc.path}`,
     `hash ${doc.contentHash}`,
@@ -1191,9 +1194,10 @@ function overlayPanel(model, state, width, height, color) {
       '↑/↓ choose  ·  Enter continue  ·  Esc go back'
     ];
   } else if (state.overlay === 'setup-job-source') {
-    title = 'SET UP JOBOS · ADD A JOB';
+    title = 'SET UP JOBOS · ADD A JOB YOU LIKE';
     body = [
-      ...wrap('Add a posting now or set up discovery for later.', width - 4),
+      ...wrap('Add a role you like or would seriously consider. Your first job helps JobOS understand the roles, companies, and work you prefer.', width - 4),
+      ...wrap('It does not apply for you. JobOS saves the posting locally so you can check fit and improve later recommendations.', width - 4),
       '',
       ...setupChoiceRows(JOB_SOURCE_CHOICES, state.overlayIndex, width - 4),
       '',
@@ -1247,7 +1251,7 @@ function overlayPanel(model, state, width, height, color) {
     title = 'SET UP JOBOS · REVIEW YOUR EXPERIENCE HIGHLIGHTS';
     body = [
       ...wrap('Confirm only claims you can support. JobOS will never invent achievements.', width - 4),
-      ...wrap('Enter/V verify  ·  E edit  ·  R reject  ·  A add another  ·  Esc continue', width - 4),
+      ...wrap('Enter validates and moves forward  ·  E edit  ·  R reject  ·  A add another', width - 4),
       '',
       ...(items.length
         ? visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${item.verification_status === 'verified' ? '✓' : '!'} ${item.summary}`)
@@ -1922,6 +1926,35 @@ export class JobosTui {
     return this.state.setupProofItems;
   }
 
+  advanceSetupProofReview({ autoContinue = false, completed = 'Highlight reviewed' } = {}) {
+    this.refresh({ disk: false, render: false });
+    this.refreshSetupProofItems();
+    const nextIndex = this.state.setupProofItems.findIndex(item => item.verification_status !== 'verified');
+    if (nextIndex >= 0) {
+      this.state.overlay = 'setup-proof-review';
+      this.state.overlayIndex = nextIndex;
+      this.state.status = `${completed} · the next highlight is selected`;
+      this.render();
+      return true;
+    }
+    const proofReady = this.model.onboarding?.steps?.find(step => step.id === 'proofs')?.status === 'complete';
+    if (proofReady && autoContinue) {
+      this.state.overlay = 'setup';
+      this.focusNextSetupAction();
+      const nextStep = this.model.onboarding?.steps?.[this.state.overlayIndex];
+      this.state.status = `${completed} · next: ${setupStepLabel(nextStep?.id).toLowerCase()}`;
+      this.render();
+      return true;
+    }
+    this.state.overlay = 'setup-proof-review';
+    this.state.overlayIndex = 0;
+    this.state.status = proofReady
+      ? `${completed} · Enter continues to add a job, or A adds another highlight`
+      : `${completed} · add and validate at least one highlight to continue`;
+    this.render();
+    return true;
+  }
+
   toggleAgentFocus() {
     if (this.state.overlay) return false;
     if (this.state.focusTarget === 'agent') {
@@ -2529,7 +2562,10 @@ export class JobosTui {
       return;
     }
     const jobId = this.state.selectedJobId;
-    const context = jobId ? selectedJobContext(this.store, jobId, this.model.profileId) : null;
+    const profileId = this.model.profileId;
+    const context = profileId
+      ? (jobId ? selectedJobContext(this.store, jobId, profileId) : profileAgentContext(this.store, profileId))
+      : null;
     const before = this.artifactSnapshot();
     this.state.busy = 'agent';
     this.state.status = `agent working on ${jobId || 'workspace'} · navigation stays active`;
@@ -3802,8 +3838,8 @@ export class JobosTui {
 
   onDocsKey(value, key) {
     if (key.name === 'escape') return this.closeTransient();
-    if (key.name === 'down') return this.state.focusTarget === 'viewer' ? this.scrollDocument(1) : this.moveArtifactSelection(1);
-    if (key.name === 'up') return this.state.focusTarget === 'viewer' ? this.scrollDocument(-1) : this.moveArtifactSelection(-1);
+    if (key.name === 'down') return this.moveArtifactSelection(1);
+    if (key.name === 'up') return this.moveArtifactSelection(-1);
     if (value === 'j') return this.moveArtifactSelection(1);
     if (value === 'k') return this.moveArtifactSelection(-1);
     if (key.name === 'pagedown') return this.scrollDocument(Math.max(1, this.dimensions().height - 12));
@@ -4284,17 +4320,11 @@ export class JobosTui {
       if (moveDelta !== null && items.length) {
         this.state.overlayIndex = Math.max(0, Math.min(items.length - 1, this.state.overlayIndex + moveDelta));
       } else if ((isEnter || value === 'V') && item) {
-        verifyProof(this.store, item.id);
-        this.refresh({ disk: false, render: false });
-        this.refreshSetupProofItems();
-        this.state.overlay = 'setup-proof-review';
-        this.state.status = 'Highlight verified · review another, add one, or press Esc to continue';
+        if (item.verification_status !== 'verified') verifyProof(this.store, item.id);
+        return this.advanceSetupProofReview({ autoContinue: true, completed: 'Highlight validated' });
       } else if (value === 'R' && item) {
         rejectProof(this.store, item.id);
-        this.refresh({ disk: false, render: false });
-        this.refreshSetupProofItems();
-        this.state.overlay = 'setup-proof-review';
-        this.state.status = 'Highlight rejected and excluded';
+        return this.advanceSetupProofReview({ completed: 'Highlight rejected and excluded' });
       } else if (value === 'E' && item) {
         this.state.mode = 'setup-proof';
         this.state.setupFormAction = 'replace_proof';

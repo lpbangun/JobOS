@@ -163,9 +163,9 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     { proofCount: proofs.length, activeVerifiedCount: verified.length, activeVerifiedProofIds: verified.map(item => item.id) }));
 
   const intakeComplete = jobs.length > 0;
-  const intakeActions = pid ? [action('import_local_job', 'Import local job', `jobos jobs import-text --profile ${pid} --file <path> --json`)] : [];
-  steps.push(step('intake', 'canonical', true, intakeComplete ? 'complete' : 'blocked', intakeComplete ? 'Canonical job intake exists.' : 'Import or discover at least one job.',
-    intakeComplete ? [] : [blocker('job_missing', 'No profile-owned job exists.', 'Import a local job or explicitly run a saved search.')], intakeActions,
+  const intakeActions = pid ? [action('import_local_job', 'Add a job you like', `jobos jobs import-text --profile ${pid} --file <path> --json`)] : [];
+  steps.push(step('intake', 'canonical', true, intakeComplete ? 'complete' : 'blocked', intakeComplete ? 'Your first preference-setting job is saved.' : 'Add a role you like or would seriously consider so JobOS can understand your preferences.',
+    intakeComplete ? [] : [blocker('job_missing', 'No job has been added yet.', 'Add a role you like; your first job helps JobOS learn what you want.')], intakeActions,
     { jobCount: jobs.length, jobIds: jobs.map(item => item.id) }));
 
   const ambiguousJobs = jobs.length > 1 && !jobId;

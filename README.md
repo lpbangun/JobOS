@@ -56,14 +56,14 @@ Guided setup opens as a focused full-screen workspace and starts on the first ta
 1. Confirm the local workspace.
 2. Create or choose a profile.
 3. Add a resume by pasting text or choosing a local PDF, DOCX, TXT, Markdown, JSON, or YAML file; review and correct the extracted identity fields before import. Image-only PDFs need local OCR first.
-4. Verify, edit, reject, or add the experience highlights extracted from the resume.
-5. Add a job by pasting a description or URL, browsing a local file, entering a path, or configuring company-page discovery.
+4. Validate, edit, reject, or add the experience highlights extracted from the resume. `Enter` validates the selected highlight, moves to the next one, and continues automatically after the final required validation.
+5. Add a job you like or would seriously consider by pasting a description or URL, browsing a local file, entering a path, or configuring company-page discovery. This first role helps JobOS understand the roles, companies, and work you prefer; it does not apply for you.
 6. Check the fit and choose whether to pursue the job.
 7. Generate and review application materials.
 
 No provider, browser, or API key is required for this core flow. Successful actions move directly to the next task. Press `g` later to return to setup.
 
-Use `↑`/`↓` on every selectable list; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard.
+Use `↑`/`↓` on setup and other selectable lists; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard. In the document viewer, the document names form a vertical list: `↑`/`↓` or `j`/`k` changes documents, while `PgUp`/`PgDn` scrolls the open document.
 
 Every text field supports `Left`/`Right`, `Home`/`End`, `Backspace`, `Delete`, and `Shift`+arrow selection. Pasted text is inserted at the cursor and replaces the current selection. Press `?` for controls and the recommended action on the current screen; press `?` again for the complete shortcut reference.
 
@@ -140,7 +140,7 @@ hermes acp --check
 jobos
 ```
 
-Press `Tab` for the expanded chat, `i` to compose, `↑`/`↓` or `j`/`k` for scrollback, and `Esc` to return to the dashboard.
+Press `Tab` for the expanded chat, `i` to compose, `↑`/`↓` or `j`/`k` for scrollback, and `Esc` to return to the dashboard. Each turn receives bounded JobOS context for the active profile and selected job, including a secret-safe summary of the current resume upload and verified experience highlights. Raw resume text and contact details are excluded from this host context; Hermes can use the mediated JobOS tools for current domain state.
 
 ## How it works
 

@@ -10,7 +10,7 @@ import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { defaultTuiState, JobosTui, renderTui, TUI_DOMAIN_ACTIONS } from '../src/tui.js';
-import { callDomainTool } from '../src/domain-tools.js';
+import { callDomainTool, profileAgentContext, selectedJobContext } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runMcpDemo } from '../scripts/mcp-demo.js';
 import { createArtifact } from '../src/artifacts.js';
@@ -99,6 +99,38 @@ test('agent is default-on, Escape does not hide it, overlays stay overlays, and 
   assert.equal(tui.state.agentOn, false);
   tui.onKeypress('a', { name: 'a' });
   assert.equal(tui.state.agentOn, true);
+});
+
+test('Hermes chat receives uploaded resume and verified profile context with or without a selected job', async t => {
+  const { store, profile, proof, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const profileContext = profileAgentContext(store, profile.id);
+  assert.equal(profileContext.profile.name, 'PM EdTech');
+  assert.equal(profileContext.resumeUpload.revision, 1);
+  assert.deepEqual(profileContext.resumeUpload.experience, [{
+    title: 'Product Manager', employer: 'Learning Studio', startDate: '2021-01', endDate: 'Present'
+  }]);
+  assert.deepEqual(profileContext.resumeUpload.skills, ['Product discovery']);
+  assert.equal(profileContext.verifiedProofs[0].id, proof.id);
+  assert.equal(profileContext.privacy.rawResumeTextIncluded, false);
+  assert.doesNotMatch(JSON.stringify(profileContext), /candidate@example\.com|555 555 0100/);
+
+  const jobContext = selectedJobContext(store, jobs[0].id, profile.id);
+  assert.equal(jobContext.resumeUpload.id, profileContext.resumeUpload.id);
+  assert.equal(jobContext.verifiedProofs[0].id, proof.id);
+
+  const tui = new JobosTui(store, { ...streams(), profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = null;
+  let receivedContext = null;
+  tui.client = {
+    state: 'ready',
+    async prompt(_text, options) {
+      receivedContext = options.context;
+      return { stopReason: 'end_turn' };
+    }
+  };
+  await tui.promptAgent('What experience did I upload?');
+  assert.equal(receivedContext.resumeUpload.id, profileContext.resumeUpload.id);
+  assert.equal(receivedContext.verifiedProofs[0].id, proof.id);
 });
 
 test('review queue opens the exact artifact revision, shows local readiness policy, and keeps document diff cancellable', async t => {

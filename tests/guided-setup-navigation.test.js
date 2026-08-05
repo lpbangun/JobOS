@@ -293,6 +293,44 @@ test('resume paste and path preview, supported-format guidance, import, and imme
   assert.doesNotMatch(stdout.writes[0], /NEXT TASK · Workspace ready/, 'transition never exposes an intermediate workspace focus');
 });
 
+test('validating the final experience highlight advances directly to the first-job step without Escape', async () => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.state.setupProfileId = profile.id;
+  tui.state.profileId = profile.id;
+  tui.previewSetupResume({ sourceText: RESUME_TEXT });
+  enter(tui);
+
+  assert.equal(tui.state.overlay, 'setup-proof-review');
+  while (tui.state.overlay === 'setup-proof-review') enter(tui);
+
+  assert.equal(tui.state.overlay, 'setup', 'the last validation returns to the forward setup journey');
+  assert.equal(
+    tui.model.onboarding.steps[tui.state.overlayIndex]?.id,
+    'intake',
+    'the next focused task is adding a preference-setting first job'
+  );
+  assert.match(tui.state.status, /next: add a job you like/i);
+});
+
+test('first-job setup copy explains that a liked role teaches JobOS the user preferences', async () => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.state.setupProfileId = profile.id;
+  tui.state.profileId = profile.id;
+  tui.refresh({ disk: false, render: false });
+  tui.state.overlay = 'setup';
+  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'intake');
+
+  const setup = screenOf(tui).join('\n');
+  assert.match(setup, /Add a job you like/);
+  enter(tui);
+  const source = screenOf(tui).join('\n');
+  assert.match(source, /role you like or would seriously consider/i);
+  assert.match(source, /first job helps JobOS/i);
+  assert.match(source, /work you prefer/i);
+});
+
 test('input fields support cursor movement, Delete, Home/End, Shift selection, and replacement paste', async () => {
   const { tui } = await emptyTui();
   tui.state.mode = 'setup-profile';

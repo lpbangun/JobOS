@@ -35,6 +35,8 @@ test('embedded NLP prompt receives full agent tool catalog and typed human hando
   assert.match(prompt, /approve_artifact.*trusted TUI slash command/s);
   assert.match(prompt, /Natural-language requests are the default/);
   assert.match(prompt, /\/approve_artifact/);
+  assert.match(prompt, /Current JobOS context/);
+  assert.match(prompt, /secret-safe resume-upload summary/);
 });
 
 test('ACP session id persists privately per profile across JobOS processes', async t => {
