@@ -5,8 +5,9 @@ import { one, all, run, save, audit } from './db.js';
 import { writeYaml, writeMd } from './workspace.js';
 import { normalizeOrganization } from './research/context.js';
 import { createResumeRevision, readResumeFile, validateResumeDocument } from './resumes.js';
+import { RESUME_TEMPLATES, resolveAccentColor } from './resume-renderer.js';
 
-export function defaultPrefs(name){ return {targetRoleFamilies:[name],industries:[],companyStages:[],locations:[],salary:{min:null,max:null,currency:'USD'},dealbreakers:[],skills:slug(name).split('-').filter(Boolean),missionKeywords:[],values:[],workModel:'',communicationStyle:'concise, warm, evidence-grounded',searchStrategy:'focused',automationPolicy:{externalApply:'user_configured',externalSend:'user_configured',autoApply:'disabled',autoSend:'disabled',allowedConnectors:[]},networkIntent:{version:1,targetCompanies:[],targetRoles:[],preferredPersonas:[],comfortableRelationshipTypes:[],exclusions:[],allowedSources:{publicWeb:true,linkedinImport:false,xai:false},completedAt:null}}; }
+export function defaultPrefs(name){ return {targetRoleFamilies:[name],industries:[],companyStages:[],locations:[],salary:{min:null,max:null,currency:'USD'},dealbreakers:[],skills:slug(name).split('-').filter(Boolean),missionKeywords:[],values:[],workModel:'',communicationStyle:'concise, warm, evidence-grounded',searchStrategy:'focused',resumeDocument:{defaultTemplate:'classic',accentColor:null},automationPolicy:{externalApply:'user_configured',externalSend:'user_configured',autoApply:'disabled',autoSend:'disabled',allowedConnectors:[]},networkIntent:{version:1,targetCompanies:[],targetRoles:[],preferredPersonas:[],comfortableRelationshipTypes:[],exclusions:[],allowedSources:{publicWeb:true,linkedinImport:false,xai:false},completedAt:null}}; }
 export function extractMetrics(line){ return [...String(line).matchAll(/(?:\$[\d,.]+|\d+(?:\.\d+)?%|\d+x|\b\d{2,}\b)/gi)].map(m=>m[0]); }
 export function structuredProofs(profileId, text, source){ return String(text||'').split(/\r?\n/).map(l=>l.trim().replace(/^[-*•]\s*/, '')).filter(l=>l.length>=20).filter(l=>/\b(built|led|managed|created|designed|improved|launched|reduced|increased|owned|shipped|analyzed|implemented|taught|researched|coordinated|facilitated|developed)\b/i.test(l)).slice(0,24).map((line,idx)=>({id:id('proof',`${profileId}:${idx}:${line}`),summary:line,evidence:source,skills:[...new Set(tokenize(line).filter(t=>t.length>3).slice(0,10))],metrics:extractMetrics(line),metadata:{origin:'resume_import',claimType:'experience',requiresHumanVerification:true}})); }
 export function suggestProfileAffiliations(resumeText){
@@ -94,7 +95,7 @@ export function createProfile(s, name, opts = {}) {
     ...defaults,
     ...Object.fromEntries(Object.entries(extracted).filter(([, value]) => (Array.isArray(value) ? value.length > 0 : Boolean(value)))),
     ...custom,
-    automationPolicy: { ...defaults.automationPolicy, ...(custom.automationPolicy || {}) },
+    resumeDocument: { ...defaults.resumeDocument, ...(custom.resumeDocument || {}) },
     networkIntent: {
       ...defaults.networkIntent,
       ...(custom.networkIntent || {}),
@@ -140,6 +141,39 @@ export function createProfile(s, name, opts = {}) {
       `jobos network import --profile ${pid} --file <connections.csv>`,
       'Press b in the TUI to build your network map.'
     ]
+  };
+}
+
+export function setResumeDocumentPreferences(s, { profileId, template, accentColor }) {
+  const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
+  if (!profile) throw Object.assign(new Error(`Unknown profile: ${profileId}`), { code: 'unknown_profile', type: 'validation' });
+  const preferences = parseJson(profile.preferences_json, {});
+  const current = preferences.resumeDocument || {};
+  const selectedTemplate = String(template || current.defaultTemplate || 'classic').trim().toLowerCase();
+  if (!RESUME_TEMPLATES[selectedTemplate]) {
+    throw Object.assign(new Error(`Invalid resume template: ${selectedTemplate}. Expected classic, modern, executive, or technical.`), { code: 'resume_template_invalid', type: 'validation' });
+  }
+  const requestedAccent = accentColor === undefined
+    ? current.accentColor || null
+    : ['neutral', 'none', ''].includes(String(accentColor).trim().toLowerCase()) ? null : String(accentColor);
+  const accent = resolveAccentColor(requestedAccent, selectedTemplate);
+  preferences.resumeDocument = {
+    defaultTemplate: selectedTemplate,
+    accentColor: accent.status === 'safe' ? accent.appliedColor : null
+  };
+  run(s, 'UPDATE profiles SET preferences_json=?,updated_at=? WHERE id=?', [JSON.stringify(preferences), now(), profileId]);
+  audit(s, 'profile.resume_document_preferences_updated', 'profile', profileId, {
+    defaultTemplate: selectedTemplate,
+    accentStatus: accent.status,
+    appliedAccentColor: accent.appliedColor
+  });
+  syncProfile(s, profileId);
+  save(s);
+  return {
+    profileId,
+    ...preferences.resumeDocument,
+    appliedAccentColor: accent.appliedColor,
+    accent
   };
 }
 export function setNetworkIntent(s, { profileId, intent, affiliations }) {

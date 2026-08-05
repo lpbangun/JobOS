@@ -188,6 +188,27 @@ jobos help --all
 
 Successful one-shot commands support `--json` where practical. Validation failures exit non-zero with a `jobos:` error and a typed JSON error under `--json`.
 
+## Resume documents
+
+JobOS includes four ATS-safe, single-column templates: `classic`, `modern`, `executive`, and `technical`. Set a profile default, then override it for one application when needed:
+
+```bash
+# List templates and set the profile default.
+jobos resume templates --json
+jobos resume template --profile <profile-id> --template modern --accent-color '#003366' --json
+
+# Generate one exact artifact revision with both export formats.
+jobos tailor resume --job <job-id> --profile <profile-id> \
+  --template technical --format both --page-limit 2 --json
+
+# Preview, download, then explicitly approve that exact revision.
+jobos artifacts preview <artifact-id> --json
+jobos artifacts download <artifact-id> --format docx --to ./resume.docx --json
+jobos artifacts approve <artifact-id> --note 'Reviewed the exact exported revision.' --json
+```
+
+Accent colors affect only headings, rules, and links. JobOS requires at least `4.5:1` contrast on white and falls back to the selected template's neutral palette for invalid or unsafe colors. DOCX export is local and self-contained. PDF export additionally requires a supported LaTeX engine (`tectonic` or `pdflatex`) and Poppler validation tools. Every requested render must pass semantic and extraction checks before approval; approval never submits an application.
+
 ## Local data
 
 By default, JobOS stores runtime state under the current directory:

@@ -1,6 +1,6 @@
 # JobOS Build Progress
 
-## Current status — 2026-08-03
+## Current status — 2026-08-05
 
 JobOS now has a data-bound terminal product as its primary local control surface. The CLI remains supported; SQLite is canonical and the terminal, CLI, ACP-session MCP, and external MCP all observe the same workspace state.
 
@@ -11,6 +11,7 @@ JobOS now has a data-bound terminal product as its primary local control surface
 - `jobos daily --profile <id>` runs every saved source, isolates failures, deduplicates, scores, and ranks imported jobs.
 - `jobos pursue <job-id> --profile <id>` composes fit scoring, company and durable people research, application answers, resume and cover-letter drafts, application tracking, outreach path selection, and a review-gated outreach draft when an approved sourced path is available. Full reachable-network mapping remains available through the standalone `network paths` operation.
 - `jobos applications plan --job <id> --profile <id>` compiles readiness v4: artifact review produces `materials-ready`; only a current inspected employer form with resolved required bindings produces `form-ready`. Blockers and mirrors remain secret-safe.
+- Tailored resumes now support four curated ATS-safe single-column templates (`classic`, `modern`, `executive`, and `technical`), profile defaults plus per-application overrides, contrast-validated optional accents, validated PDF/DOCX exports, and hash-checked exact-revision preview/download/approval and packet bindings.
 - `jobos network paths|contacts --job <id>` makes user-owned relationship data and public contact evidence a first-class control surface.
 - `jobos research people --scope profile|target|job|person ...` runs budgeted, checkpointed people research; `research runs get|resume|cancel` exposes the durable lifecycle.
 - `jobos profile network-intent ...` and the TUI `b` flow confirm progressive networking goals, exclusions, sources, and affiliations before an open profile network map is built.
@@ -67,10 +68,11 @@ Not required for the smallest coherent CLI product:
 
 - Universal auto-apply, Workday/iCIMS/Taleo automation, or LinkedIn/Indeed DOM-specific bots.
 - SMTP auto-send, mailbox reconciliation, and hardcoded platform automation.
-- Additional document export formats, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
+- Additional document formats beyond PDF/DOCX, voice interview coaching, offer/negotiation workspaces, and frontend redesign.
 - Agent marketplace/plugin SDK beyond the small executable protocol and MCP surface.
 
 ## Verification
+- Resume document-system verification on 2026-08-05: focused template, ATS extraction/order, PDF pagination preflight, accessible accent fallback, DOCX OOXML, exact-revision preview/download/approval, and packet integrity checks passed **21/21**; `npm test` passed **665/665** checks; `npm run smoke` passed with zero external side effects.
 - Onboarding-navigation hotfix verification on 2026-08-05: a clean-workspace PTY run exercised profile creation, arrow-key navigation, bracketed multiline resume paste and review, experience verification, Escape cancellation, job intake, provider-free scoring, material generation/review recovery, and `Q` shutdown with terminal restoration. `npm test` passed **661/661** checks and `npm run smoke` passed with zero external side effects.
 - Resume-ingestion verification on 2026-08-04: `npm test` passed **651/651** checks after adding multiline terminal paste handling, identity correction, and local PDF/DOCX extraction coverage; `npm run smoke` passed with zero external side effects.
 - TUI usability verification on 2026-08-03: `npm test` passed **642/642** checks; `npm run smoke` passed the clean-workspace W03/W04/W07/W08 workflow with zero external side effects.
@@ -130,3 +132,4 @@ The 2026-07-20 artifact-review convergence used a critic-authored T1–T13 red s
 - Hermes ACP needs configured provider authentication for live conversation; absent/crashed backends leave the JobOS pipeline usable with typed recovery.
 - Codex app-server is cataloged as a distinct future adapter, not mislabeled as ACP.
 - Generated materials remain reviewable drafts unless a user separately configures an enabled external consumer.
+- DOCX pagination is intentionally flowing and can vary with the user's installed fonts and editor; exact-revision human review remains required. PDF page count and geometry are validated when the local LaTeX and Poppler toolchain is available.

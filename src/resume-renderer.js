@@ -3,21 +3,98 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const TEMPLATE_ID = 'jobos-classic';
-const TEMPLATE_VERSION = 1;
+export const RESUME_TEMPLATES = Object.freeze({
+  classic: Object.freeze({
+    id: 'classic',
+    name: 'Classic',
+    description: 'Conservative, recruiter-friendly typography and section treatment.',
+    templateFile: 'jobos-classic.tex',
+    defaultAccent: '1F2933',
+    sectionOrder: ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections']
+  }),
+  modern: Object.freeze({
+    id: 'modern',
+    name: 'Modern',
+    description: 'Clean sans-serif hierarchy with restrained visual emphasis.',
+    templateFile: 'jobos-modern.tex',
+    defaultAccent: '1F4E5F',
+    sectionOrder: ['summary', 'experience', 'skills', 'projects', 'education', 'credentials', 'additionalSections']
+  }),
+  executive: Object.freeze({
+    id: 'executive',
+    name: 'Executive',
+    description: 'Editorial hierarchy for leadership scope and outcomes.',
+    templateFile: 'jobos-executive.tex',
+    defaultAccent: '4B3A2A',
+    sectionOrder: ['summary', 'experience', 'projects', 'skills', 'education', 'credentials', 'additionalSections']
+  }),
+  technical: Object.freeze({
+    id: 'technical',
+    name: 'Technical',
+    description: 'Compact skills-and-projects emphasis for technical roles.',
+    templateFile: 'jobos-technical.tex',
+    defaultAccent: '243B53',
+    sectionOrder: ['summary', 'skills', 'projects', 'experience', 'education', 'credentials', 'additionalSections']
+  })
+});
+const TEMPLATE_VERSION = 2;
 const ALLOWED_SECTIONS = new Set(['summary', 'skills', 'experience', 'projects', 'education', 'credentials', 'additionalSections']);
 const PROFILE_ORDERS = {
-  professional: ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections'],
+  professional: RESUME_TEMPLATES.classic.sectionOrder,
   technical: ['summary', 'skills', 'experience', 'projects', 'education', 'credentials', 'additionalSections'],
-  leadership: ['summary', 'experience', 'projects', 'skills', 'education', 'credentials', 'additionalSections']
+  leadership: RESUME_TEMPLATES.executive.sectionOrder
 };
 const TEX_ENGINES = new Set(['tectonic', 'pdflatex']);
+const HEX_COLOR = /^#?([a-f0-9]{6})$/i;
 
 function hashBuffer(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function text(value) { return value == null ? '' : String(value); }
 function normalizedText(value) { return text(value).normalize('NFKD').toLowerCase().replace(/[^a-z0-9+.%$]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function safePageSize(value) { return String(value || '').toLowerCase() === 'a4' ? 'a4' : 'letter'; }
 function boundedPageLimit(value) { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 2 ? number : 2; }
+
+function relativeLuminance(hex) {
+  const channels = [0, 2, 4].map(offset => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+    .map(channel => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+function contrastAgainstWhite(hex) {
+  return 1.05 / (relativeLuminance(hex) + 0.05);
+}
+function templateId(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/^jobos-/, '');
+  return RESUME_TEMPLATES[normalized] ? normalized : 'classic';
+}
+export function listResumeTemplates() {
+  return Object.values(RESUME_TEMPLATES).map(template => ({
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    atsSafe: true,
+    columns: 1,
+    conventionalHeadings: true,
+    accessibleReadingOrder: true,
+    prohibitedVisualStructures: []
+  }));
+}
+export function resolveAccentColor(requestedColor, requestedTemplate = 'classic') {
+  const template = RESUME_TEMPLATES[templateId(requestedTemplate)];
+  const requested = String(requestedColor || '').trim();
+  if (!requested) return { requestedColor: null, appliedColor: `#${template.defaultAccent}`, status: 'neutral', contrastRatio: Number(contrastAgainstWhite(template.defaultAccent).toFixed(2)), warning: null };
+  const match = HEX_COLOR.exec(requested);
+  if (match) {
+    const candidate = match[1].toUpperCase();
+    const contrastRatio = Number(contrastAgainstWhite(candidate).toFixed(2));
+    if (contrastRatio >= 4.5) return { requestedColor: `#${candidate}`, appliedColor: `#${candidate}`, status: 'safe', contrastRatio, warning: null };
+  }
+  return {
+    requestedColor: requested,
+    appliedColor: `#${template.defaultAccent}`,
+    status: 'fallback',
+    contrastRatio: Number(contrastAgainstWhite(template.defaultAccent).toFixed(2)),
+    warning: { code: 'resume_accent_color_unsafe', message: `Accent ${requested || '(empty)'} is invalid or does not meet 4.5:1 contrast on white; the ${template.name} neutral palette was used.` }
+  };
+}
 
 export function latexEscape(value) {
   const replacements = { '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '$': '\\$', '&': '\\&', '#': '\\#', '%': '\\%', '_': '\\_', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}' };
@@ -36,10 +113,30 @@ export function resolveLayoutProfile(job, options = {}) {
   const roleFamily = PROFILE_ORDERS[options.layout]
     ? options.layout
     : PROFILE_ORDERS[options.roleFamily] ? options.roleFamily : roleFamilyFor(job);
-  const requestedOrder = Array.isArray(options.sectionOrder) ? options.sectionOrder : PROFILE_ORDERS[roleFamily];
+  const hasTemplateSelection = Boolean(options.template || options.templateId);
+  const selectedTemplateId = templateId(options.template || options.templateId);
+  const selectedTemplate = RESUME_TEMPLATES[selectedTemplateId];
+  const requestedOrder = Array.isArray(options.sectionOrder)
+    ? options.sectionOrder
+    : hasTemplateSelection ? selectedTemplate.sectionOrder : PROFILE_ORDERS[roleFamily];
   const sectionOrder = [...new Set(requestedOrder.filter(sectionName => ALLOWED_SECTIONS.has(sectionName)))];
-  for (const sectionName of PROFILE_ORDERS[roleFamily]) if (!sectionOrder.includes(sectionName)) sectionOrder.push(sectionName);
-  return { templateId: TEMPLATE_ID, templateVersion: TEMPLATE_VERSION, roleFamily, sectionOrder, density: options.density === 'compact' ? 'compact' : 'standard', pageSize: safePageSize(options.pageSize), pageLimit: boundedPageLimit(options.pageLimit) };
+  const fallbackOrder = hasTemplateSelection ? selectedTemplate.sectionOrder : PROFILE_ORDERS[roleFamily];
+  for (const sectionName of fallbackOrder) if (!sectionOrder.includes(sectionName)) sectionOrder.push(sectionName);
+  const density = ['compact', 'standard', 'spacious'].includes(options.density) ? options.density : 'standard';
+  const requestedAccentColor = options.requestedAccentColor ?? options.accent?.requestedColor ?? options.accentColor ?? null;
+  const accent = resolveAccentColor(requestedAccentColor, selectedTemplateId);
+  return {
+    templateId: selectedTemplateId,
+    templateVersion: TEMPLATE_VERSION,
+    roleFamily,
+    sectionOrder,
+    density,
+    pageSize: safePageSize(options.pageSize),
+    pageLimit: boundedPageLimit(options.pageLimit),
+    accentColor: accent.appliedColor,
+    requestedAccentColor: accent.requestedColor,
+    accent
+  };
 }
 
 function dateText(entry) {
@@ -52,15 +149,19 @@ function itemize(items) {
 }
 function section(title, body) { return body ? `\\section*{${latexEscape(title)}}\n${body}` : ''; }
 function link(label, url) { return `\\href{${latexUrlEscape(url)}}{${latexEscape(label || url)}}`; }
+function summaryHeading(profile) {
+  return profile.templateId === 'executive' || profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary';
+}
 
 export function renderResumeLatex(document, layoutProfile, { templateText = null } = {}) {
   const profile = resolveLayoutProfile(null, layoutProfile);
-  const template = templateText ?? fs.readFileSync(new URL('../templates/jobos-classic.tex', import.meta.url), 'utf8');
+  const selectedTemplate = RESUME_TEMPLATES[profile.templateId];
+  const template = templateText ?? fs.readFileSync(new URL(`../templates/${selectedTemplate.templateFile}`, import.meta.url), 'utf8');
   const identity = document.identity || {};
   const contact = [identity.email, identity.phone, identity.location].filter(Boolean).map(latexEscape);
   for (const value of identity.links || []) if (value.url) contact.push(link(value.label, value.url));
   const rendered = {
-    summary: section(profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', latexEscape(document.summary?.text || '')),
+    summary: section(summaryHeading(profile), latexEscape(document.summary?.text || '')),
     skills: section('Skills', latexEscape((document.skills || []).map(skill => skill.name).join(' • '))),
     experience: section('Experience', (document.experience || []).map(entry => {
       const heading = `\\jobosrole{${latexEscape(entry.title)}}{${latexEscape([entry.employer, entry.location].filter(Boolean).join(' | '))}}{${latexEscape(dateText(entry))}}`;
@@ -74,8 +175,19 @@ export function renderResumeLatex(document, layoutProfile, { templateText = null
     credentials: section('Credentials', itemize((document.credentials || []).map(entry => `${entry.name}${entry.issuer ? ` — ${entry.issuer}` : ''}${entry.date ? ` (${entry.date})` : ''}`))),
     additionalSections: (document.additionalSections || []).map(value => section(value.title, itemize(value.entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry))))).join('\n')
   };
-  const body = `\\begin{center}\n{\\LARGE\\bfseries ${latexEscape(identity.name)}}\\\\[3pt]\n${contact.join(' \\textbar{} ')}\n\\end{center}\n${profile.sectionOrder.map(sectionName => rendered[sectionName]).filter(Boolean).join('\n')}`;
-  return template.replace('%%PAGE_SIZE%%', profile.pageSize === 'a4' ? 'a4paper' : 'letterpaper').replace('%%BODY%%', body);
+  const body = `\\jobosname{${latexEscape(identity.name)}}\n\\joboscontact{${contact.join(' \\textbar{} ')}}\n${profile.sectionOrder.map(sectionName => rendered[sectionName]).filter(Boolean).join('\n')}`;
+  const compact = profile.density === 'compact';
+  const spacious = profile.density === 'spacious';
+  const margin = compact ? '0.58in' : spacious ? '0.78in' : '0.68in';
+  const itemSep = compact ? '0.5pt' : spacious ? '2.5pt' : '1.5pt';
+  const sectionSpace = compact ? '6pt' : spacious ? '10pt' : '8pt';
+  return template
+    .replaceAll('%%PAGE_SIZE%%', profile.pageSize === 'a4' ? 'a4paper' : 'letterpaper')
+    .replaceAll('%%MARGIN%%', margin)
+    .replaceAll('%%ITEM_SEP%%', itemSep)
+    .replaceAll('%%SECTION_SPACE%%', sectionSpace)
+    .replaceAll('%%ACCENT%%', profile.accentColor.slice(1))
+    .replaceAll('%%BODY%%', body);
 }
 
 function run(command, args, options = {}) {
@@ -88,7 +200,7 @@ function toolVersion(command) {
 function blocker(code, message, details = {}) { return { code, message, ...details }; }
 function expectedText(document, profile) {
   const expected = [document.identity?.name, document.identity?.email, document.identity?.phone];
-  const sectionLabels = { summary: profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' };
+  const sectionLabels = { summary: summaryHeading(profile), skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' };
   for (const sectionName of profile.sectionOrder) if (sectionLabels[sectionName] && ((sectionName === 'summary' && document.summary?.text) || (sectionName === 'skills' && document.skills?.length) || (sectionName === 'experience' && document.experience?.length) || (sectionName === 'projects' && document.projects?.length) || (sectionName === 'education' && document.education?.length) || (sectionName === 'credentials' && document.credentials?.length))) expected.push(sectionLabels[sectionName]);
   for (const entry of document.experience || []) expected.push(entry.title, entry.employer, dateText(entry), ...(entry.bullets || []).map(bullet => bullet.text));
   for (const entry of document.education || []) expected.push(entry.institution, entry.degree, entry.field);
@@ -101,11 +213,11 @@ export function preflightExtractedText(document, extractedText, profile) {
   const normalized = normalizedText(extractedText);
   const missing = expectedText(document, profile).filter(value => !normalized.includes(normalizedText(value)));
   const normalizedLines = text(extractedText).split(/\r?\n/).map(normalizedText);
-  const sectionLabels = profile.sectionOrder.map(sectionName => ({ summary: profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' }[sectionName])).filter(Boolean).filter(label => normalizedLines.includes(normalizedText(label)));
+  const sectionLabels = profile.sectionOrder.map(sectionName => ({ summary: summaryHeading(profile), skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' }[sectionName])).filter(Boolean).filter(label => normalizedLines.includes(normalizedText(label)));
   const positions = sectionLabels.map(label => normalizedLines.indexOf(normalizedText(label)));
   const orderValid = positions.every((position, index) => index === 0 || position > positions[index - 1]);
   const blockers = [];
-  if (missing.length) blockers.push(blocker('resume_render_text_invalid', 'Rendered PDF is missing expected semantic text.', { missing }));
+  if (missing.length) blockers.push(blocker('resume_render_text_invalid', 'Rendered document is missing expected semantic text.', { missing }));
   if (!orderValid) blockers.push(blocker('resume_render_text_invalid', 'Rendered section extraction order differs from the semantic layout.', { sectionLabels }));
   return { valid: blockers.length === 0, blockers, missing, orderValid };
 }
@@ -125,10 +237,24 @@ export function renderResumePdf({ statePath, workspacePath, jobId, artifact, doc
   const tex = renderResumeLatex(document, profile);
   const artifactsDirectory = path.join(workspacePath, 'jobs', jobId, 'artifacts');
   fs.mkdirSync(artifactsDirectory, { recursive: true });
-  for (const stalePath of ['resume-tailored.pdf', 'resume-tailored.txt', 'resume-tailored.pages']) fs.rmSync(path.join(artifactsDirectory, stalePath), { recursive: true, force: true });
-  const texPath = path.join(artifactsDirectory, 'resume-tailored.tex');
+  const artifactToken = String(artifact.id || artifact.contentHash || artifact.content_hash || 'unbound').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 96);
+  const outputStem = `resume-${artifactToken}`;
+  const texPath = path.join(artifactsDirectory, `${outputStem}.tex`);
   fs.writeFileSync(texPath, tex);
-  const baseManifest = { templateId: TEMPLATE_ID, templateVersion: TEMPLATE_VERSION, pageSize: profile.pageSize, pageLimit: profile.pageLimit, sourceArtifactHash: artifact.contentHash || artifact.content_hash, texHash: hashBuffer(tex), status: 'blocked', warnings: [], blockers: [], toolVersions: {} };
+  const baseManifest = {
+    templateId: profile.templateId,
+    templateVersion: profile.templateVersion,
+    accent: profile.accent,
+    pageSize: profile.pageSize,
+    pageLimit: profile.pageLimit,
+    sourceArtifactId: artifact.id || null,
+    sourceArtifactHash: artifact.contentHash || artifact.content_hash,
+    texHash: hashBuffer(tex),
+    status: 'blocked',
+    warnings: profile.accent.warning ? [profile.accent.warning] : [],
+    blockers: [],
+    toolVersions: {}
+  };
   if (!TEX_ENGINES.has(engine)) return { ...baseManifest, blockers: [blocker('resume_render_failed', `Unsupported LaTeX engine: ${engine}.`, { setupAction: 'Set JOBOS_TEX_ENGINE to tectonic or pdflatex.' })], texPath: path.relative(workspacePath, texPath) };
   const engineVersion = toolVersion(engine);
   if (!engineVersion) return { ...baseManifest, blockers: [blocker('resume_render_failed', `LaTeX engine ${engine} is not installed.`, { setupAction: `Install ${engine}, then rerun tailor resume --format pdf.` })], texPath: path.relative(workspacePath, texPath) };
@@ -162,12 +288,12 @@ export function renderResumePdf({ statePath, workspacePath, jobId, artifact, doc
     if (images.status !== 0) blockers.push(blocker('resume_render_failed', 'PDF page image generation failed.'));
     const imageNames = fs.existsSync(temporaryPages) ? fs.readdirSync(temporaryPages).filter(name => name.endsWith('.png')).sort() : [];
     blockers.push(...preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount: imageNames.length }).blockers);
-    const warnings = [{ code: 'resume_visual_review_required', message: 'Subjective typography and whitespace remain part of exact-revision human review.' }];
+    const warnings = [...baseManifest.warnings, { code: 'resume_visual_review_required', message: 'Subjective typography and whitespace remain part of exact-revision human review.' }];
     const toolVersions = { [engine]: engineVersion, pdftotext: pdftotextVersion, pdfinfo: pdfinfoVersion, pdftoppm: pdftoppmVersion };
     if (blockers.length) return { ...baseManifest, blockers, warnings, toolVersions, pageCount, reportedPageSize: reportedSize, texPath: path.relative(workspacePath, texPath), textPreflight };
-    const pdfPath = path.join(artifactsDirectory, 'resume-tailored.pdf');
-    const extractedPath = path.join(artifactsDirectory, 'resume-tailored.txt');
-    const pagesDirectory = path.join(artifactsDirectory, 'resume-tailored.pages');
+    const pdfPath = path.join(artifactsDirectory, `${outputStem}.pdf`);
+    const extractedPath = path.join(artifactsDirectory, `${outputStem}.txt`);
+    const pagesDirectory = path.join(artifactsDirectory, `${outputStem}.pages`);
     fs.copyFileSync(temporaryPdf, pdfPath);
     fs.copyFileSync(temporaryExtracted, extractedPath);
     fs.cpSync(temporaryPages, pagesDirectory, { recursive: true });

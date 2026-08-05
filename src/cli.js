@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, reload, save } from './db.js';
 import { id, parseJson, paths, slug, splitCsv, workspaceRoot } from './utils.js';
-import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
+import { createProfile, addProof, retireProof, setNetworkIntent, setResumeDocumentPreferences, supersedeProof, verifyProof } from './profiles.js';
 import { getResume, importResume, readResumeFileAsync, replaceResume, validateResumeDocument } from './resumes.js';
 import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
@@ -31,7 +31,8 @@ import { connectAgentClient, doctorAgents } from './agent-setup.js';
 import { callDomainTool } from './domain-tools.js';
 import { domainCapabilityCatalog } from './capabilities.js';
 import { authenticatedFetch, browserStatus, exportCookies, importCookies, loginPersistentProfile, registerScript, runRegisteredScript } from './browser.js';
-import { preflightResumeArtifact } from './artifacts.js';
+import { downloadArtifact, preflightResumeArtifact, previewArtifact } from './artifacts.js';
+import { listResumeTemplates } from './resume-renderer.js';
 import { getMemoryObservation } from './career-memory-observations.js';
 import { inspectOnboardingStatus } from './onboarding.js';
 
@@ -83,6 +84,8 @@ export const commandRegistry = [
   cmd(['resume', 'coverage'], 'jobos resume coverage --job <job-id> --profile <profile-id> [--json]', 'Show transparent requirement coverage from active verified evidence.', { flags: ['--job <job-id>', '--profile <profile-id>'] }),
   cmd(['resume', 'preflight'], 'jobos resume preflight --artifact <artifact-id> [--json]', 'Recheck semantic, exact-revision, and requested render eligibility without mutating review state.', { flags: ['--artifact <artifact-id>'] }),
   cmd(['resume', 'replace'], 'jobos resume replace --profile <profile-id> --file <path> [--json]', 'Create a corrected canonical resume revision from a supported local file without rewriting history.', { flags: ['--profile <profile-id>', '--file <path>'] }),
+  cmd(['resume', 'templates'], 'jobos resume templates [--json]', 'List the four curated ATS-safe single-column resume templates.'),
+  cmd(['resume', 'template'], 'jobos resume template --profile <profile-id> --template classic|modern|executive|technical [--accent-color <#RRGGBB|neutral>] [--json]', 'Set the profile default resume template and optional accessible accent color.', { flags: ['--profile <profile-id>', '--template <id>', '--accent-color <color>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
   cmd(['proof', 'verify'], 'jobos proof verify <proof-id> [--json]', 'Verify a stored proof point for generated factual claims.'),
   cmd(['proof', 'retire'], 'jobos proof retire <proof-id> --reason <text> [--json]', 'Retire a proof point while preserving its lineage.', { flags: ['--reason <text>'] }),
@@ -115,10 +118,12 @@ export const commandRegistry = [
   cmd(['discover', 'run'], 'jobos discover run --search <name-or-id> [--json]', 'Run one saved discovery search and queue results for review.'),
   cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
-  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf] [--output markdown] [--json]', 'Advanced standalone resume operation; creates a complete proof-grounded tailored resume draft with optional local PDF rendering without pursue dependencies.', { flags: ['--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
+  cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--template classic|modern|executive|technical] [--accent-color <#RRGGBB|neutral>] [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf|docx|both] [--output markdown] [--json]', 'Advanced standalone resume operation; creates an exact-revision proof-grounded draft with optional validated PDF and DOCX exports.', { flags: ['--template <id>', '--accent-color <color>', '--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
   cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
+  cmd(['artifacts', 'preview'], 'jobos artifacts preview <artifact-id> [--json]', 'Preview the exact generated artifact revision, template, page images, and verified downloads.', { category: 'workflow' }),
+  cmd(['artifacts', 'download'], 'jobos artifacts download <artifact-id> --format markdown|pdf|docx --to <path> [--json]', 'Download a hash-verified exact artifact revision without approving or submitting it.', { flags: ['--format <format>', '--to <path>'], category: 'workflow' }),
   cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
   cmd(['artifacts', 'reject'], 'jobos artifacts reject <artifact-id> --note <reason> [--json]', 'Reject an exact current artifact revision and require a new draft.', { flags: ['--note <reason>'], category: 'workflow' }),
   cmd(['applications', 'plan'], 'jobos applications plan --job <job-id> --profile <profile-id> [--json]', 'Compile review readiness from local score, proofs, materials, answers, and identity evidence.', { flags: ['--job <job-id>'], category: 'workflow' }),
@@ -807,6 +812,20 @@ export async function main(argv = process.argv.slice(2)) {
     out({ jobId, profileId, requirements: inventoryForJob(job), coverage: buildRequirementCoverage(inventoryForJob(job), proofs) });
     return;
   }
+  if (group === 'resume' && action === 'templates') {
+    out(listResumeTemplates());
+    return;
+  }
+  if (group === 'resume' && action === 'template') {
+    const template = String(requireFlag(flags, 'template', '--template <id>')).toLowerCase();
+    if (!['classic', 'modern', 'executive', 'technical'].includes(template)) usage('Invalid --template; expected classic, modern, executive, or technical');
+    out(setResumeDocumentPreferences(s, {
+      profileId: needProfile(flags),
+      template,
+      accentColor: flags['accent-color'] === undefined ? undefined : String(flags['accent-color'])
+    }));
+    return;
+  }
   if (group === 'proof' && action === 'add') {
     const summary = requireFlag(flags, 'summary');
     const p = addProof(s, needProfile(flags), String(summary), flags.evidence ? String(flags.evidence) : '', flags.skills ? splitCsv(flags.skills) : []);
@@ -1038,12 +1057,14 @@ export async function main(argv = process.argv.slice(2)) {
   if (group === 'tailor' && action === 'resume') {
     const jobId = requireFlag(flags, 'job');
     const layout = flags.layout ? String(flags.layout) : null;
+    const templateId = flags.template ? String(flags.template).toLowerCase() : null;
     const pageSize = flags['page-size'] ? String(flags['page-size']).toLowerCase() : 'letter';
     const format = flags.format ? String(flags.format).toLowerCase() : 'markdown';
     if (layout && !['professional', 'technical', 'leadership'].includes(layout)) usage('Invalid --layout; expected professional, technical, or leadership');
+    if (templateId && !['classic', 'modern', 'executive', 'technical'].includes(templateId)) usage('Invalid --template; expected classic, modern, executive, or technical');
     if (!['letter', 'a4'].includes(pageSize)) usage('Invalid --page-size; expected letter or a4');
-    if (!['markdown', 'pdf'].includes(format)) usage('Invalid --format; expected markdown or pdf');
-    const r = await tailor(s, jobId, needProfile(flags), 'resume', { layoutProfileId: layout, pageSize, pageLimit: numberFlag(flags, 'page-limit', 2, { min: 1 }), format });
+    if (!['markdown', 'pdf', 'docx', 'both'].includes(format)) usage('Invalid --format; expected markdown, pdf, docx, or both');
+    const r = await tailor(s, jobId, needProfile(flags), 'resume', { layoutProfileId: layout, templateId, accentColor: flags['accent-color'] === undefined ? undefined : String(flags['accent-color']), pageSize, pageLimit: numberFlag(flags, 'page-limit', 2, { min: 1 }), format });
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
     return;
@@ -1070,6 +1091,21 @@ export async function main(argv = process.argv.slice(2)) {
     }, { source: 'cli' });
     if (flags.json) out(result);
     else text(result.text);
+    return;
+  }
+  if (group === 'artifacts' && action === 'preview') {
+    if (!subaction) usage('Missing artifact id');
+    out(previewArtifact(s, String(subaction)));
+    return;
+  }
+  if (group === 'artifacts' && action === 'download') {
+    if (!subaction) usage('Missing artifact id');
+    const format = String(flags.format || 'markdown').toLowerCase();
+    if (!['markdown', 'pdf', 'docx'].includes(format)) usage('Invalid --format; expected markdown, pdf, or docx');
+    out(downloadArtifact(s, String(subaction), {
+      format,
+      destination: String(requireFlag(flags, 'to', '--to <path>'))
+    }));
     return;
   }
   if (group === 'artifacts' && action === 'approve') {

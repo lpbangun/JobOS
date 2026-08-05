@@ -314,7 +314,7 @@ function hasApprovedResumePdf(s, artifact) {
   const document = one(s, 'SELECT render_manifest_json FROM artifact_resume_documents WHERE artifact_id=?', [artifact.id]);
   const manifest = parseJson(document?.render_manifest_json, null);
   const pdfPath = String(manifest?.pdfPath || '').replaceAll('\\', '/');
-  return manifest?.format === 'pdf'
+  return ['pdf', 'both'].includes(manifest?.format)
     && manifest?.status === 'passed'
     && SHA256_HEX.test(String(manifest.pdfHash || ''))
     && pdfPath.length > 0

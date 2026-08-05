@@ -276,6 +276,62 @@ export function diffArtifact(s, artifactId, { againstArtifactId = null } = {}) {
   };
 }
 
+const RENDER_EXPORTS = Object.freeze({
+  pdf: { pathKey: 'pdfPath', hashKey: 'pdfHash', extension: '.pdf' },
+  docx: { pathKey: 'docxPath', hashKey: 'docxHash', extension: '.docx' }
+});
+
+export function requestedResumeRenderFormats(renderManifest) {
+  if (renderManifest?.format === 'both') return ['pdf', 'docx'];
+  return RENDER_EXPORTS[renderManifest?.format] ? [renderManifest.format] : [];
+}
+
+export function resumeRenderExport(renderManifest, format) {
+  if (!RENDER_EXPORTS[format]) return null;
+  return renderManifest?.exports?.[format] || (renderManifest?.format === format ? renderManifest : null);
+}
+
+export function verifyResumeRenderExport(s, artifactRow, renderManifest, format) {
+  const contract = RENDER_EXPORTS[format];
+  const rendered = resumeRenderExport(renderManifest, format);
+  if (!contract || !rendered) throw new ArtifactError('resume_render_failed', `Resume ${artifactRow.id} has no requested ${format.toUpperCase()} export.`, { artifactId: artifactRow.id, format });
+  if (rendered.status !== 'passed') {
+    throw new ArtifactError('resume_render_failed', `Resume ${artifactRow.id} did not pass requested ${format.toUpperCase()} rendering.`, { artifactId: artifactRow.id, format, renderStatus: rendered.status || renderManifest?.status });
+  }
+  if (Number(renderManifest.schemaVersion || 1) >= 2) {
+    if (renderManifest.sourceArtifactId !== artifactRow.id || renderManifest.sourceArtifactHash !== artifactRow.content_hash) {
+      throw new ArtifactError('resume_export_revision_mismatch', `Rendered ${format.toUpperCase()} is not bound to exact artifact revision ${artifactRow.id}.`, {
+        artifactId: artifactRow.id,
+        format,
+        expectedHash: artifactRow.content_hash,
+        sourceArtifactId: renderManifest.sourceArtifactId || null,
+        sourceArtifactHash: renderManifest.sourceArtifactHash || null
+      });
+    }
+  }
+  const relativePath = String(rendered[contract.pathKey] || '').replaceAll('\\', '/');
+  const expectedHash = String(rendered[contract.hashKey] || '');
+  if (!relativePath || relativePath.length > 512 || path.isAbsolute(relativePath) || relativePath.split('/').includes('..') || !relativePath.toLowerCase().endsWith(contract.extension) || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+    throw new ArtifactError('resume_render_failed', `Rendered ${format.toUpperCase()} manifest path or hash is invalid for ${artifactRow.id}.`, { artifactId: artifactRow.id, format, path: relativePath || null });
+  }
+  const workspace = fs.realpathSync(s.p.ws);
+  let resolved;
+  let bytes;
+  try {
+    resolved = fs.realpathSync(path.resolve(workspace, relativePath));
+    const outside = path.relative(workspace, resolved);
+    if (outside.startsWith('..') || path.isAbsolute(outside)) throw new Error('outside workspace');
+    bytes = fs.readFileSync(resolved);
+  } catch {
+    throw new ArtifactError('resume_render_failed', `Rendered ${format.toUpperCase()} is missing for ${artifactRow.id}.`, { artifactId: artifactRow.id, format, path: relativePath });
+  }
+  const actualHash = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actualHash !== expectedHash) {
+    throw new ArtifactError('resume_export_revision_mismatch', `Rendered ${format.toUpperCase()} bytes diverged from exact artifact revision ${artifactRow.id}.`, { artifactId: artifactRow.id, format, expectedHash, actualHash });
+  }
+  return { format, path: relativePath, hash: expectedHash, size: bytes.length, bytes };
+}
+
 function verifyReviewable(s, artifactId, decision) {
   const row = one(s, 'SELECT * FROM artifacts WHERE id=?', [artifactId]);
   if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`, { artifactId });
@@ -308,13 +364,11 @@ function verifyReviewable(s, artifactId, decision) {
       throw new ArtifactError('resume_stale_source_revision', `Resume ${artifactId} was built from a stale canonical source revision.`, { artifactId, sourceResumeRevisionId: resumeDocument.source_resume_revision_id, currentResumeRevisionId: currentSource?.id || null });
     }
     const renderManifest = parseJson(resumeDocument.render_manifest_json, null);
-    if (renderManifest?.format === 'pdf') {
-      if (renderManifest.status !== 'passed') throw new ArtifactError('resume_render_failed', `Resume ${artifactId} did not pass requested PDF rendering.`, { artifactId, renderStatus: renderManifest.status });
-      const pdfPath = path.join(s.p.ws, renderManifest.pdfPath || '');
-      if (!renderManifest.pdfPath || !fs.existsSync(pdfPath)) throw new ArtifactError('resume_render_failed', `Rendered PDF is missing for ${artifactId}.`, { artifactId, pdfPath: renderManifest.pdfPath || null });
-      const pdfHash = crypto.createHash('sha256').update(fs.readFileSync(pdfPath)).digest('hex');
-      if (pdfHash !== renderManifest.pdfHash) throw new ArtifactError('resume_render_failed', `Rendered PDF hash diverged for ${artifactId}.`, { artifactId, expectedHash: renderManifest.pdfHash, actualHash: pdfHash });
+    const requestedFormats = requestedResumeRenderFormats(renderManifest);
+    if (requestedFormats.length && renderManifest.status !== 'passed') {
+      throw new ArtifactError('resume_render_failed', `Resume ${artifactId} did not pass all requested document rendering.`, { artifactId, renderStatus: renderManifest.status });
     }
+    for (const format of requestedFormats) verifyResumeRenderExport(s, row, renderManifest, format);
   }
   if (decision === 'approved' && row.approval_status === 'rejected') {
     throw new ArtifactError('artifact_rejected_requires_redraft', `Rejected artifact ${artifactId} requires a new draft before approval.`, { artifactId });
@@ -352,6 +406,75 @@ export function preflightResumeArtifact(s, artifactId) {
     blockers,
     warnings: [...(validation.warnings || []), ...(renderManifest.warnings || [])],
     externalSideEffects: 'none',
+    submissionPerformed: false
+  };
+}
+
+export function previewArtifact(s, artifactId) {
+  const row = one(s, `SELECT artifacts.*,(SELECT MAX(revision) FROM artifacts current
+    WHERE current.series_key=artifacts.series_key) AS current_revision FROM artifacts WHERE id=?`, [artifactId]);
+  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`, { artifactId });
+  const artifact = rowProjection(row, row.current_revision);
+  const result = {
+    artifact,
+    exactRevision: { artifactId: artifact.id, revision: artifact.revision, contentHash: artifact.contentHash, revisionState: artifact.revisionState },
+    preview: { markdown: artifact.content },
+    downloads: [],
+    approvalRequired: artifact.approvalStatus !== 'approved',
+    submissionPerformed: false
+  };
+  if (row.type !== 'resume') return result;
+  const resumeDocument = one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [artifactId]);
+  if (!resumeDocument) throw new ArtifactError('resume_document_incomplete', `Resume ${artifactId} has no semantic document snapshot.`, { artifactId });
+  const renderManifest = parseJson(resumeDocument.render_manifest_json, { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] });
+  result.template = parseJson(resumeDocument.layout_profile_json, {});
+  result.renderManifest = renderManifest;
+  result.renderIssues = { blockers: renderManifest.blockers || [], warnings: renderManifest.warnings || [] };
+  for (const format of requestedResumeRenderFormats(renderManifest)) {
+    const rendered = resumeRenderExport(renderManifest, format);
+    if (rendered?.status !== 'passed') continue;
+    const verified = verifyResumeRenderExport(s, row, renderManifest, format);
+    result.downloads.push({ format, path: verified.path, hash: verified.hash, size: verified.size });
+  }
+  const pdf = resumeRenderExport(renderManifest, 'pdf');
+  if (pdf?.status === 'passed') result.preview.pageImages = pdf.pageImages || [];
+  return result;
+}
+
+export function downloadArtifact(s, artifactId, { format = 'markdown', destination }) {
+  if (!destination) throw new ArtifactError('artifact_download_path_required', 'Artifact download requires a destination path.', { artifactId });
+  const row = one(s, `SELECT artifacts.*,(SELECT MAX(revision) FROM artifacts current
+    WHERE current.series_key=artifacts.series_key) AS current_revision FROM artifacts WHERE id=?`, [artifactId]);
+  if (!row) throw new ArtifactError('unknown_artifact', `Unknown artifact: ${artifactId}`, { artifactId });
+  let bytes;
+  let sourceHash;
+  if (format === 'markdown') {
+    bytes = Buffer.from(normalizeArtifactContent(row.content));
+    sourceHash = row.content_hash;
+  } else {
+    if (row.type !== 'resume') throw new ArtifactError('artifact_format_unavailable', `${format.toUpperCase()} download is available only for resume artifacts.`, { artifactId, format });
+    const resumeDocument = one(s, 'SELECT render_manifest_json FROM artifact_resume_documents WHERE artifact_id=?', [artifactId]);
+    const renderManifest = parseJson(resumeDocument?.render_manifest_json, null);
+    const verified = verifyResumeRenderExport(s, row, renderManifest, format);
+    bytes = verified.bytes;
+    sourceHash = verified.hash;
+  }
+  const target = path.resolve(String(destination));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, bytes);
+  const downloadedHash = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  if (downloadedHash !== sourceHash) throw new ArtifactError('artifact_download_failed', `Downloaded ${format} bytes failed exact-revision hash verification.`, { artifactId, format, expectedHash: sourceHash, actualHash: downloadedHash });
+  return {
+    artifactId,
+    revision: Number(row.revision),
+    contentHash: row.content_hash,
+    revisionState: Number(row.revision) === Number(row.current_revision) ? 'current' : 'superseded',
+    approvalStatus: row.approval_status,
+    format,
+    path: target,
+    hash: sourceHash,
+    size: bytes.length,
+    approvalRequired: row.approval_status !== 'approved',
     submissionPerformed: false
   };
 }

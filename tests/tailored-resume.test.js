@@ -400,8 +400,8 @@ test('missing LaTeX dependency returns a typed blocker and never creates a fake 
   const manifest = renderResumePdf({ statePath, workspacePath, jobId: 'job_render', artifact: { contentHash: 'abc' }, document: completeResume(), layoutProfile: profile, engine: 'not-an-engine' });
   assert.equal(manifest.status, 'blocked');
   assert.ok(manifest.blockers.some(blocker => blocker.code === 'resume_render_failed'));
-  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-tailored.tex')), true);
-  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-tailored.pdf')), false);
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-abc.tex')), true);
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-abc.pdf')), false);
 });
 
 test('resume feedback exposes linked gaps and gates outcome comparisons on sample size', async () => {

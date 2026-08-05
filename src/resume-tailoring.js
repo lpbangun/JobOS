@@ -5,6 +5,7 @@ import { generateJson, llmConfig } from './llm.js';
 import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { currentResume, validateResumeDocument } from './resumes.js';
 import { renderResumePdf, resolveLayoutProfile } from './resume-renderer.js';
+import { renderResumeDocx } from './resume-docx.js';
 import { parseJson, tokenize } from './utils.js';
 import { writeYaml } from './workspace.js';
 import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
@@ -329,11 +330,11 @@ function dateText(entry) {
 function renderEntries(items, render) { return items.length ? items.map(render).join('\n\n') : ''; }
 function section(title, content) { return content ? `## ${title}\n\n${content}` : ''; }
 
-export function renderSemanticResumeMarkdown(document, { sectionOrder = ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections'], roleFamily = 'professional' } = {}) {
+export function renderSemanticResumeMarkdown(document, { sectionOrder = ['summary', 'experience', 'skills', 'education', 'credentials', 'projects', 'additionalSections'], roleFamily = 'professional', templateId = 'classic' } = {}) {
   const identity = document.identity;
   const contact = [identity.email, identity.phone, identity.location, ...(identity.links || []).map(link => `${link.label}: ${link.url}`)].filter(Boolean).join(' | ');
   const sections = {
-    summary: section(roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', document.summary?.text || ''),
+    summary: section(templateId === 'executive' || roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', document.summary?.text || ''),
     experience: section('Experience', renderEntries(document.experience || [], entry => `### ${entry.title} — ${entry.employer}\n${[entry.location, dateText(entry)].filter(Boolean).join(' | ')}${entry.bullets?.length ? `\n\n${entry.bullets.map(bullet => `- ${bullet.text}`).join('\n')}` : ''}`)),
     skills: section('Skills', (document.skills || []).map(skill => skill.name).join(' • ')),
     education: section('Education', renderEntries(document.education || [], entry => `### ${entry.degree || entry.field || 'Education'} — ${entry.institution}\n${[entry.field, entry.location, [entry.startDate, entry.endDate].filter(Boolean).join(' – ')].filter(Boolean).join(' | ')}`)),
@@ -348,7 +349,7 @@ function tailoringPrompt(job, profile, canonical, coverage, proofs, memory) {
   return `Return only typed resume transformations. Never return identity, employers, titles, dates, education, credentials, or LaTeX. Use only listed sourceBulletId, proofPointId, and selectedSkillIds. Every rewritten factual claim must cite active proof IDs. Schema: ${JSON.stringify(RESUME_TRANSFORMATION_SCHEMA)}\n\nCAREER MEMORY (bounded public guidance): ${JSON.stringify(memory)}\n\nJOB: ${JSON.stringify({ id: job.id, title: job.title, company: job.company, requirements: inventoryForJob(job) })}\nPROFILE: ${JSON.stringify({ id: profile.id, name: profile.name })}\nCANONICAL: ${JSON.stringify(canonical)}\nCOVERAGE: ${JSON.stringify(coverage)}\nPROOFS: ${JSON.stringify(proofs.map(proof => ({ id: proof.id, summary: proof.summary, metrics: proof.metrics, skills: proof.skills, sourceResumeEntryId: proof.source_resume_entry_id })))}`;
 }
 
-export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutProfileId = null, pageSize = 'letter', pageLimit = 2, density = 'standard', format = 'markdown' }) {
+export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutProfileId = null, templateId = null, accentColor = undefined, pageSize = 'letter', pageLimit = 2, density = 'standard', format = 'markdown' }) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) throw Error(`Unknown job: ${jobId}`);
   const profile = one(s, 'SELECT * FROM profiles WHERE id=?', [profileId]);
@@ -383,7 +384,10 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
       transformationWarnings.push(`LLM transformation failed; used deterministic complete resume: ${error.message}`);
     }
   }
-  const layoutProfile = resolveLayoutProfile(job, { layout: selectedLayout, sectionOrder, pageSize, pageLimit, density });
+  const resumePreferences = parseJson(profile.preferences_json, {}).resumeDocument || {};
+  const selectedTemplate = templateId || resumePreferences.defaultTemplate || 'classic';
+  const selectedAccent = accentColor === undefined ? resumePreferences.accentColor || null : accentColor;
+  const layoutProfile = resolveLayoutProfile(job, { layout: selectedLayout, template: selectedTemplate, accentColor: selectedAccent, sectionOrder, pageSize, pageLimit, density });
   const deriveState = currentDocument => {
     const selectedProofPointIds = selectedResumeProofIds(currentDocument);
     const coverage = buildRequirementCoverage(inventory, proofs, { selectedProofPointIds });
@@ -407,7 +411,7 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
   validation.warnings.push(...transformationWarnings.map(message => ({ code: 'resume_transformation_warning', message })));
   validation.warnings.push(...guidance.warnings.map(message => ({ code: 'resume_memory_rule_omitted', message })));
   const relativePath = path.join('jobs', job.id, 'artifacts', 'resume-tailored.md');
-  let renderManifest = { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] };
+  let renderManifest = { schemaVersion: 2, format: 'markdown', status: 'not_requested', templateId: layoutProfile.templateId, templateVersion: layoutProfile.templateVersion, accent: layoutProfile.accent, blockers: [], warnings: layoutProfile.accent.warning ? [layoutProfile.accent.warning] : [], exports: {} };
   const artifact = createArtifact(s, {
     jobId: job.id,
     profileId: profile.id,
@@ -421,19 +425,44 @@ export async function tailorResume(s, { jobId, profileId, sectionOrder, layoutPr
     ],
     warnings: [...validation.warnings.map(warning => warning.message), ...(memory.rules.length ? [`Career-memory guidance retrieved and deterministically projected: ${memory.rules.map(rule => rule.id).join(', ')}.`] : [])],
     series: { kind: 'resume' },
-    auditPayload: { sourceResumeRevisionId: source.id, semanticValidationStatus: validation.valid ? 'passed' : 'blocked', mode },
+    auditPayload: { sourceResumeRevisionId: source.id, semanticValidationStatus: validation.valid ? 'passed' : 'blocked', mode, templateId: layoutProfile.templateId, requestedFormat: format },
     mutate: (store, created) => run(store, 'INSERT INTO artifact_resume_documents (artifact_id,schema_version,source_resume_revision_id,document_json,coverage_json,validation_json,layout_profile_json,render_manifest_json) VALUES (?,?,?,?,?,?,?,?)', [created.id, 1, source.id, JSON.stringify(document), JSON.stringify(coverage), JSON.stringify(validation), JSON.stringify(layoutProfile), JSON.stringify(renderManifest)])
   });
-  if (format === 'pdf') {
-    renderManifest = validation.valid
-      ? { format: 'pdf', ...renderResumePdf({ statePath: s.p.state, workspacePath: s.p.ws, jobId: job.id, artifact, document, layoutProfile }) }
-      : { format: 'pdf', status: 'not_run', blockers: [ { code: 'resume_render_failed', message: 'PDF rendering was not attempted because semantic validation failed.' } ], warnings: [] };
-    validation.blockers.push(...(renderManifest.blockers || []));
-    validation.warnings.push(...(renderManifest.warnings || []));
-    validation.valid = validation.blockers.length === 0 && renderManifest.status === 'passed';
+  if (format !== 'markdown') {
+    const requestedFormats = format === 'both' ? ['pdf', 'docx'] : [format];
+    const exports = {};
+    if (validation.valid) {
+      if (requestedFormats.includes('pdf')) exports.pdf = renderResumePdf({ statePath: s.p.state, workspacePath: s.p.ws, jobId: job.id, artifact, document, layoutProfile });
+      if (requestedFormats.includes('docx')) exports.docx = await renderResumeDocx({ workspacePath: s.p.ws, jobId: job.id, artifact, document, layoutProfile });
+    } else {
+      for (const requestedFormat of requestedFormats) {
+        exports[requestedFormat] = { status: 'not_run', blockers: [{ code: 'resume_render_failed', message: `${requestedFormat.toUpperCase()} rendering was not attempted because semantic validation failed.` }], warnings: [] };
+      }
+    }
+    const renderBlockers = requestedFormats.flatMap(requestedFormat => exports[requestedFormat]?.blockers || []);
+    const renderWarnings = requestedFormats.flatMap(requestedFormat => exports[requestedFormat]?.warnings || []);
+    const status = requestedFormats.every(requestedFormat => exports[requestedFormat]?.status === 'passed') ? 'passed' : 'blocked';
+    renderManifest = {
+      schemaVersion: 2,
+      format,
+      status,
+      templateId: layoutProfile.templateId,
+      templateVersion: layoutProfile.templateVersion,
+      accent: layoutProfile.accent,
+      sourceArtifactId: artifact.id,
+      sourceArtifactHash: artifact.contentHash,
+      exports,
+      ...(exports.pdf || {}),
+      ...(exports.docx ? { docxPath: exports.docx.docxPath, docxHash: exports.docx.docxHash, docxTextPreflight: exports.docx.textPreflight, docxPagination: exports.docx.pagination } : {}),
+      blockers: renderBlockers,
+      warnings: renderWarnings
+    };
+    validation.blockers.push(...renderBlockers);
+    validation.warnings.push(...renderWarnings);
+    validation.valid = validation.blockers.length === 0 && status === 'passed';
     run(s, 'UPDATE artifact_resume_documents SET validation_json=?,render_manifest_json=? WHERE artifact_id=?', [JSON.stringify(validation), JSON.stringify(renderManifest), artifact.id]);
     run(s, 'UPDATE artifacts SET warnings_json=? WHERE id=?', [JSON.stringify(validation.warnings.map(warning => warning.message)), artifact.id]);
-    audit(s, 'artifact.resume_render_completed', 'artifact', artifact.id, { sourceResumeRevisionId: source.id, renderStatus: renderManifest.status, finalValidationStatus: validation.valid ? 'passed' : 'blocked', mode });
+    audit(s, 'artifact.resume_render_completed', 'artifact', artifact.id, { sourceResumeRevisionId: source.id, renderStatus: renderManifest.status, finalValidationStatus: validation.valid ? 'passed' : 'blocked', mode, templateId: layoutProfile.templateId, formats: requestedFormats });
     save(s);
   }
   const sidecarBase = path.join(s.p.ws, 'jobs', job.id, 'artifacts', 'resume-tailored');

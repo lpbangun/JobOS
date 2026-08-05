@@ -9,15 +9,16 @@
 \usepackage{xcolor}
 \definecolor{jobosaccent}{HTML}{%%ACCENT%%}
 \hypersetup{colorlinks=true,urlcolor=jobosaccent,linkcolor=jobosaccent}
+\renewcommand{\familydefault}{\sfdefault}
 \pagestyle{empty}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{3pt}
-\setlist[itemize]{leftmargin=1.25em,itemsep=%%ITEM_SEP%%,topsep=2pt,parsep=0pt}
-\titleformat{\section}{\large\bfseries\color{jobosaccent}}{}{0pt}{}[\vspace{-2pt}\color{jobosaccent}\titlerule]
+\setlist[itemize]{leftmargin=1.2em,itemsep=%%ITEM_SEP%%,topsep=2pt,parsep=0pt}
+\titleformat{\section}{\normalsize\bfseries\color{jobosaccent}\MakeUppercase}{}{0pt}{}[\vspace{-3pt}\color{jobosaccent}\titlerule]
 \titlespacing*{\section}{0pt}{%%SECTION_SPACE%%}{4pt}
-\newcommand{\jobosname}[1]{\begin{center}{\LARGE\bfseries #1}\end{center}\vspace{-5pt}}
-\newcommand{\joboscontact}[1]{\begin{center}#1\end{center}}
-\newcommand{\jobosrole}[3]{\textbf{#1}\hfill #3\\\textit{#2}}
+\newcommand{\jobosname}[1]{{\fontsize{20}{22}\selectfont\bfseries #1}\\[-1pt]{\color{jobosaccent}\rule{\textwidth}{1.2pt}}}
+\newcommand{\joboscontact}[1]{\small #1\normalsize\vspace{2pt}}
+\newcommand{\jobosrole}[3]{\textbf{#1}\hfill\textcolor{jobosaccent}{#3}\\#2}
 \newcommand{\jobosproject}[2]{\textbf{#1}\hfill #2}
 \begin{document}
 \raggedbottom

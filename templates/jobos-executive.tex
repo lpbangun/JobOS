@@ -1,0 +1,25 @@
+\documentclass[10pt,%%PAGE_SIZE%%]{article}
+\usepackage[margin=%%MARGIN%%]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\definecolor{jobosaccent}{HTML}{%%ACCENT%%}
+\hypersetup{colorlinks=true,urlcolor=jobosaccent,linkcolor=jobosaccent}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\setlist[itemize]{leftmargin=1.28em,itemsep=%%ITEM_SEP%%,topsep=2pt,parsep=0pt}
+\titleformat{\section}{\large\scshape\color{jobosaccent}}{}{0pt}{}[\vspace{-2pt}\color{jobosaccent}\titlerule]
+\titlespacing*{\section}{0pt}{%%SECTION_SPACE%%}{5pt}
+\newcommand{\jobosname}[1]{\begin{center}{\fontsize{21}{23}\selectfont\bfseries #1}\\[2pt]{\color{jobosaccent}\rule{0.42\textwidth}{1pt}}\end{center}\vspace{-5pt}}
+\newcommand{\joboscontact}[1]{\begin{center}\small #1\normalsize\end{center}}
+\newcommand{\jobosrole}[3]{\textbf{#1}\hfill\textcolor{jobosaccent}{#3}\\\textit{#2}}
+\newcommand{\jobosproject}[2]{\textbf{#1}\hfill #2}
+\begin{document}
+\raggedbottom
+%%BODY%%
+\end{document}

@@ -77,31 +77,43 @@ function answerRowFingerprint(answer) {
 }
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 
-function freezeApprovedResumePdf(s, renderManifest) {
-  if (renderManifest?.format !== 'pdf' || renderManifest?.status !== 'passed') return null;
-  const pdfPath = String(renderManifest.pdfPath || '').replaceAll('\\', '/');
-  const pdfHash = String(renderManifest.pdfHash || '');
-  if (!pdfPath || pdfPath.length > 512 || path.isAbsolute(pdfPath) || pdfPath.split('/').includes('..')
-    || !pdfPath.toLowerCase().endsWith('.pdf') || !SHA256_HEX.test(pdfHash)) {
-    throw packetError('resume_pdf_binding_invalid', 'Approved resume render manifest does not contain a bounded PDF path and SHA-256 hash');
+function freezeApprovedResumeExports(s, artifact, renderManifest) {
+  const requestedFormats = renderManifest?.format === 'both'
+    ? ['pdf', 'docx']
+    : ['pdf', 'docx'].includes(renderManifest?.format) ? [renderManifest.format] : [];
+  if (!requestedFormats.length) return {};
+  if (renderManifest.status !== 'passed') throw packetError('resume_render_binding_invalid', 'Approved resume exports did not pass render validation');
+  if (Number(renderManifest.schemaVersion || 1) >= 2 && (renderManifest.sourceArtifactId !== artifact.id || renderManifest.sourceArtifactHash !== artifact.content_hash)) {
+    throw packetError('resume_export_revision_mismatch', 'Approved resume exports are not bound to the exact approved artifact revision');
   }
-  let workspace;
-  let resolved;
-  let bytes;
-  try {
-    workspace = fs.realpathSync(s.p.ws);
-    resolved = fs.realpathSync(path.resolve(workspace, pdfPath));
-    const outside = path.relative(workspace, resolved);
-    if (outside.startsWith('..') || path.isAbsolute(outside)) throw new Error('outside workspace');
-    bytes = fs.readFileSync(resolved);
-  } catch {
-    throw packetError('resume_pdf_missing', 'Approved rendered resume PDF bytes are missing');
+  const frozen = {};
+  for (const format of requestedFormats) {
+    const rendered = renderManifest.exports?.[format] || renderManifest;
+    const suffix = format === 'pdf' ? 'pdf' : 'docx';
+    const relativePath = String(rendered[`${suffix}Path`] || '').replaceAll('\\', '/');
+    const expectedHash = String(rendered[`${suffix}Hash`] || '');
+    if (rendered.status !== 'passed' || !relativePath || relativePath.length > 512 || path.isAbsolute(relativePath) || relativePath.split('/').includes('..')
+      || !relativePath.toLowerCase().endsWith(`.${suffix}`) || !SHA256_HEX.test(expectedHash)) {
+      throw packetError(`resume_${suffix}_binding_invalid`, `Approved resume render manifest does not contain a bounded ${suffix.toUpperCase()} path and SHA-256 hash`);
+    }
+    let workspace;
+    let resolved;
+    let bytes;
+    try {
+      workspace = fs.realpathSync(s.p.ws);
+      resolved = fs.realpathSync(path.resolve(workspace, relativePath));
+      const outside = path.relative(workspace, resolved);
+      if (outside.startsWith('..') || path.isAbsolute(outside)) throw new Error('outside workspace');
+      bytes = fs.readFileSync(resolved);
+    } catch {
+      throw packetError(`resume_${suffix}_missing`, `Approved rendered resume ${suffix.toUpperCase()} bytes are missing`);
+    }
+    const actualHash = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (actualHash !== expectedHash) throw packetError('resume_export_revision_mismatch', `Approved rendered resume ${suffix.toUpperCase()} bytes no longer match the exact revision manifest`);
+    frozen[`${suffix}Path`] = relativePath;
+    frozen[`${suffix}Hash`] = expectedHash;
   }
-  const actualHash = crypto.createHash('sha256').update(bytes).digest('hex');
-  if (actualHash !== pdfHash) {
-    throw packetError('resume_pdf_diverged', 'Approved rendered resume PDF bytes no longer match the render manifest');
-  }
-  return { pdfPath, pdfHash };
+  return frozen;
 }
 
 
@@ -129,7 +141,7 @@ export function buildPacketProjection(s, { jobId, profileId }) {
   const currentCover = one(s, `SELECT * FROM artifacts WHERE job_id=? AND profile_id=? AND type='cover_letter' ORDER BY revision DESC LIMIT 1`, [jobId, profileId]);
   const resumeDocument = currentResume ? one(s, 'SELECT * FROM artifact_resume_documents WHERE artifact_id=?', [currentResume.id]) : null;
   const resumeRenderManifest = parseJson(resumeDocument?.render_manifest_json, null);
-  const frozenResumePdf = freezeApprovedResumePdf(s, resumeRenderManifest);
+  const frozenResumeExports = currentResume ? freezeApprovedResumeExports(s, currentResume, resumeRenderManifest) : {};
 
   if (!currentResume || currentResume.approval_status !== 'approved') {
     throw packetError('artifact_unapproved', 'The current resume revision is not approved');
@@ -174,8 +186,9 @@ export function buildPacketProjection(s, { jobId, profileId }) {
       revision: Number(currentResume.revision),
       contentHash: currentResume.content_hash,
       sourceResumeRevisionId: resumeDocument?.source_resume_revision_id || null,
-      pdfPath: frozenResumePdf?.pdfPath || null,
-      pdfHash: frozenResumePdf?.pdfHash || null
+      pdfPath: frozenResumeExports.pdfPath || null,
+      pdfHash: frozenResumeExports.pdfHash || null,
+      ...(frozenResumeExports.docxPath ? { docxPath: frozenResumeExports.docxPath, docxHash: frozenResumeExports.docxHash } : {})
     },
     coverLetter: coverEntry,
     proofPointIds: (readiness.materials.proofs.proofPointIds || []).slice().sort()

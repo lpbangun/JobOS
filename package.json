@@ -23,6 +23,7 @@
   ],
   "files": [
     "src/",
+    "templates/",
     "docs/jobos-tui.svg",
     "docs/AGENT_GUIDE.md",
     "docs/CONFIGURATION.md",
@@ -54,6 +55,7 @@
     "@langchain/langgraph": "1.4.8",
     "cheerio": "^1.2.0",
     "diff": "^9.0.0",
+    "jszip": "^3.10.1",
     "mammoth": "^1.12.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
@@ -78,7 +80,6 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "jszip": "^3.10.1",
     "playwright": "^1.61.1"
   }
 }

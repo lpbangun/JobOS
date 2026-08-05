@@ -99,7 +99,7 @@ function bindingValue(s, packet, binding, field) {
     }
     const manifest = parseJson(artifact.render_manifest_json, null);
     const frozen = packet.materials?.resume || {};
-    if (manifest?.format !== 'pdf'
+    if (!['pdf', 'both'].includes(manifest?.format)
       || manifest?.status !== 'passed'
       || frozen.artifactId !== binding.artifactId
       || manifest.pdfPath !== frozen.pdfPath

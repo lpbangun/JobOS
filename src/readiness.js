@@ -210,10 +210,10 @@ export function compileApplicationReadiness(s, { jobId, profileId, includePacket
       { artifactId: resume.artifactId, ...item }
     ));
   }
-  if (resumeRenderManifest?.format === 'pdf' && resumeRenderManifest.status !== 'passed' && !(resumeValidation?.blockers || []).some(item => item.code === 'resume_render_failed' || item.code === 'resume_render_text_invalid' || item.code === 'resume_page_budget_exceeded')) blockers.push(blocker(
+  if (['pdf', 'docx', 'both'].includes(resumeRenderManifest?.format) && resumeRenderManifest.status !== 'passed' && !(resumeValidation?.blockers || []).some(item => item.code === 'resume_render_failed' || item.code === 'resume_render_text_invalid' || item.code === 'resume_page_budget_exceeded' || item.code === 'resume_docx_layout_invalid')) blockers.push(blocker(
     'resume_render_failed',
-    'Requested PDF render validation did not pass.',
-    `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --format pdf --json" after installing or correcting the local renderer.`,
+    'Requested resume document render validation did not pass.',
+    `Rerun "jobos tailor resume --job ${jobId} --profile ${profileId} --format ${resumeRenderManifest.format} --json" after correcting the local renderer.`,
     { renderStatus: resumeRenderManifest.status }
   ));
   if (duplicates.length) blockers.push(blocker(
