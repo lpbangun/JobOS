@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { all, one, run, save, audit } from './db.js';
 import { id, now, parseJson, slug, splitCsv } from './utils.js';
 import { writeYaml, writeMd } from './workspace.js';
@@ -7,6 +9,13 @@ import { compareFitDecisions, deserializeFitScore, qualifiesForHighFit, score } 
 import { getAdapter } from './discovery/adapters.js';
 import { classifyLiveness, deserializeLiveness, normalizeLiveness, postingLivenessHandoff } from './discovery/liveness.js';
 import { createDiscoveryBudget } from './discovery/http.js';
+
+const SAMPLE_OFFLINE_SEARCH_NAME = 'Sample offline Greenhouse';
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+export function sampleOfflineDiscoveryFixturePath() {
+  return path.join(PACKAGE_ROOT, 'samples', 'discovery-greenhouse.json');
+}
 
 function parseConfig(value) {
   if (!value) return {};
@@ -153,6 +162,38 @@ export function createSearch(s, { name, profileId, adapter, config = {}, minFit 
   audit(s, 'search.saved', 'saved_search', sid, { profileId, adapter, name });
   syncSearch(s, row); save(s);
   return serializeSearch(row);
+}
+
+/**
+ * First-run offline discovery preset: Greenhouse adapter + bundled fixture.
+ * Idempotent per profile by fixture path identity.
+ */
+export function ensureSampleOfflineSearch(s, { profileId, name = SAMPLE_OFFLINE_SEARCH_NAME, minFit = 50 } = {}) {
+  if (!profileId) throw Error('Missing profileId');
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const fixture = sampleOfflineDiscoveryFixturePath();
+  if (!existsSync(fixture)) {
+    throw Error(`Sample discovery fixture missing: ${fixture}`);
+  }
+  const existing = listSearches(s).find(item => {
+    if (item.profileId !== profileId && item.profile_id !== profileId) return false;
+    const cfg = item.config || parseJson(item.config_json, {});
+    return item.adapter === 'greenhouse' && String(cfg.fixture || '') === fixture;
+  });
+  if (existing) return { ...existing, created: false, fixture };
+  const created = createSearch(s, {
+    name,
+    profileId,
+    adapter: 'greenhouse',
+    config: {
+      boardToken: 'acme-sample',
+      companyLabel: 'Acme Learning (sample fixture)',
+      fixture,
+      notes: 'Bundled offline first-run sample. No network required.'
+    },
+    minFit
+  });
+  return { ...created, created: true, fixture };
 }
 
 export function listSearches(s) {

@@ -516,7 +516,65 @@ export function discoveryHealth(s, { profileId = null } = {}) {
       startedAt: item.startedAt,
       finishedAt: item.finishedAt
     }));
-  return { searches, runs, browser: 'optional', externalSideEffects: 'off_by_default' };
+  const recentFailures = [];
+  for (const item of runs) {
+    if (item.status !== 'failed' && item.status !== 'partial') continue;
+    const outputs = item.counts || {};
+    recentFailures.push({
+      searchId: item.id,
+      searchName: item.actionId || 'discovery',
+      status: item.status,
+      error: item.error || null,
+      message: item.error || (item.status === 'partial' ? 'partial run' : 'failed'),
+      startedAt: item.startedAt
+    });
+  }
+  // Prefer structured discovery.run outputs when present on failed automation rows.
+  const discoveryRows = all(s, `SELECT id,inputs_json,outputs_json,status,error,started_at,finished_at
+    FROM automation_runs
+    WHERE action_id IN ('discover.run','daily_discovery') OR trigger_name IN ('discover.run','daily')
+    ORDER BY created_at DESC LIMIT 12`);
+  for (const row of discoveryRows) {
+    if (row.status !== 'failed' && row.status !== 'partial') continue;
+    const inputs = parseJson(row.inputs_json, {});
+    if (profileId && inputs.profileId && inputs.profileId !== profileId) continue;
+    const outputs = parseJson(row.outputs_json, {});
+    const failures = Array.isArray(outputs.failures) ? outputs.failures : [];
+    if (failures.length) {
+      for (const failure of failures.slice(0, 3)) {
+        const err = failure.errors?.[0] || {};
+        recentFailures.push({
+          searchId: failure.searchId || outputs.searchId || row.id,
+          searchName: failure.searchName || outputs.searchName || 'search',
+          status: failure.status || row.status,
+          error: err.message || row.error || null,
+          message: err.message || row.error || failure.status || row.status,
+          startedAt: row.started_at
+        });
+      }
+    } else if (row.error) {
+      recentFailures.push({
+        searchId: outputs.searchId || row.id,
+        searchName: outputs.searchName || 'discovery',
+        status: row.status,
+        error: row.error,
+        message: row.error,
+        startedAt: row.started_at
+      });
+    }
+  }
+  return {
+    searches,
+    runs,
+    recentFailures: recentFailures.slice(0, 8),
+    sampleOfflineSearch: {
+      name: 'Sample offline Greenhouse',
+      adapter: 'greenhouse',
+      note: 'Enter in discovery overlay when no searches exist'
+    },
+    browser: 'optional',
+    externalSideEffects: 'off_by_default'
+  };
 }
 
 export function profileAgentContext(s, profileId) {

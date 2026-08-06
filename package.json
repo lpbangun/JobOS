@@ -23,6 +23,7 @@
   ],
   "files": [
     "src/",
+    "samples/",
     "docs/jobos-tui.svg",
     "docs/AGENT_GUIDE.md",
     "docs/CONFIGURATION.md",

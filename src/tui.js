@@ -34,7 +34,7 @@ import { updateJobStatus } from './jobs.js';
 import { getInterviewDebrief } from './interview.js';
 import { transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
 import { refreshMemoryProjection } from './career-memory-projections.js';
-import { createSearch } from './discovery.js';
+import { createSearch, ensureSampleOfflineSearch, runSavedSearch } from './discovery.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -405,11 +405,29 @@ function composeModal(background, modal, width, bodyStart, bodyHeight) {
   return output;
 }
 
-function fitLabel(fit) {
+/** User-facing FIT chip. Never says "unscored/unknown" when a score contract exists. */
+export function fitLabel(fit) {
   if (!fit) return 'unscored';
-  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy unknown' : `legacy ${fit.overall}/100`;
-  if (fit.overall == null) return 'unknown';
-  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' review' : ''}`;
+  if (fit.contract === 'legacy_unversioned') {
+    return fit.overall == null ? 'legacy unknown' : `legacy ${fit.overall}/100`;
+  }
+  const status = String(fit.scoreStatus || '').trim();
+  const coverage = Number.isFinite(Number(fit.evidenceCoverage)) ? Number(fit.evidenceCoverage) : null;
+  if (fit.overall == null) {
+    if (status === 'insufficient_evidence') {
+      return coverage == null ? 'low evidence' : `low evidence · ${coverage}%`;
+    }
+    if (status === 'review_required') {
+      return coverage == null ? 'review needed' : `review · ${coverage}%`;
+    }
+    if (status) return status.replaceAll('_', ' ');
+    // Contract present but no overall yet — still not "unscored".
+    return coverage == null ? 'scored · no overall' : `scored · ${coverage}% cov`;
+  }
+  const base = `${fit.overall}/100`;
+  if (status === 'review_required') return `${base} review`;
+  if (status === 'insufficient_evidence') return `${base} low evidence`;
+  return base;
 }
 
 function filteredJobs(model, filter) {
@@ -1437,16 +1455,32 @@ function overlayPanel(model, state, width, height, color) {
     }
     body.push('', keyHints('due'), 'Enter jumps to the selected task’s job');
   } else if (state.overlay === 'discovery') {
-    body = [
-      'SAVED SEARCHES / RUNS',
-      ...model.discovery.searches.map(item => `${item.name || item.id} · ${item.adapter} · last ${item.lastRunAt || item.last_run_at || 'never'}`),
-      ...model.discovery.runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`),
-      '',
-      'NEW JOB REVIEW',
-      ...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · posting ${item.postingLiveness?.status || 'uncertain'} · fit ${fitLabel(item.fit)}${item.highFit ? ' · high' : ''}`)
-    ];
-    if (!model.discovery.searches.length && !model.discovery.runs.length) body.splice(1, 0, 'No discovery searches configured.');
-    if (!model.discovery.queue.length) body.push('No new jobs awaiting review.');
+    const searches = model.discovery.searches || [];
+    const runs = model.discovery.runs || [];
+    const failures = model.discovery.recentFailures || [];
+    body = ['SAVED SEARCHES / RUNS'];
+    if (!searches.length) {
+      body.push(
+        'No discovery searches configured.',
+        '▶ Enter adds the sample offline Greenhouse search (no network).',
+        'Then d runs daily against that fixture board.'
+      );
+    } else {
+      body.push(...searches.map(item => `${item.name || item.id} · ${item.adapter} · last ${item.lastRunAt || item.last_run_at || 'never'}`));
+    }
+    if (runs.length) {
+      body.push(...runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`));
+    }
+    if (failures.length) {
+      body.push('', 'RECENT FAILURES (isolated — other sources still run)');
+      body.push(...failures.slice(0, 4).map(item => `! ${item.searchName || item.searchId || 'search'} · ${item.message || item.error || item.status}`));
+    }
+    body.push('', 'NEW JOB REVIEW');
+    if (model.discovery.queue.length) {
+      body.push(...model.discovery.queue.map(item => `${item.id === state.selectedDiscoveryJobId ? '▶' : ' '} ${item.title} · ${item.company} · posting ${item.postingLiveness?.status || 'uncertain'} · fit ${fitLabel(item.fit)}${item.highFit ? ' · high' : ''}`));
+    } else {
+      body.push('No new jobs awaiting review.');
+    }
     body.push('', keyHints('discovery'));
   } else if (state.overlay === 'help') {
     const context = state.helpContextOverlay || 'dashboard';
@@ -2390,6 +2424,7 @@ export class JobosTui {
   }
 
   openDocuments(artifactId = null) {
+    this.refresh({ disk: true, render: false });
     this.state.selectedArtifactId = artifactId || this.state.selectedArtifactId;
     this.openOverlay('docs');
     this.syncDocumentSelection();
@@ -2397,6 +2432,9 @@ export class JobosTui {
   }
 
   openOverlay(name) {
+    if (['docs', 'review', 'discovery', 'network', 'due', 'log'].includes(name)) {
+      this.refresh({ disk: true, render: false });
+    }
     this.state.overlay = name;
     this.state.overlayIndex = 0;
     this.state.docsDiff = false;
@@ -2408,7 +2446,11 @@ export class JobosTui {
     } else {
       if (name === 'memory') this.state.memoryView = 'observations';
       if (name === 'docs') this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
-      this.state.status = `${name} overlay · Esc closes`;
+      if (name === 'discovery' && !(this.model.discovery?.searches || []).length) {
+        this.state.status = 'No searches yet · Enter adds the sample offline Greenhouse search';
+      } else {
+        this.state.status = `${name} overlay · Esc closes`;
+      }
     }
     this.render();
   }
@@ -2640,7 +2682,9 @@ export class JobosTui {
       this.state.error = error.message;
     } finally {
       this.state.busy = null;
-      this.refresh({ disk: false });
+      // Always reread SQLite so CLI/MCP writers and same-process domain tools
+      // both surface artifacts, FIT, and discovery in the live TUI.
+      this.refresh({ disk: true });
       if (succeeded && setupAction) {
         this.state.overlay = 'setup';
         this.focusNextSetupAction();
@@ -2995,6 +3039,15 @@ export class JobosTui {
     }
     if (item?.target === 'log') {
       this.openOverlay('log');
+      return;
+    }
+    if (item?.target === 'build-network' || item?.actionId === 'build_network') {
+      if (item.jobId) this.state.selectedJobId = item.jobId;
+      this.openOverlay('build-network');
+      return;
+    }
+    if (item?.target === 'discovery' || item?.actionId === 'run_discovery') {
+      this.openOverlay('discovery');
       return;
     }
     if (!item?.jobId) {
@@ -3644,13 +3697,57 @@ export class JobosTui {
       this.state.overlay = null;
       this.state.filter = 'all';
       this.state.selectedJobId = jobId;
-      this.refresh({ disk: false });
+      this.refresh({ disk: true });
       this.state.status = 'Discovery job saved · now selected in the main list.';
     } catch (error) {
       this.state.error = error.message;
       this.state.status = `Discovery open failed: ${error.message}`;
     }
     this.render();
+  }
+
+  async seedSampleDiscoveryAndRun() {
+    const profileId = this.state.profileId || this.model.profileId;
+    if (!profileId) {
+      this.state.error = 'No profile';
+      this.state.status = 'Create a profile before adding a discovery search.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'discovery-sample';
+    this.state.error = null;
+    this.state.status = 'Adding sample offline Greenhouse search…';
+    this.render();
+    try {
+      const seeded = ensureSampleOfflineSearch(this.store, { profileId });
+      let imported = 0;
+      try {
+        const run = await runSavedSearch(this.store, seeded.id || seeded.name);
+        imported = Number(run?.imported || run?.counts?.imported || 0);
+      } catch (error) {
+        // Search is still saved; surface run failure without undoing seed.
+        this.state.error = error.message;
+        this.refresh({ disk: true });
+        this.state.status = `Sample search saved (${seeded.name}) but run failed: ${error.message}`;
+        return;
+      }
+      this.refresh({ disk: true });
+      const queue = this.model.discovery?.queue?.length || 0;
+      this.state.status = seeded.created === false
+        ? `Sample search already present · run imported ${imported} · queue ${queue}`
+        : `Sample offline search added · imported ${imported} · ${queue} new job(s) to review`;
+      if (this.model.discovery?.queue?.[0]?.id) {
+        this.state.selectedDiscoveryJobId = this.model.discovery.queue[0].id;
+      }
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Sample discovery failed: ${error.message}`;
+      this.refresh({ disk: true });
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
   }
 
   decideDiscovery(status) {
@@ -4421,7 +4518,13 @@ export class JobosTui {
       return true;
     }
     if (this.state.overlay === 'discovery') {
-      if (isEnter) return this.openDiscoverySelection();
+      if (isEnter) {
+        if (!(this.model.discovery?.searches || []).length) {
+          void this.seedSampleDiscoveryAndRun();
+          return true;
+        }
+        return this.openDiscoverySelection();
+      }
       if (moveDelta === 1) return this.moveDiscoverySelection(1);
       if (moveDelta === -1) return this.moveDiscoverySelection(-1);
       if (value === 'A') return this.decideDiscovery('saved');

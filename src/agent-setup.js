@@ -70,11 +70,16 @@ async function findExecutable(command, env = process.env) {
   return null;
 }
 
-function runCommand(command, args, { cwd, env = process.env, timeoutMs = 10_000 } = {}) {
+function runCommand(command, args, { cwd, env = process.env, timeoutMs = 10_000, stdin = null } = {}) {
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn(command, args, { cwd, env, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(command, args, {
+        cwd,
+        env,
+        shell: false,
+        stdio: [stdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe']
+      });
     } catch (error) {
       resolve({ ok: false, exitCode: null, signal: null, output: '', error: error?.code || 'spawn_failed' });
       return;
@@ -88,6 +93,14 @@ function runCommand(command, args, { cwd, env = process.env, timeoutMs = 10_000 
     };
     child.stdout.on('data', append);
     child.stderr.on('data', append);
+    if (stdin != null) {
+      try {
+        child.stdin.write(String(stdin));
+        child.stdin.end();
+      } catch {
+        // Child may exit before stdin is fully written; probe/output still decide success.
+      }
+    }
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     const finish = result => {
       if (settled) return;
@@ -156,7 +169,16 @@ export async function connectAgentClient(name, {
       command: client.command
     });
   }
-  const processOptions = { cwd: root, env, timeoutMs };
+  const processOptions = {
+    cwd: root,
+    env: {
+      ...env,
+      // Hermes MCP add prompts to enable tools; accept non-interactively when possible.
+      HERMES_ACCEPT_HOOKS: env.HERMES_ACCEPT_HOOKS || '1'
+    },
+    // Hermes MCP discovery + tool enable can exceed the default 10s probe budget.
+    timeoutMs: client.name === 'hermes' ? Math.max(timeoutMs, 45_000) : timeoutMs
+  };
   const before = await probeClient(client.name, executable, processOptions);
   const args = registrationArgs(client.name, { cliPath: resolvedCli, workspace: root });
   const registration = {
@@ -190,7 +212,11 @@ export async function connectAgentClient(name, {
       verification: before
     };
   }
-  const applied = await runCommand(executable, args, processOptions);
+  const applied = await runCommand(executable, args, {
+    ...processOptions,
+    // Hermes prompts "Enable all N tools? [Y/n/select]" — answer yes without a TTY.
+    stdin: client.name === 'hermes' ? 'Y\n' : null
+  });
   if (!applied.ok) {
     throw new AgentSetupError('agent_registration_failed', `Could not register JobOS with ${client.name}`, {
       client: client.name,

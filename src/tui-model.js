@@ -88,7 +88,12 @@ function stageState(s, context) {
   ];
 }
 
-function priorityStrip(s, jobs, profileId, at, recommendedAction) {
+function priorityStrip(s, jobs, profileId, at, recommendedAction, {
+  selectedJobId = null,
+  selectedSignals = null,
+  networkSetupStatus = null,
+  discoverySearchCount = 0
+} = {}) {
   const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
     FROM applications JOIN jobs ON jobs.id=applications.job_id
     LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.profile_id=applications.profile_id AND tasks.status='open'
@@ -97,6 +102,13 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction) {
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
   const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
+  const networkGap = Boolean(
+    selectedJobId
+    && (selectedSignals?.artifacts || 0) > 0
+    && (selectedSignals?.path === 'none' || !selectedSignals?.path)
+    && networkSetupStatus === 'not_started'
+  );
+  const discoveryGap = Boolean(profileId && discoverySearchCount === 0 && jobs.length > 0);
   return [
     {
       kind: recommendedAction?.state || 'action',
@@ -110,6 +122,22 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction) {
       kind: 'interview',
       jobId: interview.job_id,
       text: `${interview.title || 'Interview prep'} · ${interview.company}${interview.due_at ? ` · ${interview.due_at.slice(0, 16)}` : ''}`
+    } : null,
+    networkGap ? {
+      kind: 'network',
+      jobId: selectedJobId,
+      text: 'Build network (b) · no reachable paths yet',
+      actionId: 'build_network',
+      target: 'build-network',
+      source: 'network'
+    } : null,
+    discoveryGap ? {
+      kind: 'discovery',
+      jobId: selectedJobId || null,
+      text: 'Add sample offline search · Enter in discovery (s)',
+      actionId: 'run_discovery',
+      target: 'discovery',
+      source: 'discovery'
     } : null,
     newJobs.length ? {
       kind: 'new',
@@ -512,7 +540,17 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   const onboarding = buildOnboardingStatus(s, { profileId, jobId: selectedJobId, asOf: at });
   const nextAction = recommendedAction(onboarding, details, jobs, selectedId);
   onboarding.recommendedAction = nextAction;
-  const priority = priorityStrip(s, jobs, selectedProfile, at, nextAction);
+  const selectedSignals = jobs.find(job => job.id === selectedId)?.signals || null;
+  const discovery = {
+    ...discoveryHealth(s, { profileId: selectedProfile }),
+    queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions)
+  };
+  const priority = priorityStrip(s, jobs, selectedProfile, at, nextAction, {
+    selectedJobId: selectedId,
+    selectedSignals,
+    networkSetupStatus,
+    discoverySearchCount: discovery.searches?.length || 0
+  });
   return {
     version: 2,
     generatedAt: at,
@@ -556,7 +594,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions) },
+    discovery,
     networkSetup: {
       status: networkSetupStatus,
       intent: {

@@ -201,7 +201,10 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
 
   const searches = pid ? all(s, 'SELECT id,adapter FROM saved_searches WHERE profile_id=? ORDER BY id', [pid]) : [];
   steps.push(step('source', 'canonical', false, searches.length ? 'optional_ready' : 'optional_incomplete', searches.length ? 'A canonical saved search is configured.' : 'Saved discovery is optional; local import remains available.', [],
-    pid && !searches.length ? [action('create_source', 'Create saved search', `jobos searches create <name> --profile ${pid} --adapter <adapter> --json`)] : [],
+    pid && !searches.length ? [
+      action('create_source', 'Add sample offline search', `jobos searches create "Sample offline Greenhouse" --profile ${pid} --adapter greenhouse --board-token acme-sample --fixture samples/discovery-greenhouse.json --json`),
+      action('create_source_custom', 'Create custom saved search', `jobos searches create <name> --profile ${pid} --adapter <adapter> --json`)
+    ] : [],
     { searchCount: searches.length, searchIds: searches.map(item => item.id), adapters: [...new Set(searches.map(item => item.adapter))] }));
 
   const memory = memorySummary(s, pid, canonicalAsOf);
