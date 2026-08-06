@@ -56,7 +56,11 @@ test('populated dashboard prioritizes jobs and selected action while technical d
 
   assert.match(screen, /JOBOS · PM EdTech/);
   assert.match(screen, /NEXT UP/);
-  assert.deepEqual(model.priority.map(item => item.kind), ['action', 'new']);
+  assert.equal(model.priority[0].kind, 'action');
+  assert.ok(model.priority.some(item => item.actionId === 'unlock_fit'));
+  assert.ok(model.priority.some(item => item.kind === 'network'));
+  assert.ok(model.priority.some(item => item.kind === 'discovery'));
+  assert.ok(model.priority.some(item => item.kind === 'new'));
   assert.doesNotMatch(screen, /QUEUE|INTERVIEW|FAILURE/, 'priority metadata and empty categories stay out of the calm default view');
   assert.match(screen, /┌ JOBS /);
   assert.match(screen, /\[today\] all high review ready applied interview/);
@@ -298,7 +302,7 @@ test('compact terminals keep context reachable and switch to a focused chat page
   assert.match(dashboard, /┌ JOBS /);
   assert.match(dashboard, /SELECTED JOB/);
   assert.doesNotMatch(dashboard, /┌ ASSISTANT/);
-  assert.match(dashboard, /FIT .*STATUS|FIT unknown/);
+  assert.match(dashboard, /FIT .*READINESS/);
   assert.match(dashboard, /NEXT/);
   assert.match(dashboard, /Tab chat/);
   assert.equal(dashboard.split('\n').length, 24);

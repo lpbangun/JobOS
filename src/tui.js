@@ -6,7 +6,7 @@ import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { buildTuiModel } from './tui-model.js';
+import { buildTuiModel, fitUnlockGuidance } from './tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, profileAgentContext, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
 import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
@@ -34,7 +34,7 @@ import { updateJobStatus } from './jobs.js';
 import { getInterviewDebrief } from './interview.js';
 import { transitionMemoryProposal, undoMemoryTransition } from './career-memory-proposals.js';
 import { refreshMemoryProjection } from './career-memory-projections.js';
-import { createSearch, ensureSampleOfflineSearch, runSavedSearch } from './discovery.js';
+import { createCompanySearch, ensureSampleOfflineSearch, runSavedSearch } from './discovery.js';
 import {
   openArtifactEditor as runArtifactEditor,
   parseEditorCommand,
@@ -80,7 +80,7 @@ export const TUI_KEYMAP = Object.freeze({
   ]),
   review: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['↑/↓', 'document'], ['j/k', 'document'], ['PgUp/PgDn', 'scroll'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
-  discovery: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['Esc', 'close']]),
+  discovery: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['w', 'company-watch'], ['Esc', 'close']]),
   network: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
@@ -97,7 +97,7 @@ export const TUI_HANDLED_KEYS = Object.freeze({
   global: Object.freeze(['up', 'down', 'j', 'k', 'h', '1', '2', '3', '4', '5', '6', '7', 'p', 'z', 'd', 'a', 'i', 't', 'c', 'x', 'r', 'l', 'm', 'n', 'o', 'q', 'e', 's', 'g', '?', 'b', 'v', ':', '/', 'Q', 'tab', 'left', 'right', 'return']),
   review: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['up', 'down', 'j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'pageup', 'pagedown', 'ctrl+a', 'escape', 'D', 'X']),
-  discovery: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'X', 'd', 'escape']),
+  discovery: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'X', 'd', 'w', 'escape']),
   network: Object.freeze(['up', 'down', 'j', 'k', 'm', 'A', 'X', 'P', 'escape']),
   due: Object.freeze(['up', 'down', 'j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
@@ -608,6 +608,7 @@ function detailSummaryLines(model, state, width, height, color) {
   const readinessStatus = item.readiness?.status === 'approved'
     ? 'ready'
     : item.readiness?.readyForReview ? 'ready for review' : 'needs attention';
+  const fitGuidance = fitUnlockGuidance(item.fit);
   const hint = state.detailsExpanded
     ? (state.focusTarget === 'details' ? 'e hide details · Esc jobs · ↑/↓ scroll' : 'e focus details · p prepare · i ask')
     : 'e details · p prepare · z score · i ask';
@@ -616,7 +617,8 @@ function detailSummaryLines(model, state, width, height, color) {
     const leading = [
       paint(`▶ ${item.job.title}`, 'selected', color),
       ...(room >= 7 ? [`${item.job.company} · ${item.job.location || 'location not listed'}`] : []),
-      paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color)
+      paint(`FIT ${fitScore} · READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
+      ...(fitGuidance ? [paint(fitGuidance, 'warn', color)] : [])
     ];
     const nextRows = wrap(`▶ NEXT · ${recommended?.label || 'Review this job and choose your next step'}`, width)
       .slice(0, Math.max(1, room - leading.length - 1));
@@ -627,6 +629,7 @@ function detailSummaryLines(model, state, width, height, color) {
     `${item.job.company} · ${item.job.location || 'location not listed'}`,
     '',
     paint(`FIT ${fitScore}${item.fit?.highFit ? ' · HIGH' : ''}`, 'cyan', color),
+    ...(fitGuidance ? wrap(fitGuidance, width).map(line => paint(line, 'warn', color)) : []),
     paint(`READINESS ${readinessStatus}`, readinessStatus === 'ready' ? 'green' : 'warn', color),
     '',
     paint('▶ NEXT', 'selected', color),
@@ -898,9 +901,10 @@ function buildNetworkItems(model, state) {
   items.push({ key: 'saveBuild', label: '[Save and build]', value: 'save and start network research', type: 'action', action: 'saveBuild' });
   return items;
 }
-function seedNetworkDraft(model) {
+function seedNetworkDraft(model, selectedJobId = model.selectedJobId) {
   const ns = model.networkSetup || {};
   const intent = ns.intent || {};
+  const selectedCompany = selectedJobId && model.selected?.job?.id === selectedJobId ? model.selected.job.company : null;
   const rows = ns.affiliationRows || [];
   const groupFor = type => rows.filter(row => row.type === type && row.status !== 'rejected')
     .map(row => row.roleOrProgram ? `${row.organization} (${row.roleOrProgram})` : row.organization)
@@ -910,7 +914,7 @@ function seedNetworkDraft(model) {
     employers: groupFor('employer'),
     communities: groupFor('community'),
     targetRoles: (intent.targetRoles || []).join(', '),
-    targetCompanies: (intent.targetCompanies || []).join(', '),
+    targetCompanies: (intent.targetCompanies?.length ? intent.targetCompanies : [selectedCompany].filter(Boolean)).join(', '),
     personas: (intent.preferredPersonas || []).join(', '),
     relTypes: (intent.comfortableRelationshipTypes || []).join(', '),
     exclusions: (intent.exclusions || []).join(', '),
@@ -1420,6 +1424,8 @@ function overlayPanel(model, state, width, height, color) {
       body.push('', `Contacts & candidates · human gates (${contactItems.length}):`);
       const visible = visibleWindow(contactItems, state.overlayIndex, Math.max(3, height - body.length - 4));
       body.push(...visible.items.map((item, offset) => `${visible.start + offset === state.overlayIndex ? '▶' : ' '} ${fit(item.label, width - 4)}`));
+    } else if (run) {
+      body.push('', 'No source-backed contacts were found in this research run. JobOS did not invent contacts or paths.', 'Press b to revise intent and run the map again.');
     } else {
       body.push('', 'No discovered contacts yet — b build-network, then m map/refresh.');
     }
@@ -1463,7 +1469,8 @@ function overlayPanel(model, state, width, height, color) {
       body.push(
         'No discovery searches configured.',
         '▶ Enter adds the sample offline Greenhouse search (no network).',
-        'Then d runs daily against that fixture board.'
+        'w adds a real company watch using a public board token.',
+        'Then d runs daily against the saved sources.'
       );
     } else {
       body.push(...searches.map(item => `${item.name || item.id} · ${item.adapter} · last ${item.lastRunAt || item.last_run_at || 'never'}`));
@@ -1472,8 +1479,8 @@ function overlayPanel(model, state, width, height, color) {
       body.push(...runs.slice(0, 8).map(item => `${item.startedAt || '—'} · ${item.actionId || 'run'} · ${item.status}${item.error ? ` · ${item.error}` : ''}`));
     }
     if (failures.length) {
-      body.push('', 'RECENT FAILURES (isolated — other sources still run)');
-      body.push(...failures.slice(0, 4).map(item => `! ${item.searchName || item.searchId || 'search'} · ${item.message || item.error || item.status}`));
+      body.push('', 'RECENT DAILY FAILURES (isolated — other sources still run)');
+      body.push(...failures.slice(0, 4).map(item => `! FAILED · ${item.searchName || item.searchId || 'search'} · ${item.message || item.error || item.status}`));
     }
     body.push('', 'NEW JOB REVIEW');
     if (model.discovery.queue.length) {
@@ -1481,7 +1488,7 @@ function overlayPanel(model, state, width, height, color) {
     } else {
       body.push('No new jobs awaiting review.');
     }
-    body.push('', keyHints('discovery'));
+    body.push('', 'w company watch · Company | greenhouse | board-token', keyHints('discovery'));
   } else if (state.overlay === 'help') {
     const context = state.helpContextOverlay || 'dashboard';
     const scope = context === 'dashboard' ? 'global'
@@ -1506,6 +1513,10 @@ function overlayPanel(model, state, width, height, color) {
           '',
           'Press ? again to see every shortcut  ·  Esc returns'
         ];
+    const guidance = context === 'dashboard' ? fitUnlockGuidance(model.selected?.fit) : null;
+    if (!state.helpFull && guidance) {
+      body.splice(2, 0, '', guidance, 'Press g, choose Your preferences, then add the missing preference evidence.');
+    }
   } else if (state.overlay === 'system') {
     body = [
       ...state.catalog.map(item => `${item.name} · ${item.available ? 'available' : 'unavailable'} · ${item.protocol} · ${item.role}`),
@@ -1671,7 +1682,7 @@ export function renderTui(model, state, { width = 140, height = 42, color = fals
               'setup-job-path': 'Job file path',
               'setup-job-paste': 'Job description',
               'setup-job-url': 'Job URL',
-              'setup-discovery': 'Company | careers page URL',
+              'setup-discovery': 'Company | greenhouse | board token  OR  Company | careers page URL',
               'setup-proof': 'Highlight | supporting source',
               'setup-calibration': 'Preference details'
             };
@@ -2441,12 +2452,12 @@ export class JobosTui {
     this.state.mode = 'normal';
     this.setInput('');
     if (name === 'build-network') {
-      this.state.networkDraft = seedNetworkDraft(this.model);
+      this.state.networkDraft = seedNetworkDraft(this.model, this.state.selectedJobId);
       this.state.status = 'build-network editor · Enter edits fields · Esc closes';
     } else {
       if (name === 'memory') this.state.memoryView = 'observations';
       if (name === 'docs') this.state.focusTarget = this.dimensions().width < 116 ? 'viewer' : 'shell';
-      if (name === 'discovery' && !(this.model.discovery?.searches || []).length) {
+      if (name === 'discovery' && !(this.model.discovery?.searches || []).length && !(this.model.discovery?.queue || []).length) {
         this.state.status = 'No searches yet · Enter adds the sample offline Greenhouse search';
       } else {
         this.state.status = `${name} overlay · Esc closes`;
@@ -2753,7 +2764,7 @@ export class JobosTui {
         this.state.status = 'Create a profile first.';
         return;
       }
-      const draft = this.state.networkDraft || seedNetworkDraft(this.model);
+      const draft = this.state.networkDraft || seedNetworkDraft(this.model, this.state.selectedJobId);
       setNetworkIntent(this.store, {
         profileId,
         intent: buildIntentFromDraft(draft),
@@ -2784,7 +2795,7 @@ export class JobosTui {
         this.state.status = 'Create a profile first.';
         return;
       }
-      const draft = this.state.networkDraft || seedNetworkDraft(this.model);
+      const draft = this.state.networkDraft || seedNetworkDraft(this.model, this.state.selectedJobId);
       const scope = this.state.selectedJobId ? 'job' : 'profile';
       const jobId = this.state.selectedJobId || undefined;
       setNetworkIntent(this.store, {
@@ -3035,6 +3046,20 @@ export class JobosTui {
         this.state.overlayIndex = this.model.onboarding.steps.indexOf(setupItem);
         return this.openSetupAction(setupItem, setupAction);
       }
+      return;
+    }
+    if (item?.target === 'review' || item?.actionId === 'review_materials') {
+      if (item.jobId) this.state.selectedJobId = item.jobId;
+      this.refresh({ disk: false, render: false });
+      this.openOverlay('review');
+      return;
+    }
+    if (item?.target === 'setup-calibration' || item?.actionId === 'unlock_fit') {
+      this.openSetupOverlay();
+      const calibrationIndex = this.model.onboarding?.steps?.findIndex(step => step.id === 'calibration') ?? -1;
+      if (calibrationIndex >= 0) this.state.overlayIndex = calibrationIndex;
+      this.state.status = 'Add target roles, location/work model, compensation, and mission under Your preferences.';
+      this.render();
       return;
     }
     if (item?.target === 'log') {
@@ -4291,23 +4316,39 @@ export class JobosTui {
 
   saveSetupDiscovery(value) {
     try {
-      const [company, ...urlParts] = String(value).split('|').map(part => part.trim());
-      const url = urlParts.join('|').trim();
-      if (!company || !/^https?:\/\//i.test(url)) throw new Error('Enter a company name, then |, then its full careers page URL.');
+      const [company, route, ...targetParts] = String(value).split('|').map(part => part.trim());
+      const target = targetParts.join('|').trim();
       const profileId = this.state.setupProfileId || this.model.onboarding?.profileId;
-      createSearch(this.store, {
-        name: `${company} roles`,
-        profileId,
-        adapter: 'career-page',
-        config: { url, companyLabel: company }
-      });
-      this.state.overlay = 'setup';
+      if (!company || !profileId) throw new Error('Select a profile and enter a company discovery target.');
+      let saved;
+      if (/^https?:\/\//i.test(route) && !target) {
+        saved = createCompanySearch(this.store, {
+          company,
+          profileId,
+          adapter: 'career-page',
+          handle: route
+        });
+      } else {
+        const adapter = String(route || '').toLowerCase();
+        if (!['greenhouse', 'lever', 'ashby'].includes(adapter) || !target) {
+          throw new Error('Enter Company | greenhouse | board-token, or Company | full careers page URL.');
+        }
+        saved = createCompanySearch(this.store, {
+          company,
+          profileId,
+          adapter,
+          handle: target
+        });
+      }
+      const returnOverlay = this.state.setupReturnOverlay || 'setup';
+      this.state.overlay = returnOverlay;
+      this.state.setupReturnOverlay = null;
       this.state.mode = 'normal';
       this.setInput('');
       this.refresh({ disk: false });
-      this.focusNextSetupAction();
+      if (returnOverlay === 'setup') this.focusNextSetupAction();
       this.state.error = null;
-      this.state.status = `Discovery saved for ${company} · press d from the dashboard whenever you want to search`;
+      this.state.status = `Company watch saved for ${company} (${saved.adapter}) · press d when you want to run discovery`;
       this.render();
     } catch (error) {
       this.state.error = error.message;
@@ -4519,7 +4560,7 @@ export class JobosTui {
     }
     if (this.state.overlay === 'discovery') {
       if (isEnter) {
-        if (!(this.model.discovery?.searches || []).length) {
+        if (!(this.model.discovery?.searches || []).length && !(this.model.discovery?.queue || []).length) {
           void this.seedSampleDiscoveryAndRun();
           return true;
         }
@@ -4531,6 +4572,14 @@ export class JobosTui {
       if (value === 'X') return this.decideDiscovery('archived');
       if (value === 'd') {
         void this.runAction('daily');
+        return true;
+      }
+      if (value === 'w') {
+        this.state.mode = 'setup-discovery';
+        this.state.setupReturnOverlay = 'discovery';
+        this.setInput('');
+        this.state.status = 'Enter Company | greenhouse | board-token, or Company | full careers page URL';
+        this.render();
         return true;
       }
     }
@@ -4686,6 +4735,21 @@ export class JobosTui {
     if (actionId === 'import_resume' || actionId === 'replace_resume') return this.beginSetupSource('resume');
     if (actionId === 'import_local_job') return this.beginSetupSource('job');
     if (actionId === 'review_materials') return this.openOverlay('review');
+    if (actionId === 'create_source') {
+      this.state.overlay = 'discovery';
+      void this.seedSampleDiscoveryAndRun();
+      return true;
+    }
+    if (actionId === 'create_source_custom' || actionId === 'create_source_careers') {
+      this.state.mode = 'setup-discovery';
+      this.state.setupReturnOverlay = 'setup';
+      this.setInput('');
+      this.state.status = actionId === 'create_source_custom'
+        ? 'Enter Company | greenhouse | board-token'
+        : 'Enter Company | full careers page URL';
+      this.render();
+      return true;
+    }
     if (['add_proof', 'replace_proof', 'retire_proof'].includes(actionId)) {
       const proofId = String(action.command).match(/proof (?:supersede|retire)\s+(\S+)/)?.[1] || null;
       this.state.mode = 'setup-proof';

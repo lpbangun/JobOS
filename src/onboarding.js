@@ -192,18 +192,18 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
     : materialsComplete ? []
       : readinessBlockers.length ? readinessBlockers.map(item => blocker(item.code, item.message, item.nextAction))
         : [blocker('materials_review_required', 'Current artifact revisions require local human review.', readiness?.nextAction || 'Review exact current artifact revisions.')];
-  const regenerationNeeded = readinessBlockers.some(item => /\btailor resume\b/i.test(String(item.nextAction || '')));
-  const materialAction = readiness?.review?.pendingArtifactIds?.length && !regenerationNeeded
+  const materialAction = readiness?.review?.pendingArtifactIds?.length
     ? action('review_materials', 'Review exact revisions', `jobos artifacts queue --profile ${pid} --job ${jid} --json`)
     : decisionComplete ? action('pursue_job', 'Prepare application materials', `jobos pursue ${jid} --profile ${pid} --json`) : null;
   steps.push(step('materials', 'derived', true, materialsComplete ? 'complete' : 'blocked', materialsComplete ? 'Local application materials are approved.' : 'Application materials are incomplete.', materialBlockers, materialAction ? [materialAction] : [],
     { readinessStatus: readiness?.status || null, materialsStatus: readiness?.materialsStatus || null, localApprovalComplete: readiness?.localApprovalComplete || false, pendingArtifactIds: readiness?.review?.pendingArtifactIds || [], blockerCodes: readinessBlockers.map(item => item.code) }));
 
   const searches = pid ? all(s, 'SELECT id,adapter FROM saved_searches WHERE profile_id=? ORDER BY id', [pid]) : [];
-  steps.push(step('source', 'canonical', false, searches.length ? 'optional_ready' : 'optional_incomplete', searches.length ? 'A canonical saved search is configured.' : 'Saved discovery is optional; local import remains available.', [],
+  steps.push(step('source', 'canonical', false, searches.length ? 'optional_ready' : 'optional_incomplete', searches.length ? 'A canonical saved search is configured.' : 'Saved discovery is optional; use the offline sample or watch a public company board.', [],
     pid && !searches.length ? [
       action('create_source', 'Add sample offline search', `jobos searches create "Sample offline Greenhouse" --profile ${pid} --adapter greenhouse --board-token acme-sample --fixture samples/discovery-greenhouse.json --json`),
-      action('create_source_custom', 'Create custom saved search', `jobos searches create <name> --profile ${pid} --adapter <adapter> --json`)
+      action('create_source_custom', 'Watch a Greenhouse company board', `jobos searches create "<company> jobs" --profile ${pid} --adapter greenhouse --board-token <board-token> --json`),
+      action('create_source_careers', 'Watch a company careers page', `jobos searches create "<company> roles" --profile ${pid} --adapter career-page --url <careers-page-url> --json`)
     ] : [],
     { searchCount: searches.length, searchIds: searches.map(item => item.id), adapters: [...new Set(searches.map(item => item.adapter))] }));
 

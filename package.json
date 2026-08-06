@@ -45,6 +45,7 @@
     "smoke": "node scripts/smoke.js",
     "smoke:live-form": "node scripts/smoke-live-form.js",
     "acp-demo": "node scripts/acp-demo.js",
+    "acp-smoke": "node scripts/acp-smoke.js",
     "mcp-demo": "node scripts/mcp-demo.js",
     "check:release-security": "node scripts/check-release-security.js --format json",
     "test:w10": "node --test --test-concurrency=1 tests/w10-golden.test.js tests/w10-security-release.test.js tests/w10-docs-status.test.js tests/w10-mcp-compatibility.test.js",

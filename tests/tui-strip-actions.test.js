@@ -58,8 +58,12 @@ test('priority strip carries jobId and omits empty interview and failure categor
   appCreate(store, job.id, 'materials-ready', '', { at: '2026-07-20T09:00:00.000Z' });
   seedDueTask(store, job);
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: '2026-07-21T12:00:00.000Z' });
-  assert.deepEqual(model.priority.map(item => item.kind), ['overdue', 'new']);
+  assert.equal(model.priority[0].kind, 'overdue');
   assert.equal(model.priority[0].jobId, job.id, 'current action card carries its job');
+  assert.ok(model.priority.some(item => item.actionId === 'unlock_fit'));
+  assert.ok(model.priority.some(item => item.kind === 'discovery'));
+  assert.ok(model.priority.some(item => item.kind === 'new'));
+  assert.ok(model.priority.every(item => !['interview', 'failure'].includes(item.kind)));
 });
 
 // Tab owns the primary chat-focus transition; arrows retain strip navigation.
@@ -74,13 +78,14 @@ test('Tab focuses chat while arrows cycle the priority strip with wrap', async t
   tui.onKeypress('', { name: 'tab' });
   assert.equal(tui.state.focusTarget, 'shell');
 
+  const count = tui.model.priority.length;
   tui.onKeypress('', { name: 'right' });
   assert.equal(tui.state.stripIndex, 1);
-  assert.match(tui.state.status, /Priority: new/);
+  assert.equal(tui.model.priority[1].actionId, 'unlock_fit');
   tui.onKeypress('', { name: 'left' });
   assert.equal(tui.state.stripIndex, 0);
   tui.onKeypress('', { name: 'left' });
-  assert.equal(tui.state.stripIndex, 1, 'left wraps to the last actionable card');
+  assert.equal(tui.state.stripIndex, count - 1, 'left wraps to the last actionable card');
   tui.onKeypress('', { name: 'right' });
   assert.equal(tui.state.stripIndex, 0, 'right wraps to the first card');
   const screen = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });

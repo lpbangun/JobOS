@@ -88,11 +88,17 @@ function stageState(s, context) {
   ];
 }
 
+export function fitUnlockGuidance(fit) {
+  if (!fit || fit.scoreStatus !== 'insufficient_evidence' || fit.overall != null) return null;
+  return 'Unlock FIT: add target roles, location/work model, compensation, and mission in Setup → Your preferences (g) or profile preferences.';
+}
+
 function priorityStrip(s, jobs, profileId, at, recommendedAction, {
   selectedJobId = null,
   selectedSignals = null,
   networkSetupStatus = null,
-  discoverySearchCount = 0
+  discoverySearchCount = 0,
+  selectedFit = null
 } = {}) {
   const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
     FROM applications JOIN jobs ON jobs.id=applications.job_id
@@ -109,6 +115,7 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction, {
     && networkSetupStatus === 'not_started'
   );
   const discoveryGap = Boolean(profileId && discoverySearchCount === 0 && jobs.length > 0);
+  const fitGuidance = fitUnlockGuidance(selectedFit);
   return [
     {
       kind: recommendedAction?.state || 'action',
@@ -118,6 +125,15 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction, {
       actionId: recommendedAction?.id || null,
       source: recommendedAction?.source || null
     },
+    fitGuidance ? {
+      kind: 'action',
+      jobId: selectedJobId,
+      taskId: null,
+      text: fitGuidance,
+      actionId: 'unlock_fit',
+      target: 'setup-calibration',
+      source: 'fit'
+    } : null,
     interview ? {
       kind: 'interview',
       jobId: interview.job_id,
@@ -154,6 +170,17 @@ function priorityStrip(s, jobs, profileId, at, recommendedAction, {
 }
 
 function recommendedAction(onboarding, details, jobs, selectedJobId) {
+  const pendingArtifactIds = details?.readiness?.review?.pendingArtifactIds || [];
+  if (pendingArtifactIds.length || onboarding?.nextAction?.id === 'review_materials') {
+    return {
+      id: 'review_materials',
+      label: 'Review exact revisions',
+      source: 'review',
+      target: 'review',
+      jobId: selectedJobId,
+      taskId: null
+    };
+  }
   const task = jobs.find(job => job.id === selectedJobId)?.next || null;
   if (task) {
     return {
@@ -549,7 +576,8 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     selectedJobId: selectedId,
     selectedSignals,
     networkSetupStatus,
-    discoverySearchCount: discovery.searches?.length || 0
+    discoverySearchCount: discovery.searches?.length || 0,
+    selectedFit: details?.fit || null
   });
   return {
     version: 2,
