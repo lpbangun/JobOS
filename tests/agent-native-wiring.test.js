@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildHostPrompt, readPersistedAcpSession, writePersistedAcpSession } from '../src/acp.js';
+import { buildHostPrompt, listPersistedAcpSessions, readPersistedAcpSession, writePersistedAcpSession } from '../src/acp.js';
 import { AGENT_DOMAIN_TOOLS, HUMAN_ONLY_DOMAIN_TOOLS } from '../src/capabilities.js';
 import { DOMAIN_TOOLS } from '../src/domain-tools.js';
 import { openStore } from '../src/db.js';
@@ -49,6 +49,19 @@ test('ACP session id persists privately per profile across JobOS processes', asy
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).sessions['hermes-acp:pm'].sessionId, 'session-123');
 });
 
+test('listPersistedAcpSessions returns per-profile session ids and updatedAt', async t => {
+  const root = workspace(t);
+  assert.deepEqual(await listPersistedAcpSessions(root), []);
+  await writePersistedAcpSession(root, 'pm', 'session-123');
+  await writePersistedAcpSession(root, 'backend', 'session-456');
+  const sessions = await listPersistedAcpSessions(root);
+  assert.equal(sessions.length, 2);
+  const pm = sessions.find(s => s.profileId === 'pm');
+  assert.equal(pm.sessionId, 'session-123');
+  assert.ok(pm.updatedAt, 'updatedAt is present');
+  assert.equal(sessions.find(s => s.profileId === 'backend').sessionId, 'session-456');
+});
+
 test('quarantining an ACP turn clears the resumable session before reconnect', async t => {
   const root = workspace(t);
   const store = await openStore({ workspace: root });
@@ -77,4 +90,24 @@ test('TUI slash syntax dispatches domain tools through the shared facade', async
 
   tui.executeCommand('/score_job not-json');
   assert.match(tui.state.status, /Usage: \/score_job <json-object>/);
+});
+
+test(':resume lists persisted ACP sessions and reports when none exist', async t => {
+  const root = workspace(t);
+  const store = await openStore({ workspace: root });
+  t.after(() => store.db.close());
+  const output = { columns: 120, rows: 40, isTTY: false, write() {} };
+  const tui = new JobosTui(store, { stdout: output, connectAgent: false, color: false });
+
+  // No persisted sessions yet.
+  tui.executeCommand(':resume');
+  await wait();
+  assert.match(tui.state.status, /no resumable ACP session/i);
+
+  // Persist a session for the current profile, then :resume should name it.
+  await writePersistedAcpSession(root, tui.model.profileId, 'session-abc');
+  tui.executeCommand(':resume');
+  await wait();
+  assert.match(tui.state.status, /resumable ACP session/);
+  assert.match(tui.state.status, /:resume <profileId> to load/);
 });

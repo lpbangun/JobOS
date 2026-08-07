@@ -216,6 +216,26 @@ export async function readPersistedAcpSession(root, profileId = null) {
   return typeof sessionId === 'string' && sessionId.trim() ? sessionId : null;
 }
 
+/**
+ * List every persisted Hermes ACP session under a workspace, newest first.
+ * Each entry is { profileId, sessionId, updatedAt }. Used by the TUI `:resume`
+ * host command so a user can see and pick up a prior session.
+ */
+export async function listPersistedAcpSessions(root) {
+  const state = await readAcpSessions(root);
+  const prefix = 'hermes-acp:';
+  const entries = [];
+  for (const [key, value] of Object.entries(state.sessions || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const profileId = key.slice(prefix.length);
+    const sessionId = value?.sessionId;
+    if (typeof sessionId !== 'string' || !sessionId.trim()) continue;
+    entries.push({ profileId, sessionId: sessionId.trim(), updatedAt: value?.updatedAt || null });
+  }
+  entries.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  return entries;
+}
+
 export async function writePersistedAcpSession(root, profileId, sessionId) {
   const state = await readAcpSessions(root);
   const key = acpSessionKey(profileId);

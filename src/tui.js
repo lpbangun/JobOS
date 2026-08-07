@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { buildTuiModel, fitUnlockGuidance } from './tui-model.js';
 import { callDomainTool, DOMAIN_TOOLS, profileAgentContext, selectedJobContext } from './domain-tools.js';
 import { all, one, reload } from './db.js';
-import { AcpClient, agentBackendCatalog, jobosMcpServer, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
+import { AcpClient, agentBackendCatalog, jobosMcpServer, listPersistedAcpSessions, readPersistedAcpSession, writePersistedAcpSession } from './acp.js';
 import {
   addProof,
   createProfile,
@@ -2556,6 +2556,40 @@ export class JobosTui {
     this.render();
   }
 
+  /**
+   * `:resume` host command — list persisted Hermes ACP sessions and resume one
+   * (or start fresh). Mirrors Hermes's `/resume`. With no arg, lists sessions
+   * and reports the current profile's resumable session. With a profileId arg,
+   * connects the agent pane to that profile's persisted session.
+   */
+  async resumeAgentSession(argText = '') {
+    const sessions = await listPersistedAcpSessions(this.store.root).catch(() => []);
+    const target = String(argText || '').trim();
+    if (!target) {
+      const current = await readPersistedAcpSession(this.store.root, this.model.profileId).catch(() => null);
+      if (current) {
+        this.state.status = `resumable ACP session ${current.slice(0, 8)} for ${this.model.profileId || 'workspace'} · :resume <profileId> to load`;
+      } else if (sessions.length) {
+        this.state.status = `no resumable ACP session for ${this.model.profileId || 'workspace'} · available: ${sessions.map(s => s.profileId).join(', ')}`;
+      } else {
+        this.state.status = 'no resumable ACP session · start one with the agent pane (Tab)';
+      }
+      this.render();
+      return;
+    }
+    const match = sessions.find(s => s.profileId === target);
+    if (!match) {
+      this.state.error = `No persisted ACP session for profile "${target}"`;
+      this.state.status = `:resume <profileId> · available: ${sessions.map(s => s.profileId).join(', ') || 'none'}`;
+      this.render();
+      return;
+    }
+    this.state.agentOn = true;
+    this.state.status = `resuming Hermes ACP session ${match.sessionId.slice(0, 8)} for ${target}`;
+    this.render();
+    await this.connectAgent();
+  }
+
   onAgentEvent(event) {
     if (event.type === 'user_message') this.addMessage('user', event.text);
     else if (event.type === 'agent_message') this.addMessage('assistant', event.text, { append: true });
@@ -2918,6 +2952,7 @@ export class JobosTui {
       if (this.state.agentOn && !this.client) void this.connectAgent();
       return this.render();
     }
+    if (command === 'resume') return void this.resumeAgentSession(argText);
     if (command === 'refresh') return this.refresh();
     if (command === 'reconnect') return void this.connectAgent();
     if (command === 'quit') return void this.stop();
