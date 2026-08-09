@@ -516,13 +516,116 @@ export function discoveryHealth(s, { profileId = null } = {}) {
       startedAt: item.startedAt,
       finishedAt: item.finishedAt
     }));
-  return { searches, runs, browser: 'optional', externalSideEffects: 'off_by_default' };
+  const recentFailures = [];
+  for (const item of runs) {
+    if (item.status !== 'failed' && item.status !== 'partial') continue;
+    recentFailures.push({
+      searchId: item.id,
+      searchName: item.actionId || 'discovery',
+      status: item.status,
+      error: item.error || null,
+      message: item.error || (item.status === 'partial' ? 'partial run' : 'failed'),
+      startedAt: item.startedAt
+    });
+  }
+  // Prefer structured discovery.run outputs when present on failed automation rows.
+  const discoveryRows = all(s, `SELECT id,inputs_json,outputs_json,status,error,started_at,finished_at
+    FROM automation_runs
+    WHERE action_id IN ('discover.run','daily_discovery') OR trigger_name IN ('discover.run','daily')
+    ORDER BY created_at DESC LIMIT 12`);
+  for (const row of discoveryRows) {
+    if (row.status !== 'failed' && row.status !== 'partial') continue;
+    const inputs = parseJson(row.inputs_json, {});
+    if (profileId && inputs.profileId && inputs.profileId !== profileId) continue;
+    const outputs = parseJson(row.outputs_json, {});
+    const failures = Array.isArray(outputs.failures) ? outputs.failures : [];
+    if (failures.length) {
+      for (const failure of failures.slice(0, 3)) {
+        const err = failure.errors?.[0] || {};
+        recentFailures.push({
+          searchId: failure.searchId || outputs.searchId || row.id,
+          searchName: failure.searchName || outputs.searchName || 'search',
+          status: failure.status || row.status,
+          error: err.message || row.error || null,
+          message: err.message || row.error || failure.status || row.status,
+          startedAt: row.started_at
+        });
+      }
+    } else if (row.error) {
+      recentFailures.push({
+        searchId: outputs.searchId || row.id,
+        searchName: outputs.searchName || 'discovery',
+        status: row.status,
+        error: row.error,
+        message: row.error,
+        startedAt: row.started_at
+      });
+    }
+  }
+  return {
+    searches,
+    runs,
+    recentFailures: recentFailures.slice(0, 8),
+    sampleOfflineSearch: {
+      name: 'Sample offline Greenhouse',
+      adapter: 'greenhouse',
+      note: 'Enter in discovery overlay when no searches exist'
+    },
+    browser: 'optional',
+    externalSideEffects: 'off_by_default'
+  };
+}
+
+export function profileAgentContext(s, profileId) {
+  const profile = one(s, 'SELECT id,name FROM profiles WHERE id=?', [profileId]);
+  if (!profile) throw new DomainToolError('unknown_profile', `Unknown profile: ${profileId}`, { profileId });
+  const resume = one(s, `SELECT r.id,r.revision,r.document_json,r.verification_status,r.reviewed_at,
+      i.source_format,i.source_name
+    FROM profile_resume_revisions r
+    LEFT JOIN resume_source_imports i ON i.resume_id=r.id
+    WHERE r.profile_id=? AND r.is_current=1`, [profileId]);
+  const document = parseJson(resume?.document_json, null);
+  const verifiedProofs = all(s, `SELECT id,summary,evidence,source,updated_at
+    FROM proof_points
+    WHERE profile_id=? AND status='active' AND verification_status='verified'
+    ORDER BY created_at,id`, [profileId]).map(row => ({
+    id: row.id,
+    summary: row.summary,
+    evidence: row.evidence,
+    source: row.source,
+    verifiedAt: row.updated_at || null
+  }));
+  const jobCount = Number(one(s, 'SELECT COUNT(*) AS count FROM jobs WHERE profile_id=?', [profileId])?.count || 0);
+  return {
+    version: 1,
+    profile: { id: profile.id, name: profile.name, jobCount },
+    resumeUpload: resume ? {
+      id: resume.id,
+      revision: Number(resume.revision),
+      sourceFormat: resume.source_format || 'text',
+      sourceName: resume.source_name || 'resume',
+      verificationStatus: resume.verification_status,
+      reviewedAt: resume.reviewed_at || null,
+      summary: document?.summary?.text || '',
+      experience: (document?.experience || []).map(item => ({
+        title: item.title || '',
+        employer: item.employer || '',
+        startDate: item.startDate || item.dateSource?.startText || null,
+        endDate: item.endDate || item.dateSource?.endText || null
+      })),
+      skills: (document?.skills || []).map(item => item?.name || String(item)).filter(Boolean)
+    } : null,
+    verifiedProofs,
+    privacy: {
+      rawResumeTextIncluded: false,
+      contactDetailsIncluded: false,
+      onlyVerifiedProofsIncluded: true
+    }
+  };
 }
 
 export function selectedJobContext(s, jobId, profileId) {
-  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) {
-    throw new DomainToolError('unknown_profile', `Unknown profile: ${profileId}`, { profileId });
-  }
+  const profileContext = profileAgentContext(s, profileId);
   const job = one(s, `SELECT jobs.*,applications.id AS application_id,applications.status AS application_status
     FROM jobs LEFT JOIN applications ON applications.job_id=jobs.id
     WHERE jobs.id=? AND jobs.profile_id=?`, [jobId, profileId]);
@@ -562,6 +665,9 @@ export function selectedJobContext(s, jobId, profileId) {
   const path = one(s, 'SELECT id,path_strength,channel,reasoning_json,warnings_json,created_at FROM outreach_plans WHERE job_id=? ORDER BY recommended DESC,created_at DESC LIMIT 1', [jobId]);
   return {
     version: 2,
+    profile: profileContext.profile,
+    resumeUpload: profileContext.resumeUpload,
+    verifiedProofs: profileContext.verifiedProofs,
     job: {
       id: job.id,
       profileId: job.profile_id,
@@ -603,7 +709,8 @@ export function selectedJobContext(s, jobId, profileId) {
       externalSideEffects: 'none',
       submissionPerformed: false,
       applicationStatusChanged: false
-    }
+    },
+    privacy: profileContext.privacy
   };
 }
 

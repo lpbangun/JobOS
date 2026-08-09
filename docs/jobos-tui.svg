@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
-  <title id="title">JobOS focused chat terminal interface</title>
-  <desc id="desc">A dark terminal window with job context in a narrow left sidebar and a large agent conversation on the right.</desc>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="968" height="537" viewBox="0 0 968 537" role="img" aria-labelledby="title desc">
+  <title id="title">JobOS dashboard</title>
+  <desc id="desc">JobOS terminal dashboard with priority strip, job list, selected-job evidence, FIT score, and next action to review exact revisions.</desc>
   <defs>
     <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#111827"/>
@@ -10,66 +11,42 @@
       <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#020617" flood-opacity="0.45"/>
     </filter>
   </defs>
-  <rect width="1200" height="720" fill="#eef2f7"/>
-  <rect x="55" y="42" width="1090" height="636" rx="18" fill="url(#shell)" filter="url(#shadow)"/>
-  <rect x="55" y="42" width="1090" height="48" rx="18" fill="#172033"/>
-  <rect x="55" y="72" width="1090" height="18" fill="#172033"/>
-  <circle cx="83" cy="66" r="7" fill="#fb7185"/>
-  <circle cx="106" cy="66" r="7" fill="#fbbf24"/>
-  <circle cx="129" cy="66" r="7" fill="#34d399"/>
-  <text x="600" y="72" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">jobos — focused chat</text>
-
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
-    <text x="81" y="119" fill="#e2e8f0" font-size="15" font-weight="700">JOBOS</text>
-    <text x="149" y="119" fill="#94a3b8" font-size="14">PM EdTech · FX:OFF · agent:ready</text>
-    <text x="1118" y="119" text-anchor="end" fill="#5eead4" font-size="13">local workspace</text>
-
-    <rect x="79" y="139" width="1042" height="58" rx="8" fill="#0d1728" stroke="#273449"/>
-    <text x="98" y="164" fill="#5eead4" font-size="12" font-weight="700">PRIORITY</text>
-    <text x="98" y="184" fill="#e2e8f0" font-size="14">Review tailored resume for Senior Product Manager</text>
-    <text x="1098" y="174" text-anchor="end" fill="#94a3b8" font-size="12">1 of 4</text>
-
-    <rect x="79" y="213" width="270" height="381" rx="9" fill="#0a1423" stroke="#334155"/>
-    <text x="98" y="243" fill="#5eead4" font-size="13" font-weight="700">SELECTED JOB</text>
-    <text x="98" y="275" fill="#f8fafc" font-size="16" font-weight="700">Senior Product Manager</text>
-    <text x="98" y="298" fill="#94a3b8" font-size="13">Northstar Learning · Remote</text>
-    <line x1="98" y1="316" x2="330" y2="316" stroke="#273449"/>
-    <text x="98" y="344" fill="#5eead4" font-size="12">FIT</text>
-    <text x="330" y="344" text-anchor="end" fill="#f8fafc" font-size="14">82 / 100</text>
-    <text x="98" y="374" fill="#5eead4" font-size="12">STATUS</text>
-    <text x="330" y="374" text-anchor="end" fill="#f8fafc" font-size="13">materials ready</text>
-    <text x="98" y="404" fill="#5eead4" font-size="12">PROOFS</text>
-    <text x="330" y="404" text-anchor="end" fill="#f8fafc" font-size="13">4 verified</text>
-    <text x="98" y="434" fill="#5eead4" font-size="12">NETWORK</text>
-    <text x="330" y="434" text-anchor="end" fill="#f8fafc" font-size="13">2 warm paths</text>
-    <line x1="98" y1="456" x2="330" y2="456" stroke="#273449"/>
-    <text x="98" y="484" fill="#94a3b8" font-size="12">NEXT</text>
-    <text x="98" y="508" fill="#e2e8f0" font-size="13">Approve resume draft</text>
-    <text x="98" y="531" fill="#e2e8f0" font-size="13">then prepare outreach</text>
-    <rect x="97" y="551" width="160" height="25" rx="5" fill="#12372f" stroke="#2dd4bf"/>
-    <text x="177" y="568" text-anchor="middle" fill="#99f6e4" font-size="11">context stays visible</text>
-
-    <rect x="365" y="213" width="756" height="381" rx="9" fill="#081321" stroke="#334155"/>
-    <text x="386" y="243" fill="#5eead4" font-size="13" font-weight="700">AGENT · FOCUSED</text>
-    <text x="1098" y="243" text-anchor="end" fill="#34d399" font-size="12">Hermes ACP · ready</text>
-    <line x1="386" y1="258" x2="1100" y2="258" stroke="#273449"/>
-
-    <text x="386" y="291" fill="#67e8f9" font-size="12" font-weight="700">YOU</text>
-    <text x="386" y="315" fill="#e2e8f0" font-size="14">Compare this role with my verified proof points.</text>
-
-    <rect x="386" y="337" width="691" height="120" rx="8" fill="#101d2f"/>
-    <text x="404" y="363" fill="#a7f3d0" font-size="12" font-weight="700">HERMES</text>
-    <text x="404" y="388" fill="#e2e8f0" font-size="14">Strong evidence for product discovery and activation.</text>
-    <text x="404" y="412" fill="#e2e8f0" font-size="14">The seniority signal is weaker, so I would keep the</text>
-    <text x="404" y="436" fill="#e2e8f0" font-size="14">fit at 82 and flag that gap instead of inventing a claim.</text>
-
-    <text x="386" y="492" fill="#94a3b8" font-size="12">Tool result · score_job · authoritative state refreshed</text>
-    <rect x="386" y="517" width="714" height="51" rx="7" fill="#07101d" stroke="#2dd4bf"/>
-    <text x="405" y="549" fill="#94a3b8" font-size="14">Type a request…</text>
-    <rect x="1081" y="536" width="3" height="17" fill="#5eead4"/>
-
-    <text x="81" y="627" fill="#94a3b8" font-size="12">↑/↓ scroll   i type   x cancel   c reconnect</text>
-    <text x="1119" y="627" text-anchor="end" fill="#5eead4" font-size="12">Tab/Esc dashboard   ? controls   Q quit</text>
-    <text x="81" y="653" fill="#64748b" font-size="11">SQLite is canonical · Markdown/YAML/JSONL mirrors stay agent-readable · external effects remain user-configured</text>
+  <rect width="968" height="537" fill="#eef2f7"/>
+  <rect x="35" y="24" width="898" height="481" rx="18" fill="url(#shell)" filter="url(#shadow)"/>
+  <rect x="35" y="24" width="898" height="44" rx="18" fill="#172033"/>
+  <rect x="35" y="54" width="898" height="18" fill="#172033"/>
+  <circle cx="63" cy="46" r="7" fill="#fb7185"/>
+  <circle cx="86" cy="46" r="7" fill="#fbbf24"/>
+  <circle cx="109" cy="46" r="7" fill="#34d399"/>
+  <text x="484" y="52" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">jobos — dashboard</text>
+  <rect x="35" y="68" width="898" height="437" fill="#0a1423"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Cascadia Mono, monospace" font-size="12.5">
+    <text x="55" y="96.0" fill="#5eead4" xml:space="preserve"> JOBOS · PM EdTech                                                                                      local workspace </text>
+    <text x="55" y="111.0" fill="#f8fafc" xml:space="preserve"> NEXT UP  1 of 3  ·  use ←/→ to review                                                                                  </text>
+    <text x="55" y="126.0" fill="#f8fafc" xml:space="preserve"> ▶ Review exact revisions  ·  Enter opens                                                                               </text>
+    <text x="55" y="141.0" fill="#5eead4" xml:space="preserve">┌ JOBS ────────────────────────────────────────────┐ ┌ SELECTED JOB ───────────────────────────────────────────────────┐</text>
+    <text x="55" y="156.0" fill="#dbe4f0" xml:space="preserve">│[today] all high review ready applied interview   │ │▶ Product Manager, Learning Platform                             │</text>
+    <text x="55" y="171.0" fill="#dbe4f0" xml:space="preserve">│▶ Product Manager, Learning Platform              │ │Example Learning Co · Remote US                                  │</text>
+    <text x="55" y="186.0" fill="#a5f3fc" xml:space="preserve">│  FIT 52/100 review                               │ │                                                                 │</text>
+    <text x="55" y="201.0" fill="#a5f3fc" xml:space="preserve">│                                                  │ │FIT 52/100 review                                                │</text>
+    <text x="55" y="216.0" fill="#a5f3fc" xml:space="preserve">│                                                  │ │READINESS needs attention                                        │</text>
+    <text x="55" y="231.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │                                                                 │</text>
+    <text x="55" y="246.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │▶ NEXT                                                           │</text>
+    <text x="55" y="261.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │Review exact revisions                                           │</text>
+    <text x="55" y="276.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │                                                                 │</text>
+    <text x="55" y="291.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │e details · p prepare · z score · i ask                          │</text>
+    <text x="55" y="306.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │                                                                 │</text>
+    <text x="55" y="321.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │KEY REQUIREMENTS                                                 │</text>
+    <text x="55" y="336.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │• Lead customer discovery with educators, learners, and          │</text>
+    <text x="55" y="351.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │enterprise stakeholders.                                         │</text>
+    <text x="55" y="366.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │• Define product strategy, metrics, and roadmap for an           │</text>
+    <text x="55" y="381.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │early-stage EdTech product.                                      │</text>
+    <text x="55" y="396.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │• Partner with engineering and design to ship usable software    │</text>
+    <text x="55" y="411.0" fill="#dbe4f0" xml:space="preserve">│                                                  │ │in weekly increments.                                            │</text>
+    <text x="55" y="426.0" fill="#dbe4f0" xml:space="preserve">└──────────────────────────────────────────────────┘ └─────────────────────────────────────────────────────────────────┘</text>
+    <text x="55" y="441.0" fill="#dbe4f0" xml:space="preserve">                                                                                                                        </text>
+    <text x="55" y="456.0" fill="#94a3b8" xml:space="preserve">local workspace ready                                                                                                   </text>
+    <text x="55" y="471.0" fill="#94a3b8" xml:space="preserve"> ↑/↓ or j/k jobs · ←/→ priority · Enter jump · Tab focus chat · i prompt · p pursue · d discover                        </text>
+    <text x="55" y="486.0" fill="#dbe4f0" xml:space="preserve"> r review · o documents · g setup · ? help · Q quit                                                                     </text>
   </g>
 </svg>

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="968" height="612" viewBox="0 0 968 612" role="img" aria-labelledby="title desc">
+  <title id="title">JobOS focused agent chat</title>
+  <desc id="desc">Focused Hermes ACP chat beside selected-job context for proof-grounded fit discussion.</desc>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#020617" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="968" height="612" fill="#eef2f7"/>
+  <rect x="35" y="24" width="898" height="556" rx="18" fill="url(#shell)" filter="url(#shadow)"/>
+  <rect x="35" y="24" width="898" height="44" rx="18" fill="#172033"/>
+  <rect x="35" y="54" width="898" height="18" fill="#172033"/>
+  <circle cx="63" cy="46" r="7" fill="#fb7185"/>
+  <circle cx="86" cy="46" r="7" fill="#fbbf24"/>
+  <circle cx="109" cy="46" r="7" fill="#34d399"/>
+  <text x="484" y="52" text-anchor="middle" fill="#94a3b8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">jobos — focused chat</text>
+  <rect x="35" y="68" width="898" height="512" fill="#0a1423"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Cascadia Mono, monospace" font-size="12.5">
+    <text x="55" y="96.0" fill="#5eead4" xml:space="preserve"> JOBOS · PM EdTech                                                                                      local workspace </text>
+    <text x="55" y="111.0" fill="#f8fafc" xml:space="preserve"> NEXT UP  1 of 3  ·  use ←/→ to review                                                                                  </text>
+    <text x="55" y="126.0" fill="#f8fafc" xml:space="preserve"> ▶ Review exact revisions  ·  Enter opens                                                                               </text>
+    <text x="55" y="141.0" fill="#5eead4" xml:space="preserve">┌ SELECTED JOB ────────────────────┐ ┌ ASSISTANT · FOCUSED ────────────────────────────────────────────────────────────┐</text>
+    <text x="55" y="156.0" fill="#dbe4f0" xml:space="preserve">│▶ Product Manager, Learning Platf…│ │Assistant ready                                                                  │</text>
+    <text x="55" y="171.0" fill="#dbe4f0" xml:space="preserve">│Example Learning Co · Remote US   │ │Focused on Product Manager, Learning Platform                                    │</text>
+    <text x="55" y="186.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="201.0" fill="#a5f3fc" xml:space="preserve">│FIT 52/100 review                 │ │you&gt;                                                                             │</text>
+    <text x="55" y="216.0" fill="#a5f3fc" xml:space="preserve">│READINESS needs attention         │ │Compare this role with my verified proof points.                                 │</text>
+    <text x="55" y="231.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │assistant&gt;                                                                       │</text>
+    <text x="55" y="246.0" fill="#dbe4f0" xml:space="preserve">│▶ NEXT                            │ │Strong evidence for product discovery and activation. The seniority signal is    │</text>
+    <text x="55" y="261.0" fill="#a5f3fc" xml:space="preserve">│Review exact revisions            │ │weaker, so keep the honest FIT and flag that gap instead of inventing a claim.   │</text>
+    <text x="55" y="276.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │tool&gt;                                                                            │</text>
+    <text x="55" y="291.0" fill="#dbe4f0" xml:space="preserve">│e details · p prepare · z score ·…│ │Tool result · score_job · authoritative state refreshed                          │</text>
+    <text x="55" y="306.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="321.0" fill="#dbe4f0" xml:space="preserve">│KEY REQUIREMENTS                  │ │                                                                                 │</text>
+    <text x="55" y="336.0" fill="#dbe4f0" xml:space="preserve">│• Lead customer discovery with    │ │                                                                                 │</text>
+    <text x="55" y="351.0" fill="#dbe4f0" xml:space="preserve">│educators, learners, and          │ │                                                                                 │</text>
+    <text x="55" y="366.0" fill="#dbe4f0" xml:space="preserve">│enterprise stakeholders.          │ │                                                                                 │</text>
+    <text x="55" y="381.0" fill="#dbe4f0" xml:space="preserve">│• Define product strategy,        │ │                                                                                 │</text>
+    <text x="55" y="396.0" fill="#dbe4f0" xml:space="preserve">│metrics, and roadmap for an       │ │                                                                                 │</text>
+    <text x="55" y="411.0" fill="#dbe4f0" xml:space="preserve">│early-stage EdTech product.       │ │                                                                                 │</text>
+    <text x="55" y="426.0" fill="#dbe4f0" xml:space="preserve">│• Partner with engineering and    │ │                                                                                 │</text>
+    <text x="55" y="441.0" fill="#dbe4f0" xml:space="preserve">│design to ship usable software    │ │                                                                                 │</text>
+    <text x="55" y="456.0" fill="#dbe4f0" xml:space="preserve">│in weekly increments.             │ │                                                                                 │</text>
+    <text x="55" y="471.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="486.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="501.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="516.0" fill="#dbe4f0" xml:space="preserve">│                                  │ │                                                                                 │</text>
+    <text x="55" y="531.0" fill="#dbe4f0" xml:space="preserve">└──────────────────────────────────┘ └─────────────────────────────────────────────────────────────────────────────────┘</text>
+    <text x="55" y="546.0" fill="#94a3b8" xml:space="preserve">Hermes ACP · ready                                                                                                      </text>
+    <text x="55" y="561.0" fill="#dbe4f0" xml:space="preserve"> CHAT FOCUSED · ↑/↓ or j/k scroll · i type · x cancel · c reconnect · Tab/Esc dashboard · ? help · Q quit               </text>
+  </g>
+</svg>

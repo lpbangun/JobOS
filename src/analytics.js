@@ -45,9 +45,24 @@ export function state(s, { profileId = null } = {}) {
 
 function fitSummary(fit) {
   if (!fit) return 'unscored';
-  if (fit.contract === 'legacy_unversioned') return fit.overall == null ? 'legacy fit unknown' : `legacy ${fit.overall}/100`;
-  if (fit.overall == null) return 'fit unknown';
-  return `${fit.overall}/100${fit.scoreStatus === 'review_required' ? ' (review required)' : ''}`;
+  if (fit.contract === 'legacy_unversioned') {
+    return fit.overall == null ? 'legacy fit unknown' : `legacy ${fit.overall}/100`;
+  }
+  const status = String(fit.scoreStatus || '').trim();
+  const coverage = Number.isFinite(Number(fit.evidenceCoverage)) ? Number(fit.evidenceCoverage) : null;
+  if (fit.overall == null) {
+    if (status === 'insufficient_evidence') {
+      return coverage == null ? 'low evidence' : `low evidence (${coverage}% coverage)`;
+    }
+    if (status === 'review_required') {
+      return coverage == null ? 'review needed' : `review needed (${coverage}% coverage)`;
+    }
+    if (status) return status.replaceAll('_', ' ');
+    return coverage == null ? 'scored · no overall' : `scored · ${coverage}% coverage`;
+  }
+  if (status === 'review_required') return `${fit.overall}/100 (review required)`;
+  if (status === 'insufficient_evidence') return `${fit.overall}/100 (low evidence)`;
+  return `${fit.overall}/100`;
 }
 
 

@@ -52,15 +52,18 @@ function seedDueTask(store, job) {
 
 const tick = (ms = 150) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Gap #7 — strip shape is stable and linked jobs are carried
-test('priority strip carries jobId on actionable cards and null on failure', async t => {
+// Gap #7 — only actionable strip items are navigable.
+test('priority strip carries jobId and omits empty interview and failure categories', async t => {
   const { store, profile, job } = await seeded(t);
   appCreate(store, job.id, 'materials-ready', '', { at: '2026-07-20T09:00:00.000Z' });
   seedDueTask(store, job);
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: '2026-07-21T12:00:00.000Z' });
-  assert.deepEqual(model.priority.map(item => item.kind), ['overdue', 'interview', 'new', 'failure']);
+  assert.equal(model.priority[0].kind, 'overdue');
   assert.equal(model.priority[0].jobId, job.id, 'current action card carries its job');
-  assert.equal(model.priority[3].jobId, null, 'failure card never carries a job');
+  assert.ok(model.priority.some(item => item.actionId === 'unlock_fit'));
+  assert.ok(model.priority.some(item => item.kind === 'discovery'));
+  assert.ok(model.priority.some(item => item.kind === 'new'));
+  assert.ok(model.priority.every(item => !['interview', 'failure'].includes(item.kind)));
 });
 
 // Tab owns the primary chat-focus transition; arrows retain strip navigation.
@@ -75,12 +78,14 @@ test('Tab focuses chat while arrows cycle the priority strip with wrap', async t
   tui.onKeypress('', { name: 'tab' });
   assert.equal(tui.state.focusTarget, 'shell');
 
+  const count = tui.model.priority.length;
   tui.onKeypress('', { name: 'right' });
   assert.equal(tui.state.stripIndex, 1);
-  assert.match(tui.state.status, /Priority: interview/);
+  assert.equal(tui.model.priority[1].actionId, 'unlock_fit');
   tui.onKeypress('', { name: 'left' });
+  assert.equal(tui.state.stripIndex, 0);
   tui.onKeypress('', { name: 'left' });
-  assert.equal(tui.state.stripIndex, 3, 'left wraps to the last card');
+  assert.equal(tui.state.stripIndex, count - 1, 'left wraps to the last actionable card');
   tui.onKeypress('', { name: 'right' });
   assert.equal(tui.state.stripIndex, 0, 'right wraps to the first card');
   const screen = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
@@ -130,14 +135,20 @@ test('selected job exposes its W06 action and :reschedule preserves policy prove
   assert.match(tui.state.status, /Rescheduled Prepare interview/);
 });
 
-// Gap #7 — cards without a job explain themselves instead of no-op silence
-test('Enter on the failure card reports no linked job', async t => {
+// Gap #7 — active failures remain visible and open their diagnostic log.
+test('Enter on an active failure opens the failure log', async t => {
   const { store, profile, job } = await seeded(t);
+  run(store, `INSERT INTO automation_runs
+    (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,error)
+    VALUES (?,?,?,?,?,?,?,?)`, [
+    'run_failed', 'discover.run', '{}', '{}', 'failed', 'none', '2026-07-21T11:00:00.000Z', 'source timed out'
+  ]);
   const tui = makeTui(store, profile, job);
-  tui.state.stripIndex = 3; // failure card
+  tui.state.stripIndex = tui.model.priority.findIndex(item => item.kind === 'failure');
+  assert.ok(tui.state.stripIndex >= 0, 'active failure consumes one navigation position');
   tui.onKeypress('', { name: 'return' });
-  assert.match(tui.state.status, /No linked job on the failure card/);
-  assert.equal(tui.state.selectedJobId, job.id, 'selection unchanged');
+  assert.equal(tui.state.overlay, 'log', 'failure action opens the diagnostic log');
+  assert.equal(tui.state.selectedJobId, job.id, 'selection remains unchanged');
 });
 
 // Gap #7 — :due lists tasks and Enter jumps to the selected task's job

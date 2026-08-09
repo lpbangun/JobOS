@@ -191,7 +191,7 @@ test('W08-CONSUMERS-03 cover tailoring actively renders accepted writing guidanc
   assert.match(result.content, /Closing variant:\*\* gratitude/);
   assert.match(result.content, /## Warm letter — why this role and evidence/);
   assert.match(result.content, new RegExp(`Dear hiring team,\\n\\n${proof.summary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-  assert.match(result.content, /Thank you for considering this evidence-grounded draft\.\n\n## Evidence warnings/);
+  assert.match(result.content, /Thank you for considering this evidence-grounded draft\.\n\nSincerely,\n[^\n]+\n\n## Evidence warnings/);
   assert.ok(result.content.trim().split(/\s+/u).length >= 120);
   assert.doesNotMatch(result.content, /synergy|doubled revenue/i);
   const memoryEvidence = result.evidence.find(item => item.careerMemoryRuleIds);
@@ -205,7 +205,7 @@ test('W08-CONSUMERS-03 cover tailoring actively renders accepted writing guidanc
     const llmResult = await tailor(store, job.id, 'alpha', 'cover');
     assert.match(llmResult.content, /## Warm letter — why this role and evidence/);
     assert.match(llmResult.content, new RegExp(`Dear hiring team,\\n\\n${proof.summary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-    assert.match(llmResult.content, /Thank you for considering this evidence-grounded draft\.\n\n## Evidence warnings/);
+    assert.match(llmResult.content, /Thank you for considering this evidence-grounded draft\.\n\nSincerely,\n[^\n]+\n\n## Evidence warnings/);
     assert.doesNotMatch(llmResult.content, /Provider prose is not persisted/);
   } finally {
     restore();

@@ -4,9 +4,9 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, reload, save } from './db.js';
-import { id, parseJson, paths, splitCsv, workspaceRoot } from './utils.js';
+import { id, parseJson, paths, slug, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
-import { getResume, importResume, replaceResume, validateResumeDocument } from './resumes.js';
+import { getResume, importResume, readResumeFileAsync, replaceResume, validateResumeDocument } from './resumes.js';
 import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
 import { dedupeJobs, importText, importUrl } from './jobs.js';
 import { tailor } from './tailoring.js';
@@ -77,16 +77,16 @@ export const commandRegistry = [
   cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--mouse] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the primary data-bound terminal product with an embedded ACP agent pane.', { flags: ['--agent off', '--mouse', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
-  cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import resume proof text.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
+  cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import a local PDF, DOCX, text, Markdown, JSON, or YAML resume.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
   cmd(['profile', 'network-intent'], 'jobos profile network-intent --profile <profile-id> --file <json> [--json]', 'Confirm progressive networking goals, exclusions, sources, and affiliations.', { flags: ['--profile <profile-id>', '--file <json>'] }),
   cmd(['profile', 'brief'], 'jobos profile brief --profile <id> [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the deterministic cited career brief.'),
   cmd(['profile', 'voice-guide'], 'jobos profile voice-guide --profile <id> [--artifact-type <type>] [--revision <n>] [--as-of <rfc3339>] [--refresh] [--output markdown] --json', 'Read or explicitly refresh the proof-safe voice and positioning guide.'),
-  cmd(['resume', 'import'], 'jobos resume import --profile <profile-id> --file <path> [--json]', 'Import a complete resume into a versioned canonical source record.', { flags: ['--profile <profile-id>', '--file <path>'] }),
+  cmd(['resume', 'import'], 'jobos resume import --profile <profile-id> --file <path> [--json]', 'Locally extract and import a PDF, DOCX, text, Markdown, JSON, or YAML resume into a versioned canonical source record.', { flags: ['--profile <profile-id>', '--file <path>'] }),
   cmd(['resume', 'show'], 'jobos resume show --profile <profile-id> [--revision <n>] [--json]', 'Inspect the current or historical canonical resume revision.', { flags: ['--profile <profile-id>', '--revision <n>'] }),
   cmd(['resume', 'validate'], 'jobos resume validate --profile <profile-id> [--json]', 'Validate the current canonical resume and expose correctable fields.', { flags: ['--profile <profile-id>'] }),
   cmd(['resume', 'coverage'], 'jobos resume coverage --job <job-id> --profile <profile-id> [--json]', 'Show transparent requirement coverage from active verified evidence.', { flags: ['--job <job-id>', '--profile <profile-id>'] }),
   cmd(['resume', 'preflight'], 'jobos resume preflight --artifact <artifact-id> [--json]', 'Recheck semantic, exact-revision, and requested render eligibility without mutating review state.', { flags: ['--artifact <artifact-id>'] }),
-  cmd(['resume', 'replace'], 'jobos resume replace --profile <profile-id> --file <json-or-yaml> [--json]', 'Create a corrected canonical resume revision without rewriting history.', { flags: ['--profile <profile-id>', '--file <path>'] }),
+  cmd(['resume', 'replace'], 'jobos resume replace --profile <profile-id> --file <path> [--json]', 'Create a corrected canonical resume revision from a supported local file without rewriting history.', { flags: ['--profile <profile-id>', '--file <path>'] }),
   cmd(['proof', 'add'], 'jobos proof add --profile <profile> --summary <text> [--evidence <text>] [--skills a,b] [--json]', 'Add an evidence-backed proof point to a profile.', { flags: ['--summary <text>', '--evidence <text>', '--skills a,b'] }),
   cmd(['proof', 'verify'], 'jobos proof verify <proof-id> [--json]', 'Verify a stored proof point for generated factual claims.'),
   cmd(['proof', 'retire'], 'jobos proof retire <proof-id> --reason <text> [--json]', 'Retire a proof point while preserving its lineage.', { flags: ['--reason <text>'] }),
@@ -111,7 +111,7 @@ export const commandRegistry = [
   cmd(['jobs', 'import-url'], 'jobos jobs import-url <url> --profile <profile> [--json]', 'Import a human-provided public job URL.'),
   cmd(['jobs', 'list'], 'jobos jobs list [--json]', 'List imported jobs.'),
   cmd(['jobs', 'dedupe'], 'jobos jobs dedupe [--apply] [--json]', 'Find likely duplicate jobs and optionally apply local dedupe updates.', { flags: ['--apply'] }),
-  cmd(['searches', 'create'], 'jobos searches create <name> --profile <profile> --adapter greenhouse|lever|ashby|career-page|portfolio [--board-token token|--company handle|--url URL] [--keywords a,b] [--location remote] [--posted-within-days <n>] [--remote-only] [--employment-types <csv>] [--json]', 'Create a routed public-source discovery search.', { flags: ['--adapter <id>', '--board-token <token>', '--company <handle>', '--handle <handle>', '--url <url>', '--max-companies <n>', '--keywords a,b', '--location <text>', '--posted-within-days <n>', '--remote-only', '--employment-types <csv>', '--min-fit <n>'] }),
+  cmd(['searches', 'create'], 'jobos searches create <name> --profile <profile> --adapter greenhouse|lever|ashby|career-page|portfolio [--board-token token|--company handle|--url URL] [--fixture <path>] [--keywords a,b] [--location remote] [--posted-within-days <n>] [--remote-only] [--employment-types <csv>] [--json]', 'Create a routed public-source discovery search.', { flags: ['--adapter <id>', '--board-token <token>', '--company <handle>', '--handle <handle>', '--url <url>', '--fixture <path>', '--max-companies <n>', '--keywords a,b', '--location <text>', '--posted-within-days <n>', '--remote-only', '--employment-types <csv>', '--min-fit <n>'] }),
   cmd(['searches', 'list'], 'jobos searches list [--json]', 'List saved discovery searches.'),
   cmd(['searches', 'migrate-watchlist'], 'jobos searches migrate-watchlist --profile <profile> [--min-fit <n>] [--json]', 'Migrate legacy profile-less watchlist rows into executable saved searches for one profile.', { flags: ['--profile <profile>', '--min-fit <n>'] }),
   cmd(['watchlist', 'add'], 'jobos watchlist add --profile <profile> --company <company> --adapter greenhouse|lever --board-token <token>|--handle <handle> [--notes text] [--json]', 'Deprecated alias: create an executable company saved-search preset.', { deprecated: 'Use searches create with a company/ATS target.', relatedWorkflow: 'daily' }),
@@ -646,7 +646,9 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  if (flags.agent && group !== 'tui') process.env.JOBOS_AGENT = String(flags.agent);
+  // In interactive TUI/setup commands, --agent off controls the embedded ACP
+  // pane. It must not also become the noninteractive generation adapter name.
+  if (flags.agent && !['tui', 'setup'].includes(group)) process.env.JOBOS_AGENT = String(flags.agent);
   if (flags.workspace) process.env.JOBOS_WORKSPACE = path.resolve(String(flags.workspace));
   const boot = bootstrapInfo(flags);
   const s = await openStore(flags);
@@ -743,7 +745,9 @@ export async function main(argv = process.argv.slice(2)) {
   if (group === 'profile' && action === 'create') {
     const name = [subaction, ...rest].filter(Boolean).join(' ');
     if (!name) usage('Missing profile name');
-    const r = createProfile(s, name, { fromResume: flags['from-resume'], preferences: flags.preferences });
+    const fromResume = flags['from-resume'] ? String(flags['from-resume']) : '';
+    const resumeInput = fromResume ? await readResumeFileAsync(slug(name), fromResume) : null;
+    const r = createProfile(s, name, { fromResume, resumeInput, preferences: flags.preferences });
     const proofPointCount = Number(one(s, 'SELECT COUNT(*) AS count FROM proof_points WHERE profile_id=?', [r.profile.id])?.count || 0);
     const canonicalResumeCreated = Boolean(one(s, 'SELECT 1 AS present FROM profile_resume_revisions WHERE profile_id=? LIMIT 1', [r.profile.id]));
     out({ id: r.profile.id, name: r.profile.name, created: r.created, proofPointCount, canonicalResumeCreated, preferences: parseJson(r.profile.preferences_json, {}), nextActions: r.nextActions });
@@ -777,15 +781,15 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'resume' && action === 'import') {
-    const row = importResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
-    out({ id: row.id, profileId: row.profile_id, revision: row.revision, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    const row = await importResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, source: { format: row.source_format, name: row.source_name, archivePath: row.source_archive_path || null, extraction: row.extraction }, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
     return;
   }
   if (group === 'resume' && action === 'show') {
     const revision = flags.revision == null ? null : numberFlag(flags, 'revision', null, { min: 1 });
     const row = getResume(s, needProfile(flags), revision);
     if (!row) throw Error(`Resume revision not found${revision == null ? '' : `: ${revision}`}`);
-    out({ id: row.id, profileId: row.profile_id, revision: row.revision, sourceTextHash: row.source_text_hash, verificationStatus: row.verification_status, supersedesResumeId: row.supersedes_resume_id || null, isCurrent: Boolean(row.is_current), document: row.document, validation: row.validation });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, sourceTextHash: row.source_text_hash, source: { format: row.source_format, name: row.source_name, archivePath: row.source_archive_path || null, extraction: row.extraction }, verificationStatus: row.verification_status, supersedesResumeId: row.supersedes_resume_id || null, isCurrent: Boolean(row.is_current), document: row.document, validation: row.validation });
     return;
   }
   if (group === 'resume' && action === 'validate') {
@@ -799,8 +803,8 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (group === 'resume' && action === 'replace') {
-    const row = replaceResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <json-or-yaml>')) });
-    out({ id: row.id, profileId: row.profile_id, revision: row.revision, supersedesResumeId: row.supersedes_resume_id, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
+    const row = await replaceResume(s, { profileId: needProfile(flags), filePath: String(requireFlag(flags, 'file', '--file <path>')) });
+    out({ id: row.id, profileId: row.profile_id, revision: row.revision, supersedesResumeId: row.supersedes_resume_id, source: { format: row.source_format, name: row.source_name, archivePath: row.source_archive_path || null, extraction: row.extraction }, verificationStatus: row.verification_status, document: row.document, validation: row.validation });
     return;
   }
   if (group === 'resume' && action === 'coverage') {

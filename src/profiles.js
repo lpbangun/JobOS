@@ -71,7 +71,7 @@ export function createProfile(s, name, opts = {}) {
   const existing = one(s, 'SELECT * FROM profiles WHERE id=?', [pid]);
   if (existing) return { profile: existing, created: false, nextActions: [] };
   const at = now();
-  const resumeInput = opts.fromResume ? readResumeFile(pid, opts.fromResume) : null;
+  const resumeInput = opts.resumeInput || (opts.fromResume ? readResumeFile(pid, opts.fromResume) : null);
   const resume = resumeInput?.sourceText || '';
   const custom = opts.preferences ? JSON.parse(fs.readFileSync(opts.preferences, 'utf8')) : {};
   const sourceEntries = new Map();
@@ -223,6 +223,35 @@ export function addProof(s, pid, summary, evidence = '', skills = [], metrics = 
   return one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
 }
 export function listProofs(s,pid){ return all(s,'SELECT * FROM proof_points WHERE profile_id=? ORDER BY created_at',[pid]).map(p=>({...p,skills:parseJson(p.skills_json,[]),metrics:parseJson(p.metrics_json,[]),metadata:parseJson(p.metadata_json,{})})); }
+
+export function importResumeProofCandidates(s, profileId, sourceText, source = 'resume import') {
+  if (!one(s, 'SELECT id FROM profiles WHERE id=?', [profileId])) throw Error(`Unknown profile: ${profileId}`);
+  const at = now();
+  const candidates = structuredProofs(profileId, sourceText, source);
+  for (const proof of candidates) {
+    run(s, 'INSERT OR IGNORE INTO proof_points (id,profile_id,summary,evidence,skills_json,metrics_json,source,metadata_json,status,verification_status,updated_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', [
+      proof.id, profileId, proof.summary, proof.evidence, JSON.stringify(proof.skills), JSON.stringify(proof.metrics),
+      'resume_import', JSON.stringify(proof.metadata), 'active', 'unverified', at, at
+    ]);
+  }
+  if (candidates.length) {
+    audit(s, 'proof_candidates.imported', 'profile', profileId, { source, count: candidates.length });
+    syncProfile(s, profileId);
+    save(s);
+  }
+  return listProofs(s, profileId).filter(proof => candidates.some(candidate => candidate.id === proof.id));
+}
+
+export function rejectProof(s, proofId, reason = 'Rejected during proof review') {
+  const proof = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+  if (!proof) throw Error(`Unknown proof point: ${proofId}`);
+  const at = now();
+  run(s, "UPDATE proof_points SET status='retired',verification_status='rejected',retired_at=?,retirement_reason=?,updated_at=? WHERE id=?", [at, String(reason).trim(), at, proofId]);
+  audit(s, 'proof_point.rejected', 'proof_point', proofId, { profileId: proof.profile_id, reason: String(reason).trim() });
+  syncProfile(s, proof.profile_id);
+  save(s);
+  return one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);
+}
 
 export function verifyProof(s, proofId) {
   const proof = one(s, 'SELECT * FROM proof_points WHERE id=?', [proofId]);

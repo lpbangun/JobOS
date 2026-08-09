@@ -88,13 +88,18 @@ function stageState(s, context) {
   ];
 }
 
-function priorityStrip(s, jobs, profileId, at) {
-  const actionRow = profileId ? one(s, `SELECT tasks.*,jobs.company
-    FROM tasks LEFT JOIN jobs ON jobs.id=tasks.job_id
-    WHERE tasks.profile_id=? AND tasks.status='open' AND tasks.action_kind='application_next_action'
-    ORDER BY CASE WHEN tasks.urgent_at<=? THEN 0 WHEN tasks.due_at<=? THEN 1 ELSE 2 END,
-      tasks.due_at,tasks.id LIMIT 1`, [profileId, at, at]) : null;
-  const action = actionRow ? taskView(actionRow, { nowDate: new Date(at) }) : null;
+export function fitUnlockGuidance(fit) {
+  if (!fit || fit.scoreStatus !== 'insufficient_evidence' || fit.overall != null) return null;
+  return 'Unlock FIT: add target roles, location/work model, compensation, and mission in Setup → Your preferences (g) or profile preferences.';
+}
+
+function priorityStrip(s, jobs, profileId, at, recommendedAction, {
+  selectedJobId = null,
+  selectedSignals = null,
+  networkSetupStatus = null,
+  discoverySearchCount = 0,
+  selectedFit = null
+} = {}) {
   const interview = profileId ? one(s, `SELECT jobs.id AS job_id,jobs.company,tasks.title,tasks.due_at
     FROM applications JOIN jobs ON jobs.id=applications.job_id
     LEFT JOIN tasks ON tasks.application_id=applications.id AND tasks.profile_id=applications.profile_id AND tasks.status='open'
@@ -103,31 +108,118 @@ function priorityStrip(s, jobs, profileId, at) {
   const recentThreshold = new Date(new Date(at).getTime() - 7 * 86_400_000).toISOString();
   const newJobs = jobs.filter(job => ['new', 'imported'].includes(job.discoveryStatus) && String(job.updatedAt || '') >= recentThreshold);
   const failure = one(s, "SELECT trigger_name,error,created_at FROM automation_runs WHERE status='failed' ORDER BY created_at DESC LIMIT 1");
+  const networkGap = Boolean(
+    selectedJobId
+    && (selectedSignals?.artifacts || 0) > 0
+    && (selectedSignals?.path === 'none' || !selectedSignals?.path)
+    && networkSetupStatus === 'not_started'
+  );
+  const discoveryGap = Boolean(profileId && discoverySearchCount === 0 && jobs.length > 0);
+  const fitGuidance = fitUnlockGuidance(selectedFit);
   return [
     {
-      kind: action?.state || 'action',
-      jobId: action?.jobId || null,
-      taskId: action?.id || null,
-      text: action
-        ? `${action.title}${actionRow.company ? ` · ${actionRow.company}` : ''} · ${action.dueAt.slice(0, 16)}`
-        : 'No current application actions'
+      kind: recommendedAction?.state || 'action',
+      jobId: recommendedAction?.jobId || null,
+      taskId: recommendedAction?.taskId || null,
+      text: recommendedAction?.label || 'Review your workspace and choose the next step',
+      actionId: recommendedAction?.id || null,
+      source: recommendedAction?.source || null
     },
-    {
+    fitGuidance ? {
+      kind: 'action',
+      jobId: selectedJobId,
+      taskId: null,
+      text: fitGuidance,
+      actionId: 'unlock_fit',
+      target: 'setup-calibration',
+      source: 'fit'
+    } : null,
+    interview ? {
       kind: 'interview',
-      jobId: interview?.job_id || null,
-      text: interview ? `${interview.title || 'Interview prep'} · ${interview.company}${interview.due_at ? ` · ${interview.due_at.slice(0, 16)}` : ''}` : 'No interviews scheduled'
-    },
-    {
+      jobId: interview.job_id,
+      text: `${interview.title || 'Interview prep'} · ${interview.company}${interview.due_at ? ` · ${interview.due_at.slice(0, 16)}` : ''}`
+    } : null,
+    networkGap ? {
+      kind: 'network',
+      jobId: selectedJobId,
+      text: 'Build network (b) · no reachable paths yet',
+      actionId: 'build_network',
+      target: 'build-network',
+      source: 'network'
+    } : null,
+    discoveryGap ? {
+      kind: 'discovery',
+      jobId: selectedJobId || null,
+      text: 'Add sample offline search · Enter in discovery (s)',
+      actionId: 'run_discovery',
+      target: 'discovery',
+      source: 'discovery'
+    } : null,
+    newJobs.length ? {
       kind: 'new',
-      jobId: newJobs[0]?.id || null,
-      text: newJobs.length ? `${newJobs.length} new/imported · ${newJobs.filter(job => job.highFit).length} high-fit` : 'No new jobs this week'
-    },
-    {
+      jobId: newJobs[0].id,
+      text: `${newJobs.length} new/imported · ${newJobs.filter(job => job.highFit).length} high-fit`
+    } : null,
+    failure ? {
       kind: 'failure',
       jobId: null,
-      text: failure ? `${failure.trigger_name} · ${failure.error || 'failed'} · ${failure.created_at.slice(0, 16)}` : 'No recent source failures'
-    }
-  ];
+      target: 'log',
+      text: `${failure.trigger_name} · ${failure.error || 'failed'} · ${failure.created_at.slice(0, 16)}`
+    } : null
+  ].filter(Boolean);
+}
+
+function recommendedAction(onboarding, details, jobs, selectedJobId) {
+  const pendingArtifactIds = details?.readiness?.review?.pendingArtifactIds || [];
+  if (pendingArtifactIds.length || onboarding?.nextAction?.id === 'review_materials') {
+    return {
+      id: 'review_materials',
+      label: 'Review exact revisions',
+      source: 'review',
+      target: 'review',
+      jobId: selectedJobId,
+      taskId: null
+    };
+  }
+  const task = jobs.find(job => job.id === selectedJobId)?.next || null;
+  if (task) {
+    return {
+      id: task.id,
+      label: task.title,
+      source: 'task',
+      jobId: selectedJobId,
+      taskId: task.id,
+      state: task.state || null
+    };
+  }
+  if (!onboarding.coreReady && onboarding.nextAction) {
+    return {
+      id: onboarding.nextAction.id,
+      label: onboarding.nextAction.label,
+      source: 'setup',
+      jobId: onboarding.jobId || selectedJobId || null,
+      taskId: null
+    };
+  }
+  const readinessNext = details?.readiness?.nextAction
+    || details?.readiness?.next
+    || details?.readiness?.nextActions?.[0]?.action;
+  if (readinessNext) {
+    return {
+      id: 'application_readiness',
+      label: typeof readinessNext === 'string' ? readinessNext : JSON.stringify(readinessNext),
+      source: 'readiness',
+      jobId: selectedJobId,
+      taskId: null
+    };
+  }
+  return {
+    id: selectedJobId ? 'review_selected_job' : 'continue_setup',
+    label: selectedJobId ? 'Review this job and choose your next step' : 'Continue guided setup',
+    source: selectedJobId ? 'job' : 'setup',
+    jobId: selectedJobId || null,
+    taskId: null
+  };
 }
 
 export function artifactDocs(s, jobId) {
@@ -367,8 +459,9 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   const details = selected ? {
     ...selected,
     job: { ...selected.job, ...statusStage(selected.job) },
-    narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ').slice(0, 280) || 'No description is stored for this job.',
-    requirements: selectedRow ? requirementTextsForJob(selectedRow).slice(0, 6) : [],
+    narrative: selected.fit?.reasoning || String(selectedRow?.description || '').replace(/\s+/g, ' ') || 'No description is stored for this job.',
+    postingText: String(selectedRow?.description || '') || 'No description is stored for this job.',
+    requirements: selectedRow ? requirementTextsForJob(selectedRow) : [],
     compensation: selectedRow?.compensation || '',
     workModel: selectedRow?.work_model || '',
     stages: stageState(s, selected),
@@ -472,7 +565,20 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
   });
   const memory = memoryProjection(s, { profileId: selectedProfile, at });
   const onboarding = buildOnboardingStatus(s, { profileId, jobId: selectedJobId, asOf: at });
-
+  const nextAction = recommendedAction(onboarding, details, jobs, selectedId);
+  onboarding.recommendedAction = nextAction;
+  const selectedSignals = jobs.find(job => job.id === selectedId)?.signals || null;
+  const discovery = {
+    ...discoveryHealth(s, { profileId: selectedProfile }),
+    queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions)
+  };
+  const priority = priorityStrip(s, jobs, selectedProfile, at, nextAction, {
+    selectedJobId: selectedId,
+    selectedSignals,
+    networkSetupStatus,
+    discoverySearchCount: discovery.searches?.length || 0,
+    selectedFit: details?.fit || null
+  });
   return {
     version: 2,
     generatedAt: at,
@@ -487,10 +593,15 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
       drafts: reviews.length,
       interviews: interviewCount
     },
-    priority: priorityStrip(s, jobs, selectedProfile, at),
+    priority,
+    recommendedAction: nextAction,
     jobs,
     selectedJobId: selectedId,
-    selected: details,
+    selected: details ? {
+      ...details,
+      readiness: readiness ? { ...readiness, nextAction: nextAction.label, recommendedAction: nextAction } : null,
+      recommendedAction: nextAction
+    } : null,
     interviews,
     memory,
     onboarding,
@@ -511,7 +622,7 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
             .map(question => ({ category: question.category, question: question.question, status: question.status }))
         : []
     },
-    discovery: { ...discoveryHealth(s, { profileId: selectedProfile }), queue: jobs.filter(job => job.discoveryStatus === 'new').sort(compareFitDecisions) },
+    discovery,
     networkSetup: {
       status: networkSetupStatus,
       intent: {

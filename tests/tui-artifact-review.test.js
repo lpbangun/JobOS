@@ -757,16 +757,16 @@ test('T8 — Document navigation/search', async t => {
   assert.equal(tui.state.selectedArtifactId, docs[0].id,
     'T8: k decrements selectedArtifactId');
 
-  // ── Intended: arrow keys content scroll ──
-  tui.state.docsScroll = 10;
+  // ── Intended: arrow keys follow the vertical document list ──
   tui.onKeypress(null, { name: 'down' });
-  assert.equal(tui.state.docsScroll, 11,
-    'T8: down arrow increments docsScroll');
+  assert.equal(tui.state.selectedArtifactId, docs[1].id,
+    'T8: down arrow advances the selected document');
   tui.onKeypress(null, { name: 'up' });
-  assert.equal(tui.state.docsScroll, 10,
-    'T8: up arrow decrements docsScroll');
+  assert.equal(tui.state.selectedArtifactId, docs[0].id,
+    'T8: up arrow returns to the previous document');
 
   // ── Intended: PageUp/PageDown page content scroll ──
+  tui.state.docsScroll = 10;
   tui.onKeypress(null, { name: 'pagedown' });
   const afterPageDown = tui.state.docsScroll;
   assert.ok(afterPageDown > 10,
@@ -777,7 +777,7 @@ test('T8 — Document navigation/search', async t => {
 
   // ── Intended: clamp minimum scroll ──
   tui.state.docsScroll = 0;
-  tui.onKeypress(null, { name: 'up' });
+  tui.onKeypress(null, { name: 'pageup' });
   assert.equal(tui.state.docsScroll, 0,
     'T8: scroll clamped at 0');
 
@@ -973,9 +973,9 @@ test('T10 — Correct predecessor diff', async t => {
   // ── Intended: diffScroll independent from docsScroll ──
   tui.state.docsScroll = 5;
   tui.state.docsDiffScroll = 3;
-  tui.onKeypress(null, { name: 'down' });
-  assert.equal(tui.state.docsDiffScroll, 4,
-    'T10: down arrow increments docsDiffScroll in diff mode');
+  tui.onKeypress(null, { name: 'pagedown' });
+  assert.ok(tui.state.docsDiffScroll > 3,
+    'T10: PageDown increments docsDiffScroll in diff mode');
   tui.onKeypress('V', { name: 'v', shift: true }); // back to document
   assert.equal(tui.state.docsView, 'document',
     'T10: V toggles back to document');
@@ -1373,10 +1373,15 @@ test('T13 — Responsive existing-docs surface', async t => {
     'T13: docs title at width 140');
   assert.match(screenWide, /resume\.md/,
     'T13: artifact path at width 140');
+  assert.match(screenWide, /YOUR DOCUMENTS · ↑\/↓ or j\/k selects · PgUp\/PgDn scrolls contents/,
+    'T13: the vertical document list explains selection separately from content scrolling');
+  const visibleDocumentRows = screenWide.split('\n').filter(line => /[▶ ] \d+\. (Resume|Cover)/.test(line));
+  assert.ok(visibleDocumentRows.length >= 2,
+    'T13: document choices render as a vertical list that matches j/k navigation');
 
-  // Agent-off placeholder visible alongside content
-  assert.match(screenWide, /agent off|AGENT.*off/,
-    'T13: wide split shows agent/placeholder alongside content');
+  // Assistant-off placeholder visible alongside content
+  assert.match(screenWide, /Assistant (?:is )?offline?/i,
+    'T13: wide split shows assistant/placeholder alongside content');
 
   // ── Intended: Ctrl+A toggles focusTarget in wide docs ──
   tui.state.focusTarget = 'shell';

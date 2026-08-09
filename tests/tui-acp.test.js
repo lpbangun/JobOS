@@ -10,7 +10,7 @@ import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { defaultTuiState, JobosTui, renderTui, TUI_DOMAIN_ACTIONS } from '../src/tui.js';
-import { callDomainTool } from '../src/domain-tools.js';
+import { callDomainTool, profileAgentContext, selectedJobContext } from '../src/domain-tools.js';
 import { mcpToolNames } from '../src/mcp.js';
 import { runMcpDemo } from '../scripts/mcp-demo.js';
 import { createArtifact } from '../src/artifacts.js';
@@ -48,27 +48,34 @@ function streams() {
   return { stdin, stdout };
 }
 
-test('locked 011 snapshot is data-bound and keeps authoritative list/detail/agent orientation', async t => {
+test('populated dashboard prioritizes jobs and selected action while technical detail stays disclosed on demand', async t => {
   const { store, profile, proof, jobs } = await seededWorkspace(t);
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id, at: '2026-07-15T12:00:00.000Z' });
   const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready', sessionId: 'session-123' };
   const screen = renderTui(model, state, { width: 150, height: 46, color: false });
 
   assert.match(screen, /JOBOS · PM EdTech/);
-  assert.match(screen, /ACTION/);
-  assert.match(screen, /INTERVIEW/);
-  assert.match(screen, /NEW/);
-  assert.match(screen, /FAILURE/);
-  assert.match(screen, /JOBS · today/);
+  assert.match(screen, /NEXT UP/);
+  assert.equal(model.priority[0].kind, 'action');
+  assert.ok(model.priority.some(item => item.actionId === 'unlock_fit'));
+  assert.ok(model.priority.some(item => item.kind === 'network'));
+  assert.ok(model.priority.some(item => item.kind === 'discovery'));
+  assert.ok(model.priority.some(item => item.kind === 'new'));
+  assert.doesNotMatch(screen, /QUEUE|INTERVIEW|FAILURE/, 'priority metadata and empty categories stay out of the calm default view');
+  assert.match(screen, /┌ JOBS /);
+  assert.match(screen, /\[today\] all high review ready applied interview/);
   assert.match(screen, /SELECTED JOB/);
-  assert.match(screen, /AGENT/);
-  assert.match(screen, /Hermes ACP · ready/);
+  assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');
+  assert.doesNotMatch(screen, /Hermes ACP|side-effects:off|TECHNICAL DETAILS/);
   assert.match(screen, /Product Manager 1/);
-  assert.match(screen, new RegExp(proof.id));
-  assert.match(screen, /resume · draft_needs_human_review/);
-  assert.match(screen, /side-effects:off/);
-  assert.match(screen, /p pursue · z score · n network · o docs · q answers · a agent/);
-  assert.match(screen, /i prompt/);
+  assert.match(screen, /e details · p prepare · z score · i ask/);
+
+  const detailed = renderTui(model, { ...state, detailsExpanded: true }, { width: 150, height: 46, color: false });
+  assert.match(detailed, /TECHNICAL DETAILS/);
+  assert.match(detailed, /side effects off/);
+  const lowerDetails = renderTui(model, { ...state, detailsExpanded: true, detailsScroll: Number.MAX_SAFE_INTEGER }, { width: 150, height: 46, color: false });
+  assert.match(lowerDetails, new RegExp(proof.id));
+  assert.match(lowerDetails, /resume · draft_needs_human_review/);
 });
 
 test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {
@@ -96,6 +103,38 @@ test('agent is default-on, Escape does not hide it, overlays stay overlays, and 
   assert.equal(tui.state.agentOn, false);
   tui.onKeypress('a', { name: 'a' });
   assert.equal(tui.state.agentOn, true);
+});
+
+test('Hermes chat receives uploaded resume and verified profile context with or without a selected job', async t => {
+  const { store, profile, proof, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const profileContext = profileAgentContext(store, profile.id);
+  assert.equal(profileContext.profile.name, 'PM EdTech');
+  assert.equal(profileContext.resumeUpload.revision, 1);
+  assert.deepEqual(profileContext.resumeUpload.experience, [{
+    title: 'Product Manager', employer: 'Learning Studio', startDate: '2021-01', endDate: 'Present'
+  }]);
+  assert.deepEqual(profileContext.resumeUpload.skills, ['Product discovery']);
+  assert.equal(profileContext.verifiedProofs[0].id, proof.id);
+  assert.equal(profileContext.privacy.rawResumeTextIncluded, false);
+  assert.doesNotMatch(JSON.stringify(profileContext), /candidate@example\.com|555 555 0100/);
+
+  const jobContext = selectedJobContext(store, jobs[0].id, profile.id);
+  assert.equal(jobContext.resumeUpload.id, profileContext.resumeUpload.id);
+  assert.equal(jobContext.verifiedProofs[0].id, proof.id);
+
+  const tui = new JobosTui(store, { ...streams(), profileId: profile.id, connectAgent: false, color: false });
+  tui.state.selectedJobId = null;
+  let receivedContext = null;
+  tui.client = {
+    state: 'ready',
+    async prompt(_text, options) {
+      receivedContext = options.context;
+      return { stopReason: 'end_turn' };
+    }
+  };
+  await tui.promptAgent('What experience did I upload?');
+  assert.equal(receivedContext.resumeUpload.id, profileContext.resumeUpload.id);
+  assert.equal(receivedContext.verifiedProofs[0].id, proof.id);
 });
 
 test('review queue opens the exact artifact revision, shows local readiness policy, and keeps document diff cancellable', async t => {
@@ -205,7 +244,7 @@ test('review, log, network, documents, answers, discovery, system, and profile s
   for (const [overlay, expected] of Object.entries(expectations)) {
     const screen = renderTui(model, { ...base, overlay }, { width: 120, height: 38, color: false });
     assert.match(screen, expected, `${overlay} overlay did not expose expected state`);
-    assert.match(screen, /A:ready|agent:ready/, `${overlay} replaced the shell header`);
+    assert.match(screen, /local workspace/, `${overlay} replaced the shell header`);
   }
 });
 
@@ -259,17 +298,19 @@ test('compact terminals keep context reachable and switch to a focused chat page
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
   const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
   const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
-  assert.match(dashboard, /FX:OFF/);
-  assert.match(dashboard, /JOBS · today/);
+  assert.doesNotMatch(dashboard, /FX:OFF|side-effects/);
+  assert.match(dashboard, /┌ JOBS /);
   assert.match(dashboard, /SELECTED JOB/);
-  assert.doesNotMatch(dashboard, /┌ AGENT/);
+  assert.doesNotMatch(dashboard, /┌ ASSISTANT/);
+  assert.match(dashboard, /FIT .*READINESS/);
+  assert.match(dashboard, /NEXT/);
   assert.match(dashboard, /Tab chat/);
   assert.equal(dashboard.split('\n').length, 24);
 
   const chat = renderTui(model, { ...state, focusTarget: 'agent' }, { width: 60, height: 24, color: false });
-  assert.match(chat, /AGENT · FOCUSED/);
-  assert.match(chat, /Hermes ACP · ready/);
-  assert.match(chat, /Press i to prompt/);
+  assert.match(chat, /ASSISTANT · FOCUSED/);
+  assert.match(chat, /Assistant ready/);
+  assert.match(chat, /Press i to type/);
   assert.doesNotMatch(chat, /┌ SELECTED JOB/);
   assert.match(chat, /Tab\/Esc dashboard/);
   assert.equal(chat.split('\n').length, 24);
@@ -289,9 +330,9 @@ test('focused chat owns most wide-terminal real estate and supports scrollback',
     messages
   };
   const screen = renderTui(model, state, { width: 140, height: 34, color: false });
-  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('AGENT · FOCUSED'));
-  assert.ok(panelHeader, 'focused chat includes selected-job context and agent panels');
-  assert.ok(panelHeader.indexOf('┌ AGENT') <= 38, 'agent panel begins within the first 27% of the terminal');
+  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('ASSISTANT · FOCUSED'));
+  assert.ok(panelHeader, 'focused chat includes selected-job context and assistant panels');
+  assert.ok(panelHeader.indexOf('┌ ASSISTANT') <= 45, 'assistant panel owns most of the terminal');
   assert.match(screen, /message-14/);
   assert.doesNotMatch(screen, /message-19/);
   assert.match(screen, /scroll ↑5/);
@@ -466,9 +507,9 @@ test('build-network editor: editing a list field and toggling a source persists 
   tui.onOverlayKey('\r', { name: 'return' });
   assert.equal(tui.state.mode, 'build-network-field', 'entered field edit mode');
   // Type a value
-  for (const ch of 'Acme Learning, EduCo') tui.onInputKey(ch, { name: ch });
-  // Commit with Enter
-  tui.onInputKey('\r', { name: 'return' });
+  for (const ch of 'Acme Learning, EduCo') tui.onKeypress(ch, { name: ch });
+  // Commit through the live dispatcher so modal routing cannot bypass field input.
+  tui.onKeypress('\r', { name: 'return' });
   assert.equal(tui.state.mode, 'normal', 'edit mode exited after commit');
   assert.equal(tui.state.networkDraft.targetCompanies, 'Acme Learning, EduCo', 'draft updated with typed value');
 

@@ -23,7 +23,10 @@
   ],
   "files": [
     "src/",
+    "samples/",
     "docs/jobos-tui.svg",
+    "docs/jobos-setup.svg",
+    "docs/jobos-chat.svg",
     "docs/AGENT_GUIDE.md",
     "docs/CONFIGURATION.md",
     "docs/SAFETY_AND_STATE.md",
@@ -44,6 +47,7 @@
     "smoke": "node scripts/smoke.js",
     "smoke:live-form": "node scripts/smoke-live-form.js",
     "acp-demo": "node scripts/acp-demo.js",
+    "acp-smoke": "node scripts/acp-smoke.js",
     "mcp-demo": "node scripts/mcp-demo.js",
     "check:release-security": "node scripts/check-release-security.js --format json",
     "test:w10": "node --test --test-concurrency=1 tests/w10-golden.test.js tests/w10-security-release.test.js tests/w10-docs-status.test.js tests/w10-mcp-compatibility.test.js",
@@ -54,9 +58,11 @@
     "@langchain/langgraph": "1.4.8",
     "cheerio": "^1.2.0",
     "diff": "^9.0.0",
+    "mammoth": "^1.12.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "openai": "^6.45.0",
+    "pdfjs-dist": "5.4.624",
     "slice-ansi": "^9.0.0",
     "sql.js": "^1.12.0",
     "string-width": "^8.2.2",
@@ -76,6 +82,7 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "jszip": "^3.10.1",
     "playwright": "^1.61.1"
   }
 }

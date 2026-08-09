@@ -146,8 +146,9 @@ test('W09-RECOVERY-05 setup navigation, recompute, and Escape are zero-write', a
   const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
   const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
   const before = readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite'));
+  assert.equal(tui.state.overlayIndex, 1, 'setup starts on the first actionable blocker');
   tui.onKeypress('j', { name: 'j' });
-  assert.equal(tui.state.overlayIndex, 1);
+  assert.equal(tui.state.overlayIndex, 2);
   tui.onKeypress('r', { name: 'r' });
   assert.equal(tui.state.overlay, 'setup');
   tui.onKeypress('', { name: 'escape' });
@@ -160,7 +161,7 @@ test('W09-JOURNEY-02 TUI canonical form advances only after success and retains 
   const s = await openStore({ workspace: root() });
   const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
   const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  tui.onKeypress('j', { name: 'j' });
+  assert.equal(tui.state.overlayIndex, 1, 'profile is the first actionable step');
   tui.onKeypress('', { name: 'return' });
   assert.equal(tui.state.mode, 'setup-profile');
   tui.state.input = 'Guided Profile';
@@ -169,11 +170,16 @@ test('W09-JOURNEY-02 TUI canonical form advances only after success and retains 
   assert.equal(tui.model.onboarding.nextAction.id, 'import_resume');
   assert.equal(tui.state.overlayIndex, 2);
   tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.overlay, 'setup-resume-source');
+  tui.onKeypress('j', { name: 'j' });
+  tui.onKeypress('j', { name: 'j' });
+  tui.onKeypress('', { name: 'return' });
+  assert.equal(tui.state.mode, 'setup-resume-path');
   tui.state.input = '/definitely/missing/resume.json';
   tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-file');
+  assert.equal(tui.state.mode, 'setup-resume-path');
   assert.equal(tui.state.input, '/definitely/missing/resume.json');
-  assert.match(tui.state.status, /import_resume failed/);
+  assert.match(tui.state.status, /ENOENT|no such file/i);
   assert.equal(tui.model.onboarding.steps.find(step => step.id === 'resume').status, 'blocked');
 });
 
@@ -264,6 +270,32 @@ test('W09-JOURNEY-03 materials completion matrix does not alias ready-for-review
   for (const status of ['materials-ready', 'form-ready', 'form-blocked']) assert.equal(isOnboardingMaterialsComplete({ status }), true, status);
   assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', materialsStatus: 'approved' }), true);
   assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', localApprovalComplete: true }), true);
+  assert.equal(isOnboardingMaterialsComplete({
+    status: 'blocked',
+    review: { requiredArtifactIds: ['resume-1', 'cover-1'], approvedArtifactIds: ['resume-1', 'cover-1'] }
+  }), true, 'reviewing every exact draft can finish onboarding while application readiness remains blocked');
+});
+
+test('provider-free insufficient-evidence fit is a completed check, not an endless rescore loop', async () => {
+  const { buildOnboardingStatus } = await import('../src/onboarding.js');
+  const s = await openStore({ workspace: root() });
+  const profileId = createProfile(s, 'Provider Free').profile.id;
+  const job = localJob(s, profileId, 'provider-free');
+  s.db.run('UPDATE jobs SET fit_score=NULL,score_json=? WHERE id=?', [JSON.stringify({
+    contract: 'jobos.fit-score.v1',
+    jobId: job.id,
+    profileId,
+    overall: null,
+    scoreStatus: 'insufficient_evidence',
+    dimensions: {}
+  }), job.id]);
+
+  const status = buildOnboardingStatus(s, { profileId, jobId: job.id, asOf: AS_OF });
+  const decision = status.steps.find(step => step.id === 'decision');
+  assert.equal(decision.status, 'complete');
+  assert.equal(decision.evidence.fitPersisted, true);
+  assert.match(decision.summary, /evidence remains insufficient/i);
+  assert.equal(status.nextAction?.id, 'import_resume', 'the check advances without hiding earlier required setup');
 });
 
 test('W09-RESUME-02 proof recovery exposes verify, replace, retire, and add routes', async () => {
