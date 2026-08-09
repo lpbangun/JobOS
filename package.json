@@ -25,6 +25,8 @@
     "src/",
     "samples/",
     "docs/jobos-tui.svg",
+    "docs/jobos-setup.svg",
+    "docs/jobos-chat.svg",
     "docs/AGENT_GUIDE.md",
     "docs/CONFIGURATION.md",
     "docs/SAFETY_AND_STATE.md",

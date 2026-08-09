@@ -3,19 +3,25 @@
 A local-first, agent-native operating system for job discovery, fit decisions, tailored materials, applications, networking, and follow-up.
 
 <p align="center">
-  <img src="docs/jobos-tui.svg" alt="JobOS focused chat terminal interface" width="100%" />
+  <img src="docs/jobos-tui.svg" alt="JobOS dashboard with priority strip, job list, FIT score, and next action" width="100%" />
 </p>
 
-JobOS gives job seekers one terminal application backed by their own local data. The TUI combines a job pipeline, selected-job evidence, review queues, and a focused agent conversation without requiring a cloud account or API key.
+JobOS is a terminal application backed by your own local data. The TUI combines a job pipeline, selected-job evidence, review queues, guided setup, and a focused agent conversation—without a cloud account or required API key.
+
+<p align="center">
+  <img src="docs/jobos-setup.svg" alt="JobOS guided setup with seven essential steps" width="48%" />
+  &nbsp;
+  <img src="docs/jobos-chat.svg" alt="JobOS focused Hermes chat beside selected-job context" width="48%" />
+</p>
 
 ## What you can do
 
-- Build a reusable profile from a resume and verified proof points.
-- Discover or import roles, then score fit with explicit evidence and gaps.
-- Draft role-specific resumes, cover letters, research, and outreach.
-- Review exact artifact revisions before they become application-ready.
+- Build a reusable profile from a resume (paste or local PDF/DOCX/TXT/Markdown/JSON/YAML) and verified experience highlights.
+- Discover or import roles, then score fit with explicit evidence, gaps, and unlock guidance when preferences are thin.
+- Draft role-specific resumes, cover letters, research, and outreach from stored proof points—never invented claims.
+- Review exact artifact revisions before they become application-ready; Enter jumps to the recommended next task.
 - Track applications, interviews, contacts, tasks, and weekly progress.
-- Use Hermes inside JobOS or connect Hermes, Codex, or Claude Code through MCP.
+- Use Hermes inside JobOS (ACP) or connect Hermes, Codex, or Claude Code through MCP.
 - Keep SQLite as the source of truth with readable Markdown, YAML, and JSONL mirrors.
 
 ## Install
@@ -61,7 +67,7 @@ Guided setup opens as a focused full-screen workspace and starts on the first ta
 6. Check the fit and choose whether to pursue the job.
 7. Generate and review application materials.
 
-No provider, browser, or API key is required for this core flow. Successful actions move directly to the next task. Press `g` later to return to setup.
+Optional later steps cover discovery sources, preference calibration (roles, location/work model, compensation, mission), the AI assistant, and web applications. Successful actions move directly to the next task. Press `g` later to return to setup.
 
 Use `↑`/`↓` on setup and other selectable lists; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard. In the document viewer, the document names form a vertical list: `↑`/`↓` or `j`/`k` changes documents, while `PgUp`/`PgDn` scrolls the open document.
 
@@ -74,13 +80,15 @@ Primary controls:
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` or `j` / `k` | Move through jobs or the active list |
-| `Enter` | Open the selected action |
+| `←` / `→` | Cycle the priority strip |
+| `Enter` | Open the selected / recommended action |
 | `Tab` | Focus chat; press again to restore the dashboard |
 | `i` | Type an agent prompt |
 | `p` | Run the pursue workflow |
 | `d` | Run discovery |
 | `r` | Open review |
 | `o` | Open documents |
+| `n` / `b` | Network paths / build network map |
 | `g` | Resume guided setup |
 | `?` | Show contextual help; press again for all shortcuts |
 | `Q` | Quit cleanly |
@@ -141,6 +149,8 @@ jobos
 ```
 
 Press `Tab` for the expanded chat, `i` to compose, `↑`/`↓` or `j`/`k` for scrollback, and `Esc` to return to the dashboard. Each turn receives bounded JobOS context for the active profile and selected job, including a secret-safe summary of the current resume upload and verified experience highlights. Raw resume text and contact details are excluded from this host context; Hermes can use the mediated JobOS tools for current domain state.
+
+In chat command mode (`:`), `:resume` lists persisted Hermes ACP sessions for the workspace; `:resume <profile-id>` reconnects the agent pane to that profile's saved session.
 
 ## How it works
 
@@ -239,9 +249,15 @@ npm run smoke
 
 The main runtime is Node.js ESM. Tests use Node's built-in test runner. `sql.js` provides the portable local SQLite database.
 
+Deterministic noninteractive TUI frames (useful for docs and debugging):
+
+```bash
+jobos tui --snapshot --width 120 --height 36
+```
+
 ## Status
 
-JobOS is an early local-first release. The deterministic pipeline, TUI, ACP/MCP paths, workspace mirrors, review gates, and core workflow are implemented. Optional websites and authenticated browser flows can change independently; JobOS reports those failures rather than fabricating success.
+JobOS is an early local-first release. The deterministic pipeline, responsive TUI, guided setup, ACP/MCP paths, workspace mirrors, review gates, and core pursue workflow are implemented. Recent product surfaces include honest FIT/unlock guidance, exact material review as the primary next action when drafts exist, resume identity correction, document-viewer navigation, and Hermes session resume via `:resume`. Optional websites and authenticated browser flows can change independently; JobOS reports those failures rather than fabricating success.
 
 ## License
 
