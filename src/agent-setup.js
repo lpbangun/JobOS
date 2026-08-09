@@ -94,6 +94,10 @@ function runCommand(command, args, { cwd, env = process.env, timeoutMs = 10_000,
     child.stdout.on('data', append);
     child.stderr.on('data', append);
     if (stdin != null) {
+      // EPIPE (child exits/closes stdin before the write drains) is delivered
+      // asynchronously as an 'error' event on the writable stream; without a
+      // listener it would crash the process. The close/exit result still decides success.
+      child.stdin.on('error', () => {});
       try {
         child.stdin.write(String(stdin));
         child.stdin.end();

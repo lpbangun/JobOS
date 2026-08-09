@@ -519,7 +519,6 @@ export function discoveryHealth(s, { profileId = null } = {}) {
   const recentFailures = [];
   for (const item of runs) {
     if (item.status !== 'failed' && item.status !== 'partial') continue;
-    const outputs = item.counts || {};
     recentFailures.push({
       searchId: item.id,
       searchName: item.actionId || 'discovery',

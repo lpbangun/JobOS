@@ -338,9 +338,17 @@ function wrap(value, width) {
 }
 
 function editableInput(state, color) {
-  const input = String(state.input || '').replace(/\r?\n/g, ' ↵ ');
-  const cursor = Math.max(0, Math.min(input.length, Number(state.inputCursor ?? input.length)));
-  const anchor = state.inputAnchor == null ? cursor : Math.max(0, Math.min(input.length, Number(state.inputAnchor)));
+  const raw = String(state.input || '');
+  const input = raw.replace(/\r?\n/g, ' ↵ ');
+  // state.inputCursor/state.inputAnchor index the raw input, but `input` expands
+  // each newline into 3 display chars, so map raw offsets through the expansion.
+  const toDisplay = offset => {
+    const clamped = Math.max(0, Math.min(raw.length, Number(offset ?? raw.length)));
+    const newlinesBefore = raw.slice(0, clamped).match(/\r?\n/g)?.length || 0;
+    return Math.min(input.length, clamped + newlinesBefore * 2);
+  };
+  const cursor = toDisplay(state.inputCursor ?? raw.length);
+  const anchor = state.inputAnchor == null ? cursor : toDisplay(state.inputAnchor);
   const start = Math.min(cursor, anchor);
   const end = Math.max(cursor, anchor);
   if (start !== end) {
@@ -388,19 +396,6 @@ function mergeColumns(columns, widths, color, separator = ' ') {
       return `${value}${' '.repeat(pad)}`;
     });
     output.push(parts.join(paint(separator, 'green', color)));
-  }
-  return output;
-}
-
-function composeModal(background, modal, width, bodyStart, bodyHeight) {
-  const output = [...background];
-  const modalWidth = Math.min(width, Math.max(1, ...modal.map(line => stringWidth(line))));
-  const top = bodyStart + Math.max(0, Math.floor((bodyHeight - modal.length) / 2));
-  const left = Math.max(0, Math.floor((width - modalWidth) / 2));
-  for (let index = 0; index < modal.length && index < bodyHeight; index++) {
-    const row = top + index;
-    const backdrop = fit(output[row] || '', width);
-    output[row] = `${sliceAnsi(backdrop, 0, left)}${modal[index]}${sliceAnsi(backdrop, left + modalWidth, width)}`;
   }
   return output;
 }
@@ -2734,6 +2729,7 @@ export class JobosTui {
         this.state.overlay = 'setup';
         this.focusNextSetupAction();
         this.state.status = `${name === 'score' ? 'Fit check' : 'Application draft'} complete · the next task is highlighted`;
+        this.render();
       }
       this.noteArtifactChanges(before, this.artifactSnapshot());
     }

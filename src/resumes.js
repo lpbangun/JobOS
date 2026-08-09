@@ -185,7 +185,7 @@ function isAdditionalSection(value) {
   return /^(awards?|honors?|publications?|languages?|volunteer(?:ing| experience)?|community|leadership|interests?|activities|associations?|memberships?|references?)$/.test(key);
 }
 
-function sectionHeading(line, { insideSection = false } = {}) {
+function sectionHeading(line) {
   const heading = headingName(line);
   if (!heading) return '';
   if (canonicalSection(heading) || isAdditionalSection(heading)) return heading;
@@ -380,7 +380,7 @@ export function parseResumeText(profileId, sourceText) {
   const sections = [];
   let current = { title: 'Unsectioned', key: '', lines: [] };
   for (const raw of rawLines.slice(firstHeadingIndex < 0 ? 0 : firstHeadingIndex)) {
-    const heading = sectionHeading(raw, { insideSection: Boolean(current.key) });
+    const heading = sectionHeading(raw);
     if (heading) {
       if (current.lines.some(line => text(line))) sections.push(current);
       current = { title: heading, key: canonicalSection(heading), lines: [] };
