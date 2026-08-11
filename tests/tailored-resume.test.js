@@ -8,7 +8,7 @@ import YAML from 'yaml';
 
 import { applyResumeTransformations, renderSemanticResumeMarkdown, validateTailoredResume } from '../src/resume-tailoring.js';
 import { buildRequirementCoverage, extractRequirementInventory } from '../src/requirements.js';
-import { latexEscape, latexUrlEscape, preflightExtractedText, preflightPdfMetadata, renderResumeLatex, renderResumePdf, resolveLayoutProfile } from '../src/resume-renderer.js';
+import { latexEscape, latexUrlEscape, measureInkCoverage, preflightExtractedText, preflightPdfMetadata, renderResumeLatex, renderResumePdf, resolveLayoutProfile } from '../src/resume-renderer.js';
 import { openStore, one as dbOne, run as dbRun, save as dbSave } from '../src/db.js';
 import { resumeFeedback } from '../src/analytics.js';
 import { preflightResumeArtifact, reviewArtifact } from '../src/artifacts.js';
@@ -390,6 +390,62 @@ test('render preflights enforce extraction order, geometry, images, and page bud
   assert.ok(overflow.blockers.some(blocker => /image count/i.test(blocker.message)));
   const a4 = resolveLayoutProfile(null, { layout: 'technical', pageSize: 'a4' });
   assert.equal(preflightPdfMetadata(a4, { pageCount: 1, reportedSize: '595 x 842 pts (A4)', imageCount: 1 }).valid, true);
+});
+
+test('render preflights enforce minimum page fill and reject nearly-empty final pages', () => {
+  const profile = resolveLayoutProfile({ title: 'Product Manager', description: '' }, { layout: 'professional', pageSize: 'letter', pageLimit: 1 });
+  // A single page filled to 90% passes the 4/5 minimum.
+  assert.equal(preflightPdfMetadata(profile, { pageCount: 1, reportedSize: '612 x 792 pts (letter)', imageCount: 1, pageInkCoverage: [0.9] }).valid, true);
+  // A single page filled to only 50% is too short and must be blocked.
+  const underfilled = preflightPdfMetadata(profile, { pageCount: 1, reportedSize: '612 x 792 pts (letter)', imageCount: 1, pageInkCoverage: [0.5] });
+  assert.equal(underfilled.valid, false);
+  assert.ok(underfilled.blockers.some(blocker => blocker.code === 'resume_page_underfilled'));
+  // A two-page resume whose final page is nearly empty is blocked.
+  const twoPage = resolveLayoutProfile(null, { layout: 'professional', pageSize: 'letter', pageLimit: 2 });
+  const nearlyEmpty = preflightPdfMetadata(twoPage, { pageCount: 2, reportedSize: '612 x 792 pts (letter)', imageCount: 2, pageInkCoverage: [0.9, 0.03] });
+  assert.equal(nearlyEmpty.valid, false);
+  assert.ok(nearlyEmpty.blockers.some(blocker => blocker.code === 'resume_page_nearly_empty'));
+  // A two-page resume with a reasonably filled final page passes.
+  assert.equal(preflightPdfMetadata(twoPage, { pageCount: 2, reportedSize: '612 x 792 pts (letter)', imageCount: 2, pageInkCoverage: [0.9, 0.4] }).valid, true);
+  // Missing ink coverage data does not block (backward compatible).
+  assert.equal(preflightPdfMetadata(profile, { pageCount: 1, reportedSize: '612 x 792 pts (letter)', imageCount: 1 }).valid, true);
+});
+
+test('measureInkCoverage parses PPM and reports vertical fill', () => {
+  // Build a 4x1 P6 PPM: ink in rows 1 and 2 => vertical fill 0.5.
+  const header = Buffer.from('P6\n4 4\n255\n', 'latin1');
+  const pixels = Buffer.from([
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+  ]);
+  const ppm = Buffer.concat([header, pixels]);
+  assert.equal(measureInkCoverage(ppm), 0.5);
+  // A fully white image reports 0.
+  const white = Buffer.concat([header, Buffer.alloc(48, 255)]);
+  assert.equal(measureInkCoverage(white), 0);
+  // Ink spanning the full height reports ~1.
+  const full = Buffer.concat([header, Buffer.alloc(48, 0)]);
+  assert.equal(measureInkCoverage(full), 1);
+  // Garbage input returns null.
+  assert.equal(measureInkCoverage(Buffer.from('not a ppm')), null);
+});
+
+test('ATS glyph normalization and extraction preflight reject hostile glyphs', () => {
+  // latexEscape normalizes smart quotes, dashes, and nbsp to ASCII.
+  assert.equal(latexEscape('verification — 30%'), 'verification - 30\\%');
+  assert.equal(latexEscape('“smart” quotes'), '"smart" quotes');
+  assert.equal(latexEscape('non\u00A0breaking'), 'non breaking');
+  // Ligature codepoints in extracted text are a hard blocker.
+  const document = completeResume();
+  const profile = resolveLayoutProfile({ title: 'Product Manager', description: '' }, { layout: 'professional', pageSize: 'letter', pageLimit: 1 });
+  const extracted = renderSemanticResumeMarkdown(document, profile).replace('workflow', 'work\ufb02ow');
+  const check = preflightExtractedText(document, extracted, profile);
+  assert.equal(check.valid, false);
+  assert.ok(check.blockers.some(blocker => blocker.code === 'resume_render_ats_glyph'));
+  assert.ok(check.atsHostileGlyphs.some(glyph => glyph === '\ufb02'));
+  assert.ok(check.blockers.some(blocker => blocker.glyphs?.includes('U+FB02')));
 });
 
 test('missing LaTeX dependency returns a typed blocker and never creates a fake PDF', () => {
