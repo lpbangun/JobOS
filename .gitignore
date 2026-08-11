@@ -9,3 +9,7 @@ coverage/
 .tmp/
 release-evidence/
 *.sqlite-*
+.mcp.json
+.cursor/mcp.json
+.omp/mcp.json
+.grok/

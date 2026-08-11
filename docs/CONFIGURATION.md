@@ -30,7 +30,7 @@ jobos agents doctor --json
 jobos agents connect codex --dry-run --json
 ```
 
-`agents connect` supports `hermes`, `codex`, and `claude`. It registers the current installed CLI path and workspace with the client's MCP configuration. JobOS passes an executable plus an argument array; it does not generate a shell command for execution.
+`agents connect` supports `hermes`, `codex`, `claude`, `grok`, `cursor`, and `pi` (alias `omp`). It registers the current installed CLI path and workspace with the client's MCP configuration. CLI-based clients receive an executable plus argument array; Cursor and Pi receive merged project MCP JSON files.
 
 For custom noninteractive agents, register a manifest and run the protocol test:
 
