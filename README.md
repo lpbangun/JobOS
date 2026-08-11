@@ -192,6 +192,14 @@ jobos pursue <job-id> --profile <profile-id> --dry-run --json
 # Run fit, research, materials, application preparation, and outreach planning.
 jobos pursue <job-id> --profile <profile-id> --json
 
+# Inspect profile-level network opportunities, two-hop paths, and warmth.
+jobos network opportunities --profile <profile-id> --json
+jobos network graph --profile <profile-id> --max-hops 2 --json
+jobos network health --profile <profile-id> --json
+
+# Record contact recency through trusted human CLI input only.
+jobos network record --profile <profile-id> --person <person-id> --json
+
 # Review every available command only when needed.
 jobos help --all
 ```
@@ -204,7 +212,7 @@ By default, JobOS stores runtime state under the current directory:
 
 ```text
 .jobos/jobos.sqlite              canonical database
-jobos-workspace/profiles/*.yaml  agent-readable profile mirrors
+jobos-workspace/profiles/*/      profile, network health, opportunity, and graph mirrors
 jobos-workspace/jobs/*/          scores, research, artifacts, outreach
 jobos-workspace/automations/     scheduler projections
 jobos-workspace/audit.log.jsonl  local audit trail

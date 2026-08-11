@@ -151,6 +151,10 @@ export const commandRegistry = [
   cmd(['network', 'paths'], 'jobos network paths --job <job-id> [--json]', 'Rank reachable introduction and advice paths for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'contacts'], 'jobos network contacts --job <job-id> [--json]', 'List ranked source-backed contacts for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'list'], 'jobos network list [--json]', 'List imported relationship edges.', { category: 'workflow' }),
+  cmd(['network', 'opportunities'], 'jobos network opportunities --profile <profile-id> [--limit <n>] [--as-of <rfc3339>] [--json]', 'List profile-level networking opportunities ranked deterministically from local relationship and contact state; never sends or requests anything.', { flags: ['--profile <profile-id>', '--limit <n>', '--as-of <rfc3339>'], category: 'workflow' }),
+  cmd(['network', 'graph'], 'jobos network graph --profile <profile-id> [--job <job-id>] [--person <person-id>] [--max-hops 1|2] [--json]', 'Query the local profile network graph with bounded two-hop paths from the profile through people; read-only.', { flags: ['--profile <profile-id>', '--job <job-id>', '--person <person-id>', '--max-hops <1|2>'], category: 'workflow' }),
+  cmd(['network', 'health'], 'jobos network health --profile <profile-id> [--as-of <rfc3339>] [--json]', 'Read the deterministic profile network health brief with relationship warmth and recency.', { flags: ['--profile <profile-id>', '--as-of <rfc3339>'], category: 'workflow' }),
+  cmd(['network', 'record'], 'jobos network record --profile <profile-id> --person <person-id> [--contact-point <contact-point-id>] [--occurred-at <rfc3339>] [--warmth unknown|cold|cool|warm|hot] [--note <text>] [--json]', 'Record a trusted human-confirmed contact with a person, updating relationship and contact-point warmth and last-contact timestamps.', { flags: ['--profile <profile-id>', '--person <person-id>', '--contact-point <contact-point-id>', '--occurred-at <rfc3339>', '--warmth <warmth>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
   cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Advanced standalone outreach drafting operation; does not run pursue dependencies or send anything.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'], relatedWorkflow: 'pursue', workflowStage: 'outreach', runsDependencies: false }),
   cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a reviewable outreach path from discovered contacts, network edges, and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
@@ -1283,6 +1287,43 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'network' && action === 'list') {
     out(listNetworkEdges(s));
+    return;
+  }
+  if (group === 'network' && action === 'opportunities') {
+    out(await callDomainTool(s, 'network_opportunities_list', {
+      profileId: needProfile(flags),
+      limit: flags.limit == null ? 25 : numberFlag(flags, 'limit', 25, { min: 1 }),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'graph') {
+    const maxHops = flags['max-hops'] == null ? 2 : numberFlag(flags, 'max-hops', 2, { min: 1 });
+    if (maxHops < 1 || maxHops > 2) usage('Invalid --max-hops: must be 1 or 2');
+    out(await callDomainTool(s, 'network_graph_query', {
+      profileId: needProfile(flags),
+      jobId: flags.job ? String(flags.job) : null,
+      personId: flags.person ? String(flags.person) : null,
+      maxHops,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'health') {
+    out(await callDomainTool(s, 'network_health_brief', {
+      profileId: needProfile(flags),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'record') {
+    out(await callDomainTool(s, 'network_contact_record', {
+      profileId: needProfile(flags),
+      personId: String(requireFlag(flags, 'person', '--person <person-id>')),
+      contactPointId: flags['contact-point'] ? String(flags['contact-point']) : null,
+      occurredAt: flags['occurred-at'] ? String(flags['occurred-at']) : null,
+      warmth: flags.warmth ? String(flags.warmth) : null,
+      note: flags.note ? String(flags.note) : '',
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'research' && action === 'add-stakeholder') {

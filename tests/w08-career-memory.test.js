@@ -362,7 +362,7 @@ test('W08-MIGRATE-01 migrates the immutable schema-14 fixture additively', async
   assert.deepEqual(before.names.filter(name => name.startsWith('career_memory_')), []);
 
   const store = await openStore({ workspace: root });
-  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'")?.value, '15');
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'")?.value, '16');
   assert.equal(one(store, 'PRAGMA foreign_keys')?.foreign_keys, 1);
   assert.deepEqual(all(store, 'PRAGMA foreign_key_check'), []);
   assertSchema14FixtureFacts(store);
@@ -375,8 +375,9 @@ test('W08-MIGRATE-01 migrates the immutable schema-14 fixture additively', async
     for (const check of W08_CHECKS[table]) assert.ok(definition.includes(check), `${table} missing ${check}`);
   }
 
-  const after = openStoreSnapshot(store, before.names);
-  assert.deepEqual(after.tables, before.tables);
+  const after = openStoreSnapshot(store, before.names.filter(name => name !== 'automations'));
+  const { automations: _seededDefaults, ...stableBeforeTables } = before.tables;
+  assert.deepEqual(after.tables, stableBeforeTables);
   assert.deepEqual(withoutMigrationMeta(after.meta), withoutMigrationMeta(before.meta));
   store.db.close();
 });

@@ -137,6 +137,8 @@ jobos scheduler run-once --json
 jobos scheduler start --interval 60
 ```
 
+Fresh and upgraded workspaces seed `profile_network_research` (weekly) and `network_nurture` (daily) disabled. Enable them explicitly with the automation commands. Profile research reuses the existing profile-scope people-research pipeline. Nurture runs only create local tasks and review-gated check-in drafts; they never send outreach.
+
 Avoid concurrent write-heavy processes against one workspace. JobOS uses portable `sql.js`, not a native SQLite WAL service.
 
 ## PDF rendering

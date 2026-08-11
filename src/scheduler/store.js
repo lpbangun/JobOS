@@ -16,7 +16,9 @@ export const actionAliases = {
   'outreach.list_due_and_draft': 'followup_watch',
   'applications.stale_check': 'stale_application_check',
   'review.weekly': 'weekly_retrospective',
-  'brief.morning_priority': 'morning_priority_brief'
+  'brief.morning_priority': 'morning_priority_brief',
+  'network.profile_research': 'profile_network_research',
+  'network.nurture': 'network_nurture'
 };
 
 export const defaultAutomations = [
@@ -24,7 +26,9 @@ export const defaultAutomations = [
   { name: 'followup_watch', actionId: 'followup_watch', schedule: '0 9 * * 1-5', profileId: null, enabled: false, config: { require_approval_to_send: true } },
   { name: 'stale_application_check', actionId: 'stale_application_check', schedule: '0 10 * * 1-5', profileId: null, enabled: false, config: { stale_days: 14 } },
   { name: 'weekly_retrospective', actionId: 'weekly_retrospective', schedule: '0 9 * * 5', profileId: null, enabled: false, config: {} },
-  { name: 'morning_priority_brief', actionId: 'morning_priority_brief', schedule: '0 8 * * 1-5', profileId: null, enabled: false, config: {} }
+  { name: 'morning_priority_brief', actionId: 'morning_priority_brief', schedule: '0 8 * * 1-5', profileId: null, enabled: false, config: {} },
+  { name: 'profile_network_research', actionId: 'profile_network_research', schedule: '0 6 * * 1', profileId: null, enabled: false, config: { depth: 'standard' } },
+  { name: 'network_nurture', actionId: 'network_nurture', schedule: '0 12 * * *', profileId: null, enabled: false, config: {} }
 ];
 
 function rawAll(s, sql, params = []) {
