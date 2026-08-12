@@ -46,6 +46,9 @@ function atsNormalize(value) {
 // they should never appear in extracted text; bullets (•) and middots (·) are
 // legitimate separators and are NOT flagged.
 const ATS_HOSTILE_EXTRACT_RE = /[\uFB00-\uFB06\u00A0\u200B\u200C\u200D\u2060\uFEFF]/;
+export function atsHostileGlyphs(value) {
+  return [...new Set(text(value).match(ATS_HOSTILE_EXTRACT_RE) || [])];
+}
 
 export function latexEscape(value) {
   const bs = '\\';
@@ -107,14 +110,14 @@ export function renderResumeLatex(document, layoutProfile, { templateText = null
   return template.replace('%%PAGE_SIZE%%', profile.pageSize === 'a4' ? 'a4paper' : 'letterpaper').replace('%%BODY%%', body);
 }
 
-function run(command, args, options = {}) {
+export function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', timeout: options.timeoutMs ?? 30000, maxBuffer: options.maxBuffer ?? 2 * 1024 * 1024, cwd: options.cwd, env: { ...process.env, ...(options.env || {}) }, shell: false });
 }
-function toolVersion(command) {
+export function toolVersion(command) {
   const result = run(command, ['--version'], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
   return result.error?.code === 'ENOENT' ? null : text(result.stdout || result.stderr).split(/\r?\n/)[0].trim() || command;
 }
-function blocker(code, message, details = {}) { return { code, message, ...details }; }
+export function blocker(code, message, details = {}) { return { code, message, ...details }; }
 function expectedText(document, profile) {
   const expected = [document.identity?.name, document.identity?.email, document.identity?.phone];
   const sectionLabels = { summary: profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' };
@@ -136,7 +139,7 @@ export function preflightExtractedText(document, extractedText, profile) {
   const blockers = [];
   if (missing.length) blockers.push(blocker('resume_render_text_invalid', 'Rendered PDF is missing expected semantic text.', { missing }));
   if (!orderValid) blockers.push(blocker('resume_render_text_invalid', 'Rendered section extraction order differs from the semantic layout.', { sectionLabels }));
-  const hostile = [...new Set(text(extractedText).match(ATS_HOSTILE_EXTRACT_RE) || [])];
+  const hostile = atsHostileGlyphs(extractedText);
   if (hostile.length) blockers.push(blocker('resume_render_ats_glyph', 'Rendered PDF text contains ATS-hostile glyphs (ligatures, smart quotes, dashes, or zero-width characters) that break keyword extraction.', { glyphs: hostile.map(character => `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`) }));
   return { valid: blockers.length === 0, blockers, missing, orderValid, atsHostileGlyphs: hostile };
 }
@@ -180,12 +183,15 @@ export function measureInkCoverage(ppmBuffer) {
 
 // Default minimum fill: a single-page resume must use at least 4/5 of the page
 // so it does not look too short. Multi-page resumes only require the final page
-// to be reasonably filled (not a near-empty orphan page).
+// to be reasonably filled (not a near-empty orphan page). Cover letters are
+// shorter documents and set a lower minFill in their layout profile.
 const DEFAULT_MIN_FILL = 0.8;
 const DEFAULT_MIN_FINAL_PAGE_FILL = 0.1;
 
 export function preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount, pageInkCoverage = [] }) {
   const blockers = [];
+  const minFill = typeof profile.minFill === 'number' ? profile.minFill : DEFAULT_MIN_FILL;
+  const minFinalPageFill = typeof profile.minFinalPageFill === 'number' ? profile.minFinalPageFill : DEFAULT_MIN_FINAL_PAGE_FILL;
   if (!pageCount) blockers.push(blocker('resume_render_failed', 'PDF page count could not be determined.'));
   if (pageCount > profile.pageLimit) blockers.push(blocker('resume_page_budget_exceeded', `PDF has ${pageCount} pages; limit is ${profile.pageLimit}.`, { pageCount, pageLimit: profile.pageLimit }));
   const expectsA4 = profile.pageSize === 'a4';
@@ -194,10 +200,10 @@ export function preflightPdfMetadata(profile, { pageCount, reportedSize, imageCo
   if (pageCount && pageInkCoverage.length === pageCount) {
     if (pageCount === 1) {
       const fill = pageInkCoverage[0];
-      if (fill < DEFAULT_MIN_FILL) blockers.push(blocker('resume_page_underfilled', `Resume fills only ${Math.round(fill * 100)}% of the page; at least ${Math.round(DEFAULT_MIN_FILL * 100)}% is required so it does not look too short.`, { fill, minFill: DEFAULT_MIN_FILL }));
+      if (fill < minFill) blockers.push(blocker('resume_page_underfilled', `Resume fills only ${Math.round(fill * 100)}% of the page; at least ${Math.round(minFill * 100)}% is required so it does not look too short.`, { fill, minFill }));
     } else {
       const finalFill = pageInkCoverage[pageCount - 1];
-      if (finalFill < DEFAULT_MIN_FINAL_PAGE_FILL) blockers.push(blocker('resume_page_nearly_empty', `Final page is nearly empty (${Math.round(finalFill * 100)}% filled); trim content or tighten layout so it does not end with an orphan page.`, { fill: finalFill, minFill: DEFAULT_MIN_FINAL_PAGE_FILL }));
+      if (finalFill < minFinalPageFill) blockers.push(blocker('resume_page_nearly_empty', `Final page is nearly empty (${Math.round(finalFill * 100)}% filled); trim content or tighten layout so it does not end with an orphan page.`, { fill: finalFill, minFill: minFinalPageFill }));
     }
   }
   return { valid: blockers.length === 0, blockers };

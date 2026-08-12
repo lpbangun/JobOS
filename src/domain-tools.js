@@ -194,7 +194,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'discovery_health', description: 'Inspect saved discovery sources and recent isolated run failures.', inputSchema: object({ profileId: text }) },
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft with optional local PDF rendering and layout preflight.', inputSchema: required({ jobId: text, profileId: text, layoutProfileId: { type: 'string', enum: ['professional', 'technical', 'leadership'] }, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, density: { type: 'string', enum: ['compact', 'standard', 'spacious'] }, format: { type: 'string', enum: ['markdown', 'pdf'] }, sectionOrder: { type: 'array', items: { type: 'string' } } }, ['jobId', 'profileId']) },
-  { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
+  { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft with optional local PDF rendering.', inputSchema: required({ jobId: text, profileId: text, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, format: { type: 'string', enum: ['markdown', 'pdf'] } }, ['jobId', 'profileId']) },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
   { name: 'start_people_research', description: 'Run people research synchronously for a scope (profile/target/job/person) and return the run result.', inputSchema: required(peopleResearchRequest, ['profileId', 'scope']) },
   { name: 'get_people_research_run', description: 'Get the current state of a people research run.', inputSchema: required({ runId: text }, ['runId']) },
@@ -817,7 +817,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'discovery_health') return discoveryHealth(s, args);
   if (name === 'score_job') return await score(s, args.jobId, args.profileId);
   if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume', { layoutProfileId: args.layoutProfileId, pageSize: args.pageSize, pageLimit: args.pageLimit, density: args.density, format: args.format, sectionOrder: args.sectionOrder });
-  if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover');
+  if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover', { pageSize: args.pageSize, pageLimit: args.pageLimit, format: args.format });
   if (name === 'research_company') return await researchCompany(s, args.jobId);
   if (name === 'start_people_research') {
     const runId = createResearchRun(s, {

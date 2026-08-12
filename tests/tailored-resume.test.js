@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import YAML from 'yaml';
 import { applyResumeTransformations, renderSemanticResumeMarkdown, validateTailoredResume } from '../src/resume-tailoring.js';
 import { buildRequirementCoverage, extractRequirementInventory } from '../src/requirements.js';
 import { latexEscape, latexUrlEscape, measureInkCoverage, preflightExtractedText, preflightPdfMetadata, renderResumeLatex, renderResumePdf, resolveLayoutProfile } from '../src/resume-renderer.js';
+import { renderCoverLetterLatex, resolveCoverLetterProfile, preflightCoverLetterText, renderCoverLetterPdf } from '../src/cover-letter-renderer.js';
 import { openStore, one as dbOne, run as dbRun, save as dbSave } from '../src/db.js';
 import { resumeFeedback } from '../src/analytics.js';
 import { preflightResumeArtifact, reviewArtifact } from '../src/artifacts.js';
@@ -458,6 +459,84 @@ test('missing LaTeX dependency returns a typed blocker and never creates a fake 
   assert.ok(manifest.blockers.some(blocker => blocker.code === 'resume_render_failed'));
   assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-tailored.tex')), true);
   assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_render', 'artifacts', 'resume-tailored.pdf')), false);
+});
+
+test('cover letter renders LaTeX deterministically and preflight validates expected text', () => {
+  const document = {
+    identity: { name: 'Avery Candidate', email: 'avery@example.com', phone: '+1 555 555 0100', location: 'Chicago, IL' },
+    candidateName: 'Avery Candidate',
+    salutation: 'Dear hiring team,',
+    opening: 'I am applying for Senior Product Manager at Acme Learning.',
+    paragraphs: 'One relevant example from my verified records: Led educator research and shipped a workflow that reduced review time by 30%.',
+    closing: 'Thank you for your consideration.\n\nSincerely,\nAvery Candidate',
+  };
+  const profile = resolveCoverLetterProfile({ pageSize: 'letter', pageLimit: 1 });
+  assert.equal(profile.pageSize, 'letter');
+  assert.equal(profile.pageLimit, 1);
+  assert.equal(profile.minFill, 0.2);
+  const first = renderCoverLetterLatex(document, profile);
+  const second = renderCoverLetterLatex(document, profile);
+  assert.equal(first, second);
+  assert.match(first, /letterpaper/);
+  assert.match(first, /Avery Candidate/);
+  assert.match(first, /Dear hiring team/);
+  // The signature line break is preserved as a LaTeX line break.
+  assert.match(first, /Sincerely,\\\\/);
+  const a4 = resolveCoverLetterProfile({ pageSize: 'a4', pageLimit: 2 });
+  assert.match(renderCoverLetterLatex(document, a4), /a4paper/);
+  const check = preflightCoverLetterText(document, first);
+  assert.equal(check.valid, false); // raw TeX has escaped text, so extraction preflight is for PDF text only
+  assert.equal(check.atsHostileGlyphs.length, 0);
+});
+
+test('cover letter PDF render blocks underfilled stub and passes a full letter', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-cover-test-'));
+  const statePath = path.join(root, '.jobos');
+  const workspacePath = path.join(root, 'jobos-workspace');
+  mkdirSync(statePath, { recursive: true });
+  mkdirSync(workspacePath, { recursive: true });
+  const document = {
+    identity: { name: 'Avery Candidate', email: 'avery@example.com', phone: '+1 555 555 0100', location: 'Chicago, IL' },
+    candidateName: 'Avery Candidate',
+    salutation: 'Dear hiring team,',
+    opening: 'I am applying for Senior Product Manager at Acme Learning. The role stated responsibilities are the focus of this application.',
+    paragraphs: 'One relevant example from my verified records: Led educator research and shipped a workflow that reduced review time by 30%.\n\nA second relevant example from my verified records: Drove activation improvements of 22% through onboarding redesign and user feedback loops.',
+    closing: 'Thank you for your consideration. I would welcome the opportunity to discuss how this verified experience could support Acme Learning in the Senior Product Manager role.\n\nSincerely,\nAvery Candidate',
+  };
+  const manifest = renderCoverLetterPdf({ statePath, workspacePath, jobId: 'job_cover', artifact: { contentHash: 'abc' }, document, layoutProfile: { pageSize: 'letter', pageLimit: 1 } });
+  assert.equal(manifest.status, 'passed');
+  assert.equal(manifest.pageCount, 1);
+  assert.ok(manifest.pageInkCoverage[0] >= 0.2);
+  assert.equal(manifest.textPreflight.valid, true);
+  assert.equal(manifest.textPreflight.atsHostileGlyphs.length, 0);
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_cover', 'artifacts', 'cover-letter.pdf')), true);
+  // A stub letter with almost no content must be blocked as underfilled.
+  const stub = { ...document, opening: 'Hi.', paragraphs: '', closing: 'Bye.' };
+  const stubManifest = renderCoverLetterPdf({ statePath, workspacePath, jobId: 'job_cover_stub', artifact: { contentHash: 'abc' }, document: stub, layoutProfile: { pageSize: 'letter', pageLimit: 1 } });
+  assert.equal(stubManifest.status, 'blocked');
+  assert.ok(stubManifest.blockers.some(blocker => blocker.code === 'resume_page_underfilled'));
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_cover_stub', 'artifacts', 'cover-letter.pdf')), false);
+});
+
+test('missing LaTeX dependency blocks cover-letter PDF without a fake artifact', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-cover-render-test-'));
+  const statePath = path.join(root, '.jobos');
+  const workspacePath = path.join(root, 'jobos-workspace');
+  mkdirSync(statePath, { recursive: true });
+  mkdirSync(workspacePath, { recursive: true });
+  const document = {
+    identity: { name: 'Avery Candidate', email: 'avery@example.com', phone: '+1 555 555 0100', location: 'Chicago, IL' },
+    candidateName: 'Avery Candidate',
+    salutation: 'Dear hiring team,',
+    opening: 'I am applying for the role.',
+    paragraphs: 'One relevant example from my verified records: Led educator research.',
+    closing: 'Thank you.\n\nSincerely,\nAvery Candidate',
+  };
+  const manifest = renderCoverLetterPdf({ statePath, workspacePath, jobId: 'job_cover_render', artifact: { contentHash: 'abc' }, document, layoutProfile: { pageSize: 'letter', pageLimit: 1 }, engine: 'not-an-engine' });
+  assert.equal(manifest.status, 'blocked');
+  assert.ok(manifest.blockers.some(blocker => blocker.code === 'cover_letter_render_failed'));
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_cover_render', 'artifacts', 'cover-letter.tex')), true);
+  assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_cover_render', 'artifacts', 'cover-letter.pdf')), false);
 });
 
 test('resume feedback exposes linked gaps and gates outcome comparisons on sample size', async () => {
