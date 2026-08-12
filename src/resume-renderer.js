@@ -19,44 +19,12 @@ function normalizedText(value) { return text(value).normalize('NFKD').toLowerCas
 function safePageSize(value) { return String(value || '').toLowerCase() === 'a4' ? 'a4' : 'letter'; }
 function boundedPageLimit(value) { const number = Number(value); return Number.isInteger(number) && number >= 1 && number <= 2 ? number : 2; }
 
-// ATS-hostile glyphs: PDF text extractors (what ATS systems read) decode
-// ligature glyphs back to U+FB01/FB02/FB03 and garble smart quotes, dashes,
-// zero-width characters, and non-breaking spaces — so a literal keyword search
-// misses them. Normalize to ASCII before TeX escaping so the rendered PDF
-// extracts cleanly. Mirrors career-ops' normalizeTextForATS.
-const ATS_GLYPH_MAP = {
-  '\u2018': "'", '\u2019': "'", '\u201A': "'", '\u201B': "'",
-  '\u201C': '"', '\u201D': '"', '\u201E': '"', '\u201F': '"',
-  '\u2013': '-', '\u2014': '-',
-  '\u00A0': ' ',
-  '\u2026': '...',
-  '\u2022': '|', '\u00B7': '|',
-  '\u2190': ' from ', '\u2191': ' ', '\u2192': ' to ', '\u2193': ' ',
-  '\u200B': '', '\u200C': '', '\u200D': '', '\u2060': '', '\uFEFF': '',
-};
-const ATS_GLYPH_RE = /[\u2018\u2019\u201A\u201B\u201C\u201D\u201E\u201F\u2013\u2014\u00A0\u2026\u2022\u00B7\u2190\u2191\u2192\u2193\u200B\u200C\u200D\u2060\uFEFF]/g;
-function atsNormalize(value) {
-  return text(value).replace(ATS_GLYPH_RE, character => ATS_GLYPH_MAP[character] ?? '');
-}
-// Ligature codepoints (U+FB00–FB06) are not in the map above because they are
-// produced by the font at layout time, not present in source text — but if any
-// survive into extracted text they are a hard ATS blocker. Zero-width characters
-// and non-breaking spaces also corrupt keyword extraction. Smart quotes and
-// dashes are already normalized to ASCII by latexEscape before rendering, so
-// they should never appear in extracted text; bullets (•) and middots (·) are
-// legitimate separators and are NOT flagged.
-const ATS_HOSTILE_EXTRACT_RE = /[\uFB00-\uFB06\u00A0\u200B\u200C\u200D\u2060\uFEFF]/g;
-export function atsHostileGlyphs(value) {
-  return [...new Set(text(value).match(ATS_HOSTILE_EXTRACT_RE) || [])];
-}
-
 export function latexEscape(value) {
-  const bs = '\\';
-  const replacements = { [bs]: bs + 'textbackslash{}', '{': bs + '{', '}': bs + '}', '$': bs + '$', '&': bs + '&', '#': bs + '#', '%': bs + '%', '_': bs + '_', '~': bs + 'textasciitilde{}', '^': bs + 'textasciicircum{}' };
-  return atsNormalize(value).replace(/[\\{}$&#%_~^]/g, character => replacements[character]);
+  const replacements = { '\\': '\\textbackslash{}', '{': '\\{', '}': '\\}', '$': '\\$', '&': '\\&', '#': '\\#', '%': '\\%', '_': '\\_', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}' };
+  return text(value).replace(/[\\{}$&#%_~^]/g, character => replacements[character]);
 }
 export function latexUrlEscape(value) {
-  return atsNormalize(value).replace(/\\/g, '/').replace(/([%#{}])/g, '\\$1');
+  return text(value).replace(/\\/g, '/').replace(/([%#{}])/g, '\\$1');
 }
 function roleFamilyFor(job) {
   const value = `${job?.title || ''} ${job?.description || ''}`.toLowerCase();
@@ -110,14 +78,14 @@ export function renderResumeLatex(document, layoutProfile, { templateText = null
   return template.replace('%%PAGE_SIZE%%', profile.pageSize === 'a4' ? 'a4paper' : 'letterpaper').replace('%%BODY%%', body);
 }
 
-export function run(command, args, options = {}) {
+function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: 'utf8', timeout: options.timeoutMs ?? 30000, maxBuffer: options.maxBuffer ?? 2 * 1024 * 1024, cwd: options.cwd, env: { ...process.env, ...(options.env || {}) }, shell: false });
 }
-export function toolVersion(command) {
+function toolVersion(command) {
   const result = run(command, ['--version'], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
   return result.error?.code === 'ENOENT' ? null : text(result.stdout || result.stderr).split(/\r?\n/)[0].trim() || command;
 }
-export function blocker(code, message, details = {}) { return { code, message, ...details }; }
+function blocker(code, message, details = {}) { return { code, message, ...details }; }
 function expectedText(document, profile) {
   const expected = [document.identity?.name, document.identity?.email, document.identity?.phone];
   const sectionLabels = { summary: profile.roleFamily === 'leadership' ? 'Executive Summary' : 'Professional Summary', skills: 'Skills', experience: 'Experience', projects: 'Projects', education: 'Education', credentials: 'Credentials' };
@@ -139,73 +107,15 @@ export function preflightExtractedText(document, extractedText, profile) {
   const blockers = [];
   if (missing.length) blockers.push(blocker('resume_render_text_invalid', 'Rendered PDF is missing expected semantic text.', { missing }));
   if (!orderValid) blockers.push(blocker('resume_render_text_invalid', 'Rendered section extraction order differs from the semantic layout.', { sectionLabels }));
-  const hostile = atsHostileGlyphs(extractedText);
-  if (hostile.length) blockers.push(blocker('resume_render_ats_glyph', 'Rendered PDF text contains ATS-hostile glyphs (ligatures, smart quotes, dashes, or zero-width characters) that break keyword extraction.', { glyphs: hostile.map(character => `U+${character.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`) }));
-  return { valid: blockers.length === 0, blockers, missing, orderValid, atsHostileGlyphs: hostile };
+  return { valid: blockers.length === 0, blockers, missing, orderValid };
 }
-
-// Parse a PPM (P6 binary) buffer and return the vertical fill fraction: the
-// fraction of the page height that contains any ink. This is the right measure
-// of "is the resume too short" — a full page of 10pt text is only ~5% dark
-// pixels but extends ~80% down the page. Returns null on unparseable input.
-export function measureInkCoverage(ppmBuffer) {
-  const headerEnd = ppmBuffer.indexOf(Buffer.from('\n255\n'));
-  if (headerEnd === -1) return null;
-  // The PPM header ends with "\n255\n" (5 bytes); pixel data begins after it.
-  const dataStart = headerEnd + 5;
-  const header = ppmBuffer.subarray(0, dataStart).toString('latin1');
-  const match = header.match(/^P6\s+(\d+)\s+(\d+)\s+255\s*$/);
-  if (!match) return null;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  const pixelCount = width * height;
-  const data = ppmBuffer.subarray(dataStart, dataStart + pixelCount * 3);
-  if (data.length < pixelCount * 3) return null;
-  let minInkRow = -1;
-  let maxInkRow = -1;
-  for (let y = 0; y < height; y += 1) {
-    const rowStart = y * width * 3;
-    for (let x = 0; x < width; x += 1) {
-      const offset = rowStart + x * 3;
-      // A pixel counts as "ink" when any channel is meaningfully below white.
-      if (data[offset] < 245 || data[offset + 1] < 245 || data[offset + 2] < 245) {
-        if (minInkRow === -1) minInkRow = y;
-        maxInkRow = y;
-        break;
-      }
-    }
-  }
-  if (minInkRow === -1) return 0;
-  // Vertical fill = (last ink row - first ink row + 1) / page height, so a
-  // page with ink from the very top to the very bottom reports ~1.
-  return (maxInkRow - minInkRow + 1) / height;
-}
-
-// Default minimum fill: a single-page resume must use at least 4/5 of the page
-// so it does not look too short. Multi-page resumes only require the final page
-// to be reasonably filled (not a near-empty orphan page). Cover letters are
-// shorter documents and set a lower minFill in their layout profile.
-const DEFAULT_MIN_FILL = 0.8;
-const DEFAULT_MIN_FINAL_PAGE_FILL = 0.1;
-
-export function preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount, pageInkCoverage = [] }) {
+export function preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount }) {
   const blockers = [];
-  const minFill = typeof profile.minFill === 'number' ? profile.minFill : DEFAULT_MIN_FILL;
-  const minFinalPageFill = typeof profile.minFinalPageFill === 'number' ? profile.minFinalPageFill : DEFAULT_MIN_FINAL_PAGE_FILL;
   if (!pageCount) blockers.push(blocker('resume_render_failed', 'PDF page count could not be determined.'));
   if (pageCount > profile.pageLimit) blockers.push(blocker('resume_page_budget_exceeded', `PDF has ${pageCount} pages; limit is ${profile.pageLimit}.`, { pageCount, pageLimit: profile.pageLimit }));
   const expectsA4 = profile.pageSize === 'a4';
   if ((expectsA4 && !/595(?:\.\d+)? x 842/i.test(reportedSize)) || (!expectsA4 && !/612(?:\.\d+)? x 792/i.test(reportedSize))) blockers.push(blocker('resume_render_failed', `PDF page geometry does not match ${profile.pageSize}.`, { reportedSize }));
   if (imageCount !== pageCount) blockers.push(blocker('resume_render_failed', 'Rendered page-image count differs from PDF page count.', { pageCount, imageCount }));
-  if (pageCount && pageInkCoverage.length === pageCount) {
-    if (pageCount === 1) {
-      const fill = pageInkCoverage[0];
-      if (fill < minFill) blockers.push(blocker('resume_page_underfilled', `Resume fills only ${Math.round(fill * 100)}% of the page; at least ${Math.round(minFill * 100)}% is required so it does not look too short.`, { fill, minFill }));
-    } else {
-      const finalFill = pageInkCoverage[pageCount - 1];
-      if (finalFill < minFinalPageFill) blockers.push(blocker('resume_page_nearly_empty', `Final page is nearly empty (${Math.round(finalFill * 100)}% filled); trim content or tighten layout so it does not end with an orphan page.`, { fill: finalFill, minFill: minFinalPageFill }));
-    }
-  }
   return { valid: blockers.length === 0, blockers };
 }
 
@@ -248,14 +158,13 @@ export function renderResumePdf({ statePath, workspacePath, jobId, artifact, doc
     const blockers = [...textPreflight.blockers];
     const temporaryPages = path.join(temporaryDirectory, 'pages');
     fs.mkdirSync(temporaryPages, { recursive: true });
-    const images = run('pdftoppm', ['-r', '120', temporaryPdf, path.join(temporaryPages, 'page')], { timeoutMs: 20000 });
+    const images = run('pdftoppm', ['-png', '-r', '120', temporaryPdf, path.join(temporaryPages, 'page')], { timeoutMs: 20000 });
     if (images.status !== 0) blockers.push(blocker('resume_render_failed', 'PDF page image generation failed.'));
-    const imageNames = fs.existsSync(temporaryPages) ? fs.readdirSync(temporaryPages).filter(name => name.endsWith('.ppm')).sort() : [];
-    const pageInkCoverage = imageNames.map(name => measureInkCoverage(fs.readFileSync(path.join(temporaryPages, name)))).filter(value => value != null);
-    blockers.push(...preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount: imageNames.length, pageInkCoverage }).blockers);
+    const imageNames = fs.existsSync(temporaryPages) ? fs.readdirSync(temporaryPages).filter(name => name.endsWith('.png')).sort() : [];
+    blockers.push(...preflightPdfMetadata(profile, { pageCount, reportedSize, imageCount: imageNames.length }).blockers);
     const warnings = [{ code: 'resume_visual_review_required', message: 'Subjective typography and whitespace remain part of exact-revision human review.' }];
     const toolVersions = { [engine]: engineVersion, pdftotext: pdftotextVersion, pdfinfo: pdfinfoVersion, pdftoppm: pdftoppmVersion };
-    if (blockers.length) return { ...baseManifest, blockers, warnings, toolVersions, pageCount, reportedPageSize: reportedSize, pageInkCoverage, texPath: path.relative(workspacePath, texPath), textPreflight };
+    if (blockers.length) return { ...baseManifest, blockers, warnings, toolVersions, pageCount, reportedPageSize: reportedSize, texPath: path.relative(workspacePath, texPath), textPreflight };
     const pdfPath = path.join(artifactsDirectory, 'resume-tailored.pdf');
     const extractedPath = path.join(artifactsDirectory, 'resume-tailored.txt');
     const pagesDirectory = path.join(artifactsDirectory, 'resume-tailored.pages');
@@ -265,7 +174,7 @@ export function renderResumePdf({ statePath, workspacePath, jobId, artifact, doc
     const pageImages = imageNames.map(name => path.relative(workspacePath, path.join(pagesDirectory, name)));
     const pdf = fs.readFileSync(pdfPath);
     const extractedBuffer = fs.readFileSync(extractedPath);
-    return { ...baseManifest, status: 'passed', blockers: [], warnings, toolVersions, pageCount, reportedPageSize: reportedSize, pageInkCoverage, pdfHash: hashBuffer(pdf), extractedTextHash: hashBuffer(extractedBuffer), pdfPath: path.relative(workspacePath, pdfPath), texPath: path.relative(workspacePath, texPath), extractedTextPath: path.relative(workspacePath, extractedPath), pageImages, textPreflight };
+    return { ...baseManifest, status: 'passed', blockers: [], warnings, toolVersions, pageCount, reportedPageSize: reportedSize, pdfHash: hashBuffer(pdf), extractedTextHash: hashBuffer(extractedBuffer), pdfPath: path.relative(workspacePath, pdfPath), texPath: path.relative(workspacePath, texPath), extractedTextPath: path.relative(workspacePath, extractedPath), pageImages, textPreflight };
   } finally {
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }

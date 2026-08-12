@@ -120,7 +120,7 @@ export const commandRegistry = [
   cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf] [--output markdown] [--json]', 'Advanced standalone resume operation; creates a complete proof-grounded tailored resume draft with optional local PDF rendering without pursue dependencies.', { flags: ['--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
-  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--format markdown|pdf] [--page-size letter|a4] [--page-limit <n>] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
+  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
   cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
@@ -1060,11 +1060,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'tailor' && action === 'cover-letter') {
     const jobId = requireFlag(flags, 'job');
-    const pageSize = flags['page-size'] ? String(flags['page-size']).toLowerCase() : 'letter';
-    const format = flags.format ? String(flags.format).toLowerCase() : 'markdown';
-    if (!['letter', 'a4'].includes(pageSize)) usage('Invalid --page-size; expected letter or a4');
-    if (!['markdown', 'pdf'].includes(format)) usage('Invalid --format; expected markdown or pdf');
-    const r = await tailor(s, jobId, needProfile(flags), 'cover', { pageSize, pageLimit: numberFlag(flags, 'page-limit', 1, { min: 1 }), format });
+    const r = await tailor(s, jobId, needProfile(flags), 'cover');
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
     return;
