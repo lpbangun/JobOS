@@ -34,18 +34,18 @@ function currentWork(properties = {}) {
 function entityHints(data, observations, context) {
   const entities = Array.isArray(data?.entities) ? data.entities : [];
   const fallbackIds = observations.map(observation => observation.id);
-  return entities.filter(entity => entity?.type === 'person' && entity?.properties?.name).map((entity, index) => {
+  return entities.filter(entity => entity?.type === 'person' && entity?.properties?.name).map((entity) => {
     const properties = entity.properties;
     const work = currentWork(properties);
-    const observation = observations[index] || observations[0];
+    const entityUrl = String(properties.url || entity.url || '').trim();
     return {
       name: properties.name,
-      profileUrl: observation && isLinkedInProfileUrl(observation.url) ? observation.url : '',
+      profileUrl: entityUrl && isLinkedInProfileUrl(entityUrl) ? entityUrl : '',
       company: work?.company?.name || context.companyName || '',
       role: work?.title || '',
       confidence: 'medium',
       source: 'exa_people',
-      sourceObservationIds: observation ? [observation.id] : fallbackIds,
+      sourceObservationIds: fallbackIds,
       roleRelevance: 'medium'
     };
   }).filter(hint => hint.sourceObservationIds.length);

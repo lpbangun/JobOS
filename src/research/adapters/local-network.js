@@ -1,6 +1,5 @@
 import { canonicalUrl, isHttpUrl, isLinkedInProfileUrl } from '../sources.js';
 import { id, now, hash } from '../../utils.js';
-import { TIER_RANK } from '../contacts.js';
 
 export const name = 'local-network';
 

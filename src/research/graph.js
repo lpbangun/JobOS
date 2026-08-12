@@ -466,14 +466,15 @@ async function collectSourcesNode(s, state, signal, env = process.env, fetchImpl
       if (mutualSeen.has(key)) continue;
       mutualSeen.add(key);
       const targetPerson = targetType === 'person' ? one(s, 'SELECT * FROM people WHERE id=?', [targetId]) : null;
+      const targetCompany = targetType === 'company' ? one(s, 'SELECT name FROM companies WHERE id=?', [targetId]) : null;
       mutualPaths.push({
         id: id('path', `${state.profileId}:${viaPersonId}:${edge.id}`),
         viaPersonId,
         viaPersonName: allEdges.find(e => e.personId === viaPersonId)?.personName || viaPersonId,
         targetType,
         targetId,
-        targetName: targetPerson?.name || edge.personName || targetId,
-        targetProfileUrl: targetPerson?.primary_profile_url || edge.personUrl || '',
+        targetName: targetPerson?.name || targetCompany?.name || (targetType === 'company' ? targetId : edge.personName) || targetId,
+        targetProfileUrl: targetPerson?.primary_profile_url || '',
         edge: {
           id: edge.id,
           fromType: edge.fromType,
