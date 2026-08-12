@@ -721,7 +721,7 @@ export function recordNetworkContact(s, { profileId, personId, contactPointId = 
       personId,
       contactPointId: contactPointId || null,
       occurredAt: iso,
-      warmth: warmthFromLastContact(currentLastContactAt, new Date(currentLastContactAt)),
+      warmth: warmthFromLastContact(currentLastContactAt, new Date()),
       lastContactAt: currentLastContactAt,
       updatedEdge: edgeId,
       updatedContactPoints: [],
