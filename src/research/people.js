@@ -58,6 +58,86 @@ export function getPerson(s, id) {
   return personRow(one(s, 'SELECT * FROM people WHERE id=?', [id]));
 }
 
+function contactRow(row, revealValues) {
+  const contact = {
+    id: row.id,
+    personId: row.person_id || null,
+    stakeholderId: row.stakeholder_id || null,
+    companyId: row.company_id || null,
+    type: row.type,
+    evidenceTier: row.evidence_tier,
+    verificationStatus: row.verification_status,
+    confidence: row.confidence,
+    sourceObservationIds: parseJson(row.source_observation_ids_json, []),
+    humanApproved: Boolean(row.human_approved),
+    doNotUse: Boolean(row.do_not_use),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+  if (revealValues) {
+    contact.value = row.value;
+    contact.normalizedValue = row.normalized_value;
+  }
+  return contact;
+}
+
+function edgeRow(row) {
+  return {
+    id: row.id,
+    fromType: row.from_type,
+    fromId: row.from_id,
+    toType: row.to_type,
+    toId: row.to_id,
+    edgeType: row.edge_type,
+    evidence: parseJson(row.evidence_json, []),
+    confidence: row.confidence,
+    createdAt: row.created_at,
+    lastContactAt: row.last_contact_at || null,
+    warmth: row.warmth || 'unknown'
+  };
+}
+
+function personResult(s, match, revealContacts) {
+  const contacts = all(s, 'SELECT * FROM contact_points WHERE person_id=? ORDER BY updated_at DESC,id', [match.id])
+    .map(row => contactRow(row, revealContacts));
+  const edges = all(s, `SELECT * FROM relationship_edges
+    WHERE (from_type='person' AND from_id=?) OR (to_type='person' AND to_id=?)
+    ORDER BY created_at DESC,id`, [match.id, match.id]).map(edgeRow);
+  const result = { person: personRow(match), edges };
+  if (revealContacts) {
+    result.contacts = contacts;
+  } else {
+    result.contactSummary = {
+      count: contacts.length,
+      types: [...new Set(contacts.map(contact => contact.type))].sort(),
+      tiers: contacts.reduce((counts, contact) => {
+        counts[contact.evidenceTier] = (counts[contact.evidenceTier] || 0) + 1;
+        return counts;
+      }, {})
+    };
+  }
+  return result;
+}
+
+export function findPersonByEmail(s, email, { revealContacts = false } = {}) {
+  const normalized = normalizeEmail(email);
+  if (!normalized || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized)) {
+    throw new Error('A valid email address is required');
+  }
+  const match = one(s, `SELECT p.* FROM contact_points cp
+    JOIN people p ON p.id=cp.person_id
+    WHERE cp.type IN ('email','generic_inbox') AND cp.normalized_value=?
+    ORDER BY cp.updated_at DESC,cp.id LIMIT 1`, [normalized]);
+  return match ? personResult(s, match, revealContacts) : null;
+}
+
+export function showPersonContacts(s, { personId = null, email = null } = {}) {
+  if (email) return findPersonByEmail(s, email, { revealContacts: true });
+  if (!personId) throw new Error('A person ID or email address is required');
+  const match = one(s, 'SELECT * FROM people WHERE id=?', [personId]);
+  return match ? personResult(s, match, true) : null;
+}
+
 export function upsertPerson(s, { id: pid, name, primaryProfileUrl = '', aliases = [], identityConfidence = 'low' }, at = now()) {
   const normalized = String(name || '').trim().toLowerCase();
   const url = primaryProfileUrl ? canonicalUrl(primaryProfileUrl) || '' : '';

@@ -384,7 +384,7 @@ export function importNetworkCsv(s, { filePath, profileId = null, format = 'auto
     policy: { externalSideEffects: 'none', note: 'Imported LinkedIn connections are local data only.' },
     count: imported.length,
     warnings: warnings.length > 0 ? warnings : undefined,
-    persons: imported
+    persons: imported.map(person => ({ personId: person.personId, name: person.name, profileUrl: person.url, company: person.company }))
   });
 
   // Privacy-safe audit: format, counts, basename, file hash only
@@ -589,36 +589,46 @@ export function networkOpportunitiesList(s, { profileId, limit = 25, asOf = new 
   const at = toDate(asOf);
   if (!at) throw Error(`Invalid asOf timestamp: ${asOf}`);
   const max = Math.max(1, Math.min(200, Number(limit) || 25));
-  const edges = profileEdges(s, profileId);
-  const contacts = profileContacts(s, profileId);
-  const people = new Map(all(s, 'SELECT * FROM people ORDER BY name, id').map(p => [p.id, p]));
+  const graph = networkGraphQuery(s, { profileId, maxHops: 2 });
+  const people = new Map(all(s, 'SELECT * FROM people ORDER BY name, id').map(person => [person.id, person]));
+  const contacts = all(s, `SELECT * FROM contact_points
+    WHERE person_id IS NOT NULL AND person_id!=''
+    ORDER BY updated_at DESC,id`).map(rowToContact);
   const byPerson = contactsByPerson(contacts);
+  const bestPathByPerson = new Map();
+  for (const path of graph.paths.filter(item => item.target.type === 'person')) {
+    const current = bestPathByPerson.get(path.target.id);
+    if (!current || path.score > current.score || (path.score === current.score && path.hops < current.hops)) {
+      bestPathByPerson.set(path.target.id, path);
+    }
+  }
   const opportunities = [];
-  const seenPeople = new Set();
-  for (const edge of edges) {
-    if (edge.edgeType !== 'direct_connection') continue;
-    const personId = edgePersonId(edge);
-    if (!personId || seenPeople.has(personId)) continue;
-    seenPeople.add(personId);
+  for (const [personId, path] of bestPathByPerson) {
     const person = people.get(personId);
     const personContacts = byPerson.get(personId) || [];
-    const relatedEdges = edges.filter(candidate => candidate.edgeType === 'direct_connection' && edgePersonId(candidate) === personId);
-    const lastContactAt = [latestContactAt(edge, personContacts), ...relatedEdges.map(candidate => candidate.lastContactAt)].filter(Boolean).sort().at(-1) || null;
+    const lastContactAt = [
+      ...path.path.map(hop => hop.lastContactAt),
+      ...personContacts.map(contact => contact.lastContactAt)
+    ].filter(Boolean).sort().at(-1) || null;
     const warmth = warmthFromLastContact(lastContactAt, at);
     const usableContacts = personContacts.filter(contact => !contact.doNotUse && contact.humanApproved);
-    const score = WARMTH_RANK[warmth] * 10 + Math.min(usableContacts.length, 3) * 2;
+    const score = WARMTH_RANK[warmth] * 10 + path.score * 3 + Math.min(usableContacts.length, 3) * 2;
     opportunities.push({
       personId,
-      name: person?.name || edge.personName || personId,
-      profileUrl: person?.primary_profile_url || edge.personUrl || '',
+      name: person?.name || path.target.name || personId,
+      profileUrl: person?.primary_profile_url || path.target.profileUrl || '',
       warmth,
-      lastContactAt: lastContactAt || null,
+      lastContactAt,
       daysSinceContact: daysSince(lastContactAt, at),
       contactCount: usableContacts.length,
       contactTypes: [...new Set(usableContacts.map(contact => contact.type))].sort(),
       strategic: true,
+      direct: path.hops === 1 && path.path[0]?.edgeType === 'direct_connection',
+      hops: path.hops,
+      pathStrength: path.pathStrength,
+      channel: path.channel,
       score,
-      evidence: sanitizeEvidence(relatedEdges.flatMap(candidate => candidate.evidence))
+      evidence: sanitizeEvidence(path.evidence)
     });
   }
   opportunities.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name) || a.personId.localeCompare(b.personId));
@@ -630,7 +640,7 @@ export function networkOpportunitiesList(s, { profileId, limit = 25, asOf = new 
     count: top.length,
     total: opportunities.length,
     opportunities: top,
-    note: 'Local network opportunities only; no outreach or requests were sent.'
+    note: 'Local direct and indirect network opportunities only; no outreach or requests were sent.'
   };
 }
 

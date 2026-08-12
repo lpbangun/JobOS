@@ -17,6 +17,7 @@ import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from '
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
+import { findPersonByEmail, showPersonContacts } from './research/people.js';
 import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
 import { lifecycleAnalytics, renderLifecycleAnalyticsMarkdown } from './lifecycle-analytics.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
@@ -140,7 +141,9 @@ export const commandRegistry = [
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Advanced standalone company-research operation; runs without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'company', runsDependencies: false }),
-  cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
+  cmd(['people', 'find'], 'jobos people find --email <addr> [--json]', 'Find one canonical person by an exact normalized email contact point.', { flags: ['--email <addr>'], category: 'workflow' }),
+  cmd(['contacts', 'show'], 'jobos contacts show (--person <person-id> | --email <addr>) [--json]', 'Reveal trusted local contact values for one person in the human CLI.', { flags: ['--person <person-id>', '--email <addr>'], category: 'workflow', audience: 'human' }),
+  cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--email <addr>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--email <addr>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
   cmd(['research', 'runs', 'get'], 'jobos research runs get <run-id> [--json]', 'Read a durable people-research run.'),
   cmd(['research', 'runs', 'resume'], 'jobos research runs resume <run-id> [--json]', 'Resume a paused_retryable people-research run.'),
   cmd(['research', 'runs', 'cancel'], 'jobos research runs cancel <run-id> [--json]', 'Request idempotent cancellation of a people-research run.'),
@@ -1221,6 +1224,18 @@ export async function main(argv = process.argv.slice(2)) {
     }
     usage('Unknown apply command. Try: jobos apply form inspect/show, jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
   }
+  if (group === 'people' && action === 'find') {
+    const email = String(requireFlag(flags, 'email', '--email <addr>'));
+    out(findPersonByEmail(s, email, { revealContacts: true }) || { person: null, contacts: [], edges: [] });
+    return;
+  }
+  if (group === 'contacts' && action === 'show') {
+    const personId = flags.person ? String(flags.person) : null;
+    const email = flags.email ? String(flags.email) : null;
+    if (Boolean(personId) === Boolean(email)) usage('Provide exactly one of --person <person-id> or --email <addr>');
+    out(showPersonContacts(s, { personId, email }) || { person: null, contacts: [], edges: [] });
+    return;
+  }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');
     out(await researchCompany(s, jobId));
@@ -1238,6 +1253,7 @@ export async function main(argv = process.argv.slice(2)) {
       company: flags.company ? String(flags.company) : undefined,
       role: flags.role ? String(flags.role) : undefined,
       personId: flags.person ? String(flags.person) : undefined,
+      email: flags.email ? String(flags.email) : undefined,
       person: personField,
       depth: flags.depth || 'standard',
       sources: flags.sources ? String(flags.sources).split(',').map(s => s.trim()) : undefined,

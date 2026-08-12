@@ -846,6 +846,7 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS idx_stakeholders_person ON stakeholders(person_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_contact_points_email_normalized ON contact_points(normalized_value) WHERE type IN ('email','generic_inbox')",
     "ALTER TABLE outreach_threads ADD COLUMN contact_point_id TEXT",
     "ALTER TABLE status_changes ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown_legacy'",
     "ALTER TABLE status_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",

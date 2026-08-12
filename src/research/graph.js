@@ -228,6 +228,7 @@ function hydrateContextNode(s, state, signal) {
       confirmedAffiliations: ctx.confirmedAffiliations,
       networkIntent: ctx.networkIntent,
       companyId: ctx.companyId,
+      person: ctx.person,
       completedNodes: [...(state.completedNodes || []), 'hydrate_context']
     });
 
@@ -236,6 +237,7 @@ function hydrateContextNode(s, state, signal) {
       confirmedAffiliations: ctx.confirmedAffiliations || [],
       networkIntent: ctx.networkIntent || null,
       companyId: ctx.companyId || null,
+      person: ctx.person || null,
       nextNode: 'plan_queries',
       completedNodes: [...(state.completedNodes || []), 'hydrate_context']
     };
@@ -397,7 +399,8 @@ async function collectSourcesNode(s, state, signal, env = process.env, fetchImpl
     github: 'github',
     gdelt: 'gdelt',
     wayback: 'wayback',
-    xai: 'xai'
+    xai: 'xai',
+    exa_people: 'exa-people'
   };
   const adapterNames = (state.sources || [])
     .map(s => sourceMappings[s] || s)

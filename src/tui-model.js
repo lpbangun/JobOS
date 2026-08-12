@@ -7,6 +7,7 @@ import { redactSensitive } from './acp.js';
 import { compileApplicationReadiness } from './readiness.js';
 import { listNetworkContacts } from './workflows.js';
 import { listPersonCandidates } from './research/contacts.js';
+import { networkHealthBrief, networkOpportunitiesList } from './research/network.js';
 import { due, taskView } from './tracking.js';
 import { requirementTextsForJob } from './requirements.js';
 import { compareFitDecisions } from './scoring.js';
@@ -558,6 +559,18 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
     if (!hasKey) return 'misconfigured';
     return 'available';
   })();
+  const exaPeopleState = (() => {
+    const hasKey = Boolean(String(process.env.EXA_API_KEY || '').trim());
+    const consented = networkIntent.allowedSources?.exaPeople === true;
+    if (!consented) return 'off';
+    return hasKey ? 'available' : 'misconfigured';
+  })();
+  const networkHealth = selectedProfile
+    ? networkHealthBrief(s, { profileId: selectedProfile, asOf: new Date(at) })
+    : { counts: { total: 0, strategic: 0, byWarmth: { unknown: 0, cold: 0, cool: 0, warm: 0, hot: 0 } }, relationships: [] };
+  const networkOpportunities = selectedProfile
+    ? networkOpportunitiesList(s, { profileId: selectedProfile, limit: 25, asOf: new Date(at) })
+    : { count: 0, total: 0, opportunities: [] };
 
   const interviews = interviewProjection(s, {
     profileId: selectedProfile,
@@ -631,13 +644,16 @@ export function buildTuiModel(s, { profileId = null, selectedJobId = null, at = 
         preferredPersonas: networkIntent.preferredPersonas || [],
         comfortableRelationshipTypes: networkIntent.comfortableRelationshipTypes || [],
         exclusions: networkIntent.exclusions || [],
-        allowedSources: networkIntent.allowedSources || { publicWeb: true, linkedinImport: false, xai: false }
+        allowedSources: networkIntent.allowedSources || { publicWeb: true, linkedinImport: false, exaPeople: false, xai: false }
       },
       affiliations: affiliationCounts,
       affiliationRows,
       importedConnectionCount,
       latestProfileRun,
-      xaiState
+      xaiState,
+      exaPeopleState,
+      health: networkHealth,
+      opportunities: networkOpportunities
     },
     policy: {
       sideEffects: 'off',

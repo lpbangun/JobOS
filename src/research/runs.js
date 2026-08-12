@@ -4,6 +4,8 @@ import { one, run, audit, save } from '../db.js';
 import { id, now, parseJson } from '../utils.js';
 import { writeYaml, writeMd } from '../workspace.js';
 import { resolvePerson } from './people.js';
+import { upsertContactPoint } from './contacts.js';
+import { nameFromEmailLocal, normalizeEmail } from './sources.js';
 import { runGraph } from './graph.js';
 import { listAdapters } from './adapters/index.js';
 import * as fs from 'node:fs';
@@ -56,14 +58,15 @@ export const DEFAULT_BUDGET_DEEP = Object.freeze({
 //   role?: string,
 //   personId?: string,
 //   person?: { name, profileUrl },
+//   email?: string,
 //   depth: 'standard'|'deep',
-//   sources: ('local_network'|'linkedin_import'|'public_web'|'github'|'gdelt'|'wayback'|'xai')[],
+//   sources: ('local_network'|'linkedin_import'|'public_web'|'exa_people'|'github'|'gdelt'|'wayback'|'xai')[],
 //   refresh?: boolean,
 //   budget?: { maxQueries?, maxCandidates?, maxSourceChars?, maxModelCalls?, maxPaidToolCalls?, maxDurationMs?, maxCostUsd? }
 // }
 
 const VALID_SCOPES = new Set(['profile', 'target', 'job', 'person']);
-const STATIC_SOURCES = new Set(['local_network', 'linkedin_import', 'public_web', 'github', 'gdelt', 'wayback', 'xai']);
+const STATIC_SOURCES = new Set(['local_network', 'linkedin_import', 'public_web', 'exa_people', 'github', 'gdelt', 'wayback', 'xai']);
 function validSources() {
   const all = new Set(STATIC_SOURCES);
   for (const name of listAdapters()) all.add(name);
@@ -76,6 +79,7 @@ const ADAPTER_NAME_MAP = {
   local_network: 'local-network',
   linkedin_import: 'linkedin-import',
   public_web: 'public-web',
+  exa_people: 'exa-people',
   github: 'github',
   gdelt: 'gdelt',
   wayback: 'wayback',
@@ -135,16 +139,24 @@ function validateScopeInputs(s, request) {
   }
 
   if (request.scope === 'person') {
-    if (request.personId) {
+    const selectors = [request.personId, request.email, request.person].filter(Boolean);
+    if (selectors.length > 1) {
+      errors.push('Person scope accepts exactly one of personId, email, or person');
+    } else if (request.personId) {
       const existing = one(s, 'SELECT id FROM people WHERE id=?', [request.personId]);
       if (!existing) errors.push(`Person not found: ${request.personId}`);
+    } else if (request.email) {
+      const normalizedEmail = normalizeEmail(request.email);
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) {
+        errors.push('Person email must be a valid email address');
+      }
     } else if (request.person?.name && request.person?.profileUrl) {
       const profileUrl = String(request.person.profileUrl || '').trim();
       if (!/^https?:\/\//i.test(profileUrl)) {
         errors.push('Person profile URL must be HTTP(S)');
       }
     } else {
-      errors.push('Person scope requires personId or person.name + person.profileUrl');
+      errors.push('Person scope requires personId, email, or person.name + person.profileUrl');
     }
   }
 
@@ -316,6 +328,7 @@ export function createResearchRun(s, request) {
     } else if (intent.allowedSources?.publicWeb !== false) {
       sources.push('public_web');
     }
+    if (intent.allowedSources?.exaPeople === true) sources.push('exa_people');
   } else if (!Array.isArray(request.sources)) {
     throw Object.assign(new Error('sources must be an array'), { code: 'invalid_research_request', type: 'research' });
   } else {
@@ -326,8 +339,11 @@ export function createResearchRun(s, request) {
   if (invalidSources.length) {
     throw Object.assign(new Error(`Invalid sources: ${invalidSources.join(', ')}`), { code: 'invalid_research_request', type: 'research' });
   }
-  if (request.scope === 'profile' && (sources.includes('public_web') || sources.includes('xai')) && !(intent.targetCompanies || []).length) {
-    throw Object.assign(new Error('Open profile research may use public_web or xai only after confirming target companies'), { code: 'invalid_research_scope_inputs', type: 'research' });
+  if (request.scope === 'profile' && (sources.includes('public_web') || sources.includes('exa_people') || sources.includes('xai')) && !(intent.targetCompanies || []).length) {
+    throw Object.assign(new Error('Open profile research may use public_web, exa_people, or xai only after confirming target companies'), { code: 'invalid_research_scope_inputs', type: 'research' });
+  }
+  if (sources.includes('exa_people') && !String(process.env.EXA_API_KEY || '').trim()) {
+    throw Object.assign(new Error('Exa people research requires EXA_API_KEY'), { code: 'exa_people_preflight_failed', type: 'research' });
   }
   if (sources.includes('xai')) {
     if (process.env.JOBOS_XAI_ENABLED !== '1' || intent.allowedSources?.xai !== true || !String(process.env.XAI_API_KEY || '').trim()) {
@@ -340,12 +356,28 @@ export function createResearchRun(s, request) {
 
   let personId = request.personId || null;
   if (request.scope === 'person' && !personId) {
-    const resolved = resolvePerson(s, {
+    const normalizedEmail = request.email ? normalizeEmail(request.email) : '';
+    const resolved = resolvePerson(s, normalizedEmail ? {
+      email: normalizedEmail,
+      name: nameFromEmailLocal(normalizedEmail) || normalizedEmail,
+      sourceRecordId: `person-scope:email:${normalizedEmail}`
+    } : {
       name: request.person.name,
       profileUrl: request.person.profileUrl,
       sourceRecordId: `person-scope:${request.person.profileUrl}`
     });
     personId = resolved?.person?.id || null;
+    if (personId && normalizedEmail) {
+      upsertContactPoint(s, {
+        personId,
+        type: 'email',
+        value: normalizedEmail,
+        evidenceTier: 'D',
+        verificationStatus: 'research_input_unverified',
+        confidence: 'low',
+        checks: { suppliedAsResearchSelector: true }
+      });
+    }
   }
   // Resolve company name and role from job for job scope
   let companyName = request.company || '';

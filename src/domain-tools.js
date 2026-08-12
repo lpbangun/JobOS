@@ -9,6 +9,7 @@ import { approveContact, createOutreachPlan } from './research/contacts.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
 import { mapReachableNetwork, networkGraphQuery, networkHealthBrief, networkOpportunitiesList, recordNetworkContact } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
+import { findPersonByEmail } from './research/people.js';
 import { appCreate, appUpdate, openTasks, recommendResearch, taskView } from './tracking.js';
 import { weekly } from './analytics.js';
 import { lifecycleAnalytics } from './lifecycle-analytics.js';
@@ -110,7 +111,7 @@ const interviewDebriefProperties = {
 };
 const researchSources = {
   type: 'array',
-  items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'github', 'gdelt', 'wayback', 'xai'] }
+  items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'exa_people', 'github', 'gdelt', 'wayback', 'xai'] }
 };
 const researchBudget = object({
   maxQueries: { type: 'number' },
@@ -177,6 +178,7 @@ const peopleResearchRequest = {
   company: text,
   role: text,
   personId: text,
+  email: text,
   person: required({ name: text, profileUrl: text }, ['name', 'profileUrl']),
   depth: { type: 'string', enum: ['standard', 'deep'] },
   sources: researchSources,
@@ -196,6 +198,7 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft with optional local PDF rendering and layout preflight.', inputSchema: required({ jobId: text, profileId: text, layoutProfileId: { type: 'string', enum: ['professional', 'technical', 'leadership'] }, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, density: { type: 'string', enum: ['compact', 'standard', 'spacious'] }, format: { type: 'string', enum: ['markdown', 'pdf'] }, sectionOrder: { type: 'array', items: { type: 'string' } } }, ['jobId', 'profileId']) },
   { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
+  { name: 'find_person', description: 'Find one canonical person by an exact normalized email. Agent callers receive contact types, counts, and tiers without values.', inputSchema: required({ email: text }, ['email']) },
   { name: 'start_people_research', description: 'Run people research synchronously for a scope (profile/target/job/person) and return the run result.', inputSchema: required(peopleResearchRequest, ['profileId', 'scope']) },
   { name: 'get_people_research_run', description: 'Get the current state of a people research run.', inputSchema: required({ runId: text }, ['runId']) },
   { name: 'resume_people_research_run', description: 'Resume a paused_retryable people research run.', inputSchema: required({ runId: text }, ['runId']) },
@@ -845,6 +848,11 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume', { layoutProfileId: args.layoutProfileId, pageSize: args.pageSize, pageLimit: args.pageLimit, density: args.density, format: args.format, sectionOrder: args.sectionOrder });
   if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover');
   if (name === 'research_company') return await researchCompany(s, args.jobId);
+  if (name === 'find_person') {
+    const trusted = ['cli', 'tui'].includes(mediationSource(options));
+    return findPersonByEmail(s, args.email, { revealContacts: trusted })
+      || { person: null, ...(trusted ? { contacts: [] } : { contactSummary: { count: 0, types: [], tiers: {} } }), edges: [] };
+  }
   if (name === 'start_people_research') {
     const runId = createResearchRun(s, {
       profileId: args.profileId,
@@ -853,6 +861,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       company: args.company || undefined,
       role: args.role || undefined,
       personId: args.personId || undefined,
+      email: args.email || undefined,
       person: args.person || undefined,
       depth: args.depth || 'standard',
       sources: args.sources || undefined,

@@ -116,6 +116,10 @@ Equivalent profile preferences can replace the persistent environment gate. Huma
 
 Users are responsible for third-party platform terms when enabling authenticated adapters or automation.
 
+## Optional Exa people research
+
+Set `EXA_API_KEY`, then either request `--sources exa_people` explicitly or enable `networkIntent.allowedSources.exaPeople` for the profile. The adapter calls Exa search with `category: "people"` and records returned URLs/text as source observations before staging candidates and contact points. API-discovered emails are unapproved evidence, never trusted by default, and stay redacted from agent-readable workspace mirrors.
+
 ## Optional xAI people research
 
 xAI research requires all three conditions:
