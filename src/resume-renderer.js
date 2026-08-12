@@ -45,7 +45,7 @@ function atsNormalize(value) {
 // dashes are already normalized to ASCII by latexEscape before rendering, so
 // they should never appear in extracted text; bullets (•) and middots (·) are
 // legitimate separators and are NOT flagged.
-const ATS_HOSTILE_EXTRACT_RE = /[\uFB00-\uFB06\u00A0\u200B\u200C\u200D\u2060\uFEFF]/;
+const ATS_HOSTILE_EXTRACT_RE = /[\uFB00-\uFB06\u00A0\u200B\u200C\u200D\u2060\uFEFF]/g;
 export function atsHostileGlyphs(value) {
   return [...new Set(text(value).match(ATS_HOSTILE_EXTRACT_RE) || [])];
 }

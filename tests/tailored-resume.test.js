@@ -46,6 +46,11 @@ function completeResume(summary = 'Product leader focused on trustworthy educati
   };
 }
 
+function hasPdfTools() {
+  const tools = ['tectonic', 'pdftotext', 'pdfinfo', 'pdftoppm'];
+  return tools.every(tool => spawnSync(tool, ['--version'], { encoding: 'utf8', timeout: 5000 }).error?.code !== 'ENOENT');
+}
+
 test('canonical resume round-trips complete sections and preserves revision history', () => {
   const { root, run, env } = makeRunner();
   run(['init', '--json']);
@@ -489,7 +494,8 @@ test('cover letter renders LaTeX deterministically and preflight validates expec
   assert.equal(check.atsHostileGlyphs.length, 0);
 });
 
-test('cover letter PDF render blocks underfilled stub and passes a full letter', () => {
+test('cover letter PDF render blocks underfilled stub and passes a full letter', (t) => {
+  if (!hasPdfTools()) { t.skip('tectonic and/or Poppler utilities not installed'); return; }
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-cover-test-'));
   const statePath = path.join(root, '.jobos');
   const workspacePath = path.join(root, 'jobos-workspace');
