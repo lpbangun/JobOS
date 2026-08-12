@@ -1292,6 +1292,8 @@ test('T12 — Human-gate mediation', async t => {
     'record_job_feedback', 'correct_memory_observation', 'undo_memory_observation',
     'accept_memory_proposal', 'reject_memory_proposal', 'revoke_memory_proposal',
     'undo_memory_transition',
+    'network_contact_record',
+    'mark_outreach_sent',
   ]);
   assert.deepEqual(mcpNames, toolNames.filter(name => !deniedMcp.has(name)));
   assert.ok(toolNames.length > 0);

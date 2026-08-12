@@ -228,6 +228,7 @@ function hydrateContextNode(s, state, signal) {
       confirmedAffiliations: ctx.confirmedAffiliations,
       networkIntent: ctx.networkIntent,
       companyId: ctx.companyId,
+      person: ctx.person,
       completedNodes: [...(state.completedNodes || []), 'hydrate_context']
     });
 
@@ -236,6 +237,7 @@ function hydrateContextNode(s, state, signal) {
       confirmedAffiliations: ctx.confirmedAffiliations || [],
       networkIntent: ctx.networkIntent || null,
       companyId: ctx.companyId || null,
+      person: ctx.person || null,
       nextNode: 'plan_queries',
       completedNodes: [...(state.completedNodes || []), 'hydrate_context']
     };
@@ -397,7 +399,8 @@ async function collectSourcesNode(s, state, signal, env = process.env, fetchImpl
     github: 'github',
     gdelt: 'gdelt',
     wayback: 'wayback',
-    xai: 'xai'
+    xai: 'xai',
+    exa_people: 'exa-people'
   };
   const adapterNames = (state.sources || [])
     .map(s => sourceMappings[s] || s)
@@ -424,6 +427,69 @@ async function collectSourcesNode(s, state, signal, env = process.env, fetchImpl
     personUrl: edge.person_url || ''
   }));
   const connectedPersonIds = new Set(networkEdges.map(edge => edge.personId).filter(Boolean));
+
+  // Bounded 2-hop traversal: profile -> person -> person/company. Explicit 2-hop
+  // connections become mutual_path person hints instead of merely one-hop edges.
+  const mutualPaths = [];
+  const mutualSeen = new Set();
+  const allEdgeRows = all(s, `SELECT re.*, p.name AS person_name, p.primary_profile_url AS person_url
+    FROM relationship_edges re
+    LEFT JOIN people p ON p.id = CASE WHEN re.to_type='person' THEN re.to_id WHEN re.from_type='person' THEN re.from_id ELSE NULL END
+    ORDER BY re.created_at, re.id`);
+  const allEdges = allEdgeRows.map(edge => ({
+    id: edge.id,
+    fromType: edge.from_type,
+    fromId: edge.from_id,
+    toType: edge.to_type,
+    toId: edge.to_id,
+    edgeType: edge.edge_type,
+    evidence: parseJson(edge.evidence_json, []),
+    confidence: edge.confidence,
+    personId: edge.to_type === 'person' ? edge.to_id : edge.from_type === 'person' ? edge.from_id : null,
+    personName: edge.person_name || '',
+    personUrl: edge.person_url || ''
+  }));
+  const directPersonIds = networkEdges
+    .filter(edge => edge.edgeType === 'direct_connection' && edge.personId)
+    .map(edge => edge.personId);
+  for (const viaPersonId of directPersonIds) {
+    for (const edge of allEdges) {
+      if (edge.id === networkEdges.find(e => e.personId === viaPersonId)?.id) continue;
+      const isOutgoing = edge.fromType === 'person' && edge.fromId === viaPersonId;
+      const isIncoming = edge.toType === 'person' && edge.toId === viaPersonId;
+      if (!isOutgoing && !isIncoming) continue;
+      const targetType = isOutgoing ? edge.toType : edge.fromType;
+      const targetId = isOutgoing ? edge.toId : edge.fromId;
+      if (targetType !== 'person' && targetType !== 'company') continue;
+      if (targetType === 'person' && connectedPersonIds.has(targetId)) continue;
+      const key = `${viaPersonId}:${edge.id}`;
+      if (mutualSeen.has(key)) continue;
+      mutualSeen.add(key);
+      const targetPerson = targetType === 'person' ? one(s, 'SELECT * FROM people WHERE id=?', [targetId]) : null;
+      mutualPaths.push({
+        id: id('path', `${state.profileId}:${viaPersonId}:${edge.id}`),
+        viaPersonId,
+        viaPersonName: allEdges.find(e => e.personId === viaPersonId)?.personName || viaPersonId,
+        targetType,
+        targetId,
+        targetName: targetPerson?.name || edge.personName || targetId,
+        targetProfileUrl: targetPerson?.primary_profile_url || edge.personUrl || '',
+        edge: {
+          id: edge.id,
+          fromType: edge.fromType,
+          fromId: edge.fromId,
+          toType: edge.toType,
+          toId: edge.toId,
+          edgeType: edge.edgeType,
+          confidence: edge.confidence,
+          evidence: edge.evidence
+        }
+      });
+      if (targetType === 'person') connectedPersonIds.add(targetId);
+    }
+  }
+  mutualPaths.sort((a, b) => a.targetName.localeCompare(b.targetName) || a.id.localeCompare(b.id));
+
   const contactRows = all(s, `SELECT cp.*,p.name AS person_name FROM contact_points cp
     LEFT JOIN people p ON p.id=cp.person_id WHERE cp.person_id IS NOT NULL AND cp.person_id!=''`);
   const networkContacts = contactRows.filter(contact => connectedPersonIds.has(contact.person_id)).map(contact => ({
@@ -459,7 +525,7 @@ async function collectSourcesNode(s, state, signal, env = process.env, fetchImpl
   const plan = {
     queries: (state.plannedQueries || []).map(item => typeof item === 'string' ? item : item?.query).filter(Boolean),
     depth: state.depth,
-    localNetwork: { edges: networkEdges, contacts: networkContacts },
+    localNetwork: { edges: networkEdges, contacts: networkContacts, mutualPaths },
     linkedinImport: { connections }
   };
 

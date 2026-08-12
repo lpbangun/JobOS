@@ -167,8 +167,9 @@ test('contact discovery extracts public emails, infers patterns, records LinkedI
     assert.equal(promoted.name, 'Maya Chen');
     assert.ok(one(s, 'SELECT id FROM stakeholders WHERE id=?', [promoted.id]));
     const worksheet = readFileSync(path.join(root, 'jobos-workspace', result.path), 'utf8');
-    assert.match(worksheet, /maya\.chen@acme\.test/);
-    assert.match(worksheet, /Tier: C/);
+    assert.doesNotMatch(worksheet, /maya\.chen@acme\.test/);
+    assert.match(worksheet, /email: 3/);
+    assert.match(worksheet, /Tier counts: .*C=1/);
     assert.match(worksheet, /JobOS created a local contact worksheet only/);
     assert.ok(all(s, 'SELECT id FROM source_observations WHERE job_id=?', [job.id]).length >= 2);
     assert.ok(one(s, 'SELECT id FROM audit_log WHERE action=?', ['research.contact.approved']));

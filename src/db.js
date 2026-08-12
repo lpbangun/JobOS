@@ -359,9 +359,9 @@ CREATE TABLE IF NOT EXISTS artifact_resume_documents (artifact_id TEXT PRIMARY K
 CREATE TABLE IF NOT EXISTS outreach_threads (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL DEFAULT 'informational', channel TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'drafted', sent_at TEXT, next_followup_at TEXT, followup_task_id TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS source_observations (id TEXT PRIMARY KEY, company_id TEXT, job_id TEXT, url TEXT NOT NULL, canonical_url TEXT NOT NULL, title TEXT, snippet TEXT, source_type TEXT NOT NULL, provider TEXT NOT NULL, query TEXT, trust TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS person_candidates (id TEXT PRIMARY KEY, job_id TEXT, company_id TEXT, name TEXT NOT NULL, role TEXT, function TEXT, seniority TEXT, relevance TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'candidate', suppression_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS contact_points (id TEXT PRIMARY KEY, person_id TEXT, stakeholder_id TEXT, company_id TEXT, type TEXT NOT NULL, value TEXT NOT NULL, normalized_value TEXT NOT NULL, evidence_tier TEXT NOT NULL, verification_status TEXT NOT NULL, confidence TEXT NOT NULL, source_observation_ids_json TEXT NOT NULL DEFAULT '[]', checks_json TEXT NOT NULL DEFAULT '{}', human_approved INTEGER NOT NULL DEFAULT 0, do_not_use INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_contact_at TEXT, warmth TEXT NOT NULL DEFAULT 'unknown' CHECK(warmth IN ('unknown','cold','cool','warm','hot')));
 CREATE TABLE IF NOT EXISTS email_patterns (id TEXT PRIMARY KEY, company_id TEXT NOT NULL, domain TEXT NOT NULL, pattern TEXT NOT NULL, support_count INTEGER NOT NULL, support_sources_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS relationship_edges (id TEXT PRIMARY KEY, from_type TEXT NOT NULL, from_id TEXT NOT NULL, to_type TEXT NOT NULL, to_id TEXT NOT NULL, edge_type TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '[]', confidence TEXT NOT NULL, created_at TEXT NOT NULL, last_contact_at TEXT, warmth TEXT NOT NULL DEFAULT 'unknown' CHECK(warmth IN ('unknown','cold','cool','warm','hot')));
 CREATE TABLE IF NOT EXISTS outreach_plans (id TEXT PRIMARY KEY, job_id TEXT, profile_id TEXT, stakeholder_id TEXT, contact_point_id TEXT, goal TEXT NOT NULL, channel TEXT NOT NULL, path_strength TEXT NOT NULL, recommended INTEGER NOT NULL DEFAULT 0, reasoning_json TEXT NOT NULL DEFAULT '{}', warnings_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answers (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, category TEXT NOT NULL, question_fingerprint TEXT NOT NULL, question_text TEXT NOT NULL, answer_text TEXT NOT NULL, sensitivity TEXT NOT NULL, reuse_scope TEXT NOT NULL, verification_status TEXT NOT NULL, source_ref TEXT NOT NULL DEFAULT '', employer TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(profile_id,question_fingerprint,employer), FOREIGN KEY(profile_id) REFERENCES profiles(id));
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, job_id TEXT, application_id TEXT, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', type TEXT NOT NULL DEFAULT 'review', due_at TEXT, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open', created_by TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, profile_id TEXT, action_kind TEXT NOT NULL DEFAULT 'general' CHECK(action_kind IN ('general','application_next_action')), action_code TEXT, stage TEXT, source_event_type TEXT, source_event_id TEXT, waiting_since TEXT, policy_due_at TEXT, urgent_at TEXT, schedule_source TEXT NOT NULL DEFAULT 'legacy' CHECK(schedule_source IN ('legacy','policy','manual')), manual_rescheduled_at TEXT, manual_reschedule_reason TEXT NOT NULL DEFAULT '', FOREIGN KEY(profile_id) REFERENCES profiles(id), FOREIGN KEY(job_id) REFERENCES jobs(id), FOREIGN KEY(application_id) REFERENCES applications(id));
@@ -832,6 +832,10 @@ function migrate(db){
     "ALTER TABLE person_candidates ADD COLUMN research_run_id TEXT",
     "ALTER TABLE stakeholders ADD COLUMN person_id TEXT",
     "ALTER TABLE contact_points ADD COLUMN origin_research_run_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE contact_points ADD COLUMN last_contact_at TEXT",
+    "ALTER TABLE contact_points ADD COLUMN warmth TEXT NOT NULL DEFAULT 'unknown' CHECK(warmth IN ('unknown','cold','cool','warm','hot'))",
+    "ALTER TABLE relationship_edges ADD COLUMN last_contact_at TEXT",
+    "ALTER TABLE relationship_edges ADD COLUMN warmth TEXT NOT NULL DEFAULT 'unknown' CHECK(warmth IN ('unknown','cold','cool','warm','hot'))",
     "CREATE INDEX IF NOT EXISTS idx_people_normalized_name ON people(normalized_name)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_people_primary_profile_url ON people(primary_profile_url) WHERE primary_profile_url != ''",
     "CREATE INDEX IF NOT EXISTS idx_profile_affiliations_owner ON profile_affiliations(profile_id, type, normalized_organization)",
@@ -842,6 +846,7 @@ function migrate(db){
     "CREATE INDEX IF NOT EXISTS idx_stakeholders_person ON stakeholders(person_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_run ON research_run_sources(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_research_run_sources_source ON research_run_sources(source_observation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_contact_points_email_normalized ON contact_points(normalized_value) WHERE type IN ('email','generic_inbox')",
     "ALTER TABLE outreach_threads ADD COLUMN contact_point_id TEXT",
     "ALTER TABLE status_changes ADD COLUMN actor TEXT NOT NULL DEFAULT 'unknown_legacy'",
     "ALTER TABLE status_changes ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",
@@ -1240,12 +1245,12 @@ export async function openStore(flags={}) {
   migratePolicyPreferences(db);
   migratePeopleBackfill(db);
   db.run('PRAGMA foreign_keys=ON');
-  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','15']);
+  db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','16']);
   const store={db,p,root:r,baseRevision,postCommitProjections:[]};
   const { backfillLifecycleActions } = await import('./lifecycle.js');
   const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);
-  if (!existed || previousSchemaVersion !== '15' || affectedJobIds.length) save(store);
+  if (!existed || previousSchemaVersion !== '16' || affectedJobIds.length) save(store);
   db.run('PRAGMA foreign_keys=ON');
   if (affectedJobIds.length) {
     const { syncJob } = await import('./jobs.js');

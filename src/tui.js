@@ -81,7 +81,7 @@ export const TUI_KEYMAP = Object.freeze({
   review: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['Esc', 'close']]),
   docs: Object.freeze([['↑/↓', 'document'], ['j/k', 'document'], ['PgUp/PgDn', 'scroll'], ['A', 'approve'], ['R', 'reject'], ['B', 'draft'], ['E', 'editor'], ['V', 'diff'], ['I', 'evidence'], ['/', 'search'], ['n/N', 'match'], ['Ctrl+A', 'focus'], ['Esc', 'close']]),
   discovery: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['Enter', 'open'], ['A', 'accept'], ['X', 'archive'], ['d', 'daily'], ['w', 'company-watch'], ['Esc', 'close']]),
-  network: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['m', 'map'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
+  network: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['m', 'map'], ['R', 'record'], ['A', 'approve'], ['X', 'suppress'], ['P', 'promote'], ['Esc', 'close']]),
   due: Object.freeze([['↑/↓', 'select'], ['j/k', 'select'], ['1', 'all'], ['2', 'followup'], ['3', 'review'], ['Enter', 'jump'], ['Esc', 'close']]),
   stage: Object.freeze([['←/→', 'stage'], ['Enter', 'note'], ['Esc', 'cancel']]),
   memory: Object.freeze([['1', 'observations'], ['2', 'proposals'], ['3', 'career brief'], ['4', 'voice guide'], ['↑/↓', 'select'], ['j/k', 'select'], ['Esc', 'close']]),
@@ -98,7 +98,7 @@ export const TUI_HANDLED_KEYS = Object.freeze({
   review: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'R', 'B', 'E', 'V', 'I', 'escape']),
   docs: Object.freeze(['up', 'down', 'j', 'k', 'A', 'R', 'B', 'E', 'V', 'I', '/', 'n', 'N', 'pageup', 'pagedown', 'ctrl+a', 'escape', 'D', 'X']),
   discovery: Object.freeze(['up', 'down', 'j', 'k', 'return', 'A', 'X', 'd', 'w', 'escape']),
-  network: Object.freeze(['up', 'down', 'j', 'k', 'm', 'A', 'X', 'P', 'escape']),
+  network: Object.freeze(['up', 'down', 'j', 'k', 'm', 'R', 'A', 'X', 'P', 'escape']),
   due: Object.freeze(['up', 'down', 'j', 'k', '1', '2', '3', 'return', 'escape']),
   stage: Object.freeze(['left', 'right', 'h', 'l', 'return', 'escape']),
   memory: Object.freeze(['1', '2', '3', '4', 'up', 'down', 'j', 'k', 'escape']),
@@ -853,18 +853,23 @@ function dueOverlayTasks(model, state) {
 // nulled by the model (listNetworkContacts redacts do_not_use rows).
 function networkOverlayItems(model) {
   const selected = model.selected;
-  if (!selected) return [];
-  const contacts = (selected.contacts || []).map(contact => ({
+  const opportunities = (model.networkSetup?.opportunities?.opportunities || []).map(opportunity => ({
+    kind: 'opportunity',
+    id: opportunity.personId,
+    personId: opportunity.personId,
+    label: `[opportunity] ${opportunity.name || opportunity.personId} · ${opportunity.direct ? 'direct' : `${opportunity.hops || 1}-hop`} · ${opportunity.pathStrength || 'path —'} · ${opportunity.warmth || 'unknown'}${opportunity.lastContactAt ? ` · ${opportunity.lastContactAt.slice(0, 10)}` : ''}`
+  }));
+  const contacts = (selected?.contacts || []).map(contact => ({
     kind: 'contact',
     id: contact.id,
     label: `[contact] ${contact.name || 'unnamed'} · ${contact.role || 'role —'} · ${contact.type}${contact.value ? ` ${contact.value}` : ''} · tier ${contact.evidenceTier || '—'}${contact.approved ? ' · approved' : ''}${contact.suppressed ? ' · suppressed' : ''}`
   }));
-  const candidates = (selected.candidates || []).map(candidate => ({
+  const candidates = (selected?.candidates || []).map(candidate => ({
     kind: 'candidate',
     id: candidate.id,
     label: `[candidate] ${candidate.name || 'unnamed'} · ${candidate.role || 'role —'} · ${candidate.status}${candidate.relevance ? ` · ${candidate.relevance}` : ''}`
   }));
-  return [...contacts, ...candidates];
+  return [...opportunities, ...contacts, ...candidates];
 }
 // Build-network editor: a sequential, keyboard-usable setup editor.
 // The draft (state.networkDraft) holds editable copies seeded from the model on open.
@@ -888,6 +893,7 @@ function buildNetworkItems(model, state) {
   items.push({ key: 'exclusions', label: 'Exclusions', value: draft.exclusions || 'none', type: 'list' });
   items.push({ key: 'sourcePublic', label: 'Public web source', value: draft.sourcePublic ? 'on' : 'off', type: 'toggle' });
   items.push({ key: 'sourceLinkedin', label: 'LinkedIn import source', value: draft.sourceLinkedin ? 'on' : 'off', type: 'toggle' });
+  items.push({ key: 'sourceExaPeople', label: 'Exa people source', value: `${draft.sourceExaPeople ? 'on' : 'off'} · ${ns.exaPeopleState || 'off'}`, type: 'toggle' });
   items.push({ key: 'sourceXai', label: 'xAI X Search source', value: ns.xaiState || 'off', type: 'static' });
   items.push({ key: 'connCount', label: 'Imported connections', value: String(ns.importedConnectionCount || 0), type: 'static' });
   items.push({ key: 'latestRun', label: 'Latest profile research run', value: ns.latestProfileRun ? `${ns.latestProfileRun.status} · ${ns.latestProfileRun.id?.slice(0, 12)}` : 'none', type: 'static' });
@@ -915,6 +921,7 @@ function seedNetworkDraft(model, selectedJobId = model.selectedJobId) {
     exclusions: (intent.exclusions || []).join(', '),
     sourcePublic: intent.allowedSources?.publicWeb !== false,
     sourceLinkedin: Boolean(intent.allowedSources?.linkedinImport),
+    sourceExaPeople: Boolean(intent.allowedSources?.exaPeople),
     sourceXai: Boolean(intent.allowedSources?.xai)
   };
 }
@@ -932,6 +939,7 @@ function buildIntentFromDraft(draft) {
     allowedSources: {
       publicWeb: draft.sourcePublic !== false,
       linkedinImport: Boolean(draft.sourceLinkedin),
+      exaPeople: Boolean(draft.sourceExaPeople),
       xai: Boolean(draft.sourceXai)
     }
   };
@@ -1398,6 +1406,12 @@ function overlayPanel(model, state, width, height, color) {
     const run = selected?.latestJobRun || ns.latestProfileRun;
     const xaiState = ns.xaiState || 'off';
     body = [];
+    const health = ns.health;
+    if (health) {
+      const warmth = health.counts?.byWarmth || {};
+      body.push(`Health: ${health.counts?.total || 0} relationships · ${warmth.hot || 0} hot · ${warmth.warm || 0} warm · ${warmth.cool || 0} cool · ${warmth.cold || 0} cold · ${warmth.unknown || 0} unknown`);
+      body.push(`Opportunities: ${ns.opportunities?.count || 0} shown · direct and indirect paths`);
+    }
     if (run) {
       const budget = run.budget || {};
       const usage = run.usage || {};
@@ -3663,6 +3677,35 @@ export class JobosTui {
     return networkOverlayItems(this.model)[this.state.overlayIndex] || null;
   }
 
+  async recordOpportunitySelection() {
+    const item = this.networkGateItem();
+    if (!item || item.kind !== 'opportunity') {
+      this.state.status = 'R records contact for a selected opportunity row.';
+      this.render();
+      return;
+    }
+    if (this.state.busy) return;
+    this.state.busy = 'network-record';
+    this.state.status = `Recording contact with ${item.personId}…`;
+    this.render();
+    try {
+      await callDomainTool(this.store, 'network_contact_record', {
+        profileId: this.model.profileId,
+        personId: item.personId,
+        occurredAt: new Date().toISOString()
+      }, { source: 'tui' });
+      this.state.error = null;
+      this.refresh({ disk: false });
+      this.state.status = 'Contact recorded locally · warmth and health refreshed.';
+    } catch (error) {
+      this.state.error = error.message;
+      this.state.status = `Record failed: ${error.message}`;
+    } finally {
+      this.state.busy = null;
+      this.render();
+    }
+  }
+
   async approveContactSelection() {
     const item = this.networkGateItem();
     if (!item) { this.state.status = 'No contact or candidate selected.'; this.render(); return; }
@@ -4640,6 +4683,7 @@ export class JobosTui {
         void this.runAction('network');
         return true;
       }
+      if (value === 'R') return void this.recordOpportunitySelection();
       if (value === 'A') return void this.approveContactSelection();
       if (value === 'X') return this.beginSuppressContact();
       if (value === 'P') return void this.promoteCandidateSelection();
@@ -4921,7 +4965,7 @@ export class JobosTui {
     if (item.type === 'toggle') {
       const draft = this.state.networkDraft;
       if (draft) {
-        const field = item.key === 'sourcePublic' ? 'sourcePublic' : item.key === 'sourceLinkedin' ? 'sourceLinkedin' : 'sourceXai';
+        const field = item.key;
         draft[field] = !draft[field];
         this.state.status = `${item.label} ${draft[field] ? 'on' : 'off'}`;
       }

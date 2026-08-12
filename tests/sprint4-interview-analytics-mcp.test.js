@@ -107,7 +107,7 @@ test('analytics lifecycle requires a profile and exposes observed analytics as J
 
 test('MCP exposes all Sprint 4 core operation tools and stdio framing', () => {
   const names = mcpToolNames();
-  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','mark_outreach_sent','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','lifecycle_analytics','list_lifecycle_observations','list_interview_stories','get_interview_story','draft_interview_story','interview_prep','list_interview_debriefs','list_interview_observations','weekly_review']) {
+  for (const name of ['score_job','tailor_resume','draft_cover_letter','research_company','draft_outreach','schedule_outreach_followup','list_outreach_due','record_outreach_outcome','list_outreach_outcomes','create_application','update_application_status','list_tasks','lifecycle_analytics','list_lifecycle_observations','list_interview_stories','get_interview_story','draft_interview_story','interview_prep','list_interview_debriefs','list_interview_observations','weekly_review']) {
     assert.ok(names.includes(name), `${name} missing from MCP tools`);
   }
   const { env } = makeRunner();

@@ -426,6 +426,27 @@ export function listSourceObservations(s, { jobId = null, companyId = null } = {
   return all(s, 'SELECT * FROM source_observations ORDER BY fetched_at DESC, title').map(observationRow);
 }
 
+function redactEmailValues(value) {
+  return String(value || '').replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email redacted]');
+}
+
+function agentSafeObservation(observation) {
+  const metadata = observation.metadata || {};
+  return {
+    ...observation,
+    url: redactEmailValues(observation.url),
+    canonicalUrl: redactEmailValues(observation.canonicalUrl),
+    title: redactEmailValues(observation.title),
+    snippet: redactEmailValues(observation.snippet),
+    query: redactEmailValues(observation.query),
+    metadata: {
+      rank: metadata.rank || null,
+      profileUrlOnly: Boolean(metadata.profileUrlOnly),
+      discoveredContactTypes: Array.isArray(metadata.discoveredContactTypes) ? metadata.discoveredContactTypes : []
+    }
+  };
+}
+
 export function syncSourceObservations(s, jobId) {
   if (!jobId) return '';
   const rel = path.join('jobs', jobId, 'research', 'source-observations.yaml');
@@ -435,7 +456,7 @@ export function syncSourceObservations(s, jobId) {
       externalSideEffects: 'none',
       note: 'Source observations are local research evidence. Private accounts are not fetched.'
     },
-    observations: listSourceObservations(s, { jobId })
+    observations: listSourceObservations(s, { jobId }).map(agentSafeObservation)
   });
   return rel;
 }

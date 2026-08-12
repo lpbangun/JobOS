@@ -292,7 +292,7 @@ test('W04-MATH-03 recomputes overall after the local network evidence override',
   const at = FIXED_AT;
   dbRun(f.s, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, ['run-direct', 'profile-test', 'job', f.job.id, 'succeeded', at, at, at]);
   dbRun(f.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`, ['candidate-direct', f.job.id, 'Direct Person', 'fixture', 'high', 'candidate', at, at, 'person-direct', 'run-direct']);
-  dbRun(f.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', ['edge-direct', 'profile', 'profile-test', 'person', 'person-direct', 'direct_connection', '[{"label":"source-backed fixture"}]', 'high', at]);
+  dbRun(f.s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)', ['edge-direct', 'profile', 'profile-test', 'person', 'person-direct', 'direct_connection', '[{"label":"source-backed fixture"}]', 'high', at]);
   const second = await score(f.s, f.job.id, 'profile-test', providerOpts);
   assert.equal(first.dimensions.networkAccess.status, 'unknown');
   assert.equal(second.dimensions.networkAccess.status, 'scored');

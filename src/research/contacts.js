@@ -570,21 +570,38 @@ function candidateRowsForGeneration(s, jobId) {
 }
 
 
+function contactSummary(contacts) {
+  return {
+    count: contacts.length,
+    types: contacts.reduce((counts, contact) => {
+      counts[contact.type] = (counts[contact.type] || 0) + 1;
+      return counts;
+    }, {}),
+    tiers: contacts.reduce((counts, contact) => {
+      counts[contact.evidenceTier] = (counts[contact.evidenceTier] || 0) + 1;
+      return counts;
+    }, {}),
+    approvedCount: contacts.filter(contact => contact.humanApproved).length,
+    suppressedCount: contacts.filter(contact => contact.doNotUse).length
+  };
+}
+
 function syncContacts(s, jobId) {
   const job = one(s, 'SELECT * FROM jobs WHERE id=?', [jobId]);
   if (!job) return {};
   const contacts = listContactPoints(s, { jobId });
   const candidates = listPersonCandidates(s, { jobId });
   const patterns = job.company_id ? listEmailPatterns(s, { companyId: job.company_id }) : [];
+  const summary = contactSummary(contacts);
   const relYaml = path.join('jobs', jobId, 'research', 'contacts.yaml');
   writeYaml(path.join(s.p.ws, relYaml), {
-    version: 2,
+    version: 3,
     policy: {
-      autoSend: 'disabled',
+      valuesRedacted: true,
       approvalRequired: 'human_approval_required',
-      note: 'Exact public and candidate contacts are stored for review only. JobOS never sends outreach.'
+      note: 'Agent-readable mirrors contain contact types, counts, and evidence tiers only. Use the trusted CLI/TUI to reveal values.'
     },
-    contacts,
+    contactSummary: summary,
     personCandidates: candidates,
     emailPatterns: patterns
   });
@@ -598,12 +615,10 @@ function renderSources(ids) {
 }
 
 function renderContactWorksheet({ job, contacts, candidates, patterns, generatedAt }) {
-  const contactRows = contacts.length ? contacts.map(contact => {
-    const projection = contact.contactConfidence;
-    const approval = contact.humanApproved ? 'approved' : 'needs human review';
-    const warnings = projection.warnings.length ? projection.warnings.map(warning => `  - Warning: ${warning}`).join('\n') : '  - Warnings: none';
-    return `- **${contact.value}** (${contact.type})\n  - Tier: ${projection.evidenceTier} (derived; raw historical tier: ${projection.rawEvidenceTier || 'unknown'})\n  - Tier reason: ${projection.tierReason}\n  - Public observation: ${projection.signals.publicObservation.state}\n  - Company-domain alignment: ${projection.signals.companyDomain.matchState}\n  - Pattern support: ${projection.signals.pattern.supportState}\n  - DNS: MX ${projection.signals.dns.mx}; NS ${projection.signals.dns.ns}; SPF ${projection.signals.dns.spf}; DMARC ${projection.signals.dns.dmarc}\n  - SMTP: ${projection.signals.smtp.state} (not identity proof)\n  - Catch-all: ${projection.signals.catchAll.state}\n  - Freshness: ${projection.signals.freshness.state}${projection.signals.freshness.ageDays == null ? '' : ` (${projection.signals.freshness.ageDays} days)`}\n  - Approval: ${approval}; suppression: ${projection.doNotUse ? 'do not use' : 'not suppressed'}\n  - Usable: ${projection.usable ? 'yes' : 'no'} — ${projection.usabilityReason}\n${warnings}\n${renderSources(contact.sourceObservationIds)}`;
-  }).join('\n') : '- No contacts discovered yet.';
+  const summary = contactSummary(contacts);
+  const contactRows = contacts.length
+    ? Object.entries(summary.types).sort(([a], [b]) => a.localeCompare(b)).map(([type, count]) => `- ${type}: ${count}`).join('\n')
+    : '- No contacts discovered yet.';
   const candidateRows = candidates.length ? candidates.map(candidate => `- **${candidate.name}** — ${candidate.role || 'role unknown'}\n  - Relevance: ${candidate.relevance}\n  - Confidence: ${candidate.confidence}\n  - Status: ${candidate.status}\n${renderSources(candidate.sourceObservationIds)}`).join('\n') : '- No person candidates staged yet.';
   const patternRows = patterns.length ? patterns.map(pattern => `- ${pattern.domain}: \`${pattern.pattern}\` (${pattern.supportCount} source-backed example(s), ${pattern.confidence})`).join('\n') : '- No source-backed email patterns inferred.';
   return `# Contact research - ${job.company}
@@ -614,6 +629,8 @@ Generated: ${generatedAt}
 
 ## Contact points
 ${contactRows}
+
+Tier counts: ${Object.entries(summary.tiers).sort(([a], [b]) => a.localeCompare(b)).map(([tier, count]) => `${tier}=${count}`).join(', ') || 'none'}
 
 ## Email patterns
 ${patternRows}

@@ -348,13 +348,23 @@ try {
   }
   setSmokeLiveness(w04Store, job.id, 'uncertain');
   const networkAt = new Date().toISOString();
+  dbRun(w04Store, `INSERT OR IGNORE INTO people
+    (id,name,normalized_name,primary_profile_url,aliases_json,identity_confidence,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`, ['smoke-w04-network-person', 'Smoke Direct Connection', 'smoke direct connection', '', '[]', 'high', networkAt, networkAt]);
+  dbRun(w04Store, `INSERT OR IGNORE INTO people
+    (id,name,normalized_name,primary_profile_url,aliases_json,identity_confidence,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`, ['smoke-w04-target-person', 'Smoke Second Degree', 'smoke second degree', '', '[]', 'high', networkAt, networkAt]);
   dbRun(w04Store, `INSERT INTO research_runs (id,profile_id,scope,job_id,status,finished_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,
     ['smoke-w04-network-run', profile.id, 'job', job.id, 'succeeded', networkAt, networkAt, networkAt]);
   dbRun(w04Store, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
     ['smoke-w04-network-candidate', job.id, 'Smoke Direct Connection', 'source-backed smoke path', 'high', 'candidate', networkAt, networkAt, 'smoke-w04-network-person', 'smoke-w04-network-run']);
-  dbRun(w04Store, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+  dbRun(w04Store, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [
     'smoke-w04-network-edge', 'profile', profile.id, 'person', 'smoke-w04-network-person', 'direct_connection',
     '[{"label":"User-imported smoke connection","source":"smoke fixture"}]', 'high', networkAt
+  ]);
+  dbRun(w04Store, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [
+    'smoke-w04-mutual-edge', 'person', 'smoke-w04-network-person', 'person', 'smoke-w04-target-person', 'shared_event',
+    '[{"label":"Source-backed smoke mutual path","source":"smoke fixture"}]', 'medium', networkAt
   ]);
   save(w04Store);
   const networkFit = await scoreJob(w04Store, job.id, profile.id);
@@ -384,6 +394,27 @@ try {
     throw new Error('W04 scoring caused an application, outreach plan, or external side effect');
   }
   w04Store.db.close();
+  const networkRecord = JSON.parse(run(['network', 'record', '--profile', profile.id, '--person', 'smoke-w04-network-person', '--occurred-at', '2025-01-01T00:00:00.000Z', '--json']));
+  const networkHealth = JSON.parse(run(['network', 'health', '--profile', profile.id, '--as-of', '2026-08-11T00:00:00.000Z', '--json']));
+  const networkGraph = JSON.parse(run(['network', 'graph', '--profile', profile.id, '--person', 'smoke-w04-target-person', '--max-hops', '2', '--json']));
+  const networkOpportunities = JSON.parse(run(['network', 'opportunities', '--profile', profile.id, '--as-of', '2026-08-11T00:00:00.000Z', '--json']));
+  JSON.parse(run(['network', 'paths', '--job', job.id, '--json']));
+  const networkAutomations = JSON.parse(run(['automation', 'list', '--json']));
+  JSON.parse(run(['automation', 'create', 'smoke_network_nurture', '--action', 'network_nurture', '--schedule', '* * * * *', '--profile', profile.id, '--enabled', '--json']));
+  const networkNurtureRun = JSON.parse(run(['scheduler', 'run-once', '--json']));
+  const networkNurtureResult = networkNurtureRun.runs.find(item => item.actionId === 'network_nurture');
+  JSON.parse(run(['automation', 'disable', 'smoke_network_nurture', '--json']));
+  if (networkRecord.personId !== 'smoke-w04-network-person'
+    || networkHealth.relationships.find(item => item.personId === 'smoke-w04-network-person')?.warmth !== 'cold'
+    || networkGraph.paths[0]?.hops !== 2 || networkGraph.paths[0]?.mutualPath !== true
+    || !networkOpportunities.opportunities.some(item => item.personId === 'smoke-w04-network-person')
+    || !['network_nurture', 'profile_network_research'].every(name => networkAutomations.some(item => item.name === name && item.enabled === false))
+    || networkNurtureResult?.counts?.cold !== 1 || networkNurtureResult?.counts?.drafts !== 1
+    || !existsSync(path.join(root, 'jobos-workspace', 'profiles', profile.id, 'network', 'relationships.json'))
+    || !existsSync(path.join(root, 'jobos-workspace', 'profiles', profile.id, 'network', 'nurture-tasks.json'))
+    || !existsSync(path.join(root, 'jobos-workspace', 'jobs', job.id, 'research', 'introduction-paths.json'))) {
+    throw new Error('Profile networking smoke did not preserve warmth, two-hop paths, disabled schedules, and local mirrors');
+  }
   const resumeDraft = run(['tailor', 'resume', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
   if (!resumeDraft.includes('## Experience') || !resumeDraft.includes('## Education') || resumeDraft.includes('Evidence-backed highlights')) throw new Error('Resume draft was not a complete semantic resume');
   run(['tailor', 'cover-letter', '--job', job.id, '--profile', profile.id, '--output', 'markdown'], true);
@@ -732,6 +763,18 @@ try {
       activeUncertainFitIdentity: true,
       expiredPriorFitPreserved: true,
       postingLivenessSeparated: true,
+      submissionPerformed: false,
+      externalSideEffects: 'none'
+    },
+    networking: {
+      recordedPersonId: networkRecord.personId,
+      warmth: networkHealth.relationships.find(item => item.personId === 'smoke-w04-network-person')?.warmth,
+      twoHopPathCount: networkGraph.paths.filter(item => item.hops === 2).length,
+      opportunityCount: networkOpportunities.count,
+      defaultSchedulesDisabled: true,
+      nurtureTasks: networkNurtureResult.counts.cold,
+      nurtureDrafts: networkNurtureResult.counts.drafts,
+      readableMirrors: 3,
       submissionPerformed: false,
       externalSideEffects: 'none'
     },

@@ -86,7 +86,7 @@ test('migration preserves IDs while backfilling canonical people, contacts, stak
       ['contact_legacy', 'candidate_legacy', 'email', 'alex@example.test', 'alex@example.test', 'U', 'user_imported', 'medium', '[]', '{}', 0, 0, at, at]);
     run(f.s, `INSERT INTO contact_points (id,type,value,normalized_value,evidence_tier,verification_status,confidence,source_observation_ids_json,checks_json,human_approved,do_not_use,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ['contact_generic', 'generic_inbox', 'careers@example.test', 'careers@example.test', 'A', 'exact_public', 'high', '[]', '{}', 0, 0, at, at]);
-    run(f.s, `INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)`, ['edge_legacy', 'profile', f.profile.id, 'candidate', 'candidate_legacy', 'direct_connection', '[]', 'high', at]);
+    run(f.s, `INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, ['edge_legacy', 'profile', f.profile.id, 'candidate', 'candidate_legacy', 'direct_connection', '[]', 'high', at]);
     run(f.s, `INSERT INTO outreach_plans (id,job_id,profile_id,stakeholder_id,contact_point_id,goal,channel,path_strength,recommended,reasoning_json,warnings_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       ['plan_legacy', f.job.id, f.profile.id, 'stakeholder_legacy', 'contact_legacy', 'informational', 'email', 'direct', 1, '{}', '[]', at]);
     run(f.s, `DELETE FROM meta WHERE key='people_backfill_version'`);
@@ -417,7 +417,7 @@ test('W04-NETWORK-01 derives fresh stale and absent network access from exact lo
         run(f.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
           [`candidate_${runId}`, f.job.id, person.name, 'score fixture', 'high', 'candidate', at, at, person.id, runId]);
         if (scenario.kind === 'direct' || scenario.kind === 'mutual') {
-          run(f.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)', [
+          run(f.s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [
             `edge_${runId}`, 'profile', f.profile.id, 'person', person.id,
             scenario.kind === 'direct' ? 'direct_connection' : 'shared_school',
             JSON.stringify([{ label: `User-imported ${scenario.kind} connection`, source: 'connections.csv' }]), 'high', at
@@ -463,7 +463,7 @@ test('W04-NETWORK-01 derives fresh stale and absent network access from exact lo
         [runId, invalidEdge.profile.id, 'job', invalidEdge.job.id, 'succeeded', at, at, at]);
       run(invalidEdge.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [`candidate_${runId}`, invalidEdge.job.id, person.name, 'invalid edge fixture', 'high', 'candidate', at, at, person.id, runId]);
-      run(invalidEdge.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+      run(invalidEdge.s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
         [`edge_${runId}`, 'profile', invalidEdge.profile.id, 'person', person.id, 'direct_connection', evidenceJson, 'high', at]);
       const result = networkAccessFromEvidence(invalidEdge.s, { jobId: invalidEdge.job.id, profileId: invalidEdge.profile.id });
       assert.equal(result.score, 25, name);
@@ -494,7 +494,7 @@ test('W04-NETWORK-01 derives fresh stale and absent network access from exact lo
       run(unrelatedFresh.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [`candidate_${runId}`, unrelatedFresh.job.id, person.name, 'freshness fixture', 'high', 'candidate', finishedAt, finishedAt, person.id, runId]);
     }
-    run(unrelatedFresh.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+    run(unrelatedFresh.s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
       ['edge_old_path', 'profile', unrelatedFresh.profile.id, 'person', oldPerson.id, 'direct_connection', '[{"label":"old source"}]', 'high', oldAt]);
     const result = networkAccessFromEvidence(unrelatedFresh.s, { jobId: unrelatedFresh.job.id, profileId: unrelatedFresh.profile.id });
     assert.equal(result.score, 75);
@@ -510,7 +510,7 @@ test('W04-NETWORK-01 derives fresh stale and absent network access from exact lo
       ['research_cross_profile', crossProfile.profile.id, 'job', crossProfile.job.id, 'succeeded', at, at, at]);
     run(crossProfile.s, `INSERT INTO person_candidates (id,job_id,name,relevance,confidence,status,created_at,updated_at,person_id,research_run_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
       ['candidate_cross_profile', crossProfile.job.id, person.name, 'score fixture', 'high', 'candidate', at, at, person.id, 'research_cross_profile']);
-    run(crossProfile.s, 'INSERT INTO relationship_edges VALUES (?,?,?,?,?,?,?,?,?)',
+    run(crossProfile.s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
       ['edge_other_profile', 'profile', 'profile-other', 'person', person.id, 'direct_connection', '[]', 'high', at]);
     run(crossProfile.s, 'INSERT INTO profiles (id,name,preferences_json,resume_text,created_at,updated_at) VALUES (?,?,?,?,?,?)',
       ['profile-other', 'Other Profile', '{}', '', at, at]);
