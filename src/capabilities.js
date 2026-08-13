@@ -24,6 +24,8 @@ export const HUMAN_ONLY_DOMAIN_TOOLS = Object.freeze([
   'reject_memory_proposal',
   'revoke_memory_proposal',
   'undo_memory_transition',
+  'network_contact_record',
+  'mark_outreach_sent',
 ]);
 
 const humanOnly = new Set(HUMAN_ONLY_DOMAIN_TOOLS);

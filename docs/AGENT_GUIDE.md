@@ -34,9 +34,12 @@ jobos daily --profile pm-edtech --json
 jobos jobs list --json
 jobos pursue <job-id> --profile pm-edtech --json
 jobos network paths --job <job-id> --json
+jobos network opportunities --profile pm-edtech --json
+jobos network graph --profile pm-edtech --max-hops 2 --json
+jobos network health --profile pm-edtech --json
 ```
 
-`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `discover run-all` is the advanced raw runner for callers that need per-search results without the daily workflow's cross-run dedupe and combined ranking. `pursue` composes score, research, contact discovery, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies. Full reachable-network mapping remains the standalone `network paths` operation.
+`daily` runs all saved discovery sources for one profile, isolates source failures, deduplicates, and ranks results. `discover run-all` is the advanced raw runner for callers that need per-search results without the daily workflow's cross-run dedupe and combined ranking. `pursue` composes score, research, contact discovery, reusable/proof-grounded application answers, resume and cover-letter drafts, application tracking, and outreach preparation. `--dry-run` returns its graph without writes or network calls; `--stage <name>` runs one stage plus dependencies. `network opportunities`, `network graph`, and `network health` are read-only agent-eligible views over local state. `network record` is trusted CLI/TUI human input; agents cannot claim that contact occurred.
 
 Prefer `pursue` for the first end-to-end pass. Standalone score, research, tailoring, application, and outreach commands intentionally run only their operation. The `loop ...` commands are bounded JSONL primitives for agents and test harnesses; use `scheduler start` or `scheduler run-once` for human-operated background automation.
 
@@ -53,7 +56,9 @@ jobos mcp
 
 Generic agents receive one protocol-v1 JSON request on stdin and must emit exactly one JSON object on stdout. MCP exposes `daily_discovery`, `pursue_job`, and `answers_match` plus lower-level domain tools. Authenticated browser state stays only in `.jobos/browser/`; it is credential material and never part of the workspace mirror.
 
-Hermes, Codex, and Claude Code connect to the same external `jobos mcp` stdio door through `jobos agents connect <client>`. Hermes additionally has the certified embedded ACP path. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation. Run `jobos agents doctor` to distinguish executable availability, authentication evidence, embedded ACP, external MCP registration, and batch readiness.
+Hermes, Codex, Claude Code, Grok Build, Cursor CLI (`agent`), and Oh My Pi (`omp`, alias `pi`) connect to the same external `jobos mcp` stdio door through `jobos agents connect <client>`. Hermes is the default embedded ACP guest in the TUI; Oh My Pi is an alternate ACP backend (`JOBOS_ACP_COMMAND=omp`) with MCP configured in `.omp/mcp.json`. Cursor CLI uses project `.cursor/mcp.json`; Grok, Codex, and Claude use each client's MCP CLI. Codex app-server is not mislabeled as embedded support; Codex uses external MCP for full domain access and the separate batch runner only for structured generation. Run `jobos agents doctor` to distinguish executable availability, authentication evidence, embedded ACP, external MCP registration, and batch readiness.
+
+Claude Code and Codex also load career-ops-style product entrypoints in-repo: `CLAUDE.md` / `CODEX.md`, shared skill `.agents/skills/jobos/SKILL.md` (Claude symlink under `.claude/skills/jobos/`), and human guides `docs/CLAUDE.md` / `docs/CODEX.md`. Prefer `/jobos` or plain-language mode names after `agents connect`.
 
 In the embedded pane, use normal language (“score this role,” “show due follow-ups,” “draft interview prep”). The host prompt supplies the complete agent-eligible tool catalog and typed handoffs for human-only decisions. Direct TUI invocation uses `/<domain_tool> <json-object>`; friendly host navigation remains under `:...`.
 

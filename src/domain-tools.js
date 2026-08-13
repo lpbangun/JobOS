@@ -7,8 +7,9 @@ import { researchCompany } from './research.js';
 import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from './outreach.js';
 import { approveContact, createOutreachPlan } from './research/contacts.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
-import { mapReachableNetwork } from './research/network.js';
+import { mapReachableNetwork, networkGraphQuery, networkHealthBrief, networkOpportunitiesList, recordNetworkContact } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
+import { findPersonByEmail } from './research/people.js';
 import { appCreate, appUpdate, openTasks, recommendResearch, taskView } from './tracking.js';
 import { weekly } from './analytics.js';
 import { lifecycleAnalytics } from './lifecycle-analytics.js';
@@ -110,7 +111,7 @@ const interviewDebriefProperties = {
 };
 const researchSources = {
   type: 'array',
-  items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'github', 'gdelt', 'wayback', 'xai'] }
+  items: { type: 'string', enum: ['local_network', 'linkedin_import', 'public_web', 'exa_people', 'github', 'gdelt', 'wayback', 'xai'] }
 };
 const researchBudget = object({
   maxQueries: { type: 'number' },
@@ -177,6 +178,7 @@ const peopleResearchRequest = {
   company: text,
   role: text,
   personId: text,
+  email: text,
   person: required({ name: text, profileUrl: text }, ['name', 'profileUrl']),
   depth: { type: 'string', enum: ['standard', 'deep'] },
   sources: researchSources,
@@ -194,8 +196,9 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'discovery_health', description: 'Inspect saved discovery sources and recent isolated run failures.', inputSchema: object({ profileId: text }) },
   { name: 'score_job', description: 'Score a job against a profile.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
   { name: 'tailor_resume', description: 'Create an evidence-grounded tailored resume draft with optional local PDF rendering and layout preflight.', inputSchema: required({ jobId: text, profileId: text, layoutProfileId: { type: 'string', enum: ['professional', 'technical', 'leadership'] }, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, density: { type: 'string', enum: ['compact', 'standard', 'spacious'] }, format: { type: 'string', enum: ['markdown', 'pdf'] }, sectionOrder: { type: 'array', items: { type: 'string' } } }, ['jobId', 'profileId']) },
-  { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft.', inputSchema: required({ jobId: text, profileId: text }, ['jobId', 'profileId']) },
+  { name: 'draft_cover_letter', description: 'Create an evidence-grounded cover letter draft with optional local PDF rendering.', inputSchema: required({ jobId: text, profileId: text, pageSize: { type: 'string', enum: ['letter', 'a4'] }, pageLimit: { type: 'number' }, format: { type: 'string', enum: ['markdown', 'pdf'] } }, ['jobId', 'profileId']) },
   { name: 'research_company', description: 'Create a source-backed company dossier for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
+  { name: 'find_person', description: 'Find one canonical person by an exact normalized email. Agent callers receive contact types, counts, and tiers without values.', inputSchema: required({ email: text }, ['email']) },
   { name: 'start_people_research', description: 'Run people research synchronously for a scope (profile/target/job/person) and return the run result.', inputSchema: required(peopleResearchRequest, ['profileId', 'scope']) },
   { name: 'get_people_research_run', description: 'Get the current state of a people research run.', inputSchema: required({ runId: text }, ['runId']) },
   { name: 'resume_people_research_run', description: 'Resume a paused_retryable people research run.', inputSchema: required({ runId: text }, ['runId']) },
@@ -203,6 +206,10 @@ export const DOMAIN_TOOLS = Object.freeze([
   { name: 'approve_contact', description: 'Mark a discovered contact point as human-approved for later draft use.', inputSchema: required({ contactId: text }, ['contactId']) },
   { name: 'plan_outreach', description: 'Rank a reviewable outreach path from discovered contacts and user-owned network evidence.', inputSchema: required({ jobId: text, profileId: text, stakeholderId: text, goal: text }, ['jobId', 'profileId']) },
   { name: 'map_reachable_network', description: 'Create a local reachable-network path ladder for a job.', inputSchema: required({ jobId: text }, ['jobId']) },
+  { name: 'network_opportunities_list', description: 'List profile-level networking opportunities ranked deterministically from local relationship and contact-point state; never sends or requests anything.', inputSchema: closedRequired({ profileId: text, limit: { type: 'number' }, asOf: text }, ['profileId']) },
+  { name: 'network_graph_query', description: 'Query the local profile network graph with bounded two-hop paths from the profile through people to people or companies; deterministic and read-only.', inputSchema: closedRequired({ profileId: text, jobId: text, personId: text, maxHops: { type: 'number' } }, ['profileId']) },
+  { name: 'network_health_brief', description: 'Read the deterministic profile network health brief with relationship warmth and recency derived from local state as of a timestamp.', inputSchema: closedRequired({ profileId: text, asOf: text }, ['profileId']) },
+  { name: 'network_contact_record', description: 'Record a trusted human-confirmed contact with a person, updating the profile relationship edge and contact-point warmth and last-contact timestamps; agent mediation is denied.', inputSchema: closedRequired({ profileId: text, personId: text, contactPointId: text, occurredAt: text, warmth: { type: 'string', enum: ['unknown', 'cold', 'cool', 'warm', 'hot'] }, note: text }, ['profileId', 'personId']) },
   { name: 'draft_outreach', description: 'Draft human-reviewed outreach for a stakeholder; never send it.', inputSchema: { type: 'object', properties: { jobId: text, stakeholderId: text, profileId: text, goal: text, planId: text, contactId: text }, required: ['profileId'], anyOf: [{ required: ['jobId', 'stakeholderId'] }, { required: ['planId'] }] } },
   { name: 'mark_outreach_sent', description: 'Record a user-confirmed outreach send; agent mediation is denied unless explicitly enabled.', inputSchema: required({ artifactId: text, channel: { type: 'string', enum: ['email', 'linkedin', 'other'] }, notes: text }, ['artifactId', 'channel']) },
   { name: 'schedule_outreach_followup', description: 'Create a local follow-up task for an outreach thread.', inputSchema: required({ threadId: text, afterDays: { type: 'number' } }, ['threadId', 'afterDays']) },
@@ -288,6 +295,21 @@ const HUMAN_MEMORY_MUTATIONS = new Set([
   'undo_memory_transition',
 ]);
 const HUMAN_MEMORY_INPUT_MESSAGE = 'Career-memory feedback, corrections, and lifecycle decisions require trusted CLI or TUI human input.';
+const HUMAN_NETWORK_MUTATIONS = new Set([
+  'network_contact_record',
+  'mark_outreach_sent',
+]);
+const HUMAN_NETWORK_INPUT_MESSAGE = 'Recording network contacts or confirmed sends requires trusted CLI or TUI human input.';
+
+function trustedNetworkSource(options) {
+  const source = mediationSource(options);
+  if (source === 'cli' || source === 'tui') return source;
+  throw new DomainToolError(
+    'human_network_input_required',
+    HUMAN_NETWORK_INPUT_MESSAGE,
+    { tool: null, source, status: null, externalSideEffect: 'none' },
+  );
+}
 
 function trustedInterviewSource(options) {
   const source = mediationSource(options);
@@ -347,6 +369,13 @@ function enforcePolicy(name, args, options) {
     throw new DomainToolError(
       'human_memory_input_required',
       HUMAN_MEMORY_INPUT_MESSAGE,
+      { tool: name, source, status: null, externalSideEffect: 'none' },
+    );
+  }
+  if (HUMAN_NETWORK_MUTATIONS.has(name) && !['cli', 'tui'].includes(source)) {
+    throw new DomainToolError(
+      'human_network_input_required',
+      HUMAN_NETWORK_INPUT_MESSAGE,
       { tool: name, source, status: null, externalSideEffect: 'none' },
     );
   }
@@ -817,8 +846,13 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'discovery_health') return discoveryHealth(s, args);
   if (name === 'score_job') return await score(s, args.jobId, args.profileId);
   if (name === 'tailor_resume') return await tailor(s, args.jobId, args.profileId, 'resume', { layoutProfileId: args.layoutProfileId, pageSize: args.pageSize, pageLimit: args.pageLimit, density: args.density, format: args.format, sectionOrder: args.sectionOrder });
-  if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover');
+  if (name === 'draft_cover_letter') return await tailor(s, args.jobId, args.profileId, 'cover', { pageSize: args.pageSize, pageLimit: args.pageLimit, format: args.format });
   if (name === 'research_company') return await researchCompany(s, args.jobId);
+  if (name === 'find_person') {
+    const trusted = ['cli', 'tui'].includes(mediationSource(options));
+    return findPersonByEmail(s, args.email, { revealContacts: trusted })
+      || { person: null, ...(trusted ? { contacts: [] } : { contactSummary: { count: 0, types: [], tiers: {} } }), edges: [] };
+  }
   if (name === 'start_people_research') {
     const runId = createResearchRun(s, {
       profileId: args.profileId,
@@ -827,6 +861,7 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
       company: args.company || undefined,
       role: args.role || undefined,
       personId: args.personId || undefined,
+      email: args.email || undefined,
       person: args.person || undefined,
       depth: args.depth || 'standard',
       sources: args.sources || undefined,
@@ -841,6 +876,33 @@ export async function callDomainTool(s, name, args = {}, options = {}) {
   if (name === 'approve_contact') return approveContact(s, { contactId: args.contactId });
   if (name === 'plan_outreach') return createOutreachPlan(s, { jobId: args.jobId, profileId: args.profileId, stakeholderId: args.stakeholderId || null, goal: args.goal || 'informational' });
   if (name === 'map_reachable_network') return mapReachableNetwork(s, { jobId: args.jobId });
+  if (name === 'network_opportunities_list') return networkOpportunitiesList(s, {
+    profileId: args.profileId,
+    limit: args.limit == null ? 25 : args.limit,
+    asOf: args.asOf ? new Date(args.asOf) : new Date(),
+  });
+  if (name === 'network_graph_query') return networkGraphQuery(s, {
+    profileId: args.profileId,
+    jobId: args.jobId || null,
+    personId: args.personId || null,
+    maxHops: args.maxHops == null ? 2 : args.maxHops,
+  });
+  if (name === 'network_health_brief') return networkHealthBrief(s, {
+    profileId: args.profileId,
+    asOf: args.asOf ? new Date(args.asOf) : new Date(),
+  });
+  if (name === 'network_contact_record') {
+    const source = trustedNetworkSource(options);
+    return recordNetworkContact(s, {
+      profileId: args.profileId,
+      personId: args.personId,
+      contactPointId: args.contactPointId || null,
+      occurredAt: args.occurredAt ? new Date(args.occurredAt) : new Date(),
+      warmth: args.warmth || null,
+      note: args.note || '',
+      source,
+    });
+  }
   if (name === 'draft_outreach') {
     if (!(args.jobId && args.stakeholderId) && !args.planId) {
       throw new DomainToolError('draft_outreach_missing_target', 'draft_outreach requires a jobId+stakeholderId or a planId', { args });

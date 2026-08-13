@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "name": "Avery Candidate",
+    "email": "avery@example.com",
+    "phone": "+1 555 555 0100",
+    "location": "Chicago, IL",
+    "links": [
+      { "id": "link_linkedin", "label": "LinkedIn", "url": "https://www.linkedin.com/in/avery", "verificationStatus": "verified" },
+      { "id": "link_github", "label": "GitHub", "url": "https://github.com/avery", "verificationStatus": "verified" }
+    ],
+    "verificationStatus": "verified"
+  },
+  "summary": {
+    "id": "summary_main",
+    "text": "Senior Product Manager with 8+ years building evidence-grounded education technology. Led cross-functional teams shipping learning workflows that reduced manual review time by 30% and improved activation by 22%. Expert in user research, roadmap strategy, and stakeholder management across engineering, operations, and business.",
+    "verificationStatus": "verified",
+    "proofPointIds": ["proof_launch"]
+  },
+  "experience": [
+    {
+      "id": "experience_acme",
+      "employer": "Acme Learning",
+      "title": "Senior Product Manager",
+      "location": "Remote",
+      "startDate": "2021-02",
+      "endDate": null,
+      "dateSource": { "startText": "2021-02", "endText": "Present", "verificationStatus": "verified" },
+      "verificationStatus": "verified",
+      "bullets": [
+        { "id": "bullet_launch", "text": "Led educator research and shipped a workflow that reduced review time by 30%.", "proofPointIds": ["proof_launch"], "verificationStatus": "verified" },
+        { "id": "bullet_activation", "text": "Drove activation improvements of 22% through onboarding redesign and user feedback loops.", "proofPointIds": ["proof_activation"], "verificationStatus": "verified" },
+        { "id": "bullet_roadmap", "text": "Owned a 3-quarter product roadmap spanning 4 squads and 12 engineers, shipping 6 major releases.", "proofPointIds": ["proof_roadmap"], "verificationStatus": "verified" },
+        { "id": "bullet_stakeholder", "text": "Partnered with sales, support, and executive stakeholders to align roadmap with revenue goals.", "proofPointIds": ["proof_stakeholder"], "verificationStatus": "verified" },
+        { "id": "bullet_metrics", "text": "Established product analytics dashboards tracking adoption, retention, and NPS across 3 product lines.", "proofPointIds": ["proof_metrics"], "verificationStatus": "verified" },
+        { "id": "bullet_okr", "text": "Led quarterly OKR planning and cross-functional prioritization that cut time-to-market by 18%.", "proofPointIds": ["proof_okr"], "verificationStatus": "verified" }
+      ]
+    },
+    {
+      "id": "experience_edtech",
+      "employer": "Brightpath EdTech",
+      "title": "Product Manager",
+      "location": "Chicago, IL",
+      "startDate": "2018-06",
+      "endDate": "2021-01",
+      "dateSource": { "startText": "2018-06", "endText": "2021-01", "verificationStatus": "verified" },
+      "verificationStatus": "verified",
+      "bullets": [
+        { "id": "bullet_metrics", "text": "Launched a reporting dashboard used by 40+ school districts to track student outcomes.", "proofPointIds": ["proof_metrics"], "verificationStatus": "verified" },
+        { "id": "bullet_research", "text": "Conducted 60+ user interviews and usability tests to inform feature prioritization.", "proofPointIds": ["proof_research"], "verificationStatus": "verified" },
+        { "id": "bullet_retention", "text": "Improved quarterly retention by 15% through targeted feature adoption campaigns.", "proofPointIds": ["proof_retention"], "verificationStatus": "verified" }
+      ]
+    },
+    {
+      "id": "experience_startup",
+      "employer": "Nimbus Analytics",
+      "title": "Associate Product Manager",
+      "location": "Chicago, IL",
+      "startDate": "2016-07",
+      "endDate": "2018-05",
+      "dateSource": { "startText": "2016-07", "endText": "2018-05", "verificationStatus": "verified" },
+      "verificationStatus": "verified",
+      "bullets": [
+        { "id": "bullet_apm", "text": "Supported the launch of a self-serve analytics platform that grew to 5,000 users.", "proofPointIds": ["proof_apm"], "verificationStatus": "verified" },
+        { "id": "bullet_qa", "text": "Coordinated QA and release cycles across a 6-person engineering team.", "proofPointIds": ["proof_qa"], "verificationStatus": "verified" }
+      ]
+    }
+  ],
+  "education": [
+    { "id": "education_state", "institution": "State University", "degree": "BS", "field": "Computer Science", "location": "Chicago, IL", "startDate": "2012", "endDate": "2016", "verificationStatus": "verified" }
+  ],
+  "skills": [
+    { "id": "skill_research", "name": "User research", "category": "Product", "verificationStatus": "verified" },
+    { "id": "skill_roadmap", "name": "Roadmap strategy", "category": "Product", "verificationStatus": "verified" },
+    { "id": "skill_sql", "name": "SQL", "category": "Technical", "verificationStatus": "verified" },
+    { "id": "skill_analytics", "name": "Product analytics", "category": "Technical", "verificationStatus": "verified" },
+    { "id": "skill_stakeholder", "name": "Stakeholder management", "category": "Leadership", "verificationStatus": "verified" },
+    { "id": "skill_agile", "name": "Agile / Scrum", "category": "Leadership", "verificationStatus": "verified" }
+  ],
+  "credentials": [
+    { "id": "credential_cspo", "name": "CSPO", "issuer": "Scrum Alliance", "date": "2020", "verificationStatus": "verified" }
+  ],
+  "projects": [
+    { "id": "project_access", "name": "Accessibility Lab", "description": "Open accessibility research project.", "url": "https://example.com/accessibility", "verificationStatus": "verified", "bullets": [{ "id": "project_bullet_1", "text": "Built an open-source toolkit used by 200+ developers to audit web accessibility.", "proofPointIds": ["proof_project"], "verificationStatus": "verified" }] }
+  ],
+  "additionalSections": [
+    { "id": "section_community", "title": "Community Leadership", "entries": ["Mentor, Product Collective", "Speaker, EdTech Product Summit 2023"], "verificationStatus": "verified" }
+  ]
+}

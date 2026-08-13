@@ -5,6 +5,7 @@ import * as wayback from './wayback.js';
 import * as localNetwork from './local-network.js';
 import * as linkedinImport from './linkedin-import.js';
 import { xaiAdapter } from './xai.js';
+import * as exaPeople from './exa-people.js';
 
 // Adapter registry for research source adapters.
 // Each adapter: { name: string, run({context,plan,budget,signal,env,fetchImpl}) -> {observations,personHints,usage,warnings} }
@@ -40,5 +41,6 @@ for (const adapter of [
   wayback,
   localNetwork,
   linkedinImport,
-  xaiAdapter
+  xaiAdapter,
+  exaPeople,
 ]) registerAdapter(adapter);

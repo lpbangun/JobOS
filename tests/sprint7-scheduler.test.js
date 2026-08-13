@@ -51,7 +51,7 @@ test('init seeds disabled default automations and writes YAML mirror', async () 
   const root = makeRoot();
   const s = await openStore({ workspace: root });
   const automations = listAutomations(s);
-  assert.deepEqual(automations.map(a => a.name).sort(), ['daily_discovery', 'followup_watch', 'morning_priority_brief', 'stale_application_check', 'weekly_retrospective'].sort());
+  assert.deepEqual(automations.map(a => a.name).sort(), ['daily_discovery', 'followup_watch', 'morning_priority_brief', 'network_nurture', 'profile_network_research', 'stale_application_check', 'weekly_retrospective'].sort());
   assert.ok(automations.every(a => a.enabled === false));
   const yaml = readFileSync(path.join(root, 'jobos-workspace', 'automations', 'automations.yaml'), 'utf8');
   assert.match(yaml, /autoApply: disabled/);

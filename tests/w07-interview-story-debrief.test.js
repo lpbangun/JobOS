@@ -180,7 +180,7 @@ test('W07-MIGRATE-01 schema 13 migrates through schema 15 without rewriting prot
   const root = workspaceFromFixture(t);
   const store = await openStore({ workspace: root });
 
-  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '15');
+  assert.equal(one(store, "SELECT value FROM meta WHERE key='schema_version'").value, '16');
   assert.deepEqual(
     all(store, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'interview_%' ORDER BY name").map(row => row.name),
     W07_TABLES,
@@ -236,7 +236,7 @@ test('W07-MIGRATE-02 schema 15 is byte and count stable after close and reopen',
   const firstBytes = readFileSync(databasePath);
 
   const reopened = await openStore({ workspace: root });
-  assert.equal(one(reopened, "SELECT value FROM meta WHERE key='schema_version'").value, '15');
+  assert.equal(one(reopened, "SELECT value FROM meta WHERE key='schema_version'").value, '16');
   assert.deepEqual(counts(reopened, [...PROTECTED_TABLES, ...W07_TABLES, 'audit_log']), firstCounts);
   for (const table of PROTECTED_TABLES) {
     assert.deepEqual(stableRows(reopened, table), firstRows[table], `${table} changed on reopen`);

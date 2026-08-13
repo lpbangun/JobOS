@@ -2,6 +2,8 @@
 
 This file gives coding agents the project-specific context needed to make safe, useful changes without rereading the whole spec.
 
+**Product use (Claude Code / Codex / other CLIs):** use `CLAUDE.md`, `CODEX.md`, and `.agents/skills/jobos/SKILL.md` plus `jobos agents connect <client>`. Do not put end-user job-search workflows only in this developer file.
+
 ## Project overview
 
 JobOS is a local-first, agent-native job application operating system MVP. It helps a job seeker manage profiles, proof points, jobs, fit scoring, tailored draft artifacts, applications, tasks, research worksheets, and weekly reviews.

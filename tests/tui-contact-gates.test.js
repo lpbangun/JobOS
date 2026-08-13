@@ -92,7 +92,36 @@ test('network overlay lists discovered contacts and candidates with human-gate h
   assert.match(screen, /\[contact\] Ada Lovelace/);
   assert.match(screen, new RegExp(CONTACT_VALUE.replace('.', '\\.')));
   assert.match(screen, /\[candidate\] Ada Lovelace · Engineering Manager · candidate/);
-  assert.match(screen, /j\/k select · m map · A approve · X suppress · P promote · Esc close/);
+  assert.match(screen, /j\/k select · m map · R record · A approve · X suppress · P promote · Esc close/);
+});
+
+test('network overlay shows health and indirect opportunities and records selected contact', async t => {
+  const { store, profile, job } = await contactWorkspace(t);
+  const at = '2026-07-01T00:00:00.000Z';
+  for (const [id, name] of [['person_via', 'Alumni Via'], ['person_target', 'Target Person']]) {
+    run(store, `INSERT INTO people (id,name,normalized_name,primary_profile_url,aliases_json,identity_confidence,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`, [id, name, name.toLowerCase(), '', '[]', 'high', at, at]);
+  }
+  run(store, `INSERT INTO relationship_edges
+    (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at,last_contact_at,warmth)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`, ['edge_via', 'profile', profile.id, 'person', 'person_via', 'direct_connection', '[{"label":"known alumni"}]', 'high', at, at, 'warm']);
+  run(store, `INSERT INTO relationship_edges
+    (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`, ['edge_target', 'person', 'person_via', 'person', 'person_target', 'shared_event', '[{"label":"shared meetup"}]', 'medium', at]);
+  save(store);
+  const tui = makeTui(store, profile, job);
+  tui.openOverlay('network');
+  const screen = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
+  assert.match(screen, /Health: 1 relationships/);
+  assert.match(screen, /\[opportunity\] Alumni Via · direct/);
+  assert.match(screen, /\[opportunity\] Target Person · 2-hop/);
+  tui.onKeypress('j', { name: 'j' });
+  tui.onKeypress('R', { name: 'r', shift: true });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.ok(one(store, `SELECT last_contact_at FROM relationship_edges
+    WHERE edge_type='direct_connection' AND ((from_type='profile' AND from_id=? AND to_id='person_target') OR (to_type='profile' AND to_id=? AND from_id='person_target'))`, [profile.id, profile.id])?.last_contact_at);
+  assert.match(tui.state.status, /Contact recorded locally/);
+  assert.equal(tui.model.networkSetup.health.counts.total, 2);
 });
 
 // Gap #5 — approve contact (human/TUI source, audited)

@@ -1,31 +1,63 @@
 import { constants as fsConstants } from 'node:fs';
-import { access, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { agentBackendCatalog } from './acp.js';
 import { listAgents } from './agents.js';
 import { mcpToolNames } from './mcp.js';
 
+const CLIENT_ALIASES = Object.freeze({
+  omp: 'pi'
+});
+
 const CLIENTS = Object.freeze({
   hermes: Object.freeze({
     command: 'hermes',
     embedded: 'acp-v1',
     batch: true,
+    registration: 'cli',
     probeArgs: Object.freeze(['mcp', 'test', 'jobos'])
   }),
   codex: Object.freeze({
     command: 'codex',
     embedded: null,
     batch: true,
+    registration: 'cli',
     probeArgs: Object.freeze(['mcp', 'list'])
   }),
   claude: Object.freeze({
     command: 'claude',
     embedded: null,
     batch: false,
+    registration: 'cli',
     probeArgs: Object.freeze(['mcp', 'list'])
+  }),
+  grok: Object.freeze({
+    command: 'grok',
+    embedded: null,
+    batch: false,
+    registration: 'cli',
+    probeArgs: Object.freeze(['mcp', 'list'])
+  }),
+  cursor: Object.freeze({
+    command: 'agent',
+    embedded: null,
+    batch: false,
+    registration: 'file',
+    configPath: '.cursor/mcp.json',
+    probeArgs: Object.freeze(['mcp', 'list'])
+  }),
+  pi: Object.freeze({
+    command: 'omp',
+    embedded: 'acp-v1',
+    batch: false,
+    registration: 'file',
+    configPath: '.omp/mcp.json',
+    probeArgs: null
   })
 });
+
+export const SUPPORTED_AGENT_CLIENTS = Object.freeze(Object.keys(CLIENTS));
 
 const MAX_PROBE_OUTPUT_BYTES = 32 * 1024;
 
@@ -41,13 +73,14 @@ export class AgentSetupError extends Error {
 
 function clientDefinition(name) {
   const normalized = String(name || '').trim().toLowerCase();
-  const definition = CLIENTS[normalized];
+  const resolved = CLIENT_ALIASES[normalized] || normalized;
+  const definition = CLIENTS[resolved];
   if (!definition) {
     throw new AgentSetupError('agent_client_unsupported', `Unsupported agent client: ${name || '(missing)'}`, {
-      supported: Object.keys(CLIENTS)
+      supported: SUPPORTED_AGENT_CLIENTS
     });
   }
-  return { name: normalized, ...definition };
+  return { name: resolved, ...definition };
 }
 
 function executableCandidates(command, env) {
@@ -122,11 +155,96 @@ function runCommand(command, args, { cwd, env = process.env, timeoutMs = 10_000,
   });
 }
 
+function jobosMcpServerEntry({ cliPath, workspace, client }) {
+  const entry = {
+    command: process.execPath,
+    args: [cliPath, 'mcp', '--workspace', workspace],
+    env: {
+      JOBOS_HOME: workspace,
+      JOBOS_WORKSPACE: workspace
+    }
+  };
+  if (client === 'pi') entry.enabled = true;
+  return entry;
+}
+
 function registrationArgs(client, { cliPath, workspace }) {
   const server = [process.execPath, cliPath, 'mcp', '--workspace', workspace];
   if (client === 'codex') return ['mcp', 'add', 'jobos', '--', ...server];
-  if (client === 'claude') return ['mcp', 'add', '--scope', 'project', 'jobos', '--', ...server];
+  // User scope connects immediately; project/local .mcp.json requires interactive approval.
+  if (client === 'claude') return ['mcp', 'add', '--scope', 'user', 'jobos', '--', ...server];
+  if (client === 'grok') return ['mcp', 'add', 'jobos', '--scope', 'project', '--', ...server];
   return ['mcp', 'add', 'jobos', '--command', process.execPath, '--args', cliPath, 'mcp', '--workspace', workspace];
+}
+
+async function readMcpConfig(configPath) {
+  try {
+    const parsed = JSON.parse(await readFile(configPath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : { mcpServers: {} };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { mcpServers: {} };
+    throw error;
+  }
+}
+
+function mcpConfigHasJobos(config) {
+  const server = config?.mcpServers?.jobos;
+  return Boolean(server?.command && Array.isArray(server?.args) && server.args.includes('mcp'));
+}
+
+async function probeFileRegistration(clientName, definition, root) {
+  const configPath = path.join(root, definition.configPath);
+  let output = '';
+  try {
+    const config = await readMcpConfig(configPath);
+    const ok = mcpConfigHasJobos(config);
+    output = ok ? `jobos configured in ${definition.configPath}` : `jobos not found in ${definition.configPath}`;
+    return {
+      ok,
+      command: `read ${definition.configPath}`,
+      exitCode: ok ? 0 : 1,
+      output,
+      error: ok ? null : 'jobos_missing'
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      command: `read ${definition.configPath}`,
+      exitCode: null,
+      output: error?.message || String(error),
+      error: error?.code || 'read_failed'
+    };
+  }
+}
+
+async function buildFileRegistration(clientName, definition, { cliPath, workspace }) {
+  const configPath = path.join(workspace, definition.configPath);
+  const existing = await readMcpConfig(configPath);
+  const merged = {
+    ...existing,
+    mcpServers: {
+      ...(existing.mcpServers || {}),
+      jobos: jobosMcpServerEntry({ cliPath, workspace, client: clientName })
+    }
+  };
+  return {
+    kind: 'file',
+    configPath: definition.configPath,
+    absolutePath: configPath,
+    content: merged,
+    display: `write ${definition.configPath} (merge jobos MCP server)`
+  };
+}
+
+async function applyFileRegistration(registration, { dryRun = false } = {}) {
+  if (dryRun) return { ok: true, output: 'dry-run' };
+  const dir = path.dirname(registration.absolutePath);
+  await mkdir(dir, {
+    recursive: true,
+    mode: registration.configPath.startsWith('.omp/') ? 0o700 : undefined
+  });
+  await writeFile(registration.absolutePath, `${JSON.stringify(registration.content, null, 2)}\n`, 'utf8');
+  return { ok: true, output: `wrote ${registration.configPath}` };
 }
 
 function displayCommand(command, args) {
@@ -135,20 +253,83 @@ function displayCommand(command, args) {
 }
 
 function registrationObserved(client, probe) {
-  if (!probe.ok || /(?:not found|not configured|failed|error|unavailable|✗)/i.test(probe.output)) return false;
+  if (!probe.ok) return false;
+  // Claude/Codex list lines look like `jobos: …` or table rows containing jobos.
+  if (!/\bjobos\b/i.test(probe.output)) return false;
   if (client === 'hermes') return /(?:✓|passed|success|connected|healthy|ready)/i.test(probe.output);
-  return /(?:^|\s)jobos(?:\s|$)/i.test(probe.output);
+  // Project-scoped Claude servers may be listed as pending approval until the user
+  // confirms once inside `claude`; registration still succeeded.
+  return true;
+}
+
+function registrationPendingApproval(probe) {
+  return /pending approval/i.test(String(probe?.output || ''));
 }
 
 async function probeClient(client, executable, options) {
   const definition = CLIENTS[client];
-  const result = await runCommand(executable, definition.probeArgs, options);
+  const root = path.resolve(options.cwd || process.cwd());
+  if (definition.registration === 'file' && !definition.probeArgs) {
+    return probeFileRegistration(client, definition, root);
+  }
+  let cliProbe = null;
+  if (definition.probeArgs && executable) {
+    const result = await runCommand(executable, definition.probeArgs, options);
+    cliProbe = {
+      ok: registrationObserved(client, result),
+      command: displayCommand(executable, definition.probeArgs),
+      exitCode: result.exitCode,
+      output: result.output,
+      error: result.error
+    };
+    if (cliProbe.ok || client !== 'cursor') return cliProbe;
+  }
+  if (definition.registration === 'file') {
+    const fileProbe = await probeFileRegistration(client, definition, root);
+    if (fileProbe.ok || !cliProbe) return fileProbe;
+    return { ...cliProbe, fileFallback: fileProbe };
+  }
+  if (!executable) {
+    return { ok: false, command: definition.command, exitCode: null, output: '', error: 'client_missing' };
+  }
+  return cliProbe;
+}
+
+function connectVerificationOk(client, { listProbe, fileProbe, enableProbe } = {}) {
+  if (listProbe?.ok) return true;
+  if (client === 'cursor') return Boolean(fileProbe?.ok && enableProbe?.ok);
+  if (client === 'pi') return Boolean(fileProbe?.ok);
+  return false;
+}
+
+function connectionResult(client, {
+  workspace,
+  registration,
+  verification,
+  status,
+  changed,
+  alreadyConnected,
+  enableProbe = null
+}) {
   return {
-    ok: registrationObserved(client, result),
-    command: displayCommand(executable, definition.probeArgs),
-    exitCode: result.exitCode,
-    output: result.output,
-    error: result.error
+    schema: 'jobos.agent-connection.v1',
+    client: client.name,
+    workspace,
+    modes: { embedded: client.embedded, externalMcp: true, batch: client.batch },
+    status,
+    changed,
+    alreadyConnected,
+    pendingApproval: registrationPendingApproval(verification),
+    registration,
+    verification,
+    ...(enableProbe ? {
+      enable: {
+        ok: enableProbe.ok,
+        exitCode: enableProbe.exitCode,
+        output: enableProbe.output,
+        error: enableProbe.error
+      }
+    } : {})
   };
 }
 
@@ -184,71 +365,94 @@ export async function connectAgentClient(name, {
     timeoutMs: client.name === 'hermes' ? Math.max(timeoutMs, 45_000) : timeoutMs
   };
   const before = await probeClient(client.name, executable, processOptions);
-  const args = registrationArgs(client.name, { cliPath: resolvedCli, workspace: root });
-  const registration = {
-    command: executable,
-    args,
-    display: displayCommand(executable, args)
-  };
-  if (before.ok) {
-    return {
-      schema: 'jobos.agent-connection.v1',
-      client: client.name,
-      workspace: root,
-      modes: { embedded: client.embedded, externalMcp: true, batch: client.batch },
-      status: 'ready',
-      changed: false,
-      alreadyConnected: true,
-      registration,
-      verification: before
-    };
-  }
+  const registration = client.registration === 'file'
+    ? await buildFileRegistration(client.name, client, { cliPath: resolvedCli, workspace: root })
+    : {
+        kind: 'cli',
+        command: executable,
+        args: registrationArgs(client.name, { cliPath: resolvedCli, workspace: root }),
+        display: displayCommand(executable, registrationArgs(client.name, { cliPath: resolvedCli, workspace: root }))
+      };
   if (dryRun) {
-    return {
-      schema: 'jobos.agent-connection.v1',
-      client: client.name,
+    return connectionResult(client, {
       workspace: root,
-      modes: { embedded: client.embedded, externalMcp: true, batch: client.batch },
+      registration,
+      verification: before,
       status: 'preview',
       changed: false,
-      alreadyConnected: false,
-      registration,
-      verification: before
-    };
-  }
-  const applied = await runCommand(executable, args, {
-    ...processOptions,
-    // Hermes prompts "Enable all N tools? [Y/n/select]" — answer yes without a TTY.
-    stdin: client.name === 'hermes' ? 'Y\n' : null
-  });
-  if (!applied.ok) {
-    throw new AgentSetupError('agent_registration_failed', `Could not register JobOS with ${client.name}`, {
-      client: client.name,
-      command: registration.display,
-      exitCode: applied.exitCode,
-      error: applied.error,
-      output: applied.output
+      alreadyConnected: Boolean(before.ok || (client.name === 'cursor' && before.fileFallback?.ok))
     });
   }
-  const verification = await probeClient(client.name, executable, processOptions);
-  if (!verification.ok) {
+  if (before.ok || (client.name === 'cursor' && before.fileFallback?.ok)) {
+    return connectionResult(client, {
+      workspace: root,
+      registration,
+      verification: before.ok ? before : before.fileFallback,
+      status: 'ready',
+      changed: false,
+      alreadyConnected: true
+    });
+  }
+  let enableProbe = null;
+  if (client.registration === 'file') {
+    const applied = await applyFileRegistration(registration, { dryRun: false });
+    if (!applied.ok) {
+      throw new AgentSetupError('agent_registration_failed', `Could not register JobOS with ${client.name}`, {
+        client: client.name,
+        command: registration.display,
+        output: applied.output
+      });
+    }
+    if (client.name === 'cursor') {
+      enableProbe = await runCommand(executable, ['mcp', 'enable', 'jobos'], processOptions);
+    }
+  } else {
+    const applied = await runCommand(executable, registration.args, {
+      ...processOptions,
+      // Hermes prompts "Enable all N tools? [Y/n/select]" — answer yes without a TTY.
+      stdin: client.name === 'hermes' ? 'Y\n' : null
+    });
+    if (!applied.ok) {
+      throw new AgentSetupError('agent_registration_failed', `Could not register JobOS with ${client.name}`, {
+        client: client.name,
+        command: registration.display,
+        exitCode: applied.exitCode,
+        error: applied.error,
+        output: applied.output
+      });
+    }
+  }
+  const listProbe = client.probeArgs && executable
+    ? await probeClient(client.name, executable, processOptions)
+    : null;
+  const fileProbe = client.registration === 'file'
+    ? await probeFileRegistration(client.name, client, root)
+    : null;
+  const verification = listProbe?.ok
+    ? listProbe
+    : (fileProbe?.ok ? fileProbe : (listProbe || fileProbe));
+  if (!connectVerificationOk(client.name, { listProbe, fileProbe, enableProbe })) {
     throw new AgentSetupError('agent_registration_unverified', `JobOS registration was not visible to ${client.name}`, {
       client: client.name,
       registration: registration.display,
-      verification
+      verification,
+      enable: enableProbe ? {
+        ok: enableProbe.ok,
+        exitCode: enableProbe.exitCode,
+        output: enableProbe.output,
+        error: enableProbe.error
+      } : null
     });
   }
-  return {
-    schema: 'jobos.agent-connection.v1',
-    client: client.name,
+  return connectionResult(client, {
     workspace: root,
-    modes: { embedded: client.embedded, externalMcp: true, batch: client.batch },
+    registration,
+    verification,
     status: 'ready',
     changed: true,
     alreadyConnected: false,
-    registration,
-    verification
-  };
+    enableProbe
+  });
 }
 
 function check(id, status, message, recovery = null, details = {}) {
@@ -263,7 +467,7 @@ export async function doctorAgents({
   timeoutMs = 5_000
 } = {}) {
   const root = path.resolve(workspace);
-  const selected = client === 'all' ? Object.keys(CLIENTS) : [clientDefinition(client).name];
+  const selected = client === 'all' ? SUPPORTED_AGENT_CLIENTS : [clientDefinition(client).name];
   const checks = [];
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   checks.push(check(
@@ -298,10 +502,17 @@ export async function doctorAgents({
   for (const name of selected) {
     const definition = CLIENTS[name];
     const executable = await findExecutable(definition.command, env);
-    const embeddedBackend = name === 'hermes' ? backends.find(item => item.id === 'hermes-acp') : null;
+    const embeddedBackendId = name === 'hermes' ? 'hermes-acp' : (name === 'pi' ? 'omp-acp' : null);
+    const embeddedBackend = embeddedBackendId ? backends.find(item => item.id === embeddedBackendId) : null;
     const batch = batchAgents.find(item => item.name === name);
     let externalMcp = null;
-    if (executable) externalMcp = await probeClient(name, executable, { cwd: root, env, timeoutMs });
+    if (definition.registration === 'file' && !definition.probeArgs) {
+      externalMcp = await probeFileRegistration(name, definition, root);
+    } else if (executable) {
+      externalMcp = await probeClient(name, executable, { cwd: root, env, timeoutMs });
+    } else {
+      externalMcp = { ok: false, error: 'client_missing', output: '' };
+    }
     const usable = Boolean(embeddedBackend?.available || batch?.available || externalMcp?.ok);
     clients.push({
       name,

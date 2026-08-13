@@ -12,6 +12,8 @@ import {
   LIFECYCLE_EVENT_INPUT_SCHEMA,
   reconcileApplicationNextAction,
 } from '../lifecycle.js';
+import { createResearchRun, executeResearchRun } from '../research/runs.js';
+import { networkHealthBrief, syncNetworkWorkspace } from '../research/network.js';
 
 const suppressedFollowupStatuses = new Set(['interview', 'offer', 'rejected', 'withdrawn', 'ghosted']);
 
@@ -253,12 +255,166 @@ This brief summarizes local JobOS state only. It did not submit applications, se
   return { outputs: { briefs }, counts: { briefs: briefs.length } };
 }
 
+async function profileNetworkResearch(s, automation, { nowDate = new Date() } = {}) {
+  const profiles = profilesFor(s, automation.profileId);
+  const results = [];
+  for (const profile of profiles) {
+    const prefs = parseJson(profile.preferences_json, {});
+    const intent = prefs.networkIntent || {};
+    const depth = automation.config?.depth || 'standard';
+    if (!intent.completedAt && !automation.profileId) {
+      results.push({
+        profileId: profile.id,
+        status: 'skipped',
+        reason: 'Profile network intent is incomplete.',
+      });
+      continue;
+    }
+    try {
+      const runId = createResearchRun(s, {
+        profileId: profile.id,
+        scope: 'profile',
+        depth,
+        sources: automation.config?.sources || undefined,
+      });
+      const result = await executeResearchRun(s, runId);
+      results.push({
+        profileId: profile.id,
+        runId: result.runId,
+        status: result.status,
+        observations: result.observationCount,
+        people: result.counts?.people || 0,
+        contacts: result.counts?.contacts || 0,
+        path: result.path,
+        warnings: result.warnings || [],
+        intent: {
+          completedAt: intent.completedAt || null,
+          targetCompanies: (intent.targetCompanies || []).length,
+          targetRoles: (intent.targetRoles || []).length,
+          allowedSources: intent.allowedSources || null,
+        },
+      });
+    } catch (e) {
+      results.push({
+        profileId: profile.id,
+        status: 'failed',
+        error: e.message,
+        intent: {
+          completedAt: intent.completedAt || null,
+          targetCompanies: (intent.targetCompanies || []).length,
+          targetRoles: (intent.targetRoles || []).length,
+          allowedSources: intent.allowedSources || null,
+        },
+      });
+    }
+  }
+  const attempted = results.filter(result => result.status !== 'skipped');
+  const failed = attempted.filter(result => result.status === 'failed').length;
+  const partial = attempted.filter(result => result.status === 'partial').length;
+  const derivedStatus = attempted.length > 0 && failed === attempted.length
+    ? 'failed'
+    : failed > 0 || partial > 0
+      ? 'partial'
+      : 'succeeded';
+  return {
+    outputs: { research: results },
+    counts: { profiles: results.length, runs: results.filter(r => r.runId).length, failed, skipped: results.filter(r => r.status === 'skipped').length },
+    derivedStatus,
+    ...(derivedStatus === 'failed' ? { error: 'Profile network research failed for every attempted profile.' } : {}),
+  };
+}
+
+async function networkNurture(s, automation, { nowDate = new Date() } = {}) {
+  const profiles = profilesFor(s, automation.profileId);
+  const asOf = nowDate.toISOString();
+  const outputs = [];
+  let coldTotal = 0, tasksCreated = 0, tasksClosed = 0, drafts = 0;
+  for (const profile of profiles) {
+    const brief = networkHealthBrief(s, { profileId: profile.id, asOf });
+    const cold = (brief?.relationships || []).filter(rel => rel.warmth === 'cold' && rel.strategic !== false);
+    const expectedTaskIds = new Set(cold.map(rel => id('task', `network-nurture:${profile.id}:${rel.personId}`)));
+    coldTotal += cold.length;
+    const profileOutput = { profileId: profile.id, asOf, cold: cold.length, tasks: [] };
+    for (const rel of cold) {
+      const taskId = id('task', `network-nurture:${profile.id}:${rel.personId}`);
+      const existing = one(s, 'SELECT * FROM tasks WHERE id=?', [taskId]);
+      const lastContactMs = rel.lastContactAt ? new Date(rel.lastContactAt).getTime() : NaN;
+      const dueAt = Number.isNaN(lastContactMs)
+        ? asOf
+        : new Date(lastContactMs + 180 * 24 * 60 * 60 * 1000).toISOString();
+      if (existing) {
+        if (existing.status !== 'open' || existing.due_at !== dueAt) {
+          run(s, "UPDATE tasks SET status='open',due_at=?,updated_at=? WHERE id=?", [dueAt, asOf, taskId]);
+          tasksCreated++;
+        }
+      } else {
+        run(s, `INSERT INTO tasks (id,job_id,application_id,title,description,type,due_at,priority,status,created_by,created_at,updated_at,profile_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+          taskId, null, null,
+          `Check in with ${rel.name || rel.personId}`,
+          `Strategic relationship ${rel.personId} has been cold since ${rel.lastContactAt || 'unknown'}. Draft a check-in; do not send without human approval.`,
+          'network_nurture', dueAt, 'normal', 'open', 'network', asOf, asOf, profile.id,
+        ]);
+        tasksCreated++;
+      }
+      const relPath = path.join('profiles', profile.id, 'network', 'drafts', `check-in-${rel.personId}.md`);
+      const title = `Check-in draft — ${rel.name || rel.personId}`;
+      const content = `# ${title}
+
+**Approval status:** Draft only — not sent.
+**Profile:** ${profile.id}
+**Relationship:** ${rel.personId} (${rel.name || 'unnamed'})
+**Last contact:** ${rel.lastContactAt || 'unknown'} (${rel.daysSinceContact ?? 'unknown'} days ago)
+**Warmth:** ${rel.warmth}
+
+## Draft message
+Hi,
+
+I wanted to check in and see how things are going. No action needed on your end — just catching up.
+
+Thanks,
+
+## Human gate
+- JobOS created this check-in draft only.
+- It did not send email, LinkedIn messages, or contact anyone.
+- Review the relationship context before using this in an external tool.
+`;
+      const artifact = insertArtifact(s, {
+        profileId: profile.id,
+        type: 'network_check_in',
+        rel: relPath,
+        title,
+        content,
+        evidence: [{ taskId, personId: rel.personId, warmth: rel.warmth, lastContactAt: rel.lastContactAt || null }],
+        warnings: ['Draft only — not sent. Human approval is required before any external outreach.'],
+      });
+      if (artifact.created) drafts++;
+      profileOutput.tasks.push({ taskId, personId: rel.personId, name: rel.name || null, dueAt, artifactId: artifact.id, path: artifact.path, approvalStatus: artifact.approvalStatus });
+    }
+    const openNurture = all(s, `SELECT * FROM tasks WHERE profile_id=? AND type='network_nurture' AND status='open'`, [profile.id]);
+    for (const task of openNurture) {
+      if (expectedTaskIds.has(task.id)) continue;
+      run(s, "UPDATE tasks SET status='done',updated_at=? WHERE id=?", [asOf, task.id]);
+      tasksClosed++;
+      profileOutput.tasks.push({ taskId: task.id, closed: true, reason: 'relationship no longer cold' });
+    }
+    syncNetworkWorkspace(s, { profileId: profile.id });
+    outputs.push(profileOutput);
+  }
+  return {
+    outputs: { profiles: outputs },
+    counts: { profiles: profiles.length, cold: coldTotal, tasksCreated, tasksClosed, drafts },
+  };
+}
+
 export const actions = {
   daily_discovery: dailyDiscovery,
   followup_watch: followupWatch,
   stale_application_check: staleApplicationCheck,
   weekly_retrospective: weeklyRetrospective,
-  morning_priority_brief: morningPriorityBrief
+  morning_priority_brief: morningPriorityBrief,
+  profile_network_research: profileNetworkResearch,
+  network_nurture: networkNurture
 };
 
 export function listActionIds() {

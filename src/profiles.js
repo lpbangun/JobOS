@@ -6,7 +6,7 @@ import { writeYaml, writeMd } from './workspace.js';
 import { normalizeOrganization } from './research/context.js';
 import { createResumeRevision, readResumeFile, validateResumeDocument } from './resumes.js';
 
-export function defaultPrefs(name){ return {targetRoleFamilies:[name],industries:[],companyStages:[],locations:[],salary:{min:null,max:null,currency:'USD'},dealbreakers:[],skills:slug(name).split('-').filter(Boolean),missionKeywords:[],values:[],workModel:'',communicationStyle:'concise, warm, evidence-grounded',searchStrategy:'focused',automationPolicy:{externalApply:'user_configured',externalSend:'user_configured',autoApply:'disabled',autoSend:'disabled',allowedConnectors:[]},networkIntent:{version:1,targetCompanies:[],targetRoles:[],preferredPersonas:[],comfortableRelationshipTypes:[],exclusions:[],allowedSources:{publicWeb:true,linkedinImport:false,xai:false},completedAt:null}}; }
+export function defaultPrefs(name){ return {targetRoleFamilies:[name],industries:[],companyStages:[],locations:[],salary:{min:null,max:null,currency:'USD'},dealbreakers:[],skills:slug(name).split('-').filter(Boolean),missionKeywords:[],values:[],workModel:'',communicationStyle:'concise, warm, evidence-grounded',searchStrategy:'focused',automationPolicy:{externalApply:'user_configured',externalSend:'user_configured',autoApply:'disabled',autoSend:'disabled',allowedConnectors:[]},networkIntent:{version:1,targetCompanies:[],targetRoles:[],preferredPersonas:[],comfortableRelationshipTypes:[],exclusions:[],allowedSources:{publicWeb:true,linkedinImport:false,exaPeople:false,xai:false},completedAt:null}}; }
 export function extractMetrics(line){ return [...String(line).matchAll(/(?:\$[\d,.]+|\d+(?:\.\d+)?%|\d+x|\b\d{2,}\b)/gi)].map(m=>m[0]); }
 export function structuredProofs(profileId, text, source){ return String(text||'').split(/\r?\n/).map(l=>l.trim().replace(/^[-*•]\s*/, '')).filter(l=>l.length>=20).filter(l=>/\b(built|led|managed|created|designed|improved|launched|reduced|increased|owned|shipped|analyzed|implemented|taught|researched|coordinated|facilitated|developed)\b/i.test(l)).slice(0,24).map((line,idx)=>({id:id('proof',`${profileId}:${idx}:${line}`),summary:line,evidence:source,skills:[...new Set(tokenize(line).filter(t=>t.length>3).slice(0,10))],metrics:extractMetrics(line),metadata:{origin:'resume_import',claimType:'experience',requiresHumanVerification:true}})); }
 export function suggestProfileAffiliations(resumeText){
@@ -169,6 +169,7 @@ export function setNetworkIntent(s, { profileId, intent, affiliations }) {
     allowedSources: {
       publicWeb: allowedSources.publicWeb !== false,
       linkedinImport: Boolean(allowedSources.linkedinImport),
+      exaPeople: Boolean(allowedSources.exaPeople),
       xai: Boolean(allowedSources.xai)
     },
     completedAt: now()

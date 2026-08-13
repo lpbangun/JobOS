@@ -114,22 +114,33 @@ function runProbe(command, args, { cwd, env, timeoutMs = 5000 } = {}) {
   });
 }
 
+function acpBackendId(command) {
+  const normalized = String(command || 'hermes').trim().toLowerCase();
+  if (normalized === 'omp' || normalized === 'pi') return 'omp-acp';
+  return 'hermes-acp';
+}
+
 export async function agentBackendCatalog({ root = process.cwd(), env = process.env } = {}) {
-  const hermesPath = await executablePath(env.JOBOS_ACP_COMMAND || 'hermes', env);
+  const hermesCommand = env.JOBOS_ACP_COMMAND || 'hermes';
+  const hermesPath = await executablePath(hermesCommand, env);
+  const ompPath = hermesCommand === 'omp' ? hermesPath : await executablePath('omp', env);
   const codexPath = await executablePath('codex', env);
   const probeEnv = buildAgentEnvironment(root, env);
-  const [hermesVersion, hermesCheck, codexVersion] = await Promise.all([
-    hermesPath ? runProbe(hermesPath, ['acp', '--version'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
-    hermesPath ? runProbe(hermesPath, ['acp', '--check'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
+  const [hermesVersion, hermesCheck, ompHelp, ompVersion, codexVersion] = await Promise.all([
+    hermesPath && hermesCommand !== 'omp' ? runProbe(hermesPath, ['acp', '--version'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
+    hermesPath && hermesCommand !== 'omp' ? runProbe(hermesPath, ['acp', '--check'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
+    ompPath ? runProbe(ompPath, ['acp', '--help'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
+    ompPath ? runProbe(ompPath, ['--version'], { cwd: root, env: probeEnv }) : Promise.resolve(null),
     codexPath ? runProbe(codexPath, ['--version'], { cwd: root, env: probeEnv }) : Promise.resolve(null)
   ]);
+  const ompAvailable = Boolean(ompPath && (ompHelp?.ok || ompVersion?.ok));
   return [
     {
       id: 'hermes-acp',
       name: 'Hermes ACP',
-      path: hermesPath,
+      path: hermesCommand === 'omp' ? null : hermesPath,
       version: hermesVersion?.ok ? hermesVersion.output : null,
-      available: Boolean(hermesPath && hermesCheck?.ok),
+      available: Boolean(hermesPath && hermesCommand !== 'omp' && hermesCheck?.ok),
       readiness: hermesCheck?.ok ? hermesCheck.output : (hermesCheck?.error || 'missing'),
       protocol: 'acp-v1',
       transport: 'stdio-jsonl',
@@ -137,6 +148,20 @@ export async function agentBackendCatalog({ root = process.cwd(), env = process.
       evented: true,
       domainTools: 'session-mcp',
       role: 'primary'
+    },
+    {
+      id: 'omp-acp',
+      name: 'Oh My Pi ACP',
+      path: ompPath,
+      version: ompVersion?.ok ? ompVersion.output : (ompHelp?.ok ? ompHelp.output.split('\n')[0] : null),
+      available: ompAvailable,
+      readiness: ompAvailable ? 'installed; set JOBOS_ACP_COMMAND=omp for embedded TUI guest' : 'missing',
+      protocol: 'acp-v1',
+      transport: 'stdio-jsonl',
+      multiTurn: true,
+      evented: true,
+      domainTools: 'session-mcp',
+      role: 'alternate'
     },
     {
       id: 'codex-app-server',
@@ -345,7 +370,7 @@ export class AcpClient extends EventEmitter {
   details() {
     return {
       state: this.state,
-      backend: 'hermes-acp',
+      backend: acpBackendId(this.command),
       command: this.command,
       executable: this.executable,
       args: [...this.args],

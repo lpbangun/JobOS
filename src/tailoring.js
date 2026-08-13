@@ -1,11 +1,13 @@
 import path from 'node:path';
-import { one, all } from './db.js';
+import { one, all, run as dbRun, save as dbSave, audit } from './db.js';
 import { parseJson, tokenize } from './utils.js';
 import { createArtifact } from './artifacts.js';
 import { requirements } from './jobs.js';
 import { generateJson, llmConfig } from './llm.js';
 import { tailorResume } from './resume-tailoring.js';
+import { renderCoverLetterPdf } from './cover-letter-renderer.js';
 import { retrieveCareerMemory, validateWritingGuidance } from './career-memory-retrieval.js';
+import { writeYaml } from './workspace.js';
 
 function memoryEvidence(packet) {
   return packet.rules.length || packet.citations.length
@@ -122,10 +124,36 @@ function relevant(job, proofs) {
   }).sort((a, b) => b.relevance - a.relevance);
 }
 
-function canonicalCandidateName(s, profileId, fallback) {
+function canonicalIdentity(s, profileId) {
   const row = one(s, 'SELECT document_json FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [profileId]);
-  const name = String(parseJson(row?.document_json, {})?.identity?.name || '').trim();
+  const document = parseJson(row?.document_json, {});
+  return {
+    identity: document.identity || {},
+    name: String(document.identity?.name || '').trim(),
+  };
+}
+
+function canonicalCandidateName(s, profileId, fallback) {
+  const { name } = canonicalIdentity(s, profileId);
   return name || fallback || 'Candidate';
+}
+
+function coverBody({ job, chosen, memory, candidateName }) {
+  return {
+    salutation: 'Dear hiring team,',
+    opening: coverOpening({ job, chosen, packet: memory }),
+    paragraphs: coverProofParagraphs(chosen),
+    closing: coverClosing({ job, candidateName, packet: memory }),
+  };
+}
+
+function coverLetterDocument(s, profileId, { job, chosen, memory, candidateName }) {
+  const { identity } = canonicalIdentity(s, profileId);
+  return {
+    identity,
+    candidateName,
+    ...coverBody({ job, chosen, memory, candidateName }),
+  };
 }
 
 function coverProofParagraphs(proofs) {
@@ -150,52 +178,27 @@ function saveArtifact(s, { job, prof, type, title, file, content, evidence, warn
   });
 }
 
-function fallbackResume({ job, prof, chosen, warnings }) {
-  const warningBlock = warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None from deterministic evidence checks.';
-  const bullets = chosen.length ? chosen.map(p => `- ${p.summary}${p.evidence ? ` _(evidence: ${p.evidence})_` : ''}${p.metrics?.length ? ` Metrics: ${p.metrics.join(', ')}` : ''}`).join('\n') : '- Add evidence-backed accomplishments before using this resume externally.';
-  const reqBlock = requirements(job.description).length ? requirements(job.description).map(r => `- ${r}`).join('\n') : '- No explicit requirements extracted from the job text.';
-  return `# Tailored resume draft — ${prof.name} for ${job.title}\n\n**Company:** ${job.company}\n\n**Approval status:** Draft; human review required before submission.\n\n## Target role summary\nUse this degraded-mode draft as a source-grounded outline. It includes only stored proof points; it does not invent metrics, employers, credentials, or claims. Configure an LLM provider for stronger tailoring.\n\n## Evidence-backed highlights\n${bullets}\n\n## Job requirements to address\n${reqBlock}\n\n## Evidence warnings\n${warningBlock}\n\n## Human review checklist\n- Confirm every claim is true and current.\n- Add missing proof points for important requirements before exporting a final resume.\n- Do not submit from JobOS; external applications remain human-gated.\n`;
-}
-
 function fallbackCover({ job, chosen, warnings, memory, candidateName }) {
   const warningBlock = warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None from deterministic evidence checks.';
-  const proofParagraphs = coverProofParagraphs(chosen);
-  const opening = coverOpening({ job, chosen, packet: memory });
-  const closing = coverClosing({ job, candidateName, packet: memory });
+  const body = coverBody({ job, chosen, memory, candidateName });
   const template = memory.rules.length ? `${coverTemplateHeading(memory)}\n\n` : '';
   const review = memory.rules.length ? '\n\nDuring human review, compare each selected proof with the role requirements, preserve its source meaning, and remove any statement that cannot be verified from the stored evidence.' : '';
-  return `# Cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${guidanceHeader(memory)}${template}Dear hiring team,\n\n${opening}\n\n${proofParagraphs}${review}\n\n${closing}\n\n## Evidence warnings\n${warningBlock}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`;
+  return {
+    content: `# Cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${guidanceHeader(memory)}${template}${body.salutation}\n\n${body.opening}\n\n${body.paragraphs}${review}\n\n${body.closing}\n\n## Evidence warnings\n${warningBlock}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`,
+    chosen,
+    body,
+    evidence: chosen.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })),
+  };
 }
 
-function tailoringPrompt({ kind, job, prof, proofs, memory, candidateName }) {
-  return `Create a ${kind === 'resume' ? 'tailored resume' : 'cover letter'} draft for this job. Use ONLY the supplied proof points for claims. Do not invent employers, metrics, credentials, or accomplishments. Return JSON with title, summary, requirementProofMap array of at least 3 items when possible ({requirement, proofPointId, bullet}), warnings array, and coverLetter string for cover-letter work. Include only proofPointId values that appear in PROOF POINTS.\n\nCAREER MEMORY (bounded public guidance):\n${JSON.stringify(memory, null, 2)}\n\nPROFILE:\n${JSON.stringify({ id: prof.id, profileLabel: prof.name, candidateName, preferences: parseJson(prof.preferences_json, {}) }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs.map(p => ({ id: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, description: job.description }, null, 2)}`;
+function tailoringPrompt({ job, prof, proofs, memory, candidateName }) {
+  return `Create a cover letter draft for this job. Use ONLY the supplied proof points for claims. Do not invent employers, metrics, credentials, or accomplishments. Return JSON with title, summary, requirementProofMap array of at least 3 items when possible ({requirement, proofPointId, bullet}), warnings array, and coverLetter string for cover-letter work. Include only proofPointId values that appear in PROOF POINTS.\n\nCAREER MEMORY (bounded public guidance):\n${JSON.stringify(memory, null, 2)}\n\nPROFILE:\n${JSON.stringify({ id: prof.id, profileLabel: prof.name, candidateName, preferences: parseJson(prof.preferences_json, {}) }, null, 2)}\n\nPROOF POINTS:\n${JSON.stringify(proofs.map(p => ({ id: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), null, 2)}\n\nJOB:\n${JSON.stringify({ id: job.id, title: job.title, company: job.company, description: job.description }, null, 2)}`;
 }
 
 function groundedItems(json, proofById) {
   return (Array.isArray(json.requirementProofMap) ? json.requirementProofMap : [])
     .filter(x => proofById.has(x.proofPointId))
     .map(x => ({ ...x, proof: proofById.get(x.proofPointId) }));
-}
-
-function groundedBullet(item) {
-  const metrics = item.proof.metrics?.length ? ` Metrics: ${item.proof.metrics.join(', ')}` : '';
-  return `${item.proof.summary}${metrics}`;
-}
-
-function mappedRequirement(item, index, job) {
-  const candidate = String(item.requirement || '').trim();
-  if (candidate && candidate.length <= 180 && String(job.description || '').toLowerCase().includes(candidate.toLowerCase())) return candidate;
-  return `Job requirement ${index + 1}`;
-}
-
-function renderLlmResume({ job, prof, json, proofById }) {
-  const items = groundedItems(json, proofById);
-  const warnings = Array.isArray(json.warnings) ? json.warnings.map(String) : [];
-  if (items.length < 3) warnings.push('LLM returned fewer than three valid proof-grounded requirement mappings; add proof points or review manually.');
-  const map = items.length ? items.map((x, idx) => `- **${mappedRequirement(x, idx, job)}:** ${groundedBullet(x)} _(proof: ${x.proofPointId})_`).join('\n') : '- Add evidence-backed proof mappings before external use.';
-  const warningBlock = warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; every generated claim below is linked to a stored proof point.';
-  const summary = `${prof.name} evidence-grounded draft for ${job.title} at ${job.company}. The only accomplishment claims in this draft are the proof-linked bullets below.`;
-  return { content: `# LLM tailored resume draft — ${prof.name} for ${job.title}\n\n**Company:** ${job.company}\n\n**Approval status:** Draft; human review required before submission.\n\n## Target role summary\n${summary}\n\n## Requirement-to-proof map\n${map}\n\n## Evidence warnings\n${warningBlock}\n\n## Human review checklist\n- Confirm every claim is true and current.\n- Confirm the resume format before submission.\n- Do not submit from JobOS; external applications remain human-gated.\n`, warnings, evidence: items.map((x, idx) => ({ proofPointId: x.proofPointId, requirement: mappedRequirement(x, idx, job), summary: x.proof.summary, metrics: x.proof.metrics })) };
 }
 
 function renderLlmCover({ job, json, proofById, memory, candidateName }) {
@@ -205,13 +208,13 @@ function renderLlmCover({ job, json, proofById, memory, candidateName }) {
   if (json.coverLetter) warnings.push('LLM cover-letter prose was omitted; JobOS renders only proof-grounded claims plus neutral role/company context.');
   const selectedItems = items.slice(0, 2);
   const chosen = selectedItems.map(item => item.proof);
-  const opening = coverOpening({ job, chosen, packet: memory });
-  const proofParagraphs = coverProofParagraphs(chosen);
-  const closing = coverClosing({ job, candidateName, packet: memory });
+  const body = coverBody({ job, chosen, memory, candidateName });
   const template = memory.rules.length ? `${coverTemplateHeading(memory)}\n\n` : '';
   return {
-    content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${template}Dear hiring team,\n\n${opening}\n\n${proofParagraphs}\n\n${closing}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`,
+    content: `# LLM cover letter draft — ${job.title} at ${job.company}\n\n**Approval status:** Draft; human review required before sending.\n\n${template}${body.salutation}\n\n${body.opening}\n\n${body.paragraphs}\n\n${body.closing}\n\n## Evidence warnings\n${warnings.length ? warnings.map(w => `- ${w}`).join('\n') : '- None; proof-grounded draft.'}\n\n## External-action gate\nJobOS generated this draft only. It did not send email, submit forms, or contact anyone.\n`,
     warnings,
+    chosen,
+    body,
     evidence: selectedItems.map(item => ({ proofPointId: item.proofPointId, requirement: item.requirement, summary: item.proof.summary, metrics: item.proof.metrics }))
   };
 }
@@ -227,26 +230,34 @@ export async function tailor(s, jid, pid, kind, options = {}) {
   const memory = retrieveCareerMemory(s, { profileId: pid, consumer: 'tailoring', jobId: jid, artifactType: 'cover_letter' });
   const proofs = all(s, "SELECT * FROM proof_points WHERE profile_id=? AND status='active' AND verification_status='verified'", [pid]);
   const enriched = relevant(job, proofs);
-  const chosen = orderedGuidedProofs(enriched.filter(p => p.relevance > 0), memory).slice(0, kind === 'resume' ? 5 : 2);
-  const warnings = memoryWarnings(memory);
-  if (!proofs.length) warnings.push('No active verified proof points exist for this profile; draft intentionally avoids unsupported achievement claims.');
-  else if (!chosen.length) warnings.push('No proof points matched job language; add evidence before strengthening this artifact.');
+  const chosen = orderedGuidedProofs(enriched.filter(p => p.relevance > 0), memory).slice(0, 2);
+  const memoryWarningList = memoryWarnings(memory);
+  const deterministicWarnings = [];
+  if (!proofs.length) deterministicWarnings.push('No active verified proof points exist for this profile; draft intentionally avoids unsupported achievement claims.');
+  else if (!chosen.length) deterministicWarnings.push('No proof points matched job language; add evidence before strengthening this artifact.');
+  const warnings = [...memoryWarningList, ...deterministicWarnings];
   const proofById = new Map(orderedGuidedProofs(enriched, memory).map(p => [p.id, p]));
   const cfg = llmConfig();
+  let rendered = null;
+  let mode = 'deterministic';
 
   if (cfg.configured && proofs.length) {
     try {
       const result = await generateJson({
-        schemaName: kind === 'resume' ? 'jobos_tailored_resume' : 'jobos_cover_letter',
+        schemaName: 'jobos_cover_letter',
         system: 'You are JobOS tailoring. You create useful drafts while strictly grounding every achievement claim in supplied proof point IDs.',
-        user: tailoringPrompt({ kind, job, prof, proofs: enriched, memory, candidateName })
+        user: tailoringPrompt({ job, prof, proofs: enriched, memory, candidateName })
       });
       if (result.ok) {
-        const rendered = kind === 'resume' ? renderLlmResume({ job, prof, json: result.json, proofById }) : renderLlmCover({ job, json: result.json, proofById, memory, candidateName });
-        const guidedContent = `${guidanceHeader(memory)}${rendered.content}`;
-        const projected = validationProjection(guidedContent, memory, rendered.evidence.map(item => item.proofPointId));
-        if (projected.validation.valid) return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content: guidedContent, evidence: [...rendered.evidence, ...memoryEvidence(memory)], warnings: [...rendered.warnings, ...projected.warnings, ...memoryWarnings(memory)] });
-        warnings.push(`LLM tailoring output failed career-memory validation (${projected.validation.errors.map(error => error.code).join(', ')}); used deterministic renderer.`);
+        const candidate = renderLlmCover({ job, json: result.json, proofById, memory, candidateName });
+        const guidedContent = `${guidanceHeader(memory)}${candidate.content}`;
+        const projected = validationProjection(guidedContent, memory, candidate.evidence.map(item => item.proofPointId));
+        if (projected.validation.valid) {
+          rendered = { ...candidate, content: guidedContent, warnings: [...candidate.warnings, ...deterministicWarnings, ...projected.warnings, ...memoryWarningList] };
+          mode = 'llm';
+        } else {
+          warnings.push(`LLM tailoring output failed career-memory validation (${projected.validation.errors.map(error => error.code).join(', ')}); used deterministic renderer.`);
+        }
       }
     } catch (e) {
       if (e?.type === 'agent_error') throw e;
@@ -254,9 +265,25 @@ export async function tailor(s, jid, pid, kind, options = {}) {
     }
   }
 
-  const evidence = [...chosen.map(p => ({ proofPointId: p.id, summary: p.summary, evidence: p.evidence, skills: p.skills, metrics: p.metrics })), ...memoryEvidence(memory)];
-  const content = kind === 'resume' ? `${guidanceHeader(memory)}${fallbackResume({ job, prof, chosen, warnings })}` : fallbackCover({ job, chosen, warnings, memory, candidateName });
-  const projected = validationProjection(content, memory, chosen.map(proof => proof.id));
-  if (!projected.validation.valid) throw Object.assign(new Error('Deterministic tailoring renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projected.validation.errors });
-  return saveArtifact(s, { job, prof, type: kind === 'resume' ? 'resume' : 'cover_letter', title: `${kind === 'resume' ? 'Tailored resume' : 'Cover letter'} for ${job.title}`, file: kind === 'resume' ? 'resume-tailored.md' : 'cover-letter.md', content, evidence, warnings: [...warnings, ...projected.warnings] });
+  if (!rendered) {
+    const fallback = fallbackCover({ job, chosen, warnings, memory, candidateName });
+    const projected = validationProjection(fallback.content, memory, fallback.chosen.map(proof => proof.id));
+    if (!projected.validation.valid) throw Object.assign(new Error('Deterministic tailoring renderer failed career-memory validation.'), { code: 'memory_writing_fallback_invalid', type: 'validation', details: projected.validation.errors });
+    rendered = { ...fallback, warnings: [...warnings, ...projected.warnings] };
+  }
+
+  const artifact = saveArtifact(s, { job, prof, type: 'cover_letter', title: `Cover letter for ${job.title}`, file: 'cover-letter.md', content: rendered.content, evidence: [...rendered.evidence, ...memoryEvidence(memory)], warnings: rendered.warnings });
+  let renderManifest = { format: 'markdown', status: 'not_requested', blockers: [], warnings: [] };
+  if (options.format === 'pdf') {
+    const document = coverLetterDocument(s, pid, { job, chosen: rendered.chosen || chosen, memory, candidateName });
+    renderManifest = { format: 'pdf', ...renderCoverLetterPdf({ statePath: s.p.state, workspacePath: s.p.ws, jobId: jid, artifact, document, layoutProfile: { pageSize: options.pageSize, pageLimit: options.pageLimit } }) };
+    if (renderManifest.blockers?.length || renderManifest.warnings?.length) {
+      const mergedWarnings = [...rendered.warnings, ...(renderManifest.warnings || []).map(warning => warning.message), ...(renderManifest.blockers || []).map(blockerItem => blockerItem.message)];
+      dbRun(s, 'UPDATE artifacts SET warnings_json=? WHERE id=?', [JSON.stringify(mergedWarnings), artifact.id]);
+    }
+    writeYaml(path.join(s.p.ws, 'jobs', jid, 'artifacts', 'cover-letter.render.yaml'), renderManifest);
+    audit(s, 'artifact.cover_letter_render_completed', 'artifact', artifact.id, { renderStatus: renderManifest.status, mode });
+    dbSave(s);
+  }
+  return { ...artifact, mode, renderManifest };
 }

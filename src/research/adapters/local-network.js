@@ -1,6 +1,5 @@
 import { canonicalUrl, isHttpUrl, isLinkedInProfileUrl } from '../sources.js';
 import { id, now, hash } from '../../utils.js';
-import { TIER_RANK } from '../contacts.js';
 
 export const name = 'local-network';
 
@@ -113,6 +112,46 @@ export async function run({ context, plan, budget, signal, env, fetchImpl }) {
           sourceObservationId: obs.id,
           confidence: contact.confidence || 'medium',
           source: 'local_network_contact'
+        });
+      }
+    }
+
+    // Explicit 2-hop connections (profile -> person -> person/company) become
+    // mutual_path person hints instead of merely one-hop edges.
+    for (const path of (network.mutualPaths || [])) {
+      if (signal?.aborted) break;
+      const obs = {
+        id: id('src', `${context.runId}:local_network:mutual:${path.id}`),
+        companyId: context.companyId,
+        jobId: context.jobId,
+        url: path.targetProfileUrl || '',
+        canonicalUrl: path.targetProfileUrl ? canonicalUrl(path.targetProfileUrl) : '',
+        title: `${path.targetName} via ${path.viaPersonName}`,
+        snippet: `Mutual path through ${path.viaPersonName} (${path.edge.edgeType}, confidence: ${path.edge.confidence || 'medium'})`,
+        sourceType: 'local_network_mutual',
+        provider: 'local_network',
+        query: '',
+        trust: 'user_imported',
+        fetchedAt: now(),
+        contentHash: hash(`mutual:${path.id}`),
+        metadata: { pathId: path.id, viaPersonId: path.viaPersonId, viaPersonName: path.viaPersonName, targetType: path.targetType, targetId: path.targetId, edgeId: path.edge.id, edgeType: path.edge.edgeType, confidence: path.edge.confidence || 'medium' }
+      };
+      observations.push(obs);
+      if (path.targetType === 'person') {
+        personHints.push({
+          name: path.targetName,
+          profileUrl: path.targetProfileUrl || '',
+          sourceObservationId: obs.id,
+          confidence: path.edge.confidence || 'medium',
+          source: 'local_network_edge',
+          edgeType: path.edge.edgeType,
+          relationshipType: 'mutual_path',
+          mutualPath: {
+            viaPersonId: path.viaPersonId,
+            viaPersonName: path.viaPersonName,
+            edgeId: path.edge.id,
+            edgeType: path.edge.edgeType
+          }
         });
       }
     }

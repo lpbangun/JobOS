@@ -17,6 +17,7 @@ import { draftOutreach, markOutreachSent, outreachDue, scheduleFollowup } from '
 import { approveContact, createOutreachPlan, promoteStakeholder, suppressContact } from './research/contacts.js';
 import { importNetworkCsv } from './research/network.js';
 import { createResearchRun, executeResearchRun, getResearchRun, resumeResearchRun, requestCancelResearchRun } from './research/runs.js';
+import { findPersonByEmail, showPersonContacts } from './research/people.js';
 import { funnel, renderFunnelMarkdown, resumeFeedback, weekly } from './analytics.js';
 import { lifecycleAnalytics, renderLifecycleAnalyticsMarkdown } from './lifecycle-analytics.js';
 import { listOutreachOutcomes, recordOutreachOutcome } from './outreach-outcomes.js';
@@ -120,7 +121,7 @@ export const commandRegistry = [
   cmd(['discover', 'run-all'], 'jobos discover run-all [--profile <profile>] [--json]', 'Advanced raw execution of all saved searches; returns per-search runs without the daily workflow\'s cross-run dedupe or combined ranked report.', { relatedWorkflow: 'daily' }),
   cmd(['score'], 'jobos score <job-id> --profile <profile> [--json]', 'Advanced standalone scoring operation; runs only scoring without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'score', runsDependencies: false }),
   cmd(['tailor', 'resume'], 'jobos tailor resume --job <job-id> --profile <profile> [--layout professional|technical|leadership] [--page-size letter|a4] [--page-limit 1|2] [--format markdown|pdf] [--output markdown] [--json]', 'Advanced standalone resume operation; creates a complete proof-grounded tailored resume draft with optional local PDF rendering without pursue dependencies.', { flags: ['--layout <profile>', '--page-size <size>', '--page-limit <n>', '--format <format>'], output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'resume', runsDependencies: false }),
-  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
+  cmd(['tailor', 'cover-letter'], 'jobos tailor cover-letter --job <job-id> --profile <profile> [--output markdown] [--format markdown|pdf] [--page-size letter|a4] [--page-limit <n>] [--json]', 'Advanced standalone cover-letter operation; creates a new evidence-grounded draft revision without pursue dependencies.', { output: 'object-or-markdown', relatedWorkflow: 'pursue', workflowStage: 'cover-letter', runsDependencies: false }),
   cmd(['artifacts', 'queue'], 'jobos artifacts queue [--profile <profile-id>] [--job <job-id>] [--json]', 'List only current pending artifact revisions awaiting trusted human review.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow' }),
   cmd(['artifacts', 'diff'], 'jobos artifacts diff <artifact-id> [--against <artifact-id>] [--json]', 'Inspect the exact current artifact revision and its line diff.', { flags: ['--against <artifact-id>'], category: 'workflow' }),
   cmd(['artifacts', 'approve'], 'jobos artifacts approve <artifact-id> [--note <text>] [--json]', 'Record local human approval of an exact current artifact revision without submitting.', { flags: ['--note <text>'], category: 'workflow' }),
@@ -140,7 +141,9 @@ export const commandRegistry = [
   cmd(['apply', 'attest-submitted'], 'jobos apply attest-submitted <packet-id> --submitted-at <rfc3339> [--note <text>] [--json]', 'Record trusted local human submission attestation for an exact packet.', { flags: ['--submitted-at <rfc3339>', '--note <text>'], category: 'workflow' }),
   cmd(['apply', 'confirm-receipt'], 'jobos apply confirm-receipt <packet-id> --reference <text> [--note <text>] [--json]', 'Record an external reference confirming receipt of a submitted application.', { flags: ['--reference <text>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'company'], 'jobos research company --job <job-id> [--json]', 'Advanced standalone company-research operation; runs without pursue dependencies.', { relatedWorkflow: 'pursue', workflowStage: 'company', runsDependencies: false }),
-  cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
+  cmd(['people', 'find'], 'jobos people find --email <addr> [--json]', 'Find one canonical person by an exact normalized email contact point.', { flags: ['--email <addr>'], category: 'workflow' }),
+  cmd(['contacts', 'show'], 'jobos contacts show (--person <person-id> | --email <addr>) [--json]', 'Reveal trusted local contact values for one person in the human CLI.', { flags: ['--person <person-id>', '--email <addr>'], category: 'workflow', audience: 'human' }),
+  cmd(['research', 'people'], 'jobos research people --profile <profile-id> --scope profile|target|job|person [--job <job-id>] [--company <name>] [--role <name>] [--person <person-id>|--email <addr>|--name <name> --source-url <url>] [--depth standard|deep] [--sources csv] [--max-cost-usd n] [--json]', 'Run bounded, source-backed people research to a durable terminal state.', { flags: ['--profile <profile-id>', '--scope <scope>', '--job <job-id>', '--company <name>', '--role <name>', '--person <person-id>', '--email <addr>', '--name <name>', '--source-url <url>', '--depth <depth>', '--sources <csv>', '--max-cost-usd <n>'], category: 'workflow' }),
   cmd(['research', 'runs', 'get'], 'jobos research runs get <run-id> [--json]', 'Read a durable people-research run.'),
   cmd(['research', 'runs', 'resume'], 'jobos research runs resume <run-id> [--json]', 'Resume a paused_retryable people-research run.'),
   cmd(['research', 'runs', 'cancel'], 'jobos research runs cancel <run-id> [--json]', 'Request idempotent cancellation of a people-research run.'),
@@ -151,6 +154,10 @@ export const commandRegistry = [
   cmd(['network', 'paths'], 'jobos network paths --job <job-id> [--json]', 'Rank reachable introduction and advice paths for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'contacts'], 'jobos network contacts --job <job-id> [--json]', 'List ranked source-backed contacts for a job.', { flags: ['--job <job-id>'], category: 'workflow' }),
   cmd(['network', 'list'], 'jobos network list [--json]', 'List imported relationship edges.', { category: 'workflow' }),
+  cmd(['network', 'opportunities'], 'jobos network opportunities --profile <profile-id> [--limit <n>] [--as-of <rfc3339>] [--json]', 'List profile-level networking opportunities ranked deterministically from local relationship and contact state; never sends or requests anything.', { flags: ['--profile <profile-id>', '--limit <n>', '--as-of <rfc3339>'], category: 'workflow' }),
+  cmd(['network', 'graph'], 'jobos network graph --profile <profile-id> [--job <job-id>] [--person <person-id>] [--max-hops 1|2] [--json]', 'Query the local profile network graph with bounded two-hop paths from the profile through people; read-only.', { flags: ['--profile <profile-id>', '--job <job-id>', '--person <person-id>', '--max-hops <1|2>'], category: 'workflow' }),
+  cmd(['network', 'health'], 'jobos network health --profile <profile-id> [--as-of <rfc3339>] [--json]', 'Read the deterministic profile network health brief with relationship warmth and recency.', { flags: ['--profile <profile-id>', '--as-of <rfc3339>'], category: 'workflow' }),
+  cmd(['network', 'record'], 'jobos network record --profile <profile-id> --person <person-id> [--contact-point <contact-point-id>] [--occurred-at <rfc3339>] [--warmth unknown|cold|cool|warm|hot] [--note <text>] [--json]', 'Record a trusted human-confirmed contact with a person, updating relationship and contact-point warmth and last-contact timestamps.', { flags: ['--profile <profile-id>', '--person <person-id>', '--contact-point <contact-point-id>', '--occurred-at <rfc3339>', '--warmth <warmth>', '--note <text>'], category: 'workflow' }),
   cmd(['research', 'add-stakeholder'], 'jobos research add-stakeholder --job <job-id> --source-url <url> [--name <name>] [--role <role>] [--text <text>|--file <path>] [--json]', 'Record a stakeholder from user-provided source text and a required public source URL.', { flags: ['--job <job-id>', '--source-url <url>', '--name <name>', '--role <role>', '--text <text>', '--file <path>'] }),
   cmd(['outreach', 'draft'], 'jobos outreach draft --job <job-id> --stakeholder <stakeholder-id> --profile <profile-id> [--goal informational] [--plan <plan-id>] [--contact <contact-id>] [--json]', 'Advanced standalone outreach drafting operation; does not run pursue dependencies or send anything.', { flags: ['--job <job-id>', '--stakeholder <stakeholder-id>', '--profile <profile-id>', '--goal <goal>', '--plan <plan-id>', '--contact <contact-id>'], relatedWorkflow: 'pursue', workflowStage: 'outreach', runsDependencies: false }),
   cmd(['outreach', 'plan'], 'jobos outreach plan --job <job-id> --profile <profile-id> [--stakeholder <stakeholder-id>] [--goal informational] [--json]', 'Rank a reviewable outreach path from discovered contacts, network edges, and profile evidence.', { flags: ['--job <job-id>', '--profile <profile-id>', '--stakeholder <stakeholder-id>', '--goal <goal>'] }),
@@ -191,8 +198,8 @@ export const commandRegistry = [
   cmd(['loop', 'scheduler'], 'jobos loop scheduler [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run due scheduler automations with bounded JSONL events.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
   cmd(['loop', 'automation'], 'jobos loop automation <name> [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one persisted named automation.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
   cmd(['loop', 'action'], 'jobos loop action <action-id> [--profile <profile>] [--config JSON] [--interval N] [--max-iterations N] [--json]', 'Agent streaming primitive: repeatedly run one ephemeral scheduler action.', { output: 'jsonl', category: 'agent-stream', audience: 'agent' }),
-  cmd(['agents', 'connect'], 'jobos agents connect <hermes|codex|claude> [--dry-run] [--json]', 'Detect an agent and register this JobOS workspace through MCP.', { flags: ['--dry-run'], category: 'extend' }),
-  cmd(['agents', 'doctor'], 'jobos agents doctor [hermes|codex|claude] [--json]', 'Diagnose Node, workspace, embedded ACP, external MCP, and batch-agent readiness.', { category: 'extend' }),
+  cmd(['agents', 'connect'], 'jobos agents connect <hermes|codex|claude|grok|cursor|pi> [--dry-run] [--json]', 'Detect an agent and register this JobOS workspace through MCP.', { flags: ['--dry-run'], category: 'extend' }),
+  cmd(['agents', 'doctor'], 'jobos agents doctor [hermes|codex|claude|grok|cursor|pi] [--json]', 'Diagnose Node, workspace, embedded ACP, external MCP, and batch-agent readiness.', { category: 'extend' }),
   cmd(['agents', 'add'], 'jobos agents add <name> --command <executable> [--args <json>] [--transport stdin-json|prompt-arg] [--json]', 'Register a local Codex, Hermes, or compatible agent.', { flags: ['--command <executable>', '--args <json>', '--transport <type>'], category: 'extend' }),
   cmd(['agents', 'list'], 'jobos agents list [--json]', 'List configured and suggested local agents with availability.', { category: 'extend' }),
   cmd(['agents', 'test'], 'jobos agents test <name> [--json]', 'Check one agent executable and structured JSON protocol.', { category: 'extend' }),
@@ -1060,7 +1067,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'tailor' && action === 'cover-letter') {
     const jobId = requireFlag(flags, 'job');
-    const r = await tailor(s, jobId, needProfile(flags), 'cover');
+    const pageSize = flags['page-size'] ? String(flags['page-size']).toLowerCase() : 'letter';
+    const format = flags.format ? String(flags.format).toLowerCase() : 'markdown';
+    if (!['letter', 'a4'].includes(pageSize)) usage('Invalid --page-size; expected letter or a4');
+    if (!['markdown', 'pdf'].includes(format)) usage('Invalid --format; expected markdown or pdf');
+    const r = await tailor(s, jobId, needProfile(flags), 'cover', { pageSize, pageLimit: numberFlag(flags, 'page-limit', 1, { min: 1 }), format });
     if (flags.output === 'markdown' && !flags.json) text(fs.readFileSync(path.join(s.p.ws, r.path), 'utf8'));
     else out(r);
     return;
@@ -1217,6 +1228,18 @@ export async function main(argv = process.argv.slice(2)) {
     }
     usage('Unknown apply command. Try: jobos apply form inspect/show, jobos apply packet create/show/list/diff, jobos apply attest-submitted, jobos apply confirm-receipt');
   }
+  if (group === 'people' && action === 'find') {
+    const email = String(requireFlag(flags, 'email', '--email <addr>'));
+    out(findPersonByEmail(s, email, { revealContacts: true }) || { person: null, contacts: [], edges: [] });
+    return;
+  }
+  if (group === 'contacts' && action === 'show') {
+    const personId = flags.person ? String(flags.person) : null;
+    const email = flags.email ? String(flags.email) : null;
+    if (Boolean(personId) === Boolean(email)) usage('Provide exactly one of --person <person-id> or --email <addr>');
+    out(showPersonContacts(s, { personId, email }) || { person: null, contacts: [], edges: [] });
+    return;
+  }
   if (group === 'research' && action === 'company') {
     const jobId = requireFlag(flags, 'job');
     out(await researchCompany(s, jobId));
@@ -1234,6 +1257,7 @@ export async function main(argv = process.argv.slice(2)) {
       company: flags.company ? String(flags.company) : undefined,
       role: flags.role ? String(flags.role) : undefined,
       personId: flags.person ? String(flags.person) : undefined,
+      email: flags.email ? String(flags.email) : undefined,
       person: personField,
       depth: flags.depth || 'standard',
       sources: flags.sources ? String(flags.sources).split(',').map(s => s.trim()) : undefined,
@@ -1283,6 +1307,43 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (group === 'network' && action === 'list') {
     out(listNetworkEdges(s));
+    return;
+  }
+  if (group === 'network' && action === 'opportunities') {
+    out(await callDomainTool(s, 'network_opportunities_list', {
+      profileId: needProfile(flags),
+      limit: flags.limit == null ? 25 : numberFlag(flags, 'limit', 25, { min: 1 }),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'graph') {
+    const maxHops = flags['max-hops'] == null ? 2 : numberFlag(flags, 'max-hops', 2, { min: 1 });
+    if (maxHops < 1 || maxHops > 2) usage('Invalid --max-hops: must be 1 or 2');
+    out(await callDomainTool(s, 'network_graph_query', {
+      profileId: needProfile(flags),
+      jobId: flags.job ? String(flags.job) : null,
+      personId: flags.person ? String(flags.person) : null,
+      maxHops,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'health') {
+    out(await callDomainTool(s, 'network_health_brief', {
+      profileId: needProfile(flags),
+      asOf: flags['as-of'] ? String(flags['as-of']) : null,
+    }, { source: 'cli' }));
+    return;
+  }
+  if (group === 'network' && action === 'record') {
+    out(await callDomainTool(s, 'network_contact_record', {
+      profileId: needProfile(flags),
+      personId: String(requireFlag(flags, 'person', '--person <person-id>')),
+      contactPointId: flags['contact-point'] ? String(flags['contact-point']) : null,
+      occurredAt: flags['occurred-at'] ? String(flags['occurred-at']) : null,
+      warmth: flags.warmth ? String(flags.warmth) : null,
+      note: flags.note ? String(flags.note) : '',
+    }, { source: 'cli' }));
     return;
   }
   if (group === 'research' && action === 'add-stakeholder') {

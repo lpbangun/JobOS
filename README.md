@@ -113,9 +113,12 @@ JobOS has one domain layer and two agent entry paths. Both operate on the same w
 
 | Client | Embedded chat | External MCP | Batch workflows |
 | --- | --- | --- | --- |
-| Hermes | ACP v1 | Yes | Yes |
+| Hermes | ACP v1 (default TUI guest) | Yes | Yes |
+| Oh My Pi (`omp`) | ACP v1 (alternate; `JOBOS_ACP_COMMAND=omp`) | Yes (`.omp/mcp.json`) | No |
 | Codex | Not currently | Yes | Yes |
 | Claude Code | Not currently | Yes | No built-in batch manifest |
+| Grok Build | Not currently | Yes | No |
+| Cursor CLI (`agent`) | Not currently | Yes (`.cursor/mcp.json`) | No |
 
 Connect an installed external client with one command:
 
@@ -123,6 +126,9 @@ Connect an installed external client with one command:
 jobos agents connect codex
 jobos agents connect claude
 jobos agents connect hermes
+jobos agents connect grok
+jobos agents connect cursor
+jobos agents connect pi
 ```
 
 The command detects the executable, registers the installed JobOS MCP server with an argument array rather than a shell string, and verifies that the registration is visible. Preview without writing client configuration:
@@ -137,6 +143,27 @@ Diagnose the complete path—Node, workspace permissions, CLI entrypoint, embedd
 jobos agents doctor
 jobos agents doctor hermes --json
 ```
+
+### Claude Code and Codex (career-ops-style)
+
+Like career-ops, JobOS ships CLI entry wrappers and a shared skill so you can drive the product from the agent you already use:
+
+| CLI | Entry | Skill | Typical invoke |
+| --- | --- | --- | --- |
+| Claude Code | `CLAUDE.md` | `.claude/skills/jobos` → `.agents/skills/jobos` | `claude` then `/jobos`, or `claude -p "…"` |
+| Codex | `CODEX.md` | same skill + plain-language modes | `codex`, or `codex exec "…"` |
+
+```bash
+jobos agents connect claude
+claude
+# /jobos daily   or: score this JD with JobOS
+
+jobos agents connect codex
+codex
+# Ask: Run JobOS daily discovery and summarize new roles
+```
+
+Guides: [docs/CLAUDE.md](docs/CLAUDE.md), [docs/CODEX.md](docs/CODEX.md).
 
 ### Embedded Hermes chat
 
@@ -192,6 +219,21 @@ jobos pursue <job-id> --profile <profile-id> --dry-run --json
 # Run fit, research, materials, application preparation, and outreach planning.
 jobos pursue <job-id> --profile <profile-id> --json
 
+# Resolve one person by an exact email and reveal their trusted local contacts.
+jobos people find --email <addr> --json
+jobos contacts show --email <addr> --json
+
+# Start person research from an email; Exa people is optional and key-gated.
+jobos research people --profile <profile-id> --scope person --email <addr> --sources exa_people --json
+
+# Inspect profile-level direct/indirect opportunities, two-hop paths, and warmth.
+jobos network opportunities --profile <profile-id> --json
+jobos network graph --profile <profile-id> --max-hops 2 --json
+jobos network health --profile <profile-id> --json
+
+# Record contact recency through trusted human CLI input only.
+jobos network record --profile <profile-id> --person <person-id> --json
+
 # Review every available command only when needed.
 jobos help --all
 ```
@@ -204,11 +246,14 @@ By default, JobOS stores runtime state under the current directory:
 
 ```text
 .jobos/jobos.sqlite              canonical database
-jobos-workspace/profiles/*.yaml  agent-readable profile mirrors
+jobos-workspace/profiles/*/      profile, network health, opportunity, and graph mirrors
 jobos-workspace/jobs/*/          scores, research, artifacts, outreach
 jobos-workspace/automations/     scheduler projections
 jobos-workspace/audit.log.jsonl  local audit trail
+
 ```
+
+Agent-readable mirrors redact contact values and expose only contact counts, types, and evidence tiers. Full values remain in the canonical local database and are revealed only by trusted CLI/TUI contact surfaces.
 
 Choose another workspace with either form:
 

@@ -24,10 +24,16 @@
   "files": [
     "src/",
     "samples/",
+    ".agents/",
+    ".claude/",
+    "CLAUDE.md",
+    "CODEX.md",
     "docs/jobos-tui.svg",
     "docs/jobos-setup.svg",
     "docs/jobos-chat.svg",
     "docs/AGENT_GUIDE.md",
+    "docs/CLAUDE.md",
+    "docs/CODEX.md",
     "docs/CONFIGURATION.md",
     "docs/SAFETY_AND_STATE.md",
     "docs/mcp-compatibility-decision.md",
@@ -51,7 +57,9 @@
     "mcp-demo": "node scripts/mcp-demo.js",
     "check:release-security": "node scripts/check-release-security.js --format json",
     "test:w10": "node --test --test-concurrency=1 tests/w10-golden.test.js tests/w10-security-release.test.js tests/w10-docs-status.test.js tests/w10-mcp-compatibility.test.js",
-    "release:evidence": "node scripts/release-evidence.js"
+    "release:evidence": "node scripts/release-evidence.js",
+    "test:harness": "node --test --test-concurrency=1 tests/agent-harness-benchmark.test.js",
+    "benchmark:harness": "node scripts/agent-harness-benchmark.js"
   },
   "dependencies": {
     "@langchain/core": "1.2.3",
