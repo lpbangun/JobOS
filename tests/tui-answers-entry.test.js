@@ -12,6 +12,7 @@ import { listAnswers } from '../src/answers.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { callDomainTool } from '../src/domain-tools.js';
 import { JobosTui, renderTui } from '../src/tui.js';
+import { SLASH_CATALOG } from '../src/tui/model.js';
 import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 function streams() {
@@ -40,64 +41,69 @@ async function seeded(t) {
 }
 
 function makeTui(store, profile, job) {
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
+  const tui = new JobosTui(store, { ...streams(), profileId: profile.id, selectedJobId: job.id, connectAgent: false, color: false });
+  tui.refresh();
   return tui;
 }
 
-const tick = (ms = 120) => new Promise(resolve => setTimeout(resolve, ms));
 const openQuestions = (store, profile, job) =>
   compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id }).answers.questions
     .filter(q => q.status === 'unmatched' || q.status === 'blocked');
 
-// Gap #6 — the answers overlay is more than counts-only for blocked jobs
-test('answers overlay lists open questions with a minimal add path', async t => {
-  const { store, profile, job } = await seeded(t);
-  const tui = makeTui(store, profile, job);
-  const questions = openQuestions(store, profile, job);
-  assert.ok(questions.length > 0, 'seeded readiness has open questions');
-  tui.openOverlay('answers');
-  const screen = renderTui(tui.model, tui.state, { width: 130, height: 42, color: false });
-  assert.match(screen, /Open questions for the selected job/);
-  assert.match(screen, /:answer add \[category\] \| <exact question> \| <your answer>/);
-  const shown = questions.find(q => q.question.length <= 90 && !q.question.includes('|'));
-  assert.ok(shown, 'at least one question is short enough to render whole');
-  assert.ok(screen.includes(shown.question), 'question text (not any answer value) is listed');
-  if (questions.some(q => q.status === 'blocked')) {
-    assert.match(screen, /restricted — direct input required/);
+test('ANSW-01 answers_add denies mcp/acp mediation and allows the trusted TUI source', async t => {
+  const { store, profile } = await seeded(t);
+  for (const source of ['mcp', 'acp']) {
+    await assert.rejects(
+      callDomainTool(store, 'answers_add', { profileId: profile.id, question: 'Do you now or will you require sponsorship?', answer: 'No' }, { source }),
+      error => error.code === 'human_answer_input_required',
+      `${source} must not write answers`
+    );
   }
+  const saved = await callDomainTool(store, 'answers_add', { profileId: profile.id, category: 'other', question: 'Why JobOS?', answer: 'Human-gated mutations.' }, { source: 'tui' });
+  assert.ok(saved.id);
 });
 
-// Gap #6 — minimal add path clears the unmatched blocker
-test(':answer add saves a verified answer and clears its readiness blocker', async t => {
+test('ANSW-02 a trusted tui answers_add saves a verified answer and clears its readiness blocker', async t => {
   const { store, profile, job } = await seeded(t);
-  const tui = makeTui(store, profile, job);
   const question = openQuestions(store, profile, job).find(q => q.status === 'unmatched' && !q.question.includes('|'));
   assert.ok(question, 'seeded readiness has an unmatched question');
 
-  tui.executeCommand(`answer add ${question.category} | ${question.question} | A verified response grounded in stored evidence.`);
-  await tick();
-  assert.match(tui.state.status, /Answer saved/);
+  const saved = await callDomainTool(store, 'answers_add', {
+    profileId: profile.id,
+    category: question.category,
+    question: question.question,
+    answer: 'A verified response grounded in stored evidence.',
+    sensitivity: 'public',
+    verificationStatus: 'verified',
+  }, { source: 'tui' });
+  assert.ok(saved.id);
+  const row = one(store, 'SELECT sensitivity,verification_status,reuse_scope FROM answers WHERE id=?', [saved.id]);
+  assert.equal(row.sensitivity, 'public');
+  assert.equal(row.verification_status, 'verified');
+  // The valid persisted reuse scopes are global / employer_specific /
+  // never_auto_fill; a public verified answer without an explicit scope lands
+  // in the global pool (auto-fill only ever uses verified non-restricted rows).
+  assert.equal(row.reuse_scope, 'global');
 
   const after = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id })
     .answers.questions.find(q => q.question === question.question);
   assert.notEqual(after.status, 'unmatched', 'the answered question is no longer unmatched');
 });
 
-// Gap #6 — restricted values are stored redacted, job-scoped, and never displayed
-test(':answer add stores restricted answers redacted and never displays the value', async t => {
+test('ANSW-03 restricted answers are stored redacted, job-scoped, and never displayed', async t => {
   const { store, profile, job } = await seeded(t);
-  const tui = makeTui(store, profile, job);
   const restricted = openQuestions(store, profile, job).find(q => q.status === 'blocked' && !q.question.includes('|'));
   assert.ok(restricted, 'seeded readiness has a restricted question');
   const SENTINEL = 'RESTRICTED-SENTINEL-VALUE';
 
-  tui.executeCommand(`answer add ${restricted.category} | ${restricted.question} | ${SENTINEL}`);
-  await tick();
-  assert.match(tui.state.status, /Answer saved/);
-  assert.doesNotMatch(tui.state.status, new RegExp(SENTINEL), 'status never echoes the restricted value');
+  const saved = await callDomainTool(store, 'answers_add', {
+    profileId: profile.id,
+    category: restricted.category,
+    question: restricted.question,
+    answer: SENTINEL,
+    sourceRef: `job:${job.id}`,
+  }, { source: 'tui' });
+  assert.ok(saved.id);
 
   const row = one(store, "SELECT * FROM answers WHERE profile_id=? AND sensitivity='restricted' ORDER BY created_at DESC LIMIT 1", [profile.id]);
   assert.ok(row, 'restricted answer stored');
@@ -108,38 +114,39 @@ test(':answer add stores restricted answers redacted and never displays the valu
   assert.equal(listed.answer, null, 'list redacts the restricted value');
   assert.equal(listed.redacted, true);
 
-  tui.refresh({ disk: false });
-  tui.openOverlay('answers');
-  const screen = renderTui(tui.model, tui.state, { width: 130, height: 42, color: false });
-  assert.doesNotMatch(screen, new RegExp(SENTINEL), 'TUI overlay never shows the restricted value');
-
   const after = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id })
     .answers.questions.find(q => q.question === restricted.question);
   assert.notEqual(after.status, 'blocked', 'restricted direct input resolves the blocker');
+
+  const tui = makeTui(store, profile, job);
+  tui.openOverlay('files');
+  const screen = renderTui(tui.model, tui.state, { width: 130, height: 42, color: false });
+  assert.doesNotMatch(screen, new RegExp(SENTINEL), 'the TUI never shows the restricted value');
+  assert.doesNotMatch(tui.state.status, new RegExp(SENTINEL), 'status never echoes the restricted value');
+  // The questions reference row is the last Files row; its detail names the gate.
+  tui.state.overlayIndex = tui.model.selected.docs.length;
+  const questionsScreen = renderTui(tui.model, tui.state, { width: 130, height: 42, color: false });
+  assert.match(questionsScreen, /restricted answers stay gated/, 'the files copy states the restricted-answer gate');
 });
 
-// Gap #6 — malformed input explains usage without mutating
-test(':answer add rejects malformed input without mutating', async t => {
-  const { store, profile, job } = await seeded(t);
-  const tui = makeTui(store, profile, job);
+test('ANSW-04 malformed answers_add is rejected without mutating', async t => {
+  const { store, profile } = await seeded(t);
   const before = one(store, 'SELECT COUNT(*) AS n FROM answers').n;
-  tui.executeCommand('answer add onlyonepart');
-  await tick(40);
-  assert.match(tui.state.status, /Usage: :answer add/);
+  await assert.rejects(
+    callDomainTool(store, 'answers_add', { profileId: profile.id, question: 'Missing answer field' }, { source: 'tui' }),
+    error => /required|answer/i.test(error.message)
+  );
   assert.equal(one(store, 'SELECT COUNT(*) AS n FROM answers').n, before);
 });
 
-// Gap #6 — answers stay human input: agent mediation is denied
-test('answers_add denies mcp/acp mediation', async t => {
-  const { store, profile } = await seeded(t);
-  for (const source of ['mcp', 'acp']) {
-    await assert.rejects(
-      callDomainTool(store, 'answers_add', { profileId: profile.id, question: 'Do you now or will you require sponsorship?', answer: 'No' }, { source }),
-      error => error.code === 'human_answer_input_required',
-      `${source} must not write answers`
-    );
-  }
-  // tui source is allowed
-  const saved = await callDomainTool(store, 'answers_add', { profileId: profile.id, category: 'other', question: 'Why JobOS?', answer: 'Human-gated mutations.' }, { source: 'tui' });
-  assert.ok(saved.id);
+test('ANSW-05 the locked IA has no answers overlay and no colon answer bar', async t => {
+  assert.equal(SLASH_CATALOG.some(item => /answer/.test(item.id)), false, 'no slash answer command in the locked catalog');
+  const { store, profile, job } = await seeded(t);
+  const tui = makeTui(store, profile, job);
+  const text = renderTui(tui.model, tui.state, { width: 130, height: 42, color: false });
+  assert.doesNotMatch(text, /:answer add/, 'no colon command bar');
+  assert.doesNotMatch(text, /┌ JOBS|SELECTED JOB/, 'no retired dashboard chrome');
+  tui.state.overlay = 'answers';
+  const fallback = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(fallback, /Overlay — not a pane\./, 'a retired answers overlay falls back to the generic overlay');
 });

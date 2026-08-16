@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { openStore, run } from '../src/db.js';
+import { openStore, run, save } from '../src/db.js';
 import { due, openTasks } from '../src/tracking.js';
 import { outreachDue } from '../src/outreach.js';
 import { callDomainTool } from '../src/domain-tools.js';
@@ -98,15 +98,21 @@ test('outreach due is an enriched view of due tasks and excludes undated follow-
   assert.equal(dueThreads[0].threadId, 'thread-due');
 });
 
-test('TUI due overlay uses true due tasks and renders outreach reminders once with category and source', async t => {
+test('TUI review overlay uses true due tasks and renders them once without future, undated, or cross-profile reminders', async t => {
   const { store, profile, insert } = await fixture(t);
   const other = createProfile(store, 'Hidden TUI Tasks').profile;
   insert({ id: 'Follow up with recruiter', type: 'followup', dueAt: '2026-07-20T10:00:00.000Z', createdBy: 'outreach' });
-  insert({ id: 'Future reminder', type: 'followup', dueAt: '2026-07-22T10:00:00.000Z', createdBy: 'outreach' });
+  // The future reminder must sit after both the fixed AS_OF and the real wall
+  // clock, otherwise the live TUI projection would legitimately paint it due.
+  const futureReminder = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  insert({ id: 'Future reminder', type: 'followup', dueAt: futureReminder, createdBy: 'outreach' });
   insert({ id: 'Undated reminder', type: 'review' });
   insert({ id: 'Review application', type: 'review', dueAt: '2026-07-20T11:00:00.000Z', createdBy: 'system' });
   insert({ id: 'Other profile task', profileId: other.id, dueAt: '2026-07-20T08:00:00.000Z' });
   insert({ id: 'Global task', profileId: null, dueAt: '2026-07-20T08:00:00.000Z' });
+  // Persist the raw inserts through a real save so the live TUI and the fixed
+  // model both project the same persisted due set.
+  save(store);
 
   const model = buildTuiModel(store, { profileId: profile.id, at: '2026-07-21T12:00:00.000Z' });
   assert.deepEqual(model.dueTasks.map(task => task.id), ['Follow up with recruiter', 'Review application']);
@@ -119,20 +125,13 @@ test('TUI due overlay uses true due tasks and renders outreach reminders once wi
   stdout.isTTY = false;
   const stdin = new PassThrough();
   stdin.isTTY = false;
-  const tui = new JobosTui(store, { stdin, stdout, connectAgent: false, color: false });
-  tui.model = model;
-  tui.state.overlay = 'due';
-  const screen = renderTui(model, tui.state, { width: 120, height: 30, color: false });
-  assert.equal(screen.split('\n').filter(line => line.includes('[followup/outreach] Follow up with recruiter')).length, 1);
-  assert.match(screen, /\[followup\/outreach\]/);
-  assert.doesNotMatch(screen, /Future reminder|Undated reminder|OUTREACH FOLLOW-UPS/);
-
-  tui.state.taskFilter = 'followup';
-  const filtered = renderTui(model, tui.state, { width: 120, height: 30, color: false });
-  assert.match(filtered, /2 \[followup\]/);
-  assert.match(filtered, /Follow up with recruiter/);
-  assert.doesNotMatch(filtered, /Review application/);
-
-  tui.onOverlayKey('3', { name: '3' });
-  assert.equal(tui.state.taskFilter, 'review');
+  const tui = new JobosTui(store, { stdin, stdout, profileId: profile.id, connectAgent: false, color: false });
+  tui.refresh();
+  tui.openOverlay('review');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 30, color: false });
+  assert.equal(screen.split('\n').filter(line => line.includes('Follow up with recruiter')).length, 1, 'the due follow-up renders once');
+  assert.match(screen, /Review application/, 'the due system task renders');
+  assert.doesNotMatch(screen, /Future reminder|Undated reminder/, 'future and undated reminders stay out of the brief');
+  assert.doesNotMatch(screen, /Global task|Other profile task/, 'global and cross-profile tasks stay out of the brief');
+  assert.doesNotMatch(screen, /TASKS \(|OUTREACH FOLLOW-UPS/, 'no retired due-overlay chrome');
 });

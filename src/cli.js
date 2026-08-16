@@ -71,11 +71,11 @@ function cmd(pathParts, usage, summary, opts = {}) {
 
 export const commandRegistry = [
   cmd(['init'], 'jobos init [--json]', 'Create or verify the local database and agent-readable workspace.'),
-  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--mouse] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>', '--mouse'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
+  cmd(['setup'], 'jobos setup [--profile <profile-id>] [--job <job-id>] [--json]', 'Open the resumable guided setup journey or inspect its canonical projection.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['setup', 'status'], 'jobos setup status [--profile <profile-id>] [--job <job-id>] [--json]', 'Inspect the read-only guided setup projection and optional capability status.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['setup', 'next'], 'jobos setup next [--profile <profile-id>] [--job <job-id>] [--json]', 'Return the next canonical or optional guided setup action without writing.', { flags: ['--profile <profile-id>', '--job <job-id>'], category: 'workflow', tests: ['tests/w09-guided-onboarding.test.js'] }),
   cmd(['agent-guide'], 'jobos agent-guide [--json]', 'Print the machine-oriented guide for external agents.'),
-  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--mouse] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the primary data-bound terminal product with an embedded ACP agent pane.', { flags: ['--agent off', '--mouse', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
+  cmd(['tui'], 'jobos tui [--profile <profile-id>] [--agent off] [--snapshot] [--width 140] [--height 42] [--json]', 'Open the primary data-bound terminal product with an embedded ACP agent pane.', { flags: ['--agent off', '--snapshot', '--width <columns>', '--height <rows>'], category: 'workflow' }),
   cmd(['daily'], 'jobos daily --profile <profile-id> [--json]', 'Run every saved discovery source for a profile and rank the combined results.', { category: 'workflow' }),
   cmd(['pursue'], 'jobos pursue <job-id> --profile <profile-id> [--agent <name>] [--stage score|company|people-research|questions|resume|cover-letter|application|outreach] [--dry-run] [--json]', 'Run the primary integrated fit, research, application-preparation, and outreach-planning workflow.', { flags: ['--stage score|company|people-research|questions|resume|cover-letter|application|outreach', '--stage-timeout <ms>', '--dry-run'], category: 'workflow', runsDependencies: true }),
   cmd(['profile', 'create'], 'jobos profile create <name> [--from-resume file] [--json]', 'Create a target profile and optionally import a local PDF, DOCX, text, Markdown, JSON, or YAML resume.', { flags: ['--from-resume <file>', '--preferences <json>'] }),
@@ -695,13 +695,15 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const { startTui } = await import('./tui.js');
     const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
-    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
+    // --width/--height apply beyond --snapshot: they override the live TTY
+    // frame (defaults to stdout.columns x stdout.rows inside startTui).
     await startTui(s, {
       profileId: setupOptions.profileId,
       selectedJobId: setupOptions.jobId,
       initialOverlay: 'setup',
-      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
-      mouse
+      width: flags.width ? numberFlag(flags, 'width', 140, { min: 60 }) : null,
+      height: flags.height ? numberFlag(flags, 'height', 42, { min: 20 }) : null,
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
     });
     return;
   }
@@ -726,11 +728,13 @@ export async function main(argv = process.argv.slice(2)) {
       return;
     }
     const agentFlag = String(flags.agent || 'hermes-acp').toLowerCase();
-    const mouse = Boolean(flags.mouse || ['1', 'true', 'yes', 'on'].includes(String(process.env.JOBOS_TUI_MOUSE || '').toLowerCase()));
+    // --width/--height apply beyond --snapshot: they override the live TTY
+    // frame (defaults to stdout.columns x stdout.rows inside startTui).
     await startTui(s, {
       profileId,
-      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag),
-      mouse
+      width: flags.width ? numberFlag(flags, 'width', 140, { min: 60 }) : null,
+      height: flags.height ? numberFlag(flags, 'height', 42, { min: 20 }) : null,
+      connectAgent: !['off', 'false', 'none', '0'].includes(agentFlag)
     });
     return;
   }

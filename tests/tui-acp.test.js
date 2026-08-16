@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { openStore, all } from '../src/db.js';
+import { openStore, all, one } from '../src/db.js';
 import { createProfile, addProof } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
@@ -17,10 +17,10 @@ import { createArtifact } from '../src/artifacts.js';
 import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 function workspace() {
-  return mkdtempSync(path.join(tmpdir(), 'jobos-tui-test-'));
+  return mkdtempSync(path.join(tmpdir(), 'jobos-tui-acp-'));
 }
 
-async function seededWorkspace(t, { jobs = 2, draft = true } = {}) {
+async function seededWorkspace(t, { jobs = 1, draft = true } = {}) {
   const root = workspace();
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = await openStore({ workspace: root });
@@ -48,64 +48,168 @@ function streams() {
   return { stdin, stdout };
 }
 
-test('populated dashboard prioritizes jobs and selected action while technical detail stays disclosed on demand', async t => {
-  const { store, profile, proof, jobs } = await seededWorkspace(t);
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id, at: '2026-07-15T12:00:00.000Z' });
-  const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready', sessionId: 'session-123' };
-  const screen = renderTui(model, state, { width: 150, height: 46, color: false });
+function makeTui(store, profileId, jobId, options = {}) {
+  const tui = new JobosTui(store, { ...streams(), profileId, selectedJobId: jobId, connectAgent: false, ...options });
+  tui.refresh();
+  return tui;
+}
 
-  assert.match(screen, /JOBOS · PM EdTech/);
-  assert.match(screen, /NEXT UP/);
-  assert.equal(model.priority[0].kind, 'action');
-  assert.ok(model.priority.some(item => item.actionId === 'unlock_fit'));
-  assert.ok(model.priority.some(item => item.kind === 'network'));
-  assert.ok(model.priority.some(item => item.kind === 'discovery'));
-  assert.ok(model.priority.some(item => item.kind === 'new'));
-  assert.doesNotMatch(screen, /QUEUE|INTERVIEW|FAILURE/, 'priority metadata and empty categories stay out of the calm default view');
-  assert.match(screen, /┌ JOBS /);
-  assert.match(screen, /\[today\] all high review ready applied interview/);
-  assert.match(screen, /SELECTED JOB/);
-  assert.doesNotMatch(screen, /┌ ASSISTANT/, 'unfocused empty assistant pane yields space to active job content');
-  assert.doesNotMatch(screen, /Hermes ACP|side-effects:off|TECHNICAL DETAILS/);
-  assert.match(screen, /Product Manager 1/);
-  assert.match(screen, /e details · p prepare · z score · i ask/);
-
-  const detailed = renderTui(model, { ...state, detailsExpanded: true }, { width: 150, height: 46, color: false });
-  assert.match(detailed, /TECHNICAL DETAILS/);
-  assert.match(detailed, /side effects off/);
-  const lowerDetails = renderTui(model, { ...state, detailsExpanded: true, detailsScroll: Number.MAX_SAFE_INTEGER }, { width: 150, height: 46, color: false });
-  assert.match(lowerDetails, new RegExp(proof.id));
-  assert.match(lowerDetails, /resume · draft_needs_human_review/);
+test('ACP-01 the assistant is off by default with --agent off and chat stays local', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const tui = makeTui(store, profile.id, jobs[0].id, { connectAgent: false });
+  tui.state.jobTab = 'chat';
+  await tui.sendChat('job', 'Hello, summarize this listing.');
+  const log = tui.state.chat[`job:${jobs[0].id}`] || [];
+  assert.equal(log.length, 1, 'only the user message is stored');
+  assert.equal(log[0].kind, 'you');
+  assert.equal(log[0].text, 'Hello, summarize this listing.');
+  assert.equal(tui.state.agentState, 'off');
+  assert.match(tui.state.status, /assistant off · your message stays local/);
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  assert.match(screen, /Assistant is off/, 'the composer banner states the assistant is off');
+  assert.doesNotMatch(screen, /Hermes.*ready/, 'no invented assistant readiness');
 });
 
-test('agent is default-on, Escape does not hide it, overlays stay overlays, and navigation remains live while a turn is busy', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { draft: false });
+test('ACP-02 a missing ACP backend says unavailable and invents no reply or facts', async t => {
+  const { root, store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const tui = new JobosTui(store, {
+    ...streams(),
+    profileId: profile.id,
+    selectedJobId: jobs[0].id,
+    connectAgent: true,
+    agentCommand: '__jobos_missing_acp_binary__'
+  });
+  await tui.start();
+  assert.equal(tui.state.agentState, 'unavailable');
+  assert.match(tui.state.status, /ACP backend not found/);
+  await tui.sendChat('job', 'Are we applying today?');
+  const log = tui.state.chat[`job:${jobs[0].id}`] || [];
+  assert.equal(log.length, 1, 'no fabricated assistant reply');
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM application_receipts').n, 0, 'no fabricated submission receipts');
+  assert.equal(one(store, "SELECT COUNT(*) AS n FROM contact_points").n, 0, 'no fabricated contacts');
+  assert.equal(tui.model.selected.contacts.length, 0, 'no invented people');
+});
+
+test('ACP-03 a real client streams only agent_message events into chat, never a fabricated reply', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
   const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  assert.equal(tui.state.agentOn, true);
-  assert.equal(tui.closeTransient(), false);
-  assert.equal(tui.state.agentOn, true);
-
-  tui.openOverlay('review');
-  assert.equal(tui.state.overlay, 'review');
-  assert.equal(tui.state.agentOn, true);
-  tui.closeTransient();
-  assert.equal(tui.state.overlay, null);
-
-  tui.state.filter = 'all';
-  const orderedJobs = tui.filtered();
-  tui.state.selectedJobId = orderedJobs[0].id;
-  tui.state.busy = 'agent';
-  tui.moveSelection(1);
-  assert.equal(tui.state.selectedJobId, orderedJobs[1].id);
-  assert.equal(tui.state.busy, 'agent');
-  tui.onKeypress('a', { name: 'a' });
-  assert.equal(tui.state.agentOn, false);
-  tui.onKeypress('a', { name: 'a' });
-  assert.equal(tui.state.agentOn, true);
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: true, color: false });
+  tui.refresh();
+  let handler = null;
+  let receivedContext = null;
+  tui.client = {
+    state: 'ready',
+    on(event, fn) { if (event === 'event') handler = fn; },
+    off() {},
+    async prompt(_text, options) {
+      receivedContext = options.context;
+      // A real AcpClient streams assistant text as events during the turn.
+      if (handler) handler({ type: 'agent_message', text: 'Streamed assistant reply' });
+      return { stopReason: 'end_turn' };
+    }
+  };
+  await tui.sendChat('job', 'What should I ask the recruiter?');
+  const log = tui.state.chat[`job:${jobs[0].id}`] || [];
+  assert.equal(log.length, 2, 'the streamed reply is appended after the user message');
+  assert.equal(log[1].kind, 'assistant');
+  assert.equal(log[1].text, 'Streamed assistant reply', 'only the streamed agent message is appended');
+  assert.ok(receivedContext, 'the agent turn received real context');
+  assert.equal(receivedContext.jobId || receivedContext.job?.id, jobs[0].id, 'job chat receives the selected-job context');
 });
 
-test('Hermes chat receives uploaded resume and verified profile context with or without a selected job', async t => {
+test('ACP-03b without agent events and without a text result there is no assistant message at all', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: true, color: false });
+  tui.refresh();
+  tui.client = {
+    state: 'ready',
+    on() {},
+    off() {},
+    async prompt() { return { stopReason: 'end_turn' }; }
+  };
+  await tui.sendChat('job', 'Anything?');
+  const log = tui.state.chat[`job:${jobs[0].id}`] || [];
+  assert.equal(log.length, 1, 'empty agent output produces no assistant message');
+  assert.equal(log[0].kind, 'you');
+});
+
+test('ACP-04 chat is scoped per job and workspace so the whole search never leaks into a listing', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 2, draft: false });
+  const tui = makeTui(store, profile.id, jobs[0].id);
+  await tui.sendChat('job', 'job-a question');
+  await tui.sendChat('workspace', 'workspace question');
+  const jobLog = tui.state.chat[`job:${jobs[0].id}`] || [];
+  const wsLog = tui.state.chat.workspace || [];
+  assert.equal(jobLog.length, 1);
+  assert.equal(wsLog.length, 1);
+  assert.equal(jobLog[0].text, 'job-a question');
+  assert.equal(wsLog[0].text, 'workspace question');
+  assert.ok(!tui.state.chat[`job:${jobs[1].id}`], 'the other job has no chat log');
+});
+
+test('ACP-05 TUI domain actions stay in the agent door and human-only tools stay out', async t => {
+  const externalTools = new Set(mcpToolNames());
+  for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) assert.ok(externalTools.has(tool), `${tool} is missing from external MCP`);
+  for (const tool of ['list_jobs', 'get_job_context', 'review_queue', 'discovery_health']) assert.ok(externalTools.has(tool));
+  for (const tool of ['approve_artifact', 'reject_artifact', 'create_application_packet', 'attest_application_submitted', 'answers_add', 'approve_contact', 'network_contact_record', 'mark_outreach_sent']) {
+    assert.equal(externalTools.has(tool), false, `${tool} must not be advertised to agents`);
+  }
+});
+
+test('ACP-06 first-run and no-job states are honest, actionable, and do not invent content', async t => {
+  const root = workspace();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = await openStore({ workspace: root });
+  let model = buildTuiModel(store, { at: '2026-07-15T12:00:00.000Z' });
+  assert.equal(model.empty.noProfile, true);
+  let tui = new JobosTui(store, { ...streams(), connectAgent: false, color: false });
+  tui.refresh();
+  let screen = renderTui(tui.model, tui.state, { width: 120, height: 34, color: false });
+  assert.match(screen, /welcome to jobos/i, 'welcome is the first-run surface');
+  assert.doesNotMatch(screen, /Example Learning|Acme|Harbor Schools|Contoso Careers Lab|Lumen Labs/, 'no invented jobs or companies');
+  assert.doesNotMatch(screen, /┌ JOBS|SELECTED JOB/, 'no retired dashboard chrome');
+
+  const profile = createProfile(store, 'PM EdTech').profile;
+  model = buildTuiModel(store, { profileId: profile.id });
+  assert.equal(model.empty.noJobs, true);
+  tui = new JobosTui(store, { ...streams(), profileId: profile.id, connectAgent: false, color: false });
+  tui.refresh();
+  tui.state.welcomeDismissed = true; // profile exists: the board is the surface, welcome was first-run
+  screen = renderTui(tui.model, tui.state, { width: 120, height: 34, color: false });
+  assert.match(screen, /No jobs yet/, 'the empty pipeline says so');
+  assert.match(screen, /Add to Jobs from New/, 'the empty pipeline points at the New rail');
+  tui.state.leftMode = 'new';
+  screen = renderTui(tui.model, tui.state, { width: 120, height: 34, color: false });
+  assert.match(screen, /daily/, 'the New rail points at discovery');
+});
+
+test('ACP-07 external apply and send are user-configured, default off', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const tui = makeTui(store, profile.id, jobs[0].id);
+  assert.equal(tui.model.policy.autoApply, 'disabled');
+  assert.equal(tui.model.policy.autoSend, 'disabled');
+  const selected = tui.model.selected;
+  assert.ok(selected.policy);
+  assert.equal(selected.policy.externalApply, 'user_configured_default_off');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  assert.doesNotMatch(screen, /submitted successfully|applied on your behalf/, 'no external submit claim');
+});
+
+test('ACP-08 compact terminals keep the frame bounded and the shell reachable', async t => {
+  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
+  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
+  const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id };
+  const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
+  const lines = dashboard.split('\n');
+  assert.ok(lines.length > 0 && lines.length <= 24, 'compact frame stays inside the height');
+  assert.ok(lines.every(line => !line.includes('\u0000')), 'no control-data leak');
+  assert.match(dashboard, /JobOS/, 'wordmark remains');
+  assert.match(dashboard, /Tab/, 'Tab hint remains');
+  assert.doesNotMatch(dashboard, /┌ JOBS|SELECTED JOB/, 'no retired dashboard chrome at compact size');
+});
+
+test('ACP-09 profile context is secret-safe and the workspace turn receives it', async t => {
   const { store, profile, proof, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
   const profileContext = profileAgentContext(store, profile.id);
   assert.equal(profileContext.profile.name, 'PM EdTech');
@@ -122,314 +226,26 @@ test('Hermes chat receives uploaded resume and verified profile context with or 
   assert.equal(jobContext.resumeUpload.id, profileContext.resumeUpload.id);
   assert.equal(jobContext.verifiedProofs[0].id, proof.id);
 
-  const tui = new JobosTui(store, { ...streams(), profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = null;
-  let receivedContext = null;
+  const io = streams();
+  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: true, color: false });
+  tui.refresh();
+  let received = null;
   tui.client = {
     state: 'ready',
+    on() {},
+    off() {},
     async prompt(_text, options) {
-      receivedContext = options.context;
-      return { stopReason: 'end_turn' };
+      received = options.context;
+      return { text: 'ok' };
     }
   };
-  await tui.promptAgent('What experience did I upload?');
-  assert.equal(receivedContext.resumeUpload.id, profileContext.resumeUpload.id);
-  assert.equal(receivedContext.verifiedProofs[0].id, proof.id);
+  await tui.sendChat('workspace', 'What experience did I upload?');
+  assert.ok(received, 'the workspace turn received profile context');
+  assert.equal(received.resumeUpload.id, profileContext.resumeUpload.id);
+  assert.equal(received.verifiedProofs[0].id, proof.id);
 });
 
-test('review queue opens the exact artifact revision, shows local readiness policy, and keeps document diff cancellable', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1 });
-  const first = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id }).selected.docs[0];
-  const revision = createArtifact(store, {
-    jobId: jobs[0].id,
-    profileId: profile.id,
-    type: 'resume',
-    path: `jobs/${jobs[0].id}/artifacts/resume-tailored.md`,
-    title: 'Tailored resume revision',
-    content: 'Revised proof-grounded resume content.',
-    evidence: [{ proofPointId: 'proof-current' }],
-    warnings: ['Review every claim before use.'],
-    seriesKey: first.seriesKey
-  });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-
-  tui.openOverlay('review');
-  const queuedIndex = tui.model.review.findIndex(item => item.id === revision.id);
-  assert.ok(queuedIndex >= 0);
-  tui.state.overlayIndex = queuedIndex;
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'docs');
-  assert.equal(tui.state.selectedArtifactId, revision.id);
-  assert.equal(tui.selectedDocument().id, revision.id);
-
-  let screen = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.match(screen, new RegExp(`hash ${revision.contentHash}`));
-  assert.match(screen, /history r1 .*r2/);
-  assert.match(screen, /evidence/);
-  assert.match(screen, /warning Review every claim/);
-  tui.onKeypress('D', { name: 'd', shift: true });
-  screen = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.match(screen, /DIFF r1 → r2/);
-  tui.onKeypress('D', { name: 'd', shift: true });
-  assert.equal(tui.state.docsDiff, false);
-
-  const selected = tui.model.selected;
-  assert.match(renderTui(tui.model, { ...tui.state, overlay: null }, { width: 150, height: 46, color: false }), /READINESS/);
-  assert.ok(selected.policy);
-  assert.equal(selected.policy.externalApply, 'user_configured_default_off');
-});
-
-test('document approval and rejection confirm locally, refresh review state, and retain Escape cancellation', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1 });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  const first = tui.model.review[0];
-  tui.openOverlay('review');
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.selectedDocument().id, first.id);
-
-  tui.onKeypress('A', { name: 'a', shift: true });
-  assert.equal(tui.state.mode, 'approve-confirm');
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'docs');
-  assert.equal(tui.state.mode, 'normal');
-  tui.onKeypress('A', { name: 'a', shift: true });
-  tui.onKeypress('y', { name: 'y' });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(tui.model.selected.docs.find(item => item.id === first.id).approvalStatus, 'approved');
-  assert.equal(tui.model.review.some(item => item.id === first.id), false);
-  assert.equal(tui.model.selected.job.applicationStatus, null);
-
-  const rejected = createArtifact(store, {
-    jobId: jobs[0].id,
-    profileId: profile.id,
-    type: 'cover_letter',
-    path: `jobs/${jobs[0].id}/artifacts/cover-letter.md`,
-    title: 'Cover letter',
-    content: 'Draft cover letter.',
-    evidence: [],
-    warnings: []
-  });
-  tui.refresh({ disk: false });
-  tui.openDocuments(rejected.id);
-  tui.onKeypress('X', { name: 'x', shift: true });
-  assert.equal(tui.state.mode, 'reject-note');
-  for (const char of 'Missing evidence') tui.onKeypress(char, { name: char.toLowerCase() });
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'reject-confirm');
-  tui.onKeypress('y', { name: 'y' });
-  await new Promise(resolve => setImmediate(resolve));
-  const rejectedDoc = tui.model.selected.docs.find(item => item.id === rejected.id);
-  assert.equal(rejectedDoc.approvalStatus, 'rejected');
-  assert.equal(rejectedDoc.reviewNote, 'Missing evidence');
-  assert.equal(tui.model.review.some(item => item.id === rejected.id), false);
-  assert.match(tui.state.status, /rejected · redraft next: jobos tailor cover-letter/);
-});
-
-test('review, log, network, documents, answers, discovery, system, and profile surfaces render real state', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t);
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready', catalog: [{ name: 'Hermes ACP', available: true, protocol: 'acp-v1', role: 'primary' }] };
-  const expectations = {
-    review: /draft_needs_human_review/,
-    log: /job\.scored|artifact/,
-    network: /No research run yet/,
-    docs: /resume|Tailored/,
-    answers: /verified reusable answers/,
-    discovery: /No discovery searches configured|last/,
-    system: /Hermes ACP · available · acp-v1/,
-    profile: /PM EdTech/
-  };
-  for (const [overlay, expected] of Object.entries(expectations)) {
-    const screen = renderTui(model, { ...base, overlay }, { width: 120, height: 38, color: false });
-    assert.match(screen, expected, `${overlay} overlay did not expose expected state`);
-    assert.match(screen, /local workspace/, `${overlay} replaced the shell header`);
-  }
-});
-
-test('TUI refresh observes an agent-side database mutation and shared capabilities remain in the external MCP door', async t => {
-  const { root, store, profile, jobs } = await seededWorkspace(t, { draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = jobs[1].id;
-  assert.equal(tui.model.jobs.find(job => job.id === jobs[1].id).fitScore, null);
-
-  const agentStore = await openStore({ workspace: root });
-  await callDomainTool(agentStore, 'score_job', { jobId: jobs[1].id, profileId: profile.id }, { source: 'acp' });
-  tui.refresh();
-  const scoredJob = tui.model.jobs.find(job => job.id === jobs[1].id);
-  assert.equal(scoredJob.fit.contract, 'jobos.fit-score.v1');
-
-  const externalTools = new Set(mcpToolNames());
-  for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) assert.ok(externalTools.has(tool), `${tool} is missing from external MCP`);
-  for (const tool of ['list_jobs', 'get_job_context', 'review_queue', 'discovery_health']) assert.ok(externalTools.has(tool));
-  for (const tool of ['list_interview_stories', 'get_interview_story', 'draft_interview_story', 'interview_prep', 'list_interview_debriefs', 'list_interview_observations']) {
-    assert.ok(externalTools.has(tool), `${tool} must be available to the ACP guest through its MCP catalog`);
-  }
-  for (const tool of ['verify_interview_story', 'retire_interview_story', 'add_interview_question_source', 'record_interview_debrief', 'correct_interview_debrief']) {
-    assert.equal(externalTools.has(tool), false, `${tool} must remain a direct trusted human surface`);
-  }
-});
-
-test('first-run and no-job states are honest, actionable, and do not invent content', async t => {
-  const root = workspace();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const store = await openStore({ workspace: root });
-  let model = buildTuiModel(store, { at: '2026-07-15T12:00:00.000Z' });
-  assert.equal(model.empty.noProfile, true);
-  let screen = renderTui(model, { ...defaultTuiState(), agentState: 'unavailable', status: 'ACP unavailable: executable missing · press c to retry' }, { width: 120, height: 34, color: false });
-  assert.match(screen, /No profile yet/);
-  assert.match(screen, /jobos profile create/);
-  assert.match(screen, /ACP unavailable/);
-  assert.doesNotMatch(screen, /Example Learning|Acme/);
-
-  const profile = createProfile(store, 'PM EdTech').profile;
-  model = buildTuiModel(store, { profileId: profile.id });
-  assert.equal(model.empty.noJobs, true);
-  screen = renderTui(model, { ...defaultTuiState(), profileId: profile.id, agentState: 'offline' }, { width: 120, height: 34, color: false });
-  assert.match(screen, /No jobs yet/);
-  assert.match(screen, /Workspace healthy and empty/);
-  assert.match(screen, /daily discovery/);
-});
-
-test('compact terminals keep context reachable and switch to a focused chat page', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  const state = { ...defaultTuiState(), profileId: profile.id, selectedJobId: jobs[0].id, agentState: 'ready' };
-  const dashboard = renderTui(model, state, { width: 60, height: 24, color: false });
-  assert.doesNotMatch(dashboard, /FX:OFF|side-effects/);
-  assert.match(dashboard, /┌ JOBS /);
-  assert.match(dashboard, /SELECTED JOB/);
-  assert.doesNotMatch(dashboard, /┌ ASSISTANT/);
-  assert.match(dashboard, /FIT .*READINESS/);
-  assert.match(dashboard, /NEXT/);
-  assert.match(dashboard, /Tab chat/);
-  assert.equal(dashboard.split('\n').length, 24);
-
-  const chat = renderTui(model, { ...state, focusTarget: 'agent' }, { width: 60, height: 24, color: false });
-  assert.match(chat, /ASSISTANT · FOCUSED/);
-  assert.match(chat, /Assistant ready/);
-  assert.match(chat, /Press i to type/);
-  assert.doesNotMatch(chat, /┌ SELECTED JOB/);
-  assert.match(chat, /Tab\/Esc dashboard/);
-  assert.equal(chat.split('\n').length, 24);
-});
-
-test('focused chat owns most wide-terminal real estate and supports scrollback', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  const messages = Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: `message-${index}` }));
-  const state = {
-    ...defaultTuiState(),
-    profileId: profile.id,
-    selectedJobId: jobs[0].id,
-    agentState: 'ready',
-    focusTarget: 'agent',
-    agentScroll: 5,
-    messages
-  };
-  const screen = renderTui(model, state, { width: 140, height: 34, color: false });
-  const panelHeader = screen.split('\n').find(line => line.includes('SELECTED JOB') && line.includes('ASSISTANT · FOCUSED'));
-  assert.ok(panelHeader, 'focused chat includes selected-job context and assistant panels');
-  assert.ok(panelHeader.indexOf('┌ ASSISTANT') <= 45, 'assistant panel owns most of the terminal');
-  assert.match(screen, /message-14/);
-  assert.doesNotMatch(screen, /message-19/);
-  assert.match(screen, /scroll ↑5/);
-});
-
-test('optional mouse clicks select jobs and switch the compact page', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 2, draft: false });
-  const io = streams();
-  io.stdout.columns = 100;
-  io.stdout.rows = 42;
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, selectedJobId: jobs[0].id, connectAgent: false, mouse: true, color: false });
-  tui.render();
-  const secondJob = tui.lastFrame.sections.jobs.hits.find(hit => hit.id === jobs[1].id);
-  assert.ok(secondJob, 'second job has a visible mouse target');
-  tui.onMouseData(`\u001b[<0;10;${secondJob.y + 1}M`);
-  assert.equal(tui.state.selectedJobId, jobs[1].id);
-  const footer = tui.lastFrame.sections.footer;
-  const tabRow = footer.lines.findIndex(line => line.includes('Tab'));
-  tui.onMouseData(`\u001b[<0;10;${footer.y + tabRow + 1}M`);
-  assert.equal(tui.state.focusTarget, 'agent');
-});
-
-test('model exposes network setup state, affiliation counts, and safe xAI display', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const model = buildTuiModel(store, { profileId: profile.id });
-  assert.ok(model.networkSetup, 'model.networkSetup is present');
-  assert.equal(model.networkSetup.status, 'not_started', 'status is not_started without completed intent');
-  assert.ok('affiliations' in model.networkSetup, 'affiliation counts present');
-  assert.ok('importedConnectionCount' in model.networkSetup, 'imported connection count present');
-  assert.equal(model.networkSetup.latestProfileRun, null, 'no profile run yet');
-  assert.match(model.networkSetup.xaiState, /^(off|available|misconfigured)$/, 'xai state is a known value');
-  assert.doesNotMatch(JSON.stringify(model.networkSetup), /XAI_API_KEY|xai_key/i, 'xai state never leaks the key');
-});
-test('b key opens build-network overlay without auto-run, default is save-only, scope is profile when no job selected', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = null;
-  assert.equal(tui.state.overlay, null, 'no overlay initially');
-  tui.onKeypress('b', { name: 'b' });
-  assert.equal(tui.state.overlay, 'build-network', 'b opens build-network overlay');
-  assert.equal(tui.state.busy, null, 'no auto-run triggered');
-  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.match(rendered, /Proposed scope: profile/, 'proposes profile scope without selected job');
-  assert.match(rendered, /Save only/, 'save only is visible');
-  assert.match(rendered, /Save and build/, 'save and build is visible');
-  assert.doesNotMatch(rendered, /XAI_API_KEY|xai_key/i, 'no api key leak');
-  assert.match(rendered, /xAI/, 'xAI state is shown');
-});
-
-test('build-network overlay proposes job scope with selected job', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = jobs[0].id;
-  tui.model = buildTuiModel(store, { profileId: profile.id, selectedJobId: jobs[0].id });
-  tui.onKeypress('b', { name: 'b' });
-  assert.equal(tui.state.overlay, 'build-network');
-  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.match(rendered, /Proposed scope: job/, 'proposes job scope with selected job');
-});
-
-test('existing navigation and overlays remain functional after build-network addition', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t);
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = jobs[0].id;
-  assert.equal(tui.state.agentOn, true, 'agent on by default');
-  tui.openOverlay('review');
-  assert.equal(tui.state.overlay, 'review');
-  tui.closeTransient();
-  assert.equal(tui.state.overlay, null);
-  tui.onKeypress('n', { name: 'n' });
-  assert.equal(tui.state.overlay, 'network', 'n still opens network');
-  tui.closeTransient();
-  tui.onKeypress('l', { name: 'l' });
-  assert.equal(tui.state.overlay, 'log', 'l still opens log');
-  tui.closeTransient();
-  tui.onKeypress('r', { name: 'r' });
-  assert.equal(tui.state.overlay, 'review', 'r still opens review');
-  tui.closeTransient();
-  tui.onKeypress('s', { name: 's' });
-  assert.equal(tui.state.overlay, 'discovery', 's still opens discovery');
-  tui.closeTransient();
-  tui.onKeypress('v', { name: 'v' });
-  assert.equal(tui.state.overlay, 'profile', 'v still opens profile');
-  tui.closeTransient();
-  const orderedJobs = tui.filtered();
-  tui.state.selectedJobId = orderedJobs[0].id;
-  tui.moveSelection(1);
-  assert.equal(tui.state.selectedJobId, orderedJobs[1].id, 'navigation j/k still works');
-  tui.state.busy = 'agent';
-  tui.moveSelection(0);
-  assert.equal(tui.state.busy, 'agent', 'busy state preserved during navigation');
-});
-
-test('external MCP demo initializes, calls shared tools, persists state, and exits cleanly', async t => {
+test('ACP-10 the external MCP demo initializes, persists state, and exits cleanly', async t => {
   const { root, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
   const transcript = path.join(root, 'mcp-demo.jsonl');
   const result = await runMcpDemo({
@@ -445,188 +261,4 @@ test('external MCP demo initializes, calls shared tools, persists state, and exi
   assert.equal(result.scoreAuditDelta, 1);
   assert.equal(result.fitAfter.overall, result.fitBefore.overall);
   assert.deepEqual(result.exit, { code: 0, signal: null });
-});
-
-test('documented Q quit restores and pauses terminal input', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const io = streams();
-  io.stdin.isTTY = true;
-  io.stdout.isTTY = true;
-  const rawModes = [];
-  io.stdin.setRawMode = value => rawModes.push(value);
-  let paused = false;
-  const pause = io.stdin.pause.bind(io.stdin);
-  io.stdin.pause = () => {
-    paused = true;
-    return pause();
-  };
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  const running = tui.start();
-  io.stdin.emit('keypress', 'Q', { name: 'q', shift: true });
-  await running;
-  assert.equal(tui.stopped, true);
-  assert.equal(paused, true);
-  assert.deepEqual(rawModes, [true, false]);
-});
-
-
-function readIntent(store, profileId) {
-  const row = all(store, 'SELECT preferences_json FROM profiles WHERE id=?', [profileId])[0];
-  return JSON.parse(row.preferences_json || '{}').networkIntent || {};
-}
-
-function affiliationRows(store, profileId) {
-  return all(store, 'SELECT type,organization,role_or_program,status,source FROM profile_affiliations WHERE profile_id=? ORDER BY type,organization', [profileId]);
-}
-
-function runCount(store, profileId) {
-  return Number(all(store, 'SELECT COUNT(*) AS count FROM research_runs WHERE profile_id=?', [profileId])[0].count || 0);
-}
-
-test('build-network editor: editing a list field and toggling a source persists with completedAt', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = null;
-  tui.onKeypress('b', { name: 'b' });
-  assert.equal(tui.state.overlay, 'build-network');
-  assert.ok(tui.state.networkDraft, 'draft seeded on open');
-
-  // Move to target companies field and enter edit mode
-  const items = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
-  assert.match(items, /Target companies/);
-  // Find the targetCompanies item index
-  const findIdx = (key) => {
-    const list = tui.model.networkSetup;
-    // buildNetworkItems order: status, schools, employers, communities, targetRoles, targetCompanies, ...
-    const order = ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'];
-    return order.indexOf(key);
-  };
-  tui.state.overlayIndex = findIdx('targetCompanies');
-  // Enter edit mode
-  tui.onOverlayKey('\r', { name: 'return' });
-  assert.equal(tui.state.mode, 'build-network-field', 'entered field edit mode');
-  // Type a value
-  for (const ch of 'Acme Learning, EduCo') tui.onKeypress(ch, { name: ch });
-  // Commit through the live dispatcher so modal routing cannot bypass field input.
-  tui.onKeypress('\r', { name: 'return' });
-  assert.equal(tui.state.mode, 'normal', 'edit mode exited after commit');
-  assert.equal(tui.state.networkDraft.targetCompanies, 'Acme Learning, EduCo', 'draft updated with typed value');
-
-  // Toggle LinkedIn source
-  tui.state.overlayIndex = findIdx('sourceLinkedin');
-  tui.onOverlayKey('\r', { name: 'return' });
-  assert.equal(tui.state.networkDraft.sourceLinkedin, true, 'linkedin toggle flipped on');
-
-  // Move to Save only and save
-  tui.state.overlayIndex = findIdx('saveOnly');
-  await tui.buildNetworkSaveOnly();
-  assert.equal(tui.state.overlay, null, 'overlay closed after save');
-  const intent = readIntent(store, profile.id);
-  assert.equal(intent.version, 1, 'persisted intent has version 1');
-  assert.ok(intent.completedAt, 'persisted intent has completedAt');
-  assert.deepEqual(intent.targetCompanies, ['Acme Learning', 'EduCo'], 'target companies persisted and deduped');
-  assert.equal(intent.allowedSources.linkedinImport, true, 'linkedin toggle persisted');
-  assert.equal(runCount(store, profile.id), 0, 'Save only does not create a research run');
-});
-
-test('build-network editor: affiliation fields are confirmed and replace existing affiliations on save', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  // Seed a suggested affiliation so we can confirm replacement
-  const { setNetworkIntent } = await import('../src/profiles.js');
-  setNetworkIntent(store, { profileId: profile.id, intent: { version: 1, allowedSources: { publicWeb: true } }, affiliations: [{ type: 'school', organization: 'Old University', status: 'suggested' }] });
-  assert.equal(affiliationRows(store, profile.id).length, 1, 'suggested affiliation seeded');
-
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.onKeypress('b', { name: 'b' });
-  const findIdx = (key) => ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'].indexOf(key);
-  // Edit schools field
-  tui.state.overlayIndex = findIdx('schools');
-  tui.onOverlayKey('\r', { name: 'return' });
-  // Clear the seeded value (edit mode pre-fills with current), then type new schools
-  const seeded = tui.state.input;
-  for (let i = 0; i < seeded.length; i++) tui.onInputKey('\b', { name: 'backspace' });
-  for (const ch of 'Stanford (MBA), MIT') tui.onInputKey(ch, { name: ch });
-  tui.onInputKey('\r', { name: 'return' });
-
-  // Save
-  tui.state.overlayIndex = findIdx('saveOnly');
-  await tui.buildNetworkSaveOnly();
-  const rows = affiliationRows(store, profile.id);
-  assert.equal(rows.length, 2, 'old suggested affiliation replaced by two confirmed schools');
-  assert.ok(rows.every(r => r.status === 'confirmed'), 'all affiliations confirmed');
-  assert.ok(rows.some(r => r.organization === 'Stanford' && r.role_or_program === 'MBA'), 'role/program shorthand parsed');
-  assert.ok(rows.some(r => r.organization === 'MIT'), 'plain organization parsed');
-});
-
-test('build-network editor: Enter on Save only does not create a run; explicit Save and build creates the proposed-scope run', async t => {
-  const { store, profile, jobs } = await seededWorkspace(t, { jobs: 1, draft: false });
-  const io = streams();
-  // No selected job → profile scope
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = null;
-  tui.onKeypress('b', { name: 'b' });
-  const findIdx = (key) => ['status', 'schools', 'employers', 'communities', 'targetRoles', 'targetCompanies', 'personas', 'relTypes', 'exclusions', 'sourcePublic', 'sourceLinkedin', 'sourceXai', 'connCount', 'latestRun', '_sep', 'saveOnly', 'saveBuild'].indexOf(key);
-  // Set target companies so profile scope is valid (requires target companies for public_web)
-  tui.state.overlayIndex = findIdx('targetCompanies');
-  tui.onOverlayKey('\r', { name: 'return' });
-  for (const ch of 'Acme Learning') tui.onInputKey(ch, { name: ch });
-  tui.onInputKey('\r', { name: 'return' });
-  // Ensure only local_network source (no public_web) so the offline run succeeds without network
-  tui.state.overlayIndex = findIdx('sourcePublic');
-  tui.onOverlayKey('\r', { name: 'return' }); // turn public web off
-  assert.equal(tui.state.networkDraft.sourcePublic, false);
-
-  // Enter on Save only
-  tui.state.overlayIndex = findIdx('saveOnly');
-  tui.onOverlayKey('\r', { name: 'return' });
-  await new Promise(r => setTimeout(r, 50));
-  assert.equal(runCount(store, profile.id), 0, 'Save only created no run');
-
-  // Reopen and Save and build with profile scope (no selected job)
-  // Save only refreshed the model which reset selectedJobId to the first job; force null again.
-  tui.state.selectedJobId = null;
-  tui.onKeypress('b', { name: 'b' });
-  // re-seed target companies and source state since draft was cleared
-  tui.state.overlayIndex = findIdx('targetCompanies');
-  tui.onOverlayKey('\r', { name: 'return' });
-  for (const ch of 'Acme Learning') tui.onInputKey(ch, { name: ch });
-  tui.onInputKey('\r', { name: 'return' });
-  tui.state.overlayIndex = findIdx('sourcePublic');
-  tui.onOverlayKey('\r', { name: 'return' }); // off
-  // b triggers Save and build
-  tui.onOverlayKey('b', { name: 'b' });
-  // Poll until the async run completes (busy clears)
-  for (let i = 0; i < 100 && tui.state.busy; i++) await new Promise(r => setTimeout(r, 50));
-  assert.equal(tui.state.busy, null, 'save and build completed');
-  assert.equal(runCount(store, profile.id), 1, 'Save and build created one run');
-  const run = all(store, 'SELECT scope,status FROM research_runs WHERE profile_id=? ORDER BY created_at DESC LIMIT 1', [profile.id])[0];
-  assert.equal(run.scope, 'profile', 'run scope is profile with no selected job');
-  assert.ok(['succeeded', 'partial', 'failed', 'cancelled'].includes(run.status), `run reached a terminal state (${run.status})`);
-
-  // Now with a selected job → job scope
-  tui.state.selectedJobId = jobs[0].id;
-  tui.refresh({ disk: false });
-  tui.onKeypress('b', { name: 'b' });
-  tui.state.overlayIndex = findIdx('sourcePublic');
-  tui.onOverlayKey('\r', { name: 'return' }); // off
-  tui.onOverlayKey('b', { name: 'b' });
-  for (let i = 0; i < 100 && tui.state.busy; i++) await new Promise(r => setTimeout(r, 50));
-  assert.equal(tui.state.busy, null, 'job-scope save and build completed');
-  const runs = all(store, 'SELECT scope FROM research_runs WHERE profile_id=? ORDER BY created_at DESC LIMIT 1', [profile.id]);
-  assert.equal(runs[0].scope, 'job', 'run scope is job with selected job');
-});
-
-test('build-network editor: no key appears in rendered output', async t => {
-  const { store, profile } = await seededWorkspace(t, { jobs: 1, draft: false });
-  process.env.XAI_API_KEY = 'test-fake-key-not-real';
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.onKeypress('b', { name: 'b' });
-  const rendered = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
-  assert.doesNotMatch(rendered, /test-fake-key-not-real/, 'api key never rendered');
-  assert.doesNotMatch(rendered, /XAI_API_KEY/i, 'env var name never rendered');
-  assert.match(rendered, /xAI/, 'xAI state shown without key');
-  delete process.env.XAI_API_KEY;
 });

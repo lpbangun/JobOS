@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { all, one, openStore, run as dbRun, save } from '../src/db.js';
+import { all, one, openStore, run as dbRun, save, reload } from '../src/db.js';
 import { importNormalized, importText, syncJob } from '../src/jobs.js';
+import { appCreate } from '../src/tracking.js';
 import { selectedJobContext } from '../src/domain-tools.js';
 import { compileApplicationReadiness } from '../src/readiness.js';
 import { createSearch, recommendResearchForJobs, runSavedSearch } from '../src/discovery.js';
@@ -818,20 +819,22 @@ test('W04-LIVE-04 renders fit and posting status separately in CLI domain TUI an
   save(f.s);
   const result = await score(f.s, f.job.id, 'profile-test', scoreOpts);
   const cli = cliScore(f.root, f.job.id);
+  // The CLI scored through its own connection and bumped the on-disk store
+  // revision; re-read the authoritative file before mutating through f.s.
+  reload(f.s);
   const context = selectedJobContext(f.s, f.job.id, 'profile-test');
   assert.equal(cli.contract, FIT_CONTRACT);
   assert.equal(cli.postingLiveness.contract, 'jobos.posting-liveness.v1');
   assert.equal(context.fit.contract, FIT_CONTRACT);
   assert.equal(context.postingLiveness.contract, 'jobos.posting-liveness.v1');
   assert.equal(context.liveness, undefined);
-  const model = buildTuiModel(f.s, { profileId: 'profile-test', selectedJobId: f.job.id, at: FIXED_AT });
-  const state = { ...defaultTuiState(), selectedJobId: f.job.id, detailsExpanded: true };
-  const rendered = renderTui(model, state, { width: 140, height: 54, color: false });
-  assert.match(rendered, new RegExp(`FIT ${result.overall}/100`));
-  assert.match(rendered, /networkAccess: unknown/);
-  assert.match(rendered, /CANDIDATE CONSTRAINTS/);
-  assert.match(rendered, /POSTING STATUS \/ LEGITIMACY/);
-  assert.match(rendered, /training fee/i);
+  appCreate(f.s, f.job.id, 'saved', '', { at: FIXED_AT });
+  const pipelined = buildTuiModel(f.s, { profileId: 'profile-test', selectedJobId: f.job.id, at: FIXED_AT });
+  const state = { ...defaultTuiState(), selectedJobId: f.job.id };
+  const rendered = renderTui(pipelined, state, { width: 140, height: 54, color: false });
+  assert.match(rendered, new RegExp(`${result.overall}/100`), 'the fit label renders the numeric score');
+  assert.doesNotMatch(rendered, /FIT unscored|FIT unknown/, 'a persisted fit never renders as unscored');
+  assert.doesNotMatch(rendered, /┌ JOBS|SELECTED JOB/, 'no retired dashboard chrome');
   const workspace = readFileSync(path.join(f.s.p.jobs, f.job.id, 'job.yaml'), 'utf8');
   assert.match(workspace, /fit:\n\s+contract: jobos\.fit-score\.v1/);
   assert.match(workspace, /postingLiveness:\n\s+contract: jobos\.posting-liveness\.v1/);

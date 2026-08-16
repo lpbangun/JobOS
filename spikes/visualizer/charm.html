@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JobOS · Charm</title>
+  <style>
+    :root {
+      --bg: #07110a; --panel: #0c1a10; --line: #2a4a32; --text: #f3faf0;
+      --muted: #b8c9b0; --accent: #c6f28a; --ink: #102010; --tool: #9ecf88;
+      --mono: "JetBrains Mono", Menlo, ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #040804; color: var(--text); font-family: var(--mono); }
+    body { min-height: 100vh; display: grid; place-items: center; padding: 20px 12px; }
+    .shell { width: min(1100px, 100%); }
+    .nav { display: flex; gap: 16px; margin: 0 0 12px; font-size: 12px; }
+    .nav a { color: var(--muted); text-decoration: none; }
+    .nav a.on { color: var(--accent); }
+    .term { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-height: 720px; display: flex; flex-direction: column; }
+    header { display: flex; align-items: center; gap: 12px; padding: 0 0 0 14px; border-bottom: 1px solid var(--line); min-height: 36px; }
+    header strong { color: var(--accent); letter-spacing: .14em; margin-right: auto; }
+    [data-clock] { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+    [data-context] { color: var(--muted); font-size: 12px; }
+    [data-working] { color: var(--ink); background: var(--accent); padding: 2px 7px; font-size: 11px; }
+    [data-working][hidden] { display: none !important; }
+    .working [data-working] { animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .5; } }
+    .modebar { display: flex; align-self: stretch; margin-left: 8px; }
+    .mode, .seg, .pbtn {
+      font: inherit; font-size: 12px; cursor: pointer; border: 0;
+      background: transparent; color: var(--muted);
+      padding: 0 12px; min-height: 28px; height: 100%;
+    }
+    .mode { border-left: 1px solid var(--line); }
+    .mode.on, .seg.on, .pbtn.on { background: var(--accent); color: var(--ink); font-weight: 700; }
+    .body { display: grid; grid-template-columns: 34% 1fr; flex: 1; min-height: 0; }
+    .ask-on .rail, .ask-on .pane-bar { display: none; }
+    .ask-on .body { grid-template-columns: 1fr; }
+    .rail { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+    .segbar { display: flex; align-items: stretch; height: 28px; border-bottom: 1px solid var(--line); background: var(--panel); }
+    .seg { border-right: 1px solid var(--line); }
+    [data-list] { padding: 8px; overflow: auto; }
+    .pane-bar {
+      display: flex; align-items: stretch; justify-content: flex-start;
+      height: 28px; background: var(--panel); border-bottom: 1px solid var(--line);
+    }
+    .pbtn { border-right: 1px solid var(--line); flex: none; }
+    .row {
+      display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto;
+      gap: 4px 8px; width: 100%; text-align: left; font: inherit; color: inherit;
+      background: none; border: 1px solid transparent; border-radius: 6px; padding: 10px 10px; cursor: pointer;
+    }
+    .row .t { grid-column: 1 / -1; }
+    .row .co { color: var(--muted); font-size: 12px; }
+    .row .act { color: var(--accent); font-size: 11px; justify-self: end; align-self: end; }
+    .row.on { background: #16321c; border-color: var(--accent); }
+    .main { display: flex; flex-direction: column; min-height: 0; }
+    [data-main] { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+    .pad { padding: 22px 24px 28px; max-width: 42rem; }
+    .pad-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .pad-head h2, .pad-head .meta { margin-bottom: 0; }
+    .kicker { color: var(--accent); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin: 0 0 10px; }
+    h2 { margin: 0 0 8px; font-size: 18px; font-weight: 500; }
+    .meta, .empty { color: var(--muted); margin: 0 0 16px; line-height: 1.45; }
+    .hint { color: var(--muted); margin: 12px 0 0; line-height: 1.5; font-size: 12px; }
+    .cta, .ghost { font: inherit; cursor: pointer; border-radius: 4px; padding: 5px 11px; font-size: 12px; }
+    .cta { border: 0; background: var(--accent); color: var(--ink); font-weight: 700; }
+    .ghost { background: none; border: 1px solid var(--line); color: var(--text); }
+    .file {
+      display: block; margin: 16px 0 0; padding: 8px 10px; width: auto; max-width: 22rem;
+      text-align: left; font: inherit; color: inherit; background: none;
+      border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    .people { margin-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+    .person {
+      display: flex; flex-direction: column; gap: 2px; width: auto; max-width: 22rem;
+      text-align: left; font: inherit; color: inherit; background: none;
+      border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; cursor: pointer;
+    }
+    .person.static { cursor: default; }
+    .person.on { border-color: var(--accent); background: #16321c; }
+    .s { color: var(--muted); font-size: 12px; }
+    .chatpane { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+    .log { flex: 1; overflow: auto; padding: 18px 24px; display: flex; flex-direction: column; gap: 14px; }
+    .who { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+    .msg.you .who { color: var(--muted); }
+    .msg.tool { color: var(--tool); }
+    .msg p { margin: 6px 0 0; line-height: 1.5; }
+    .composer { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+    .prompt { color: var(--accent); }
+    .composer input { flex: 1; background: none; border: 0; color: var(--text); font: inherit; outline: none; }
+    .composer button { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; font-weight: 700; }
+    .statusbar, footer { padding: 8px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
+    footer b { color: var(--accent); }
+    [data-overlay] { position: fixed; inset: 0; background: rgba(4,8,4,.78); display: grid; place-items: center; }
+    [data-overlay][hidden] { display: none !important; }
+    .modal { background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 22px 24px; width: min(440px, 92vw); }
+    .modal.wide { width: min(520px, 92vw); }
+    .modal h3 { margin: 0 0 8px; color: var(--accent); font-weight: 500; }
+    .modal pre { background: #08140c; padding: 12px; color: var(--muted); }
+    .btns { display: flex; gap: 8px; margin-top: 16px; }
+    .action { display: flex; justify-content: space-between; gap: 12px; width: 100%; background: none; border: 0; color: var(--text); font: inherit; text-align: left; padding: 8px 0; cursor: pointer; }
+    .action span { color: var(--muted); font-size: 12px; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <nav class="nav"><a class="on" href="./charm.html">Charm · green</a><a href="./classic.html">Classic · red</a></nav>
+    <div class="term" id="app">
+      <header>
+        <strong>JOBOS</strong>
+        <span data-clock></span>
+        <span data-working hidden>working</span>
+        <span data-context></span>
+        <div class="modebar">
+          <button type="button" class="mode" data-mode="workspace">Workspace</button>
+          <button type="button" class="mode on" data-mode="jobs">Jobs</button>
+        </div>
+      </header>
+      <div class="body">
+        <aside class="rail">
+          <div class="segbar" data-left></div>
+          <div data-list></div>
+        </aside>
+        <section class="main">
+          <div class="pane-bar" data-panes></div>
+          <div data-main></div>
+        </section>
+      </div>
+      <div class="statusbar" data-status></div>
+      <footer><b>G</b> Workspace &nbsp; <b>Tab</b> Chat &nbsp; <b>/</b> skills &nbsp; <b>Esc</b> back</footer>
+      <div data-overlay hidden></div>
+    </div>
+  </div>
+  <script type="module">
+    import { createApp } from "./app.js";
+    createApp(document.getElementById("app"));
+  </script>
+</body>
+</html>

@@ -4,501 +4,235 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { openStore, all, one, run, save } from '../src/db.js';
-import { createProfile, addProof } from '../src/profiles.js';
+import { openStore, run, save } from '../src/db.js';
+import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
-import { tailor } from '../src/tailoring.js';
-import { addAnswer } from '../src/answers.js';
-import { compileApplicationReadiness } from '../src/readiness.js';
-import { readinessPacketSummary } from '../src/packets.js';
-import { buildFormSnapshot, persistFormSnapshot } from '../src/forms.js';
-import { DOM_ADAPTER_MANIFEST } from '../src/form-browser.js';
-import {
-  TUI_KEYMAP,
-  TUI_HANDLED_KEYS,
-  FILTERS,
-  DETAIL_HINT_KEYS,
-  expandKeymapBinding,
-  keypressForToken,
-  JobosTui,
-  renderTui,
-  defaultTuiState
-} from '../src/tui.js';
-import { callDomainTool } from '../src/domain-tools.js';
-import { createArtifact } from '../src/artifacts.js';
-import { buildTuiModel } from '../src/tui-model.js';
-import { createCompleteResumeFixture } from './fixtures/resume.js';
+import { appCreate } from '../src/tracking.js';
+import { upsertContactPoint } from '../src/research/contacts.js';
+import { defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
+import { SLASH_CATALOG, slashHits } from '../src/tui/model.js';
+
+const AS_OF = '2026-08-02T12:00:00.000Z';
 
 function streams() {
   const stdout = new PassThrough();
-  stdout.columns = 140;
-  stdout.rows = 42;
+  stdout.columns = 120;
+  stdout.rows = 36;
   stdout.isTTY = false;
   const stdin = new PassThrough();
   stdin.isTTY = false;
   return { stdin, stdout };
 }
 
-async function seeded(t, { draft = true } = {}) {
+async function seeded(t, { application = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-keymap-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = await openStore({ workspace: root });
-  const preferences = path.join(root, 'preferences.json');
-  writeFileSync(preferences, JSON.stringify({
-    targetRoleFamilies: ['Product Manager'],
-    industries: ['learning'],
-    locations: ['Remote'],
-    workModel: 'remote',
-    missionKeywords: ['educator', 'learning']
-  }));
-  const profile = createProfile(store, 'PM EdTech', { preferences }).profile;
-  const proof = addProof(store, profile.id, 'Led educator discovery and launched a learning platform that improved activation by 30%.', 'portfolio', ['product'], ['30%']);
-  createCompleteResumeFixture(store, profile, proof);
+  const profile = createProfile(store, 'Keymap PM').profile;
   const file = path.join(root, 'job.md');
-  writeFileSync(file, 'Title: Product Manager\nCompany: Learning Co\nLocation: Remote\n\n## Requirements\n- Must lead educator discovery and launch a learning platform that improves activation.');
+  writeFileSync(file, 'Title: Product Manager\nCompany: Learning Co\nLocation: Remote\n\nLead educator discovery and launch a learning platform.');
   const job = importText(store, { profileId: profile.id, filePath: file }).job;
-  await callDomainTool(store, 'score_job', { jobId: job.id, profileId: profile.id }, { source: 'tui' });
-  if (draft) await tailor(store, job.id, profile.id, 'resume');
-  return { store, profile, job };
+  if (application) appCreate(store, job.id, 'saved', '', { at: AS_OF });
+  const tui = new JobosTui(store, { ...streams(), profileId: profile.id, selectedJobId: job.id, connectAgent: false, color: false });
+  tui.refresh();
+  return { store, profile, job, tui };
 }
 
-// Residual 3 — KEYMAP ⊆ handled keys
-test('TUI_KEYMAP bindings expand into TUI_HANDLED_KEYS for every scope', () => {
-  for (const [scope, entries] of Object.entries(TUI_KEYMAP)) {
-    const handled = new Set(TUI_HANDLED_KEYS[scope] || []);
-    assert.ok(handled.size, `scope ${scope} must declare handled keys`);
-    for (const [binding] of entries) {
-      const atoms = expandKeymapBinding(binding);
-      assert.ok(atoms.length, `binding ${scope}:${binding} expands`);
-      for (const token of atoms) {
-        assert.ok(
-          handled.has(token),
-          `KEYMAP ${scope} advertises "${binding}" → "${token}" but TUI_HANDLED_KEYS.${scope} lacks it`
-        );
-      }
-    }
-  }
+const tab = () => ({ tab: true });
+const shiftTab = () => ({ tab: true, shiftTab: true });
+const esc = () => ({ escape: true });
+
+test('KEYMAP-01 Tab cycles Job -> People -> Chat and Shift+Tab reverses', async t => {
+  const { tui } = await seeded(t);
+  assert.equal(tui.state.jobTab, 'job');
+  tui.handleKey('', tab());
+  assert.equal(tui.state.jobTab, 'people', 'Tab advances to People');
+  tui.handleKey('', tab());
+  assert.equal(tui.state.jobTab, 'chat', 'Tab advances to Chat');
+  tui.handleKey('', tab());
+  assert.equal(tui.state.jobTab, 'job', 'Tab wraps back to Job');
+  tui.handleKey('', shiftTab());
+  assert.equal(tui.state.jobTab, 'chat', 'Shift+Tab reverses to Chat');
+  tui.handleKey('', shiftTab());
+  assert.equal(tui.state.jobTab, 'people', 'Shift+Tab reverses to People');
 });
 
-// Reconciliation — the SELECTED JOB hint derives from TUI_KEYMAP; pin the subset
-test('SELECTED JOB hint keys are advertised by TUI_KEYMAP.global', () => {
-  const bindings = new Set(TUI_KEYMAP.global.map(([key]) => key));
-  for (const key of DETAIL_HINT_KEYS) {
-    assert.ok(bindings.has(key), `detail hint advertises "${key}" but TUI_KEYMAP.global lacks it`);
-  }
+test('KEYMAP-02 "/" on Job or People jumps to Chat with "/" in the input', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'job';
+  tui.handleKey('/', { name: '/' });
+  assert.equal(tui.state.jobTab, 'chat', '/ on Job jumps to Chat');
+  assert.equal(tui.state.input, '/', '/ is placed in the composer input');
+
+  tui.state.jobTab = 'people';
+  tui.handleKey('/', { name: '/' });
+  assert.equal(tui.state.jobTab, 'chat', '/ on People jumps to Chat');
+  assert.equal(tui.state.input, '/', '/ is placed in the composer input');
 });
 
-test('discovery overlay labels d as the full daily workflow', () => {
-  assert.deepEqual(TUI_KEYMAP.discovery.find(([key]) => key === 'd'), ['d', 'daily']);
+test('KEYMAP-03 the slash menu sits on the prompt, filters as you type, and keeps catalog order', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.state.input = '/';
+  const full = slashHits('/');
+  assert.deepEqual(full.map(item => item.id), SLASH_CATALOG.map(item => item.id), 'empty slash lists the full catalog in order');
+
+  tui.handleKey('f', { name: 'f' });
+  const filtered = slashHits(tui.state.input);
+  assert.equal(tui.state.input, '/f');
+  assert.ok(filtered.some(item => item.id === 'find-people'), '/f keeps find-people');
+  assert.ok(!filtered.some(item => item.id === 'tracker'), '/f filters tracker out');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  assert.match(screen, /\/find-people/, 'slash menu renders the filtered command above the prompt');
+  assert.doesNotMatch(screen, /\/tracker/, 'filtered-out commands are not rendered');
 });
 
-// Residual 4 — automated KEYMAP drill (PTY-equivalent, non-interactive)
-test('advertised KEYMAP keys do not throw when pressed in their scope', async t => {
-  const { store, profile, job } = await seeded(t);
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
+test('KEYMAP-04 arrows move the slash highlight and Enter runs the highlighted command', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.state.input = '/';
+  // Filter to a single workspace hit, then run it.
+  for (const char of 'workspace') tui.handleKey(char, { name: char });
+  const hits = slashHits(tui.state.input);
+  assert.deepEqual(hits.map(item => item.id), ['workspace']);
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.headerMode, 'workspace', 'Enter runs the highlighted slash command');
+  assert.equal(tui.state.input, '', 'running a slash command clears the input');
 
-  const compactScreen = renderTui(tui.model, tui.state, { width: 80, height: 42, color: false });
-  for (const hint of ['Tab chat', 'i ask', 'p pursue', 'g setup', '? help', 'Q quit']) {
-    assert.match(compactScreen, new RegExp(hint.replace('?', '\\?')), `compact footer advertises ${hint}`);
+  // Arrows move the highlight within the visible hits and clamp at bounds.
+  tui.state.jobTab = 'chat';
+  tui.setInput('/');
+  tui.handleKey('', { name: 'downArrow' });
+  assert.equal(tui.state.slashIndex, 1, 'down arrow moves the slash highlight');
+  tui.handleKey('', { name: 'downArrow' });
+  assert.equal(tui.state.slashIndex, 2, 'down arrow moves again');
+  tui.handleKey('', { name: 'upArrow' });
+  assert.equal(tui.state.slashIndex, 1, 'up arrow reverses');
+  tui.handleKey('', { name: 'upArrow' });
+  tui.handleKey('', { name: 'upArrow' });
+  tui.handleKey('', { name: 'upArrow' });
+  assert.equal(tui.state.slashIndex, 0, 'up arrow clamps at the first entry');
+  // Down arrow must reach the final catalog entry, then clamp on extra presses.
+  for (let index = 0; index < SLASH_CATALOG.length; index += 1) {
+    tui.handleKey('', { name: 'downArrow' });
   }
-  const helpScreen = renderTui(tui.model, { ...tui.state, overlay: 'system' }, { width: 100, height: 42, color: false });
-  for (const hint of ['t stage', 'c reconnect', 'x cancel', 'v profile']) {
-    assert.match(helpScreen, new RegExp(hint), `system help advertises ${hint}`);
-  }
+  assert.equal(tui.state.slashIndex, SLASH_CATALOG.length - 1, 'down arrow reaches the last catalog entry');
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'downArrow' });
+  assert.equal(tui.state.slashIndex, SLASH_CATALOG.length - 1, 'down arrow clamps at the last entry on extra presses');
+});
 
-  const fire = (token) => {
-    const { value, key } = keypressForToken(token);
-    assert.doesNotThrow(() => tui.onKeypress(value, key), `token ${token}`);
-  };
+test('KEYMAP-05 Esc clears "/" and closes overlays', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.setInput('/create');
+  tui.handleKey('', esc());
+  assert.equal(tui.state.input, '', 'Esc clears the slash input');
 
-  // Global (skip Q — exits)
-  for (const token of TUI_HANDLED_KEYS.global) {
-    if (token === 'Q') continue;
-    if (token === 'b') {
-      // Clear any overlay left by earlier tokens so the GLOBAL handler is exercised
-      tui.state.overlay = null;
-      fire(token);
-      assert.equal(tui.state.overlay, 'build-network', 'global b opens the build-network overlay');
-      tui.state.overlay = null;
-      continue;
-    }
-    if (token === ':') {
-      fire(token);
-      tui.state.mode = 'normal';
-      tui.state.input = '';
-      continue;
-    }
-    if (token === 't') {
-      fire(token);
-      assert.equal(tui.state.mode, 'stage');
-      tui.state.mode = 'normal';
-      continue;
-    }
-    if (token === 'i') {
-      fire(token);
-      tui.state.mode = 'normal';
-      tui.state.input = '';
-      continue;
-    }
-    fire(token);
-  }
-
-  // Docs scope
-  tui.openDocuments();
-  assert.equal(tui.state.overlay, 'docs');
-  for (const token of TUI_HANDLED_KEYS.docs) {
-    if (token === 'escape') continue;
-    if (token === 'A' || token === 'R' || token === 'X') {
-      // open confirm/note then cancel
-      fire(token);
-      tui.state.mode = 'normal';
-      tui.state.input = '';
-      tui.state.pendingConfirm = null;
-      continue;
-    }
-    if (token === '/') {
-      fire(token);
-      tui.state.mode = 'normal';
-      tui.state.input = '';
-      continue;
-    }
-    if (token === 'E') continue; // may spawn external editor
-    fire(token);
-  }
-  fire('escape');
-
-  // Discovery
-  tui.openOverlay('discovery');
-  for (const token of TUI_HANDLED_KEYS.discovery) {
-    if (token === 'escape' || token === 'd') continue; // d runs network discovery
-    fire(token);
-  }
-  fire('escape');
-
-  // Network (contact human gates)
-  tui.openOverlay('network');
-  for (const token of TUI_HANDLED_KEYS.network) {
-    if (token === 'escape') continue;
-    if (token === 'X') {
-      fire(token);
-      tui.state.mode = 'normal'; // suppress-reason (only entered when a contact row is highlighted)
-      tui.state.input = '';
-      continue;
-    }
-    fire(token);
-  }
-  fire('escape');
-
-  // Due (tasks & outreach list; Enter jumps to the task's job)
-  tui.openOverlay('due');
-  for (const token of TUI_HANDLED_KEYS.due) {
-    if (token === 'escape') continue;
-    fire(token);
-  }
-  fire('escape');
-
-  // Review
   tui.openOverlay('review');
-  for (const token of TUI_HANDLED_KEYS.review) {
-    if (token === 'escape') continue;
-    if (token === 'A' || token === 'R') {
-      fire(token);
-      tui.state.mode = 'normal';
-      tui.state.input = '';
-      continue;
-    }
-    if (token === 'E') {
-      // E opens the highlighted artifact, then spawns the external editor —
-      // stub the spawn and assert both steps instead of skipping the key.
-      tui.openOverlay('review');
-      let editorCalled = false;
-      tui.openArtifactEditor = async () => { editorCalled = true; return {}; };
-      fire(token);
-      assert.equal(tui.state.overlay, 'docs', 'review E opens the artifact in the docs viewer');
-      assert.ok(editorCalled, 'review E spawns the artifact editor');
-      continue;
-    }
-    if (token === 'V') {
-      tui.openOverlay('review');
-      fire(token);
-      assert.equal(tui.state.overlay, 'docs', 'review V opens the artifact first');
-      assert.equal(tui.state.docsView, 'diff', 'review V toggles the diff view');
-      continue;
-    }
-    if (token === 'I') {
-      tui.openOverlay('review');
-      tui.state.docsEvidenceExpanded = false; // known state — the docs drill may have toggled it
-      fire(token);
-      assert.equal(tui.state.overlay, 'docs', 'review I opens the artifact first');
-      assert.equal(tui.state.docsEvidenceExpanded, true, 'review I expands evidence');
-      continue;
-    }
-    fire(token);
-  }
-  fire('escape');
+  assert.equal(tui.state.overlay, 'review');
+  tui.handleKey('', esc());
+  assert.equal(tui.state.overlay, null, 'Esc closes the overlay');
 
-  // Stage mode
-  tui.state.mode = 'stage';
-  tui.state.stageIndex = 0;
-  for (const token of TUI_HANDLED_KEYS.stage) {
-    if (token === 'escape' || token === 'return') continue;
-    fire(token);
-  }
-  fire('escape');
+  tui.openOverlay('tracker');
+  tui.handleKey('', esc());
+  assert.equal(tui.state.overlay, null, 'Esc closes the tracker overlay');
 });
 
-// Residual 1 — reject surfaces redraft nextAction
-test('reject surfaces CLI redraft nextAction when agent is offline', async t => {
-  const { store, profile, job } = await seeded(t);
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-  tui.openDocuments();
-  const doc = tui.selectedDocument();
-  assert.ok(doc);
-
-  tui.onKeypress('X', { name: 'x', shift: true });
-  assert.equal(tui.state.mode, 'reject-note');
-  for (const char of 'Needs proof') tui.onKeypress(char, { name: char.toLowerCase() });
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'reject-confirm');
-  tui.onKeypress('y', { name: 'y' });
-  await new Promise(resolve => setTimeout(resolve, 50));
-  assert.match(tui.state.status, /redraft next: jobos tailor resume --job /);
-  assert.match(tui.state.status, new RegExp(job.id));
-  assert.match(tui.state.status, new RegExp(profile.id));
-  assert.doesNotMatch(tui.state.status, /redraft skipped because the agent is not ready/);
+test('KEYMAP-06 Esc on the first-run welcome skips without inventing state', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-keymap-empty-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = await openStore({ workspace: root });
+  const tui = new JobosTui(store, { ...streams(), connectAgent: false, color: false });
+  tui.refresh();
+  assert.equal(tui.state.overlay, null, 'welcome is derived, not stored');
+  tui.handleKey('', esc());
+  assert.equal(tui.state.welcomeDismissed, true, 'Esc dismisses the welcome overlay');
+  assert.match(tui.state.status, /Skipped setup/, 'skip copy is honest');
+  assert.equal(tui.model.empty.noProfile, true, 'no profile invented by skipping');
+  assert.equal(tui.model.empty.noJobs, true, 'no jobs invented by skipping');
 });
 
-// Residual 2 — packet show (read-only)
-test('command packet opens packet summary overlay advertising :packet create', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-
-  tui.executeCommand('packet');
-  await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(tui.state.overlay, 'packet');
-  assert.equal(tui.state.packetDetail?.empty, true);
-  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  assert.match(screen, /PACKET/);
-  assert.match(screen, /No application packet|:packet create|apply packet create/i);
-  assert.match(tui.state.status, /No packet|packet create/i);
+test('KEYMAP-07 G toggles Workspace and Jobs, and the composer stays active only where it exists', async t => {
+  const { tui } = await seeded(t);
+  assert.equal(tui.state.headerMode, 'jobs');
+  tui.handleKey('g', { name: 'g' });
+  assert.equal(tui.state.headerMode, 'workspace', 'g opens Workspace');
+  tui.handleKey('G', { name: 'g', shift: true });
+  assert.equal(tui.state.headerMode, 'jobs', 'G returns to Jobs');
 });
 
-test('undocumented packet and receipt command aliases are rejected', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-
-  for (const alias of ['packet-show', 'show-packet', 'packet freeze', 'freeze', 'confirm reference']) {
-    tui.state.error = null;
-    tui.executeCommand(alias);
-    assert.equal(tui.state.error, `Unknown command: ${alias}`);
-  }
+test('KEYMAP-08 shell arrows move the rail selection and Enter opens the tracker for a pipeline job', async t => {
+  const { store, profile, job, tui } = await seeded(t, { application: false });
+  // Two pipeline jobs so selection moves.
+  const secondFile = path.join(store.root, 'second.md');
+  writeFileSync(secondFile, 'Title: Associate PM\nCompany: Second Co\nLocation: Remote\n\nSupport the launch.');
+  const second = importText(store, { profileId: profile.id, filePath: secondFile }).job;
+  appCreate(store, job.id, 'saved', '', { at: AS_OF });
+  appCreate(store, second.id, 'saved', '', { at: AS_OF });
+  tui.refresh();
+  tui.state.leftMode = 'jobs';
+  assert.equal(tui.state.selectedIndex, 0);
+  tui.handleKey('', { name: 'downArrow' });
+  assert.equal(tui.state.selectedIndex, 1, 'down arrow moves the rail selection');
+  tui.handleKey('', { name: 'upArrow' });
+  assert.equal(tui.state.selectedIndex, 0, 'up arrow moves the rail selection back');
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.overlay, 'tracker', 'Enter on a pipeline row opens the tracker overlay');
 });
 
-test('packet overlay renders readiness packet fields when present', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id });
-  const state = {
-    ...defaultTuiState(),
-    profileId: profile.id,
-    selectedJobId: job.id,
-    overlay: 'packet',
-    packetDetail: {
-      id: 'pkt_test',
-      currency: 'current',
-      receiptState: 'none',
-      attemptNumber: 1,
-      revision: 1,
-      contentHash: 'abc123def456',
-      attestable: true,
-      resumeArtifactId: 'artifact_x',
-      applicationId: 'app_x'
-    }
-  };
-  // inject fake readiness on model for title
-  const screen = renderTui({ ...model, selected: model.selected }, state, { width: 120, height: 36, color: false });
-  assert.match(screen, /pkt_test/);
-  assert.match(screen, /currency current/);
-  assert.match(screen, /receipt none/);
-  assert.match(screen, /next :form assist pkt_test .* or submit manually/);
-});
-
-// Wave 1 — packet CTA follows receiptState
-test('packet overlay CTA follows currency/receiptState', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id });
-  const renderWith = detail => renderTui(
-    { ...model, selected: model.selected },
-    { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, overlay: 'packet', packetDetail: detail },
-    { width: 120, height: 36, color: false }
-  );
-  assert.match(renderWith({ id: 'p1', currency: 'stale', receiptState: 'none' }), /next :packet create — freeze a packet/);
-  assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'none', attestable: true }), /next :form assist p1 .* or submit manually/);
-  assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'attested' }), /next :receipt <external-reference>/);
-  assert.match(renderWith({ id: 'p1', currency: 'current', receiptState: 'confirmed' }), /receipt confirmed · follow-ups only/);
-});
-
-async function driveToFormReady(store, profile, job) {
-  for (let round = 0; round < 3; round++) {
-    const plan = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id });
-    if (plan.status === 'materials-ready') break;
-    for (const q of plan.answers.questions) {
-      if (q.status === 'unmatched') {
-        addAnswer(store, { profileId: profile.id, category: q.category, question: q.question, answer: 'A verified response grounded in stored evidence.', sensitivity: 'public', verificationStatus: 'verified' });
-      } else if (q.status === 'blocked') {
-        addAnswer(store, { profileId: profile.id, category: q.category, question: q.question, answer: 'direct-response', sensitivity: 'restricted', reuseScope: 'never_auto_fill', sourceRef: `job:${job.id}`, verificationStatus: 'verified' });
-      }
-    }
-    for (const artifactId of plan.review.pendingArtifactIds) {
-      await callDomainTool(store, 'approve_artifact', { artifactId }, { source: 'tui' });
-    }
-  }
-  persistFormSnapshot(store, buildFormSnapshot({
-    snapshotId: 'form_tui_apply_loop',
-    jobId: job.id,
-    profileId: profile.id,
-    capturedAt: '2026-07-22T12:00:00.000Z',
-    requestedUrl: 'https://apply.example.test/jobs/tui/apply',
-    finalUrl: 'https://apply.example.test/jobs/tui/apply',
-    adapter: DOM_ADAPTER_MANIFEST,
-    selection: { frameKey: 'main', formKey: 'application', candidateCount: 1, score: 10 },
-    fields: [{ frameKey: 'main', locatorPath: '#name', prompt: 'Full name', control: 'text', required: false }],
-    warnings: []
-  }));
-  const plan = compileApplicationReadiness(store, { jobId: job.id, profileId: profile.id });
-  assert.equal(plan.status, 'form-ready', `expected form-ready, got ${plan.status}: ${plan.blockers.map(b => b.code).join(',')}`);
-  return plan;
-}
-
-// Wave 1 — full apply loop inside the TUI
-test('packet create/attest/receipt commands run the apply loop inside the TUI', async t => {
-  const { store, profile, job } = await seeded(t);
-  await driveToFormReady(store, profile, job);
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-  const tick = (ms = 100) => new Promise(resolve => setTimeout(resolve, ms));
-  const summary = () => readinessPacketSummary(store, { jobId: job.id, profileId: profile.id });
-
-  // Open the overlay, then freeze without leaving the shell
-  tui.executeCommand('packet');
-  await tick(40);
-  assert.equal(tui.state.overlay, 'packet');
-  tui.executeCommand('packet create');
-  await tick();
-  assert.ok(summary().currentPacketId, 'packet should be frozen from the TUI');
-  assert.equal(tui.state.overlay, 'packet', 'overlay stays open and refreshes');
-  assert.match(tui.state.status, /packet frozen · next: :form assist .* or submit manually/);
-  let screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  assert.match(screen, /next :form assist .* or submit manually/);
-
-  // Invalid RFC3339 is rejected without mutating
-  tui.executeCommand('attest not-a-date');
-  await tick();
-  assert.match(tui.state.status, /packet attest failed/);
-  assert.equal(summary().receiptState, 'none');
-
-  // Attest submission
-  tui.executeCommand('attest 2026-07-21T10:00:00Z');
-  await tick();
-  assert.equal(summary().receiptState, 'attested');
-  assert.match(tui.state.status, /submission attested at 2026-07-21T10:00:00Z · next: :receipt/);
-  screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  assert.match(screen, /next :receipt <external-reference>/);
-
-  // Receipt requires a reference
-  tui.executeCommand('receipt');
-  await tick(40);
-  assert.match(tui.state.status, /Usage: :receipt <external-reference>/);
-
-  // Confirm receipt (multi-word reference preserved)
-  tui.executeCommand('receipt EXT-REF-42 portal confirmation');
-  await tick();
-  assert.equal(summary().receiptState, 'confirmed');
-  assert.match(tui.state.status, /receipt confirmed \(EXT-REF-42 portal confirmation\) · application loop complete locally/);
-  screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  assert.match(screen, /receipt confirmed · follow-ups only/);
-
-  // Mutations were recorded as trusted human/TUI source, never agent
-  const sources = all(store, 'SELECT DISTINCT source FROM application_receipts').map(row => row.source);
-  assert.deepEqual(sources, ['tui']);
-});
-
-test('TUI form command exposes explicit packet-bound inspect assist checkpoint and submit usage', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-  tui.executeCommand('form');
-  assert.match(tui.state.status, /:form inspect <url>.*:form assist <packet-id>.*:form checkpoint <packet-id>.*:form submit <packet-id>/);
-});
-
-// Wave 1 — freeze refuses unapproved readiness
-test('packet create from TUI refuses when readiness is not approved', async t => {
-  const { store, profile, job } = await seeded(t); // draft exists but is unapproved
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-
-  tui.executeCommand('packet create');
-  await new Promise(resolve => setTimeout(resolve, 100));
-  assert.match(tui.state.status, /packet create failed/);
-  assert.equal(readinessPacketSummary(store, { jobId: job.id, profileId: profile.id }).currentPacketId, null,
-    'no packet may be frozen before approval');
-});
-
-// Gap #3 — every painted filter is reachable by a number key
-test('number keys select every painted filter in header order', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.state.selectedJobId = job.id;
-  tui.refresh({ disk: false });
-
-  FILTERS.forEach((name, index) => {
-    const key = String(index + 1);
-    tui.onKeypress(key, { name: key });
-    assert.equal(tui.state.filter, name, `key ${key} must select painted filter "${name}"`);
-  });
-
-  // Header paints exactly FILTERS; no advertised filter lacks a key
-  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
-  for (const name of FILTERS) {
-    const label = name === 'materials-ready' ? 'ready' : name;
-    assert.ok(screen.includes(label), `filter "${name}" painted in header as "${label}"`);
-  }
-});
-
-// Gap #4 — discovery Enter opens the highlighted job in the main list
-test('discovery Enter saves the highlighted job and selects it in the main list', async t => {
-  const { store, profile, job } = await seeded(t, { draft: false });
-  run(store, "UPDATE jobs SET status='new' WHERE id=?", [job.id]);
+test('KEYMAP-09 the People pane uses arrows and Enter opens the connection overlay for a staged contact', async t => {
+  const { store, profile, job, tui } = await seeded(t);
+  // Seed one staged contact point for this listing.
+  const at = AS_OF;
+  run(store, `INSERT INTO people (id,name,normalized_name,primary_profile_url,aliases_json,identity_confidence,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`, ['person_ada', 'Ada Lovelace', 'ada lovelace', '', '[]', 'high', at, at]);
+  run(store, `INSERT INTO person_candidates (id, job_id, company_id, name, role, relevance, confidence, status, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`, ['cand_ada', job.id, null, 'Ada Lovelace', 'Engineering Manager', 'Likely hiring manager', 'high', 'candidate', at, at]);
+  upsertContactPoint(store, { companyId: null, personId: 'cand_ada', type: 'email', value: 'ada@example.test', evidenceTier: 'A', verificationStatus: 'verified', confidence: 'high' });
   save(store);
-  const io = streams();
-  const tui = new JobosTui(store, { ...io, profileId: profile.id, connectAgent: false, color: false });
-  tui.refresh({ disk: false });
+  tui.refresh();
+  tui.state.jobTab = 'people';
+  tui.handleKey('', { name: 'downArrow' });
+  assert.equal(tui.state.peopleIndex, 0);
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.overlay, 'connection', 'Enter on a People row opens the connection overlay');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  assert.match(screen, /Ada Lovelace/, 'connection overlay names the staged person');
+  assert.match(screen, /Record contact \(r\)/, 'record contact is available on the connection overlay');
+});
 
-  tui.openOverlay('discovery');
-  assert.equal(tui.state.overlay, 'discovery');
-  assert.equal(tui.state.selectedDiscoveryJobId, job.id, 'queue highlights the new job');
+test('KEYMAP-10 the locked state vocabulary has no filters 1-7 and no colon command bar', async t => {
+  const base = defaultTuiState();
+  assert.equal('filter' in base, false, 'retired filter state is gone');
+  assert.equal('taskFilter' in base, false, 'retired task filter state is gone');
+  assert.equal('mode' in base, false, 'retired modal mode state is gone');
+  const { tui } = await seeded(t);
+  const text = renderTui(tui.model, tui.state, { width: 120, height: 36, color: false });
+  assert.doesNotMatch(text, /\[today\]/, 'no filter tabs 1-7');
+  assert.doesNotMatch(text, /:packet|:answer|:prep/, 'no colon command bar');
+  assert.match(text, /\/ in Chat/, 'footer hint remains the slash hint');
+});
 
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, null, 'overlay closes');
-  assert.equal(one(store, 'SELECT status FROM jobs WHERE id=?', [job.id]).status, 'saved', 'job saved into the main list');
-  assert.equal(tui.model.selected?.job.id, job.id, 'main selection follows the opened job');
-  assert.match(tui.state.status, /saved · now selected in the main list/);
+test('KEYMAP-11 the composer input supports cursor movement and backspace', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.setInput('');
+  for (const char of 'abcde') tui.handleKey(char, { name: char });
+  assert.equal(tui.state.input, 'abcde');
+  tui.handleKey('', { name: 'leftArrow' });
+  tui.handleKey('', { name: 'leftArrow' });
+  tui.handleKey('', { name: 'backspace' });
+  assert.equal(tui.state.input, 'abde', 'backspace removes the char before the cursor');
+  tui.handleKey('', { name: 'rightArrow' });
+  tui.handleKey('x', { name: 'x' });
+  assert.equal(tui.state.input, 'abdxe', 'typing inserts at the cursor');
+});
+
+test('KEYMAP-12 Esc from an active composer keeps the overlay closed state and the shell responsive', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.setInput('plain question');
+  tui.handleKey('', esc());
+  assert.equal(tui.state.input, 'plain question', 'Esc does not clear non-slash composer text');
 });
