@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import chalk from 'chalk';
+import stripAnsi from 'strip-ansi';
 import { openStore, run, save } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
@@ -11,6 +13,7 @@ import { appCreate } from '../src/tracking.js';
 import { upsertContactPoint } from '../src/research/contacts.js';
 import { defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
 import { SLASH_CATALOG, slashHits } from '../src/tui/model.js';
+import { DEFAULT_VIEWPORT } from '../src/tui/layout.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
 
@@ -244,6 +247,8 @@ test('KEYMAP-13 SGR mouse presses route the frozen fixed grid without polluting 
   tui.state.jobTab = 'job';
   tui.state.leftMode = 'jobs';
   tui.setInput('');
+  tui.options.width = 140;
+  tui.options.height = 42;
   // Frozen 140x42 cells: header mode segs, rail segs, pane tabs.
   tui.handleKey('[<0;124;1M', {});
   assert.equal(tui.state.headerMode, 'workspace', 'click on Workspace seg switches the header mode');
@@ -273,8 +278,11 @@ test('KEYMAP-14 mouse CSI never appends SGR bytes to composer input and releases
   // Release (lowercase m) is a no-op: no routing, no typing pollution.
   const before = tui.state.headerMode;
   tui.handleKey('[<0;124;1m', {});
+  tui.handleKey('\x1b[<0;124;1M', {});
+  tui.handleKey('\x1b[<0;124;1m', {});
+  tui.handleKey('\x1b[M !!', {});
   assert.equal(tui.state.headerMode, before, 'release bytes do not route');
-  assert.equal(tui.state.input, 'type me', 'release bytes do not pollute the input');
+  assert.equal(tui.state.input, 'type me', 'stripped/full SGR and legacy X10 bytes do not pollute the input');
 });
 
 test('KEYMAP-15 headless start writes no mouse-mode escapes (snapshot byte-clean)', async t => {
@@ -341,25 +349,88 @@ test('KEYMAP-18 n and j type in the composer and do not switch the rail', async 
   assert.equal(tui.state.leftMode, 'jobs', 'composer j does not switch the rail');
 });
 
-test('KEYMAP-19 tracker keys 1-4 select saved/researching/applied/waiting without mutating status', async t => {
+test('KEYMAP-19 tracker keys and fixed-grid clicks visibly select their stage rows without selecting actions', async t => {
   const { tui } = await seeded(t);
   tui.state.overlay = null;
   tui.state.jobTab = 'job';
   tui.openOverlay('tracker');
-  const stages = [['1', 'saved'], ['2', 'researching'], ['3', 'applied'], ['4', 'waiting']];
-  for (const [key, label] of stages) {
-    tui.state.overlayIndex = 0;
+  tui.options.width = 140;
+  tui.options.height = 42;
+  const stages = [
+    { key: '1', label: 'saved', col: 51 },
+    { key: '2', label: 'researching', col: 60 },
+    { key: '3', label: 'applied', col: 73 },
+    { key: '4', label: 'waiting', col: 82 }
+  ];
+  const selectedBg = '\x1b[48;2;36;22;22m';
+  const renderColor = () => {
+    const previousLevel = chalk.level;
+    chalk.level = 3;
+    try {
+      return tui.render({ width: 140, height: 42, color: true });
+    } finally {
+      chalk.level = previousLevel;
+    }
+  };
+  const renderedRow = (screen, label) => screen.split('\n').find(line => {
+    const plain = stripAnsi(line);
+    return plain.includes(label) && /(?:current|set|attest only|no packet)/.test(plain);
+  });
+  const assertVisibleSelection = label => {
+    const screen = renderColor();
+    const stageLine = renderedRow(screen, label);
+    const freezeLine = renderedRow(screen, 'Freeze packet');
+    assert.ok(stageLine, `${label} renders as a selectable tracker row`);
+    assert.ok(stageLine.includes(`${selectedBg}${label}`), `${label} row has the selected background`);
+    assert.ok(freezeLine, 'Freeze packet action renders');
+    assert.ok(!freezeLine.includes(selectedBg), `${label} selection does not highlight Freeze packet`);
+  };
+
+  for (const { key, label, col } of stages) {
+    tui.state.overlayIndex = label === 'saved' ? 1 : 0;
     tui.handleKey(key, { name: key });
     assert.equal(tui.trackerSelectedRow()?.label, label, `key ${key} selects ${label}`);
+    assertVisibleSelection(label);
+
+    tui.state.overlayIndex = label === 'saved' ? 1 : 0;
+    tui.handleKey(`[<0;${col};11M`, {});
+    assert.equal(tui.trackerSelectedRow()?.label, label, `fixed-grid click selects ${label}`);
+    assertVisibleSelection(label);
   }
-  assert.equal(tui.model?.selected?.job?.applicationStatus, 'saved', 'direct stage selection never mutates application status');
+
+  for (const key of ['3', '4']) {
+    tui.handleKey(key, { name: key });
+    tui.handleKey('', { return: true });
+    assert.match(tui.state.status, /attestation only/, `${key} activation remains attestation-gated`);
+  }
+  assert.equal(tui.model?.selected?.job?.applicationStatus, 'saved', 'direct stage selection and gated activation never mutate application status');
   assert.equal(tui.state.overlay, 'tracker', 'tracker overlay stays open');
+});
+
+test('KEYMAP-19B Tracker clamps overflow selection so highlight and Enter activate the same final row', async t => {
+  const { tui } = await seeded(t);
+  tui.openOverlay('tracker');
+  tui.state.overlayIndex = 999;
+  let attested = 0;
+  let statusMutation = 0;
+  tui.attestSubmission = () => { attested += 1; };
+  tui.applyApplicationStatus = () => { statusMutation += 1; };
+
+  assert.equal(tui.trackerSelectedRow()?.id, 'attest-submitted', 'overflow resolves to the final painted Tracker row');
+  tui.handleKey('', { return: true });
+  assert.equal(attested, 1, 'Enter activates the final highlighted row');
+  assert.equal(statusMutation, 0, 'overflow cannot silently activate saved');
+
+  for (let index = 0; index < 20; index += 1) tui.handleKey('', { downArrow: true });
+  assert.equal(tui.trackerSelectedRow()?.id, 'attest-submitted', 'Down remains clamped at the final row');
 });
 
 test('KEYMAP-20 network i opens Edit intent and a fixed-grid click on the Edit-intent cell does the same', async t => {
   const { tui } = await seeded(t);
   tui.state.overlay = null;
   tui.openOverlay('network');
+  tui.options.width = 140;
+  tui.options.height = 42;
   tui.state.setupMode = null;
   tui.handleKey('i', { name: 'i' });
   assert.equal(tui.state.setupMode, 'network-intent', 'network i opens the Edit-intent input mode');
@@ -368,7 +439,102 @@ test('KEYMAP-20 network i opens Edit intent and a fixed-grid click on the Edit-i
   assert.equal(tui.state.setupMode, 'network-intent', 'click on the Edit-intent cell (55,22) opens the same input mode');
 });
 
-test('KEYMAP-21 /chat leaves an empty ready composer and a bare Enter runs no slash action', async t => {
+test('KEYMAP-21 Tracker and Network clicks follow the rendered live viewport across supported sizes and resize', async t => {
+  const { tui } = await seeded(t);
+  delete tui.options.width;
+  delete tui.options.height;
+  const stdout = tui.options.stdout;
+  const sizes = [[80, 24], [120, 36], [140, 42], [160, 50]];
+
+  const frame = () => tui.render({ color: false }).split('\n');
+  const clickText = (lines, text, occurrence = 0) => {
+    const matches = lines.map((line, index) => ({ line, index })).filter(item => item.line.includes(text));
+    const target = matches[occurrence];
+    assert.ok(target, `${text} is painted in the live frame`);
+    const col = target.line.indexOf(text) + 1 + Math.floor(text.length / 2);
+    tui.handleKey(`[<0;${col};${target.index + 1}M`, {});
+  };
+
+  for (const [width, height] of sizes) {
+    stdout.columns = width;
+    stdout.rows = height;
+    tui.openOverlay('tracker');
+    const trackerFrame = frame();
+    const chipLine = trackerFrame.findIndex(line => line.includes('saved') && line.includes('researching') && line.includes('waiting'));
+    assert.ok(chipLine >= 0, `Tracker direct stages paint at ${width}x${height}`);
+    for (const stage of ['saved', 'researching', 'applied', 'waiting']) {
+      tui.state.overlayIndex = stage === 'saved' ? 1 : 0;
+      const line = trackerFrame[chipLine];
+      const col = line.indexOf(stage) + 1 + Math.floor(stage.length / 2);
+      tui.handleKey(`[<0;${col};${chipLine + 1}M`, {});
+      assert.equal(tui.trackerSelectedRow()?.label, stage, `Tracker ${stage} routes at ${width}x${height}`);
+    }
+
+    tui.openOverlay('network');
+    tui.state.setupMode = null;
+    clickText(frame(), 'i Edit intent');
+    assert.equal(tui.state.setupMode, 'network-intent', `Network Edit intent routes at ${width}x${height}`);
+    tui.state.setupMode = null;
+  }
+
+  // A resize changes both rendered placement and routing without rebuilding
+  // the controller. The clicks below use only the post-resize frame cells.
+  stdout.columns = 80;
+  stdout.rows = 24;
+  tui.openOverlay('tracker');
+  const before = frame().findIndex(line => line.includes('saved') && line.includes('waiting'));
+  stdout.columns = 160;
+  stdout.rows = 50;
+  stdout.emit('resize');
+  const afterFrame = frame();
+  const after = afterFrame.findIndex(line => line.includes('saved') && line.includes('waiting'));
+  assert.notEqual(after, before, 'Tracker stage line moves after resize');
+  const waitingCol = afterFrame[after].indexOf('waiting') + 1 + Math.floor('waiting'.length / 2);
+  tui.handleKey(`[<0;${waitingCol};${after + 1}M`, {});
+  assert.equal(tui.trackerSelectedRow()?.label, 'waiting', 'post-resize Tracker click uses the new viewport');
+
+  tui.openOverlay('network');
+  tui.state.setupMode = null;
+  clickText(frame(), 'i Edit intent');
+  assert.equal(tui.state.setupMode, 'network-intent', 'post-resize Network click uses the new viewport');
+});
+
+test('KEYMAP-21B mounted Ink subscribes to live stdout resize and removes the listener on exit', async t => {
+  const { tui } = await seeded(t);
+  const { stdin, stdout } = tui.options;
+  stdin.isTTY = true;
+  stdin.setRawMode = () => {};
+  stdout.isTTY = true;
+  const before = stdout.listenerCount('resize');
+  const running = tui.start();
+  for (let attempt = 0; attempt < 20 && stdout.listenerCount('resize') === before; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(stdout.listenerCount('resize') > before, 'mounted Root owns a stdout resize listener');
+  await tui.exit();
+  await running;
+  assert.equal(stdout.listenerCount('resize'), before, 'unmount removes the stdout resize listener');
+});
+
+test('KEYMAP-22 viewport precedence keeps CLI overrides and deterministic controller fallback', async t => {
+  const { tui } = await seeded(t);
+  tui.options.stdout.columns = 80;
+  tui.options.stdout.rows = 24;
+  tui.options.width = 120;
+  tui.options.height = 36;
+  assert.deepEqual(tui.viewport(), { width: 120, height: 36 }, 'explicit width/height override live stdout');
+  tui.options.stdout.columns = 160;
+  tui.options.stdout.rows = 50;
+  assert.deepEqual(tui.viewport(), { width: 120, height: 36 }, 'resize cannot override explicit dimensions');
+
+  delete tui.options.width;
+  delete tui.options.height;
+  delete tui.options.stdout.columns;
+  delete tui.options.stdout.rows;
+  assert.deepEqual(tui.viewport(), DEFAULT_VIEWPORT, 'controller without dimensions uses the deterministic fallback');
+});
+
+test('KEYMAP-23 /chat leaves an empty ready composer and a bare Enter runs no slash action', async t => {
   const { tui } = await seeded(t);
   const dispatched = [];
   const originalRunSlash = tui.runSlash.bind(tui);
@@ -386,7 +552,7 @@ test('KEYMAP-21 /chat leaves an empty ready composer and a bare Enter runs no sl
   assert.equal(tui.state.input, '', 'bare Enter after /chat keeps the composer empty');
 });
 
-test('KEYMAP-22 slash stays available-anywhere but a lone "/" Enter runs nothing and clears', async t => {
+test('KEYMAP-24 slash stays available-anywhere but a lone "/" Enter runs nothing and clears', async t => {
   const { tui } = await seeded(t);
   const dispatched = [];
   const originalRunSlash = tui.runSlash.bind(tui);

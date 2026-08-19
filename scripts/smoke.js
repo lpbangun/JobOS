@@ -78,7 +78,14 @@ try {
   JSON.parse(run(['searches', 'create', 'Acme Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme Learning', '--fixture', path.join(process.cwd(), 'tests', 'fixtures-greenhouse.json'), '--keywords', 'Product,Learning', '--location', 'Remote', '--min-fit', '50', '--json']));
   const discovery = JSON.parse(run(['discover', 'run', '--search', 'Acme Discovery', '--json']));
   if (discovery.status !== 'succeeded' || discovery.counts.imported !== 1 || discovery.counts.highFit < 1) throw new Error('Fixture-backed discovery run did not import and flag a high-fit job');
-  const richFixture = path.join(process.cwd(), 'tests', 'fixtures', 'discovery-integrity', 'greenhouse-rich.json');
+  // Keep the smoke run time-independent: the source fixture intentionally has
+  // a historical timestamp for fixed-clock unit tests, while this end-to-end
+  // path exercises the real Date.now()-based --posted-within-days filter.
+  const richFixtureSource = path.join(process.cwd(), 'tests', 'fixtures', 'discovery-integrity', 'greenhouse-rich.json');
+  const richFixture = path.join(root, 'greenhouse-rich-smoke.json');
+  const richFixtureData = JSON.parse(readFileSync(richFixtureSource, 'utf8'));
+  for (const job of richFixtureData.jobs || []) job.updated_at = new Date().toISOString();
+  writeFileSync(richFixture, JSON.stringify(richFixtureData));
   JSON.parse(run(['searches', 'create', 'W03 Rich Discovery', '--profile', profile.id, '--adapter', 'greenhouse', '--company', 'Acme', '--board-token', 'acme', '--fixture', richFixture, '--posted-within-days', '30', '--remote-only', '--employment-types', 'full_time', '--min-fit', '50', '--json']));
   const richDiscovery = JSON.parse(run(['discover', 'run', '--search', 'W03 Rich Discovery', '--json']));
   if (richDiscovery.status !== 'succeeded' || richDiscovery.counts.imported !== 1) throw new Error('W03 rich fixture discovery did not succeed');

@@ -49,6 +49,7 @@ import { browserStatus } from '../browser.js';
 import { parseJson } from '../utils.js';
 import { App } from './components.js';
 import { CLASSIC_THEME } from './theme.js';
+import { resolveViewport } from './layout.js';
 import { renderTui } from './render.js';
 import {
   SETUP_SUB_OVERLAYS,
@@ -77,6 +78,7 @@ import {
   outreachDraftRows,
   selectedMemoryProposal,
   MOUSE_CSI,
+  MOUSE_X10,
   hitTestGrid
 } from './model.js';
 
@@ -208,8 +210,7 @@ function Root({ controller, options }) {
   useInput((input, key) => controller.handleKey(input, key));
   // Definite frame for the live TTY: stdout size by default, CLI --width /
   // --height override when provided (same contract as the snapshot path).
-  const width = Number(options.width) || stdout?.columns || 80;
-  const height = Number(options.height) || stdout?.rows || 24;
+  const { width, height } = resolveViewport(options, stdout);
   return h(App, {
     model: controller.model,
     state,
@@ -247,6 +248,7 @@ export class JobosTui {
     // override of the clean ready/off state).
     this._cancelSeq = 0;
     this._instance = null;
+    this._resizeListener = null;
     this._resolveExit = null;
     this._subscribers = new Set();
     this._exitPromise = null;
@@ -310,6 +312,11 @@ export class JobosTui {
     // CI stays byte-clean.
     this._mouseEnabled = true;
     this.writeMouseSequences('h');
+    const stdout = this.options.stdout || process.stdout;
+    if (typeof stdout?.on === 'function') {
+      this._resizeListener = () => this.notify();
+      stdout.on('resize', this._resizeListener);
+    }
     // TTY: connect in the background so startup never blocks on the backend;
     // failures land in agentState unavailable/failed and honest composer copy.
     if (this.options.connectAgent !== false) this.ensureAgent();
@@ -353,6 +360,12 @@ export class JobosTui {
       const instance = this._instance;
       this._instance = null;
       instance.unmount();
+    }
+    if (this._resizeListener) {
+      const stdout = this.options.stdout || process.stdout;
+      if (typeof stdout?.off === 'function') stdout.off('resize', this._resizeListener);
+      else if (typeof stdout?.removeListener === 'function') stdout.removeListener('resize', this._resizeListener);
+      this._resizeListener = null;
     }
     if (this._mouseEnabled) {
       this.writeMouseSequences('l');
@@ -426,9 +439,16 @@ export class JobosTui {
     if (render) this.notify();
   }
 
+  /** Current frame size: explicit options, then live stdout, then fallback. */
+  viewport(stdout = this.options.stdout || process.stdout) {
+    return resolveViewport(this.options, stdout);
+  }
+
   /** Bounded snapshot string of the current controller state (for tests). */
-  render({ width = 140, height = 42, color = false } = {}) {
-    return renderTui(this.model, this.state, { width, height, color });
+  render({ width, height, color = false } = {}) {
+    const live = this.viewport();
+    const viewport = resolveViewport({ width: width ?? live.width, height: height ?? live.height });
+    return renderTui(this.model, this.state, { ...viewport, color });
   }
 
   // -- state setters --------------------------------------------------------
@@ -1264,7 +1284,9 @@ export class JobosTui {
 
   trackerSelectedRow() {
     const rows = trackerRows(this.model, this.state);
-    return rows[this.state.overlayIndex || 0] || rows[0] || null;
+    if (!rows.length) return null;
+    const index = Math.min(rows.length - 1, Math.max(0, Math.floor(Number(this.state.overlayIndex) || 0)));
+    return rows[index];
   }
 
   activateTrackerRow() {
@@ -1744,11 +1766,13 @@ export class JobosTui {
     // BEFORE typing/shell/overlay routing so protocol bytes never append to
     // the composer input. Only left-button presses route; release and other
     // button codes are swallowed as no-ops.
-    const mouse = MOUSE_CSI.exec(String(input || ''));
+    const rawInput = String(input || '');
+    const mouse = MOUSE_CSI.exec(rawInput);
     if (mouse) {
       this.handleMouse(mouse);
       return;
     }
+    if (MOUSE_X10.test(rawInput)) return;
     key = normalizeInputKey(key);
     const typing = isComposerActive(this.state);
     const slashOpen = typing && String(this.state.input || '').startsWith('/');
@@ -1841,16 +1865,13 @@ export class JobosTui {
 
   /**
    * Route a parsed SGR mouse sequence (`[<btn;col;row[Mm]`, ESC stripped) to
-   * the fixed-grid hit test. Left-button press only; everything else is
+   * the live-viewport hit test. Left-button press only; everything else is
    * swallowed so it can never reach the composer. Misses are no-ops.
    */
   handleMouse(mouse) {
     const [, button, col, row, suffix] = mouse;
     if (button !== '0' || suffix !== 'M') return;
-    const hit = hitTestGrid(this.model, this.state, Number(col), Number(row), {
-      width: Number(this.options.width) || 140,
-      height: Number(this.options.height) || 42
-    });
+    const hit = hitTestGrid(this.model, this.state, Number(col), Number(row), this.viewport());
     if (!hit) return;
     switch (hit.action) {
       case 'setHeaderMode': return this.setHeaderMode(hit.value);
@@ -1896,7 +1917,10 @@ export class JobosTui {
       return this.notify();
     }
     if (key.downArrow) {
-      this.state.overlayIndex = (this.state.overlayIndex || 0) + 1;
+      const next = (this.state.overlayIndex || 0) + 1;
+      this.state.overlayIndex = overlay === 'tracker'
+        ? Math.min(Math.max(0, trackerRows(this.model, this.state).length - 1), next)
+        : next;
       return this.notify();
     }
     if (key.return) return this.activateOverlay(overlay);

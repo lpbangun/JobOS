@@ -8,6 +8,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { ThemeProvider, Spinner } from '@inkjs/ui';
 import { CLASSIC_THEME, OVERLAY_BACKDROP, INKUI_THEME } from './theme.js';
+import { MODAL_WIDTH, MODAL_PADDING_X } from './layout.js';
 import {
   ACTIVE_APPLICATION_STATUSES,
   SETUP_STEP_LABELS,
@@ -380,10 +381,10 @@ function Modal({ kicker, children, hint }) {
   // full-shell backdrop and centering.
   return h(Bx, {
     flexDirection: 'column',
-    width: 52,
+    width: MODAL_WIDTH,
     maxWidth: '100%',
     bg: CLASSIC_THEME.panel,
-    paddingX: 2,
+    paddingX: MODAL_PADDING_X,
     paddingY: 1
   },
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, String(kicker || '').toUpperCase()),
@@ -703,7 +704,7 @@ function TrackerOverlay({ model, state, actions }) {
         }, ` ${stage} `)
       ))
     ),
-    rows.filter(row => row.id !== 'status:waiting').map((row, i) => h(Bx, {
+    rows.map((row, i) => h(Bx, {
       key: row.id,
       flexDirection: 'row',
       justifyContent: 'space-between',

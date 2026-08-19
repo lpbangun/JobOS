@@ -8,20 +8,26 @@ import { AcpClient, jobosMcpServer } from '../src/acp.js';
 import { openStore, one } from '../src/db.js';
 import { selectedJobContext } from '../src/domain-tools.js';
 import { seedMcpDemo } from './seed-mcp-demo.js';
+import { hermesEvidence, preflightHermes, stopAcpClient } from './lib/hermes-live.mjs';
 
-const HERMES = '/home/logani/.local/bin/hermes';
 const root = fs.mkdtempSync(path.join(tmpdir(), 'jobos-b13-live-'));
 const workspace = path.join(root, 'workspace');
 let client = null;
 let store = null;
+let hermes = null;
+let timedOut = false;
+let hardStopCleanup = null;
+let hardStopCleanupError = null;
 const events = [];
 const hardStop = setTimeout(() => {
-  process.stderr.write('B13 prerequisite/live failure: real Hermes ACP check exceeded 180000ms\n');
-  process.exit(124);
+  timedOut = true;
+  process.stderr.write(`B13 prerequisite/live failure: real Hermes ACP check exceeded 180000ms; hermes=${hermesEvidence(null, hermes)}\n`);
+  process.exitCode = 124;
+  hardStopCleanup = stopAcpClient(client).catch(error => { hardStopCleanupError = error; });
 }, 180_000);
 
 try {
-  fs.accessSync(HERMES, fs.constants.X_OK);
+  hermes = preflightHermes();
   const seeded = await seedMcpDemo(workspace);
   store = await openStore({ workspace });
   const before = one(store, 'SELECT score_json FROM jobs WHERE id=?', [seeded.jobId]);
@@ -30,7 +36,7 @@ try {
 
   client = new AcpClient({
     root: workspace,
-    command: HERMES,
+    command: hermes.executable,
     args: ['acp'],
     requestTimeoutMs: 45_000,
     promptTimeoutMs: 150_000
@@ -60,6 +66,7 @@ try {
   process.stdout.write(`${JSON.stringify({
     ok: true,
     backend: 'hermes-acp',
+    hermes,
     sessionId,
     stopReason: turn.stopReason,
     jobId: seeded.jobId,
@@ -73,11 +80,18 @@ try {
     completedScoreToolCall: true
   }, null, 2)}\n`);
 } catch (error) {
-  process.stderr.write(`B13 prerequisite/live failure: ${error.message}\n`);
-  process.exitCode = 1;
+  process.stderr.write(`B13 prerequisite/live failure: ${error.message}; hermes=${hermesEvidence(error, hermes)}\n`);
+  process.exitCode = timedOut ? 124 : 1;
 } finally {
   clearTimeout(hardStop);
-  if (client) await Promise.race([client.stop().catch(() => {}), new Promise(resolve => setTimeout(resolve, 3_000))]);
+  try {
+    if (hardStopCleanup) await hardStopCleanup;
+    else await stopAcpClient(client);
+    if (hardStopCleanupError) throw hardStopCleanupError;
+  } catch (error) {
+    process.stderr.write(`B13 cleanup failure: ${error.message}\n`);
+    process.exitCode = timedOut ? 124 : 1;
+  }
   try { store?.db.close(); } catch {}
   fs.rmSync(root, { recursive: true, force: true });
 }

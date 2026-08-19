@@ -4,6 +4,8 @@
  * Everything here is deterministic from (model, state).
  */
 
+import { networkIntentGeometry, trackerStageGeometry } from './layout.js';
+
 export const ACTIVE_APPLICATION_STATUSES = Object.freeze([
   'saved',
   'researching',
@@ -239,16 +241,16 @@ export function statusLine(model, state) {
   return job?.company ? `${base} · ${job.company}` : base;
 }
 
-export const MOUSE_CSI = /^\[<(\d+);(\d+);(\d+)([Mm])$/;
+export const MOUSE_CSI = /^(?:\x1b)?\[<(\d+);(\d+);(\d+)([Mm])$/;
+export const MOUSE_X10 = /^(?:\x1b)?\[M[\x20-\xff]{3}$/;
 
 /**
- * Pure hit-test for the fixed 140x42 Classic grid (SGR mouse coordinates are
- * 1-based terminal cells). Returns an action descriptor for the painted cell
- * or null. Mouse is additive: every frozen cell dispatches to the same action
- * the keyboard uses, and an unknown cell is a no-op that must never leak into
- * the composer input.
+ * Pure hit-test for the live Classic grid (SGR mouse coordinates are 1-based
+ * terminal cells). Returns an action descriptor for the painted cell or null.
+ * Rendering and routing receive the same viewport; unknown cells are no-ops
+ * and mouse protocol bytes never leak into the composer input.
  *
- * Frozen geometry (measured from the rendered frame at width x height):
+ * Geometry (derived from the rendered frame at width x height):
  * - row 1: header mode segs right-aligned (Workspace, then Jobs)
  * - row 2: left rail segs (New | Jobs) then pane tabs (Job | People | Chat)
  * - rows 3+: rail rows, two painted lines per row (title, company)
@@ -292,31 +294,26 @@ export function hitTestGrid(model, state, col, row, { width = 140, height = 42 }
 }
 
 function hitTestOverlay(overlay, model, state, c, r, width, height) {
-  if (overlay === 'tracker' && width === 140 && height === 42) {
-    // Frozen B11 tracker chip row (bench-b11-direct-surfaces.mjs): the four
-    // direct stages paint on the first chip line at row 11. Columns are the
-    // modal content geometry (content starts col 47, each chip is
-    // ` ${label} ` + 1 margin), matching the painted ` saved   researching
-    // applied   waiting ` cells (51,11) (60,11) (73,11) (82,11).
-    if (r !== 11) return null;
-    let col = 47; // first chip leading space
+  if (overlay === 'tracker') {
+    const geometry = trackerStageGeometry(width, height);
+    if (r < geometry.row || r > geometry.rowEnd) return null;
+    let chipLeft = geometry.contentLeft;
     for (const stage of TRACKER_DIRECT_STAGES) {
-      const start = col + 1;
-      const end = col + stage.length;
+      const start = chipLeft + 1;
+      const end = chipLeft + stage.length;
       if (c >= start && c <= end) {
         const rows = trackerRows(model, state);
         const index = rows.findIndex(row => row.label === stage);
         return index >= 0 ? { action: 'setOverlayIndex', index } : null;
       }
-      col += stage.length + 2 + 1; // chip box + margin
+      chipLeft += stage.length + 3; // chip text (` ${stage} `) + marginRight
     }
     return null;
   }
-  if (overlay === 'network' && width === 140 && height === 42) {
-    // Frozen B11 network Edit-intent control: the `i Edit intent` line paints
-    // at modal content row 22, cols 47-59, at 140x42 (bench-b11 cell (55,22)).
-    if (r !== 22) return null;
-    if (c < 47 || c > 59) return null;
+  if (overlay === 'network') {
+    const geometry = networkIntentGeometry(width, height);
+    if (r !== geometry.row) return null;
+    if (c < geometry.contentLeft || c >= geometry.contentLeft + geometry.label.length) return null;
     return { action: 'editNetworkIntent' };
   }
   if (overlay !== 'setup') return null;

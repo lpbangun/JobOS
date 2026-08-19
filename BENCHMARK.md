@@ -706,13 +706,26 @@ node scripts/bench-b13-live-grounded.mjs
 
 ### What pass means
 
-A real `/home/logani/.local/bin/hermes acp` guest connects directly to JobOS in
-an isolated `/tmp` workspace, completes a visible `score_job` MCP tool call,
+A real resolved Hermes ACP guest (`JOBOS_HERMES_BIN`, then `PATH`, then the
+documented compatibility fallback) connects directly to JobOS in an isolated
+`/tmp` workspace, completes a visible `score_job` MCP tool call,
 and ends with `stopReason: "end_turn"`. The command prints the real ACP session
 id and then reopens SQLite from disk. It passes only when the reopened job has a
 new `job.scored` audit record and parseable `score_json` with contract
-`jobos.fit-score.v1`; the output includes its overall value and SHA-256. Missing
-or unusable Hermes, protocol failure, timeout, absent tool evidence, or absent
+`jobos.fit-score.v1`; the output includes its overall value and SHA-256.
+
+Executable selection is explicit and portable:
+
+1. `JOBOS_HERMES_BIN` when set to an executable path or command;
+2. `hermes` discovered on `PATH`;
+3. compatibility fallback `/home/logani/.local/bin/hermes`.
+
+When Hermes is installed elsewhere, run the live check as:
+
+```bash
+JOBOS_HERMES_BIN=/absolute/path/to/hermes node scripts/bench-b13-live-grounded.mjs
+```
+Missing or unusable Hermes, protocol failure, timeout, absent tool evidence, or absent
 disk mutation is an honest non-zero prerequisite/live failure, never a fake
 success.
 
@@ -773,3 +786,52 @@ PASS_EVIDENCE: <one sentence, live evidence, or fail output>
 
 B10–B15 extend, and do not replace, B1–B9. The verdict remains pass or fail
 only.
+
+---
+
+## Check B16 — genuine Linux PTY interaction and resize
+
+### Command
+
+```bash
+python3 scripts/bench-b16-real-pty.py
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+A Linux standard-library PTY launches the actual interactive
+`node src/cli.js tui --agent off` Ink mount in an isolated `/tmp` `JOBOS_HOME`.
+The harness captures the real raw terminal stream and fails closed on timeout or
+cleanup failure. It proves all of the following without native npm dependencies:
+
+- the live 140×42 welcome paint covers the **New | Jobs** rail and
+  **Job | People | Chat** pane navigation;
+- the TUI writes SGR mouse modes 1000 and 1006 enable bytes, and writes both
+  disable sequences after a clean Ctrl-C exit;
+- after dismissing welcome, real `ESC [ < ... M` mouse bytes injected through
+  the PTY route a visibly painted **Workspace** action at 140×42;
+- the same mounted process resizes to 80×24, and a size-specific SGR click again
+  routes a visibly painted **Workspace** action;
+- mouse protocol bytes never appear as composer text, including a click sent
+  while the composer is already active;
+- agent/search/LLM credentials are blank and `--agent off` starts no ACP guest.
+
+Missing Linux PTY behavior, a hang, an unclean process exit, absent mode restore,
+navigation leaking through welcome, a missed action, or visible protocol text is
+an honest non-zero failure.
+
+B16 extends, and does not rename, replace, or weaken, B6–B15. The overall
+verdict is **pass** only when B1–B16 all pass.
+
+## B16 critic record
+
+```
+CHECK: B16
+COMMAND: python3 scripts/bench-b16-real-pty.py
+EXIT: <code>
+PASS_EVIDENCE: <raw byte count/hash and interaction evidence, or fail output>
+```

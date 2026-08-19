@@ -281,6 +281,28 @@ test('UX-BENCH-09 first-run empty state is honest and never invents jobs, compan
   assert.equal(tui.model.empty.noJobs, true);
 });
 
+test('UX-BENCH-WELCOME-FOOTER effective welcome hides navigation structures and rail hints until dismissal', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-ux-welcome-footer-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = await openStore({ workspace: root });
+  const tui = makeTui(store, null, null);
+  const lines = state => render(tui.model, state, 140, 42);
+  const railHint = line => /\bn\s+New\b.*\bj\s+Jobs\b/.test(line);
+  const railTabs = line => /\bNew\b.*\bJobs\b/.test(line) && !railHint(line);
+  const paneTabs = line => /\bJob\b.*\bPeople\b.*\bChat\b/.test(line) && !/\bTab\b/.test(line);
+
+  const welcome = lines(tui.state);
+  assert.match(welcome.join('\n'), /WELCOME TO JOBOS|Welcome to JobOS/, 'effective first-run welcome is open');
+  assert.equal(welcome.some(railHint), false, 'welcome footer omits the n New / j Jobs hints');
+  assert.equal(welcome.some(railTabs), false, 'welcome covers the structural New | Jobs rail tabs');
+  assert.equal(welcome.some(paneTabs), false, 'welcome covers the structural Job | People | Chat pane tabs');
+
+  const dismissed = lines({ ...tui.state, welcomeDismissed: true });
+  assert.ok(dismissed.some(railHint), 'dismissed board restores the documented n New / j Jobs footer hints');
+  assert.ok(dismissed.some(railTabs), 'dismissed board restores the structural New | Jobs rail tabs');
+  assert.ok(dismissed.some(paneTabs), 'dismissed board restores the structural Job | People | Chat pane tabs');
+});
+
 test('UX-BENCH-10 working turns are visible in the header and the status line stays local', async t => {
   const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
   const tui = makeTui(store, profile.id, job.id);
