@@ -69,12 +69,15 @@ import {
   fitLabel,
   filesRows,
   trackerRows,
+  TRACKER_DIRECT_STAGES,
   reviewRows,
   peopleReviewRows,
   networkPeople,
   connectionPerson,
   outreachDraftRows,
-  selectedMemoryProposal
+  selectedMemoryProposal,
+  MOUSE_CSI,
+  hitTestGrid
 } from './model.js';
 
 /** Accept both Ink's boolean key flags and direct-controller name keys. */
@@ -132,9 +135,7 @@ const h = React.createElement;
 
 export const TUI_DOMAIN_ACTIONS = Object.freeze({
   daily: 'daily_discovery',
-  pursue: 'pursue_job',
-  score: 'score_job',
-  network: 'map_reachable_network'
+  network: 'network_graph_query'
 });
 
 export function defaultTuiState() {
@@ -241,6 +242,10 @@ export class JobosTui {
     // the host enables the assistant (--agent off must never assign one).
     this.client = null;
     this.connectPromise = null;
+    // Monotonic counter for in-pane ACP cancellation: a cancel during a turn
+    // invalidates the async continuation (no late chunks appended, no error
+    // override of the clean ready/off state).
+    this._cancelSeq = 0;
     this._instance = null;
     this._resolveExit = null;
     this._subscribers = new Set();
@@ -300,6 +305,11 @@ export class JobosTui {
     this._exitPromise = new Promise(resolve => {
       this._resolveExit = resolve;
     });
+    // TTY-only mouse reporting: SGR button-event mode (1000) + SGR encoding
+    // (1006). Never written on the non-TTY/headless path, so `--snapshot` and
+    // CI stays byte-clean.
+    this._mouseEnabled = true;
+    this.writeMouseSequences('h');
     // TTY: connect in the background so startup never blocks on the backend;
     // failures land in agentState unavailable/failed and honest composer copy.
     if (this.options.connectAgent !== false) this.ensureAgent();
@@ -315,6 +325,23 @@ export class JobosTui {
     return this.exit();
   }
 
+  /**
+   * Write SGR mouse enable/disable to the TTY stdout (guarded by the
+   * interactive flag in start). Every handler writes both mode bytes so the
+   * terminal state is always restored on exit.
+   */
+  writeMouseSequences(mode) {
+    if (!this._mouseEnabled && mode === 'l') return;
+    const stdout = this.options.stdout || process.stdout;
+    if (!stdout || typeof stdout.write !== 'function') return;
+    const bytes = mode === 'h'
+      ? '\x1b[?1000h\x1b[?1006h'
+      : '\x1b[?1000l\x1b[?1006l';
+    try {
+      stdout.write(bytes);
+    } catch {}
+  }
+
   async exit() {
     if (this.exited) return;
     this.exited = true;
@@ -326,6 +353,10 @@ export class JobosTui {
       const instance = this._instance;
       this._instance = null;
       instance.unmount();
+    }
+    if (this._mouseEnabled) {
+      this.writeMouseSequences('l');
+      this._mouseEnabled = false;
     }
     const client = this.client;
     this.client = null;
@@ -1501,6 +1532,9 @@ export class JobosTui {
       if (event && event.type === 'agent_message' && event.text) chunks.push(String(event.text));
     };
     if (typeof client.on === 'function') client.on('event', onEvent);
+    // Remember the cancel epoch at dispatch; a cancel during this turn
+    // invalidates the continuation so late text/errors never reach the pane.
+    const cancelSeq = this._cancelSeq;
     try {
       const result = await client.prompt(value, { context });
       // The AcpClient streams assistant text as events; the prompt result
@@ -1509,6 +1543,7 @@ export class JobosTui {
       if (result && typeof result.text === 'string' && result.text.trim() && !chunks.length) {
         chunks.push(result.text);
       }
+      if (cancelSeq !== this._cancelSeq) return; // cancelled in-pane: keep the clean state
       this.state.agentState = 'ready';
       this.state.error = null;
       this.state.status = 'assistant ready';
@@ -1517,12 +1552,13 @@ export class JobosTui {
         try { await writePersistedAcpSession(this.store.root, profileId, client.sessionId); } catch {}
       }
     } catch (error) {
+      if (cancelSeq !== this._cancelSeq) return; // cancelled in-pane: keep the clean state
       this.handleAgentPromptError(error);
     } finally {
       if (typeof client.off === 'function') client.off('event', onEvent);
-      if (!this.exited) this.setWorking(false);
+      if (!this.exited && cancelSeq === this._cancelSeq) this.setWorking(false);
     }
-    if (!this.exited && chunks.length) {
+    if (!this.exited && cancelSeq === this._cancelSeq && chunks.length) {
       this.pushChat(chatScope, { kind: 'assistant', text: chunks.join('') });
       this.notify();
     }
@@ -1551,7 +1587,10 @@ export class JobosTui {
         state.overlay = null;
         this.setHeaderMode('jobs');
         this.setJobTab('chat');
-        this.setInput('/');
+        // Leave an empty, ready composer: a welcome message may still be sent,
+        // but a stray Enter must never auto-select the first catalog entry
+        // (slice contract: bare Enter after /chat runs no slash action).
+        this.setInput('');
         this.state.status = 'Chat this job';
         break;
       case 'daily':
@@ -1666,8 +1705,50 @@ export class JobosTui {
 
   // -- key routing -----------------------------------------------------------
 
+  /**
+   * In-pane cancel of a running ACP prompt. Esc (or an equivalent key) while
+   * an agent turn is in flight calls the owned AcpClient.cancel exactly once,
+   * returns the pane to a clean ready/off state, and quarantines the session
+   * so late updates are discarded by the client. Domain-only working states
+   * (create files / discovery, no ACP session) are never cancelled here.
+   */
+  cancelInFlightPrompt() {
+    const client = this.client;
+    if (!client || typeof client.cancel !== 'function') return false;
+    const inFlight = this.state.working && Boolean(client.sessionId) &&
+      (this.state.agentState === 'working' || client.state === 'working' || client.state === 'cancelling');
+    if (!inFlight) return false;
+    this._cancelSeq += 1;
+    let cancelled = false;
+    try {
+      cancelled = client.cancel();
+    } catch {}
+    // Only a cancel that actually took effect (or a session already
+    // quarantined as cancelled) flips the pane; a refused cancel leaves the
+    // working turn untouched so the user still sees it running.
+    if (cancelled || client.quarantinedSessionId || client.quarantineReason === 'cancelled') {
+      this.state.working = false;
+      this.state.agentState = this.options.connectAgent === false ? 'off' : 'ready';
+      this.state.error = null;
+      this.state.status = 'Assistant cancelled · session quarantined';
+      this.notify();
+      return true;
+    }
+    return false;
+  }
+
   handleKey(input, key = {}) {
     if (this.exited) return;
+    // SGR mouse press/release bytes arrive with ESC already stripped by Ink
+    // (or directly from a controller in tests). They must be consumed here
+    // BEFORE typing/shell/overlay routing so protocol bytes never append to
+    // the composer input. Only left-button presses route; release and other
+    // button codes are swallowed as no-ops.
+    const mouse = MOUSE_CSI.exec(String(input || ''));
+    if (mouse) {
+      this.handleMouse(mouse);
+      return;
+    }
     key = normalizeInputKey(key);
     const typing = isComposerActive(this.state);
     const slashOpen = typing && String(this.state.input || '').startsWith('/');
@@ -1675,6 +1756,10 @@ export class JobosTui {
     // Esc during a reason/note/channel input cancels the input mode, not the
     // overlay that owns it (same contract as the Files rejection reason).
     if (key.escape) {
+      // A running ACP prompt owns Esc: cancel the turn first, before any
+      // overlay/slash/setup escape path (no overlay can be open while the
+      // composer turn is in flight, so this never steals an overlay Esc).
+      if (this.cancelInFlightPrompt()) return;
       if (this.state.setupMode) return this.cancelSetupMode();
       if (this.state.setupBrowse) {
         const browse = this.state.setupBrowse;
@@ -1754,6 +1839,33 @@ export class JobosTui {
     return this.handleShellKey(input, key);
   }
 
+  /**
+   * Route a parsed SGR mouse sequence (`[<btn;col;row[Mm]`, ESC stripped) to
+   * the fixed-grid hit test. Left-button press only; everything else is
+   * swallowed so it can never reach the composer. Misses are no-ops.
+   */
+  handleMouse(mouse) {
+    const [, button, col, row, suffix] = mouse;
+    if (button !== '0' || suffix !== 'M') return;
+    const hit = hitTestGrid(this.model, this.state, Number(col), Number(row), {
+      width: Number(this.options.width) || 140,
+      height: Number(this.options.height) || 42
+    });
+    if (!hit) return;
+    switch (hit.action) {
+      case 'setHeaderMode': return this.setHeaderMode(hit.value);
+      case 'setLeftMode': return this.setLeftMode(hit.value);
+      case 'setJobTab': return this.setJobTab(hit.value);
+      case 'selectRow': return this.selectRow(hit.index);
+      case 'setOverlayIndex':
+        this.state.overlayIndex = Math.max(0, Math.floor(Number(hit.index) || 0));
+        return this.notify();
+      case 'editNetworkIntent': return this.startNetworkIntent();
+      case 'submitComposer': return this.submitComposer();
+      default: return;
+    }
+  }
+
   handleEscape({ typing, slashOpen }) {
     if (this.state.overlay) return this.closeOverlay();
     if (effectiveOverlay(this.model, this.state) === 'welcome') {
@@ -1795,6 +1907,19 @@ export class JobosTui {
       return null;
     }
     if (overlay === 'tracker') {
+      // Direct stage select 1-4: set overlayIndex to the trackerRows row whose
+      // label is the stage (post-apply stages stay attestation-only — this
+      // selection never bypasses packet/attestation).
+      const directKeys = { '1': 'saved', '2': 'researching', '3': 'applied', '4': 'waiting' };
+      const stage = directKeys[input];
+      if (stage) {
+        const rows = trackerRows(this.model, this.state);
+        const idx = rows.findIndex(row => row.label === stage);
+        if (idx >= 0) {
+          this.state.overlayIndex = idx;
+          return this.notify();
+        }
+      }
       if (input === 'f' || input === 'F') return this.freezePacket();
       if (input === 't' || input === 'T') return this.attestSubmission();
       return null;
@@ -1817,6 +1942,7 @@ export class JobosTui {
     }
     if (overlay === 'network') {
       if (input === 'g' || input === 'G') return this.refreshNetworkGraph();
+      if (input === 'i' || input === 'I') return this.startNetworkIntent();
       return null;
     }
     if (overlay === 'connection') {
@@ -2672,6 +2798,14 @@ export class JobosTui {
         return;
       }
       if (key.return) {
+        // A lone "/" with no filter is not an explicit selection: a bare
+        // Enter must never run a slash command the user did not intend
+        // (regression: stray Enter after /chat or a just-typed "/" must not
+        // start /create-files or any other action). Clear it instead.
+        if (String(this.state.input || '') === '/') {
+          this.state.slashIndex = 0;
+          return this.setInput('');
+        }
         const hits = slashHits(this.state.input);
         const hit = hits[this.state.slashIndex || 0] || hits[0];
         if (hit) return this.runSlash(hit.id);
@@ -2725,6 +2859,8 @@ export class JobosTui {
 
   handleShellKey(input, key) {
     if (input === 'q' || input === 'Q') return this.exit();
+    if (input === 'n' || input === 'N') return this.setLeftMode('new');
+    if (input === 'j' || input === 'J') return this.setLeftMode('jobs');
     if (input === 'g' || input === 'G') {
       return this.setHeaderMode(this.state.headerMode === 'workspace' ? 'jobs' : 'workspace');
     }

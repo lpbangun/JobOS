@@ -236,3 +236,172 @@ test('KEYMAP-12 Esc from an active composer keeps the overlay closed state and t
   tui.handleKey('', esc());
   assert.equal(tui.state.input, 'plain question', 'Esc does not clear non-slash composer text');
 });
+
+test('KEYMAP-13 SGR mouse presses route the frozen fixed grid without polluting the composer', async t => {
+  const { tui } = await seeded(t);
+  tui.state.overlay = null;
+  tui.state.headerMode = 'jobs';
+  tui.state.jobTab = 'job';
+  tui.state.leftMode = 'jobs';
+  tui.setInput('');
+  // Frozen 140x42 cells: header mode segs, rail segs, pane tabs.
+  tui.handleKey('[<0;124;1M', {});
+  assert.equal(tui.state.headerMode, 'workspace', 'click on Workspace seg switches the header mode');
+  tui.handleKey('[<0;137;1M', {});
+  assert.equal(tui.state.headerMode, 'jobs', 'click on Jobs seg returns to the board');
+  tui.handleKey('[<0;12;2M', {});
+  assert.equal(tui.state.leftMode, 'new', 'click on the New rail seg selects New');
+  tui.handleKey('[<0;36;2M', {});
+  assert.equal(tui.state.leftMode, 'jobs', 'click on the Jobs rail seg selects Jobs');
+  tui.handleKey('[<0;53;2M', {});
+  assert.equal(tui.state.jobTab, 'job', 'click on the Job pane tab');
+  tui.handleKey('[<0;63;2M', {});
+  assert.equal(tui.state.jobTab, 'people', 'click on the People pane tab');
+  tui.handleKey('[<0;73;2M', {});
+  assert.equal(tui.state.jobTab, 'chat', 'click on the Chat pane tab');
+  assert.equal(tui.state.input, '', 'no mouse bytes leaked into the composer input');
+});
+
+test('KEYMAP-14 mouse CSI never appends SGR bytes to composer input and releases are swallowed', async t => {
+  const { tui } = await seeded(t);
+  tui.state.jobTab = 'chat';
+  tui.setInput('type me');
+  tui.handleKey('[<0;124;1M', {});
+  tui.handleKey('[<0;63;2M', {});
+  tui.handleKey('[<0;12;2M', {});
+  assert.equal(tui.state.input, 'type me', 'mouse bytes must never enter typed composer text');
+  // Release (lowercase m) is a no-op: no routing, no typing pollution.
+  const before = tui.state.headerMode;
+  tui.handleKey('[<0;124;1m', {});
+  assert.equal(tui.state.headerMode, before, 'release bytes do not route');
+  assert.equal(tui.state.input, 'type me', 'release bytes do not pollute the input');
+});
+
+test('KEYMAP-15 headless start writes no mouse-mode escapes (snapshot byte-clean)', async t => {
+  const { store, tui } = await seeded(t);
+  const captured = [];
+  const originalWrite = tui.options.stdout.write.bind(tui.options.stdout);
+  tui.options.stdout.write = (chunk, ...rest) => { captured.push(String(chunk)); return originalWrite(chunk, ...rest); };
+  await tui.start();
+  await tui.exit();
+  const bytes = captured.join('');
+  assert.doesNotMatch(bytes, /\x1b\[\?1000[hl]/, 'headless/non-TTY start must not write mouse-mode escapes');
+  assert.doesNotMatch(bytes, /\x1b\[\?1006[hl]/, 'headless/non-TTY start must not write SGR-encoding escapes');
+  const snapshot = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
+  assert.doesNotMatch(snapshot, /\?1000[hl]|\?1006[hl]/, 'snapshot frame stays byte-clean of mouse-mode sequences');
+});
+
+test('KEYMAP-16 writeMouseSequences emits SGR enable/disable on the TTY stdout (no Ink mount)', async t => {
+  // Do NOT call start() here: TTY start mounts a real Ink render() tree, which
+  // is not what this unit asserts. We exercise writeMouseSequences directly so
+  // the test stays synchronous and never leaks into a live Ink process.
+  const { store } = await seeded(t);
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.rows = 42;
+  stdout.isTTY = true;
+  const captured = [];
+  stdout.on('data', chunk => captured.push(String(chunk)));
+  const tui = new JobosTui(store, { ...streams(), connectAgent: false, color: false, width: 140, height: 42 });
+  tui.options.stdout = stdout;
+
+  tui._mouseEnabled = true;
+  tui.writeMouseSequences('h');
+  tui.writeMouseSequences('l');
+  tui._mouseEnabled = false;
+
+  const bytes = captured.join('');
+  assert.match(bytes, /\x1b\[\?1000h/, 'enable emits ESC[?1000h (button-event mouse)');
+  assert.match(bytes, /\x1b\[\?1006h/, 'enable emits ESC[?1006h (SGR mouse encoding)');
+  assert.match(bytes, /\x1b\[\?1000l/, 'disable emits ESC[?1000l');
+  assert.match(bytes, /\x1b\[\?1006l/, 'disable emits ESC[?1006l');
+});
+
+test('KEYMAP-17 n and j directly select the New and Jobs rail (distinct from g)', async t => {
+  const { tui } = await seeded(t);
+  tui.state.overlay = null;
+  tui.state.headerMode = 'jobs';
+  tui.state.leftMode = 'jobs';
+  tui.handleKey('n', { name: 'n' });
+  assert.equal(tui.state.leftMode, 'new', 'n selects the New rail directly');
+  tui.handleKey('j', { name: 'j' });
+  assert.equal(tui.state.leftMode, 'jobs', 'j selects the Jobs rail directly');
+});
+
+test('KEYMAP-18 n and j type in the composer and do not switch the rail', async t => {
+  const { tui } = await seeded(t);
+  tui.state.overlay = null;
+  tui.state.jobTab = 'chat';
+  tui.state.input = '';
+  tui.handleKey('n', { name: 'n' });
+  assert.equal(tui.state.input, 'n', 'composer n types');
+  assert.equal(tui.state.leftMode, 'jobs', 'composer n does not switch the rail');
+  tui.handleKey('j', { name: 'j' });
+  assert.equal(tui.state.input, 'nj', 'composer j types');
+  assert.equal(tui.state.leftMode, 'jobs', 'composer j does not switch the rail');
+});
+
+test('KEYMAP-19 tracker keys 1-4 select saved/researching/applied/waiting without mutating status', async t => {
+  const { tui } = await seeded(t);
+  tui.state.overlay = null;
+  tui.state.jobTab = 'job';
+  tui.openOverlay('tracker');
+  const stages = [['1', 'saved'], ['2', 'researching'], ['3', 'applied'], ['4', 'waiting']];
+  for (const [key, label] of stages) {
+    tui.state.overlayIndex = 0;
+    tui.handleKey(key, { name: key });
+    assert.equal(tui.trackerSelectedRow()?.label, label, `key ${key} selects ${label}`);
+  }
+  assert.equal(tui.model?.selected?.job?.applicationStatus, 'saved', 'direct stage selection never mutates application status');
+  assert.equal(tui.state.overlay, 'tracker', 'tracker overlay stays open');
+});
+
+test('KEYMAP-20 network i opens Edit intent and a fixed-grid click on the Edit-intent cell does the same', async t => {
+  const { tui } = await seeded(t);
+  tui.state.overlay = null;
+  tui.openOverlay('network');
+  tui.state.setupMode = null;
+  tui.handleKey('i', { name: 'i' });
+  assert.equal(tui.state.setupMode, 'network-intent', 'network i opens the Edit-intent input mode');
+  tui.state.setupMode = null;
+  tui.handleKey('[<0;55;22M', {});
+  assert.equal(tui.state.setupMode, 'network-intent', 'click on the Edit-intent cell (55,22) opens the same input mode');
+});
+
+test('KEYMAP-21 /chat leaves an empty ready composer and a bare Enter runs no slash action', async t => {
+  const { tui } = await seeded(t);
+  const dispatched = [];
+  const originalRunSlash = tui.runSlash.bind(tui);
+  tui.runSlash = id => { dispatched.push(id); return originalRunSlash(id); };
+  tui.createFiles = async () => false;
+
+  tui.runSlash('chat');
+  assert.equal(tui.state.jobTab, 'chat', '/chat opens this-job Chat');
+  assert.equal(tui.state.input, '', '/chat must leave an empty, ready composer, not a slash query');
+  dispatched.length = 0; // /chat itself invokes runSlash; only the bare Enter must not.
+
+  // A bare Enter after /chat must not select the first catalog entry.
+  tui.handleKey('', { name: 'return', return: true });
+  assert.deepEqual(dispatched, [], 'bare Enter after /chat dispatches no slash action (create-files included)');
+  assert.equal(tui.state.input, '', 'bare Enter after /chat keeps the composer empty');
+});
+
+test('KEYMAP-22 slash stays available-anywhere but a lone "/" Enter runs nothing and clears', async t => {
+  const { tui } = await seeded(t);
+  const dispatched = [];
+  const originalRunSlash = tui.runSlash.bind(tui);
+  tui.runSlash = id => { dispatched.push(id); return originalRunSlash(id); };
+  tui.createFiles = async () => false;
+
+  // slash-anywhere is preserved: typing "/" on the board opens the menu.
+  tui.state.jobTab = 'job';
+  tui.handleKey('/', { name: '/' });
+  assert.equal(tui.state.jobTab, 'chat', '/ on Job jumps to Chat with the menu available');
+  assert.equal(tui.state.input, '/', 'the slash menu is open with a lone slash');
+  assert.ok(slashHits('/').some(item => item.id === 'create-files'), 'lone slash lists the full catalog');
+
+  // A bare Enter on the lone "/" must not dispatch the first catalog entry.
+  tui.handleKey('', { name: 'return', return: true });
+  assert.deepEqual(dispatched, [], 'Enter on a lone "/" dispatches no slash action');
+  assert.equal(tui.state.input, '', 'Enter on a lone "/" clears the slash to an empty ready composer');
+});

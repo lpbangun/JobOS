@@ -613,3 +613,163 @@ PASS_EVIDENCE: <one sentence or fail output>
 ```
 
 B6–B9 are pass/fail only. No partial credit.
+
+---
+
+## B10+ critic log and verdict extension
+
+The frozen interaction and live-agent extension below adds B10–B15. The overall
+verdict is **pass** only when B1–B15 all pass; otherwise it is **fail**. B10–B15
+are pass/fail only. No partial credit. The scripts they invoke are committed
+benchmark harnesses and must be run unchanged from the repository root.
+
+## Check B10 — fixed-grid SGR mouse routing
+
+### Command
+
+```bash
+node scripts/bench-b10-mouse.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+At 140×42, SGR mouse press bytes in Ink's stripped form
+(`[<0;COL;ROWM`) route through `JobosTui.handleKey` to the spike-equivalent
+fixed-grid action: **Workspace | Jobs** header modes, **New | Jobs** rail
+segments, rail rows, **Job | People | Chat** pane tabs, covering-overlay rows,
+and composer send. Mouse protocol bytes never enter visible composer input.
+The harness uses only a throwaway workspace beneath `/tmp`.
+
+## Check B11 — direct key and click reachability for three surfaces
+
+### Command
+
+```bash
+node scripts/bench-b11-direct-surfaces.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+Each formerly unreachable surface has both a documented direct key and a
+fixed-grid SGR click target:
+
+- `n` selects **New** and `j` selects **Jobs** directly; each rail segment is
+  also clickable. This is distinct from `g` (**Workspace | Jobs**) and from
+  running `/daily` or `/jobs`.
+- In Tracker, `1` selects **saved**, `2` **researching**, `3` **applied**, and
+  `4` **waiting** directly; each displayed stage has a click target. Selection
+  does not bypass packet/attestation safety for mutations that require it.
+- In Network, `i` opens **Edit intent** and the displayed Edit-intent control is
+  clickable. The edit continues through the real network-intent pathway.
+
+The rendered hints document those keys; a hidden key with no product copy is a
+fail. The harness is isolated beneath `/tmp`.
+
+## Check B12 — `/chat` leaves bare Enter harmless
+
+### Command
+
+```bash
+node scripts/bench-b12-chat-enter.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+`/chat` opens this-job Chat with an empty, ready composer. A subsequent bare
+Enter dispatches no slash action. In particular it cannot select the first
+catalog entry (`/create-files`) through `slashHits('/')`, start tailoring, or
+run any other domain slash command.
+
+## Check B13 — real Hermes ACP grounded score mutation
+
+### Command
+
+```bash
+node scripts/bench-b13-live-grounded.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+A real `/home/logani/.local/bin/hermes acp` guest connects directly to JobOS in
+an isolated `/tmp` workspace, completes a visible `score_job` MCP tool call,
+and ends with `stopReason: "end_turn"`. The command prints the real ACP session
+id and then reopens SQLite from disk. It passes only when the reopened job has a
+new `job.scored` audit record and parseable `score_json` with contract
+`jobos.fit-score.v1`; the output includes its overall value and SHA-256. Missing
+or unusable Hermes, protocol failure, timeout, absent tool evidence, or absent
+disk mutation is an honest non-zero prerequisite/live failure, never a fake
+success.
+
+## Check B14 — Esc cancels an in-pane running prompt
+
+### Command
+
+```bash
+node scripts/bench-b14-cancel.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+While a Chat or Workspace ACP prompt is working, Esc calls the owned
+`AcpClient.cancel()` exactly once, sends `session/cancel`, quarantines that
+session as cancelled, and returns the pane to a clean non-working **ready** or
+**off** state. A late `session/update` from the quarantined turn is emitted only
+as `discarded_update`; late assistant text never reaches the pane.
+
+## Check B15 — real Hermes ACP resume across launches
+
+### Command
+
+```bash
+node scripts/bench-b15-live-resume.mjs
+```
+
+### Expected exit code
+
+`0`
+
+### What pass means
+
+In an isolated `/tmp` workspace, a first real Hermes ACP launch receives an
+opaque nonce and reaches `end_turn`. JobOS persists that session through
+`writePersistedAcpSession` to `.jobos/acp-sessions.json`, and
+`readPersistedAcpSession` returns it. After stopping the first ACP process, a
+new `AcpClient` and Hermes process load the persisted id. The resumed id must be
+identical, a second turn must reach `end_turn`, and its real agent-message text
+must contain the nonce known only from the prior turn. Missing Hermes, a stale
+or replaced id, missing persistence, session-load failure, timeout, or lost
+conversation context exits non-zero honestly.
+
+## Frozen critic record format (B10–B15)
+
+For each check record:
+
+```
+CHECK: B<n>
+COMMAND: <exact command above>
+EXIT: <code>
+PASS_EVIDENCE: <one sentence, live evidence, or fail output>
+```
+
+B10–B15 extend, and do not replace, B1–B9. The verdict remains pass or fail
+only.

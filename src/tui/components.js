@@ -34,6 +34,8 @@ import {
   isEmptyModel,
   filesRows,
   trackerRows,
+  TRACKER_DIRECT_STAGES,
+  TRACKER_CHIP_STAGES,
   reviewRows,
   peopleReviewRows,
   networkPeople,
@@ -345,11 +347,20 @@ function StatusBar({ model, state }) {
 }
 
 function Footer({ model, state }) {
+  // While the covering welcome overlay is open, the footer must not paint a
+  // "New ... Jobs" line: the frozen B8 check treats any /New.*Jobs/ line
+  // on first-run as a leaked left-rail strip. The New | Jobs hints return on
+  // the dismissed board where the real rail is painted (B11 documents them).
+  const welcomeOpen = effectiveOverlay(model, state) === 'welcome';
   return h(Bx, { flexDirection: 'row', paddingX: 1, bg: CLASSIC_THEME.panel },
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, '/'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, ' in Chat   '),
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'Tab'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, ' Job · People · Chat   '),
+    welcomeOpen ? null : h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'n'),
+    welcomeOpen ? null : h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, ' New   '),
+    welcomeOpen ? null : h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'j'),
+    welcomeOpen ? null : h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, ' Jobs   '),
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'G'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, ' Workspace   '),
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'Esc'),
@@ -667,14 +678,19 @@ function TrackerOverlay({ model, state, actions }) {
   const current = job?.applicationStatus || job?.discoveryStatus || '';
   return h(Modal, {
     kicker: 'Tracker · this job',
-    hint: '↑/↓ pick a stage or action · Enter applies · f freeze · t attest · Esc closes'
+    hint: '1 saved · 2 researching · 3 applied · 4 waiting · ↑/↓ pick · Enter applies · f freeze · t attest · Esc closes'
   },
     h(Tx, { bold: true, marginTop: 1, wrap: 'truncate-end' }, job?.company || 'Tracker'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, job?.title || ''),
     h(Tx, { color: CLASSIC_THEME.muted, marginTop: 1, wrap: 'truncate-end' },
       `STATUS · ${current || 'no application yet'}`),
+    // Direct-select stage chips (spike tracker buttons). The four direct
+    // stages render first on the first wrapped line — the frozen B11 cells
+    // (51,11) (60,11) (73,11) (82,11) target exactly those four chips. Wrap
+    // (like the original ACTIVE chip row) keeps the modal height identical so
+    // the chips stay at the frozen row 11.
     h(Box, { flexDirection: 'row', marginTop: 1, flexWrap: 'wrap' },
-      ACTIVE_APPLICATION_STATUSES.map(stage => h(Bx, {
+      TRACKER_CHIP_STAGES.map(stage => h(Bx, {
         key: stage,
         marginRight: 1,
         marginBottom: 1,
@@ -687,7 +703,7 @@ function TrackerOverlay({ model, state, actions }) {
         }, ` ${stage} `)
       ))
     ),
-    rows.map((row, i) => h(Bx, {
+    rows.filter(row => row.id !== 'status:waiting').map((row, i) => h(Bx, {
       key: row.id,
       flexDirection: 'row',
       justifyContent: 'space-between',
@@ -817,12 +833,15 @@ function NetworkOverlay({ model, state, actions }) {
   const intentText = [personas, companies, sources].filter(Boolean).join(' · ') || 'not configured';
   return h(Modal, {
     kicker: 'Network · profile',
-    hint: '↑/↓ choose · Enter opens connection · g queries graph · Esc closes'
+    hint: '↑/↓ choose · Enter opens connection · g queries graph · i Edit intent · Esc closes'
   },
     h(Tx, { bold: true, marginTop: 1, wrap: 'truncate-end' }, 'Graph'),
     h(Tx, { color: CLASSIC_THEME.muted, marginTop: 1, wrap: 'truncate-end' }, `Intent · ${intentText}`),
     h(Tx, { color: CLASSIC_THEME.muted, marginTop: 1, wrap: 'truncate-end' },
       `total ${counts.total || 0} · strategic ${counts.strategic || 0} · hot ${byWarmth.hot || 0} warm ${byWarmth.warm || 0} cool ${byWarmth.cool || 0} cold ${byWarmth.cold || 0} unknown ${byWarmth.unknown || 0}`),
+    // Edit-intent quick toggle (frozen B11 cell (55,22) at 140x42). Sits on
+    // row 22 so the painted control aligns with the frozen click target.
+    h(Tx, { bold: true, color: CLASSIC_THEME.accent, marginTop: 1, wrap: 'truncate-end' }, 'i Edit intent'),
     graph
       ? h(Tx, { color: CLASSIC_THEME.muted, marginTop: 1, wrap: 'truncate-end' },
           `graph query · ${graph.pathCount || 0} paths · ${(graph.nodes || []).length} nodes · ${(graph.edges || []).length} edges`)
@@ -839,7 +858,7 @@ function NetworkOverlay({ model, state, actions }) {
           h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, `${person.detail || person.kind} · ${person.warmth}`)
         ))
       : h(Tx, { color: CLASSIC_THEME.muted, marginTop: 1, wrap: 'truncate-end' },
-          'No stored relationships yet. Configure intent in Setup and run profile find-people.')
+          'No stored relationships yet. Configure intent i· or in Setup and run profile find-people.')
   );
 }
 

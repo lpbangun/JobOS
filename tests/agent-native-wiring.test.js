@@ -83,7 +83,7 @@ test('with --agent off the TUI never starts an ACP child and writes no session s
   assert.equal(await readPersistedAcpSession(root, null), null);
 });
 
-test('TUI slash ids map to real agent-door domain tools and unknown commands are refused', async t => {
+test('TUI slash ids map to real agent-door domain tools and wiring shows a real mutation', async t => {
   const root = workspace(t);
   const store = await openStore({ workspace: root });
   t.after(() => store.db.close());
@@ -91,11 +91,44 @@ test('TUI slash ids map to real agent-door domain tools and unknown commands are
   const tui = new JobosTui(store, { ...streams(), profileId: profile.id, connectAgent: false, color: false });
   tui.refresh();
 
+  // Only live slash ids remain: the dead /pursue and /score keys are dropped,
+  // and /network maps to the real read path network_graph_query, not the
+  // job-scoped map_reachable_network.
+  assert.deepEqual(
+    Object.entries(TUI_DOMAIN_ACTIONS),
+    [['daily', 'daily_discovery'], ['network', 'network_graph_query']],
+    'TUI_DOMAIN_ACTIONS is exactly the live slash ids mapped to real agent-door tools'
+  );
   const externalTools = new Set(mcpToolNames());
-  for (const [slash, tool] of Object.entries(TUI_DOMAIN_ACTIONS)) {
-    assert.ok(externalTools.has(tool), `slash ${slash} maps to ${tool}, which is missing from the external MCP catalog`);
-    assert.doesNotThrow(() => tui.runSlash(slash), `runSlash(${slash}) routes to a live handler`);
+  for (const tool of Object.values(TUI_DOMAIN_ACTIONS)) {
+    assert.ok(externalTools.has(tool), `slash maps to ${tool}, which is missing from the external MCP catalog`);
   }
+
+  // /network opens the overlay; running the real graph-query path leaves a
+  // visible result on state (pathCount/nodes/edges), proving the domain tool
+  // actually ran rather than merely not throwing.
+  tui.runSlash('network');
+  assert.equal(tui.state.overlay, 'network', '/network opens the network overlay');
+  assert.equal(tui.state.networkGraph, null, 'graph is unqueried until the g path runs');
+  await tui.refreshNetworkGraph();
+  assert.ok(tui.state.networkGraph, 'network_graph_query produced a real tool result');
+  assert.equal(typeof tui.state.networkGraph.pathCount, 'number', 'result carries pathCount');
+  assert.ok(Array.isArray(tui.state.networkGraph.nodes), 'result carries nodes');
+  assert.ok(Array.isArray(tui.state.networkGraph.edges), 'result carries edges');
+  assert.match(tui.state.status, /Network graph/, 'status reports the real graph query outcome');
+
+  // /daily runs the real daily_discovery domain tool; an empty-source profile
+  // lands an honest status line, never an invented listing or a bare throw.
+  tui.runSlash('daily');
+  assert.equal(tui.state.overlay, null, '/daily closes any overlay');
+  assert.equal(tui.state.leftMode, 'new', '/daily focuses the New rail');
+  // runDailyDiscovery fires async from runSlash; wait for it to settle.
+  for (let i = 0; i < 200 && tui.state.working; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(tui.state.working, false, 'daily run settled');
+  assert.match(tui.state.status, /Daily/, 'status reports the honest daily outcome');
+
   tui.runSlash('not-a-command');
   assert.match(tui.state.status, /No matching command/);
 });

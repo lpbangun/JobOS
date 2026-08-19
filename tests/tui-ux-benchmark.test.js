@@ -14,7 +14,7 @@ import { appCreate } from '../src/tracking.js';
 import { createArtifact } from '../src/artifacts.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { CLASSIC_THEME, defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
-import { SLASH_CATALOG, actionChip, newRows, jobRows } from '../src/tui/model.js';
+import { SLASH_CATALOG, actionChip, newRows, jobRows, hitTestGrid, setupStepViews } from '../src/tui/model.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
 const SIZES = [
@@ -347,4 +347,65 @@ test('UX-BENCH-13 the production @inkjs/ui tree is mounted: ThemeProvider + INKU
   tui.state.working = true;
   const header = render(tui.model, tui.state, 120, 36).join('\n');
   assert.match(header, /working/, 'the App header mounts the @inkjs/ui Spinner while working');
+});
+
+test('UX-BENCH-14 the frozen 140x42 SGR hit-rects map to the actions the frame paints', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  // Seed a second pipeline job so the rail paints a second row: the frozen
+  // rail-row cell (10,5) is visual index 1 and must map to a real row.
+  const secondFile = path.join(store.root, 'second-role.md');
+  writeFileSync(secondFile, [
+    'Title: Senior Product Manager II',
+    'Company: Westbrook Learning',
+    'Location: Remote',
+    '',
+    'Launch a second learning program for educators.'
+  ].join('\n'));
+  const second = importText(store, { profileId: profile.id, filePath: secondFile }).job;
+  appCreate(store, second.id, 'materials-ready', '', { at: AS_OF });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.welcomeDismissed = true;
+  tui.state.headerMode = 'jobs';
+  tui.state.leftMode = 'jobs';
+  tui.state.jobTab = 'job';
+  tui.refresh();
+  const frame = render(tui.model, tui.state, 140, 42);
+  const joint = frame.join('\n');
+  // The frame really paints the mode segs, rail segs, pane tabs, and rows the
+  // hit-test grid targets at the frozen coordinates.
+  assert.match(joint, /Workspace/, 'header paints Workspace mode');
+  assert.match(joint, /Jobs/, 'header paints Jobs mode');
+  const row2 = frame[1] || '';
+  assert.match(row2, /New/, 'row 2 paints the New rail seg');
+  assert.match(row2, /Job/, 'row 2 paints the Job pane tab');
+  assert.match(row2, /People/, 'row 2 paints the People pane tab');
+  assert.match(row2, /Chat/, 'row 2 paints the Chat pane tab');
+
+  const grid = { width: 140, height: 42 };
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 124, 1, grid), { action: 'setHeaderMode', value: 'workspace' }, 'header Workspace seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 137, 1, grid), { action: 'setHeaderMode', value: 'jobs' }, 'header Jobs seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 12, 2, grid), { action: 'setLeftMode', value: 'new' }, 'rail New seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 36, 2, grid), { action: 'setLeftMode', value: 'jobs' }, 'rail Jobs seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 53, 2, grid), { action: 'setJobTab', value: 'job' }, 'Job pane tab');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 63, 2, grid), { action: 'setJobTab', value: 'people' }, 'People pane tab');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 73, 2, grid), { action: 'setJobTab', value: 'chat' }, 'Chat pane tab');
+
+  // The rail row click targets the visual row under the cursor (row 3 = first
+  // painted rail row, row 5 = second) regardless of fixture insertion order.
+  const railHit = hitTestGrid(tui.model, tui.state, 10, 5, grid);
+  assert.equal(railHit.action, 'selectRow', 'the second painted rail row is a selectRow hit');
+  assert.equal(railHit.index, 1, 'the second painted rail row carries visual index 1');
+
+  // Setup overlay: the centered step rows are clickable and map to overlayIndex.
+  const setupState = { ...tui.state, overlay: 'setup', overlayIndex: 0 };
+  const steps = setupStepViews(tui.model);
+  assert.ok(steps.length > 5, 'the setup overlay has enough steps to cover the frozen cell');
+  assert.deepEqual(hitTestGrid(tui.model, setupState, 60, 20, grid), { action: 'setOverlayIndex', index: 5 }, 'setup step row click maps to overlayIndex 5');
+
+  // Composer: the bottom row inside the main pane dispatches submitComposer.
+  const chatState = { ...tui.state, jobTab: 'chat', headerMode: 'jobs', input: 'send this grounded question' };
+  assert.deepEqual(hitTestGrid(tui.model, chatState, 135, 40, grid), { action: 'submitComposer' }, 'composer send click dispatches submitComposer');
+
+  // A miss stays a no-op: no action descriptor is invented for empty chrome.
+  assert.equal(hitTestGrid(tui.model, tui.state, 5, 8, grid), null, 'unmapped cells are a no-op');
 });

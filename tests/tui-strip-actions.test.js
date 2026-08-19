@@ -105,7 +105,7 @@ test('RAIL-03 /daily focuses New and /jobs returns to the board', async t => {
   assert.equal(tui.state.headerMode, 'workspace', '/workspace opens Workspace chat');
   tui.runSlash('chat');
   assert.equal(tui.state.jobTab, 'chat', '/chat opens this-job Chat');
-  assert.equal(tui.state.input, '/', '/chat leaves "/" in the input');
+  assert.equal(tui.state.input, '', '/chat leaves an empty, ready composer so bare Enter runs no slash action');
 });
 
 test('RAIL-04 /review is the morning brief: real due tasks and pending drafts, no updates inbox', async t => {

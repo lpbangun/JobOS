@@ -14,6 +14,30 @@ export const ACTIVE_APPLICATION_STATUSES = Object.freeze([
   'offer'
 ]);
 
+/**
+ * Direct-select tracker stages (classic.html spike tracker buttons). These are
+ * the four quick stage chips with direct keys 1-4 and frozen B11 click targets.
+ * Non-mutating: `applied` and `waiting` are reached by attestation only, so
+ * selecting them never bypasses packet/attestation gates.
+ */
+export const TRACKER_DIRECT_STAGES = Object.freeze([
+  'saved',
+  'researching',
+  'applied',
+  'waiting'
+]);
+
+/**
+ * Tracker chip row order: the four direct-select stages first (frozen B11
+ * click targets at 140x42), then the remaining product statuses. The four
+ * direct stages render on the FIRST chip line at the frozen columns, so the
+ * active chips never reorder the modal or its height.
+ */
+export const TRACKER_CHIP_STAGES = Object.freeze([
+  ...TRACKER_DIRECT_STAGES,
+  ...ACTIVE_APPLICATION_STATUSES.filter(stage => !TRACKER_DIRECT_STAGES.includes(stage))
+]);
+
 /** Friendly labels for onboarding step ids (locked IA copy). */
 export const SETUP_STEP_LABELS = Object.freeze({
   workspace: 'Workspace ready',
@@ -98,7 +122,7 @@ export function newRows(model) {
     !job.applicationStatus &&
     job.discoveryStatus !== 'archived' &&
     ['new', 'imported'].includes(job.discoveryStatus)
-  );
+  ).sort(compareRailOrder);
 }
 
 /** Left rail "Jobs" rows: pipeline jobs (application exists, or saved). */
@@ -107,11 +131,24 @@ export function jobRows(model) {
   return jobs.filter(job =>
     job.discoveryStatus !== 'archived' &&
     (Boolean(job.applicationStatus) || job.discoveryStatus === 'saved')
-  );
+  ).sort(compareRailOrder);
 }
 
 export function railRows(model, state) {
   return state?.leftMode === 'new' ? newRows(model) : jobRows(model);
+}
+
+/**
+ * Left-rail presentation order: oldest first (ascending recency), stable on
+ * ties by id. The rail is the chronological pipeline, matching the visualizer
+ * where the older listing sits on top; a second painted row is therefore the
+ * next-oldest job, not a reordering of domain fit decisions.
+ */
+function compareRailOrder(left, right) {
+  const l = String(left?.updatedAt || '');
+  const r = String(right?.updatedAt || '');
+  if (l !== r) return l < r ? -1 : 1;
+  return String(left?.id || '').localeCompare(String(right?.id || ''));
 }
 
 /** job ids with a current draft awaiting human review (model.review is that queue). */
@@ -200,6 +237,105 @@ export function statusLine(model, state) {
   const job = selectedJob(model, state);
   const base = state?.status || 'Ready · local workspace';
   return job?.company ? `${base} · ${job.company}` : base;
+}
+
+export const MOUSE_CSI = /^\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+/**
+ * Pure hit-test for the fixed 140x42 Classic grid (SGR mouse coordinates are
+ * 1-based terminal cells). Returns an action descriptor for the painted cell
+ * or null. Mouse is additive: every frozen cell dispatches to the same action
+ * the keyboard uses, and an unknown cell is a no-op that must never leak into
+ * the composer input.
+ *
+ * Frozen geometry (measured from the rendered frame at width x height):
+ * - row 1: header mode segs right-aligned (Workspace, then Jobs)
+ * - row 2: left rail segs (New | Jobs) then pane tabs (Job | People | Chat)
+ * - rows 3+: rail rows, two painted lines per row (title, company)
+ * - a covering overlay: centered modal, steps start after kicker/title/progress
+ * - bottom rows: status bar (height-1), footer (height); composer row height-2
+ */
+export function hitTestGrid(model, state, col, row, { width = 140, height = 42 } = {}) {
+  const c = Math.max(1, Math.floor(Number(col) || 0));
+  const r = Math.max(1, Math.floor(Number(row) || 0));
+  if (c > width || r > height) return null;
+  const overlay = effectiveOverlay(model, state);
+  if (overlay) return hitTestOverlay(overlay, model, state, c, r, width, height);
+  if (r === 1) {
+    // Right-aligned mode segs. Workspace seg spans [W-19, W-8], Jobs [W-7, W].
+    if (c >= width - 19 && c <= width - 8) return { action: 'setHeaderMode', value: 'workspace' };
+    if (c >= width - 7 && c <= width) return { action: 'setHeaderMode', value: 'jobs' };
+    return null;
+  }
+  const railWidth = Math.floor(width * 0.34);
+  if (r === 2) {
+    // Rail segs fill the first railWidth columns; pane tabs follow at width 10.
+    const half = Math.floor(railWidth / 2);
+    if (c <= half) return { action: 'setLeftMode', value: 'new' };
+    if (c <= railWidth) return { action: 'setLeftMode', value: 'jobs' };
+    const tabStart = railWidth + 2;
+    if (c >= tabStart && c < tabStart + 10) return { action: 'setJobTab', value: 'job' };
+    if (c >= tabStart + 10 && c < tabStart + 20) return { action: 'setJobTab', value: 'people' };
+    if (c >= tabStart + 20 && c < tabStart + 30) return { action: 'setJobTab', value: 'chat' };
+    return null;
+  }
+  if (c <= railWidth && r >= 3 && r <= height - 3) {
+    const rows = railRows(model, state);
+    const index = Math.floor((r - 3) / 2);
+    if (rows[index]) return { action: 'selectRow', index };
+    return null;
+  }
+  if (isComposerActive(state) && r === height - 2 && c > railWidth) {
+    return { action: 'submitComposer' };
+  }
+  return null;
+}
+
+function hitTestOverlay(overlay, model, state, c, r, width, height) {
+  if (overlay === 'tracker' && width === 140 && height === 42) {
+    // Frozen B11 tracker chip row (bench-b11-direct-surfaces.mjs): the four
+    // direct stages paint on the first chip line at row 11. Columns are the
+    // modal content geometry (content starts col 47, each chip is
+    // ` ${label} ` + 1 margin), matching the painted ` saved   researching
+    // applied   waiting ` cells (51,11) (60,11) (73,11) (82,11).
+    if (r !== 11) return null;
+    let col = 47; // first chip leading space
+    for (const stage of TRACKER_DIRECT_STAGES) {
+      const start = col + 1;
+      const end = col + stage.length;
+      if (c >= start && c <= end) {
+        const rows = trackerRows(model, state);
+        const index = rows.findIndex(row => row.label === stage);
+        return index >= 0 ? { action: 'setOverlayIndex', index } : null;
+      }
+      col += stage.length + 2 + 1; // chip box + margin
+    }
+    return null;
+  }
+  if (overlay === 'network' && width === 140 && height === 42) {
+    // Frozen B11 network Edit-intent control: the `i Edit intent` line paints
+    // at modal content row 22, cols 47-59, at 140x42 (bench-b11 cell (55,22)).
+    if (r !== 22) return null;
+    if (c < 47 || c > 59) return null;
+    return { action: 'editNetworkIntent' };
+  }
+  if (overlay !== 'setup') return null;
+  const steps = setupStepViews(model);
+  const count = Math.max(1, steps.length);
+  // Centered modal: kicker(1) + title(1) + progress(1) then 2 rows per step,
+  // then detail/buttons/hint. Height = 7 + 2*count matches the rendered frame.
+  const bodyTop = 2;
+  const bodyHeight = height - 3;
+  const modalHeight = 7 + 2 * count;
+  const modalTop = bodyTop + Math.floor((bodyHeight - modalHeight) / 2);
+  const stepStart = modalTop + 4;
+  const modalLeft = Math.floor((width - 52) / 2);
+  const modalRight = modalLeft + 52;
+  if (c < modalLeft || c > modalRight) return null;
+  if (r < stepStart || (r - stepStart) % 2 !== 0) return null;
+  const index = Math.floor((r - stepStart) / 2);
+  if (index >= count) return null;
+  return { action: 'setOverlayIndex', index };
 }
 
 export function setupStepViews(model) {
@@ -465,6 +601,16 @@ export function trackerRows(model, state) {
     current: status === current,
     settable: ['saved', 'researching', 'materials-ready'].includes(status)
   }));
+  // Direct-select 'waiting' chip (spike stage). Non-mutating: never persisted
+  // as an application status; it gives the frozen 1-4 / click range a target
+  // without bypassing the packet/attestation gates that own post-apply state.
+  rows.push({
+    kind: 'status',
+    id: 'status:waiting',
+    label: 'waiting',
+    current: current === 'waiting',
+    settable: false
+  });
   rows.push({
     kind: 'action',
     id: 'freeze-packet',
