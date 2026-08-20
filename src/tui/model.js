@@ -4,7 +4,7 @@
  * Everything here is deterministic from (model, state).
  */
 
-import { networkIntentGeometry, trackerStageGeometry } from './layout.js';
+import { boardGeometry, contains, networkIntentGeometry, trackerStageGeometry } from './layout.js';
 
 export const ACTIVE_APPLICATION_STATUSES = Object.freeze([
   'saved',
@@ -185,18 +185,50 @@ export function stageLabel(job) {
   return job.applicationStatus || job.discoveryStatus || '';
 }
 
+/**
+ * Authoritative board selection resolver — single source for header, panes,
+ * docs/contacts/readiness and mutations. Preferred ID must be visible in the
+ * active rail; otherwise the first visible rail row wins. Never silently
+ * falls back to model.jobs[0] when that job is not in the active rail.
+ */
+export function resolveBoardSelection(model, state, preferredId = null) {
+  const rows = railRows(model, state);
+  const desired = preferredId ?? state?.selectedJobId ?? null;
+  if (desired && rows.some(row => row.id === desired)) {
+    const index = rows.findIndex(row => row.id === desired);
+    const job = model?.jobs?.find(j => j.id === desired) || rows[index] || null;
+    return { rows, selectedJobId: desired, selectedIndex: index, job };
+  }
+  if (rows.length) {
+    const first = rows[0];
+    const job = model?.jobs?.find(j => j.id === first.id) || first;
+    return { rows, selectedJobId: first.id, selectedIndex: 0, job };
+  }
+  // Active rail empty — keep the desired job for header/pane continuity if it
+  // still exists in the workspace; otherwise no selection.
+  if (desired && model?.jobs?.some(j => j.id === desired)) {
+    const job = model.jobs.find(j => j.id === desired) || null;
+    return { rows, selectedJobId: desired, selectedIndex: 0, job };
+  }
+  if (model?.jobs?.length) {
+    // Preserve a workspace job for continuity rather than dropping to null when
+    // the active rail is empty but jobs exist elsewhere (e.g., pipeline job
+    // while viewing empty New). This keeps header/docs/tracker coherent.
+    const fallback = model.jobs[0];
+    return { rows, selectedJobId: fallback.id, selectedIndex: 0, job: fallback };
+  }
+  return { rows, selectedJobId: null, selectedIndex: 0, job: null };
+}
+
 /** Job whose context the main pane shows (model selection is authoritative). */
 export function selectedJob(model, state) {
   if (!model) return null;
-  if (state?.selectedJobId && model.jobs?.some(job => job.id === state.selectedJobId)) {
-    return model.jobs.find(job => job.id === state.selectedJobId);
-  }
-  return model.jobs?.[0] || null;
+  return resolveBoardSelection(model, state).job;
 }
 
 export function selectedRow(model, state) {
-  const rows = railRows(model, state);
-  return rows[state?.selectedIndex] || rows[0] || null;
+  if (!model) return null;
+  return resolveBoardSelection(model, state).job;
 }
 
 export function isEmptyModel(model) {
@@ -260,34 +292,63 @@ export const MOUSE_X10 = /^(?:\x1b)?\[M[\x20-\xff]{3}$/;
 export function hitTestGrid(model, state, col, row, { width = 140, height = 42 } = {}) {
   const c = Math.max(1, Math.floor(Number(col) || 0));
   const r = Math.max(1, Math.floor(Number(row) || 0));
-  if (c > width || r > height) return null;
+  const viewportWidth = Math.max(1, Math.floor(Number(width) || 140));
+  const viewportHeight = Math.max(1, Math.floor(Number(height) || 42));
+  if (c > viewportWidth || r > viewportHeight) return null;
   const overlay = effectiveOverlay(model, state);
-  if (overlay) return hitTestOverlay(overlay, model, state, c, r, width, height);
+  if (overlay) return hitTestOverlay(overlay, model, state, c, r, viewportWidth, viewportHeight);
+  const geo = boardGeometry({ width: viewportWidth, height: viewportHeight });
+  // Header row 1 — right-aligned workspace/jobs segs (clipped to viewport)
   if (r === 1) {
-    // Right-aligned mode segs. Workspace seg spans [W-19, W-8], Jobs [W-7, W].
-    if (c >= width - 19 && c <= width - 8) return { action: 'setHeaderMode', value: 'workspace' };
-    if (c >= width - 7 && c <= width) return { action: 'setHeaderMode', value: 'jobs' };
+    if (geo.header.workspaceClipped && contains(geo.header.workspaceClipped, c, r)) return { action: 'setHeaderMode', value: 'workspace' };
+    if (geo.header.jobsClipped && contains(geo.header.jobsClipped, c, r)) return { action: 'setHeaderMode', value: 'jobs' };
     return null;
   }
-  const railWidth = Math.floor(width * 0.34);
+  // Workspace mode: board geometry is not painted — gate rail/tab/row hits
+  if (state?.headerMode === 'workspace') {
+    if (isComposerActive(state) && r === geo.composerRow) {
+      // Workspace composer spans the full width
+      if (c >= 1 && c <= viewportWidth) return { action: 'submitComposer' };
+    }
+    return null;
+  }
+  // Jobs mode — board geometry
+  if (geo.mode !== 'split') {
+    // Compact: preserve visible rail tabs/rows, suppress only absent detail controls (pane tabs + detail composer)
+    // Detail/composer is clipped in compact jobs mode — no submitComposer regardless of jobTab chat.
+    if (r === 2) {
+      if (geo.rail.tabsClipped.new && contains(geo.rail.tabsClipped.new, c, r)) return { action: 'setLeftMode', value: 'new' };
+      if (geo.rail.tabsClipped.jobs && contains(geo.rail.tabsClipped.jobs, c, r)) return { action: 'setLeftMode', value: 'jobs' };
+      return null;
+    }
+    const maxRailBottomCompact = Math.max(0, viewportHeight - 3);
+    if (r >= geo.rail.rowsTop && r <= maxRailBottomCompact && geo.rail.rectClipped && c >= geo.rail.rectClipped.left && c <= geo.rail.rectClipped.right) {
+      const rows = railRows(model, state);
+      const index = Math.floor((r - geo.rail.rowsTop) / geo.rail.rowHeight);
+      if (rows[index]) return { action: 'selectRow', index };
+      return null;
+    }
+    // Compact jobs detail/composer is clipped — do not expose submitComposer
+    return null;
+  }
   if (r === 2) {
-    // Rail segs fill the first railWidth columns; pane tabs follow at width 10.
-    const half = Math.floor(railWidth / 2);
-    if (c <= half) return { action: 'setLeftMode', value: 'new' };
-    if (c <= railWidth) return { action: 'setLeftMode', value: 'jobs' };
-    const tabStart = railWidth + 2;
-    if (c >= tabStart && c < tabStart + 10) return { action: 'setJobTab', value: 'job' };
-    if (c >= tabStart + 10 && c < tabStart + 20) return { action: 'setJobTab', value: 'people' };
-    if (c >= tabStart + 20 && c < tabStart + 30) return { action: 'setJobTab', value: 'chat' };
+    if (geo.rail.tabsClipped.new && contains(geo.rail.tabsClipped.new, c, r)) return { action: 'setLeftMode', value: 'new' };
+    if (geo.rail.tabsClipped.jobs && contains(geo.rail.tabsClipped.jobs, c, r)) return { action: 'setLeftMode', value: 'jobs' };
+    if (geo.pane.tabsClipped.job && contains(geo.pane.tabsClipped.job, c, r)) return { action: 'setJobTab', value: 'job' };
+    if (geo.pane.tabsClipped.people && contains(geo.pane.tabsClipped.people, c, r)) return { action: 'setJobTab', value: 'people' };
+    if (geo.pane.tabsClipped.chat && contains(geo.pane.tabsClipped.chat, c, r)) return { action: 'setJobTab', value: 'chat' };
     return null;
   }
-  if (c <= railWidth && r >= 3 && r <= height - 3) {
+  // Rail rows: visible rows only, each two lines high starting at rowsTop
+  const maxRailBottom = Math.max(0, viewportHeight - 3);
+  if (r >= geo.rail.rowsTop && r <= maxRailBottom && geo.rail.rectClipped && c >= geo.rail.rectClipped.left && c <= geo.rail.rectClipped.right) {
     const rows = railRows(model, state);
-    const index = Math.floor((r - 3) / 2);
+    const index = Math.floor((r - geo.rail.rowsTop) / geo.rail.rowHeight);
     if (rows[index]) return { action: 'selectRow', index };
     return null;
   }
-  if (isComposerActive(state) && r === height - 2 && c > railWidth) {
+  // Composer in jobs mode: only the painted main pane interior is clickable
+  if (isComposerActive(state) && r === geo.composerRow && geo.pane.rectClipped && contains(geo.pane.rectClipped, c, r)) {
     return { action: 'submitComposer' };
   }
   return null;

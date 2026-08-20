@@ -60,6 +60,7 @@ import {
   jobRows,
   selectedJob,
   selectedRow,
+  resolveBoardSelection,
   effectiveOverlay,
   isComposerActive,
   isEmptyModel,
@@ -387,10 +388,6 @@ export class JobosTui {
   }
 
   refresh({ render = true } = {}) {
-    // Reload only when the authoritative file changed since the last
-    // projection. Direct controller callers may still have an intentional
-    // in-memory transaction awaiting its own save; an unconditional reload
-    // would discard that state.
     const dbPath = this.store?.p?.db;
     let diskStamp = null;
     if (dbPath) {
@@ -403,10 +400,6 @@ export class JobosTui {
       reload(this.store);
     }
     this._diskStamp = diskStamp;
-    // One person, one profile in the TUI: when no profile is pinned, the
-    // workspace's first profile is the owned profile (buildTuiModel resolves
-    // the same way). Passing the resolved id keeps onboarding.profileId bound
-    // so /setup reopens on the same workspace profile.
     let requestedProfile = this.state.profileId || this.options.profileId || null;
     if (!requestedProfile) {
       try {
@@ -414,25 +407,39 @@ export class JobosTui {
         if (first) requestedProfile = first.id;
       } catch {}
     }
-    const requestedJob = this.state.selectedJobId || this.options.selectedJobId || null;
-    this.model = buildTuiModel(this.store, { profileId: requestedProfile, selectedJobId: requestedJob });
-    // At the TUI boundary, an empty workspace has neither a profile nor jobs.
-    // Keep the flags honest without fabricating rows or changing the frozen
-    // domain projection contract.
-    if (this.model?.empty?.noProfile && !this.model.empty.noJobs) {
-      this.model.empty = { ...this.model.empty, noJobs: true };
+    let preferredJobId = this.state.selectedJobId || this.options.selectedJobId || null;
+    // Initial projection with preferred id so buildTuiModel.selected matches that id when possible.
+    let model = buildTuiModel(this.store, { profileId: requestedProfile, selectedJobId: preferredJobId });
+    if (model?.empty?.noProfile && !model.empty.noJobs) {
+      model.empty = { ...model.empty, noJobs: true };
     }
+    // If the preferred job lives in the opposite rail, switch the rail to keep selection visible (product policy: selection drives rail).
+    if (preferredJobId) {
+      const currentRows = railRows(model, this.state);
+      const inCurrent = currentRows.some(r => r.id === preferredJobId);
+      if (!inCurrent) {
+        const otherMode = this.state.leftMode === 'new' ? 'jobs' : 'new';
+        const otherRows = otherMode === 'new' ? model.jobs.filter(job => !job.applicationStatus && job.discoveryStatus !== 'archived' && ['new','imported'].includes(job.discoveryStatus)) : model.jobs.filter(job => job.discoveryStatus !== 'archived' && (Boolean(job.applicationStatus) || job.discoveryStatus === 'saved'));
+        if (otherRows.some(r => r.id === preferredJobId)) {
+          this.state.leftMode = otherMode;
+        }
+      }
+    }
+    // Resolve authoritative board selection: preferred id if visible in active rail, else first row.
+    let resolved = resolveBoardSelection(model, this.state, preferredJobId);
+    // If resolver corrected the id (e.g., reordering or mode switch), rebuild so model.selected matches.
+    if (resolved.selectedJobId !== preferredJobId) {
+      model = buildTuiModel(this.store, { profileId: model.profileId, selectedJobId: resolved.selectedJobId });
+      if (model?.empty?.noProfile && !model.empty.noJobs) {
+        model.empty = { ...model.empty, noJobs: true };
+      }
+      resolved = resolveBoardSelection(model, this.state, resolved.selectedJobId);
+    }
+    this.model = model;
     const state = this.state;
-    state.profileId = this.model.profileId;
-    state.selectedJobId = this.model.selectedJobId;
-    const rows = railRows(this.model, state);
-    if (rows.length) {
-      state.selectedIndex = Math.max(0, Math.min(state.selectedIndex || 0, rows.length - 1));
-    } else {
-      state.selectedIndex = 0;
-    }
-    // Files overlay keeps its questions mirror current after an external disk
-    // write reloaded the store.
+    state.profileId = model.profileId;
+    state.selectedJobId = resolved.selectedJobId;
+    state.selectedIndex = resolved.selectedIndex;
     if (state.overlay === 'files' && state.selectedJobId) {
       this.refreshQuestionsText(state.selectedJobId);
     }
@@ -489,8 +496,18 @@ export class JobosTui {
 
   setLeftMode(mode) {
     this.state.leftMode = mode === 'new' ? 'new' : 'jobs';
-    this.state.selectedIndex = 0;
     this.state.overlay = null;
+    // Resolve authoritative selection for the new rail — ID and index together.
+    const resolved = resolveBoardSelection(this.model, this.state, null);
+    this.state.selectedJobId = resolved.selectedJobId;
+    this.state.selectedIndex = resolved.selectedIndex;
+    // Rebuild projection so model.selected matches the new rail head.
+    if (this.model) {
+      this.model = buildTuiModel(this.store, { profileId: this.state.profileId || this.model.profileId, selectedJobId: resolved.selectedJobId });
+      if (this.model?.empty?.noProfile && !this.model.empty.noJobs) {
+        this.model.empty = { ...this.model.empty, noJobs: true };
+      }
+    }
     this.notify();
   }
 
@@ -581,11 +598,18 @@ export class JobosTui {
     this.setWorking(true, 'Adding to Jobs…');
     try {
       await callDomainTool(this.store, 'create_application', { jobId, status: 'saved', notes: '' }, { source: 'tui' });
-      this.refresh({ render: false });
+      // Need to land on the Jobs rail with authoritative selection for the added job.
       this.state.leftMode = 'jobs';
+      this.state.selectedJobId = jobId;
+      this.refresh({ render: false });
       const rows = jobRows(this.model);
       const index = rows.findIndex(row => row.id === jobId);
       this.state.selectedIndex = Math.max(0, index);
+      // Ensure resolver and projection stay aligned after manual leftMode change.
+      const resolved = resolveBoardSelection(this.model, this.state, jobId);
+      this.state.selectedJobId = resolved.selectedJobId;
+      this.state.selectedIndex = resolved.selectedIndex;
+      this.model = buildTuiModel(this.store, { profileId: this.state.profileId || this.model.profileId, selectedJobId: resolved.selectedJobId });
       this.state.jobTab = 'job';
       this.state.overlay = null;
       this.state.status = 'Added to Jobs · pipeline';

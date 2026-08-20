@@ -8,7 +8,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { ThemeProvider, Spinner } from '@inkjs/ui';
 import { CLASSIC_THEME, OVERLAY_BACKDROP, INKUI_THEME } from './theme.js';
-import { MODAL_WIDTH, MODAL_PADDING_X } from './layout.js';
+import { MODAL_WIDTH, MODAL_PADDING_X, boardGeometry } from './layout.js';
 import {
   ACTIVE_APPLICATION_STATUSES,
   SETUP_STEP_LABELS,
@@ -104,23 +104,18 @@ function Cta({ label, primary }) {
   );
 }
 
-function ModeSeg({ label, active }) {
-  // Compact modebar segment (classic.html .mode): hugs its content with a
-  // left border in the line color and fills accent only while active. It is
-  // never a stretching block — the modebar reads as a tight, divider-separated
-  // cluster at the right edge, like the PaneTab tabs on the pane bar.
+function ModeSeg({ label, active, width }) {
+  const { color } = useTheme();
+  const marker = active && !color ? '●' : '';
+  const raw = ` ${label}${marker} `;
+  const content = raw.length > width ? raw.slice(0, width) : raw.padEnd(width, ' ');
   return h(Bx, {
+    width,
     flexGrow: 0,
-    flexShrink: 1,
-    borderStyle: 'single',
-    borderLeft: true,
-    borderTop: false,
-    borderBottom: false,
-    borderRight: false,
-    borderLeftColor: CLASSIC_THEME.line,
+    flexShrink: 0,
     bg: active ? CLASSIC_THEME.accent : undefined
   },
-    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, ` ${label} `)
+    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, content)
   );
 }
 
@@ -128,10 +123,11 @@ function Header({ model, state, actions }) {
   const working = Boolean(state.working);
   const clock = clockText(model, state);
   const company = companyContext(model, state);
-  return h(Bx, { flexDirection: 'row', alignItems: 'center', bg: CLASSIC_THEME.panel, paddingX: 1, minHeight: 1 },
-    // Contiguous Job+OS wordmark: no space Text between the two syllables
-    // (the B4 snapshot matches /JobOS/ with no space). The single space after
-    // OS is the gap before the clock, not part of the wordmark.
+  // Header segments consume the same deterministic rectangles as hit testing.
+  // Workspace 12 cells [W-19,W-8], Jobs 8 cells [W-7,W] — exactly 20 right-anchored cells.
+  // Outer padding is left-only so right-anchored hitboxes [W-19..W] align exactly
+  // with painted cells — no right padding shift. Left padding 1 preserves wordmark gap.
+  return h(Bx, { flexDirection: 'row', alignItems: 'center', bg: CLASSIC_THEME.panel, paddingLeft: 1, paddingRight: 0, minHeight: 1 },
     h(Tx, { bold: true, color: CLASSIC_THEME.wordmark.job, wrap: 'truncate-end' }, 'Job'),
     h(Tx, { bold: true, color: CLASSIC_THEME.wordmark.os, wrap: 'truncate-end' }, 'OS'),
     h(Text, null, ' '),
@@ -140,15 +136,17 @@ function Header({ model, state, actions }) {
     h(Box, { flexGrow: 1 }),
     company ? h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, company) : null,
     h(Box, { flexDirection: 'row', marginLeft: 1 },
-      h(ModeSeg, { label: 'Workspace', active: state.headerMode === 'workspace' }),
-      h(ModeSeg, { label: 'Jobs', active: state.headerMode === 'jobs' })
+      h(ModeSeg, { label: 'Workspace', active: state.headerMode === 'workspace', width: 12 }),
+      h(ModeSeg, { label: 'Jobs', active: state.headerMode === 'jobs', width: 8 })
     )
   );
 }
 
 function RailSeg({ label, active }) {
+  const { color } = useTheme();
+  const marker = active && !color ? ' ●' : '';
   return h(Bx, { flexGrow: 1, bg: active ? CLASSIC_THEME.accent : undefined },
-    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, ` ${label} `));
+    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, ` ${label}${marker} `));
 }
 
 function Row({ row, chip, selected }) {
@@ -161,14 +159,23 @@ function Row({ row, chip, selected }) {
   );
 }
 
-function LeftRail({ model, state, actions }) {
+function LeftRail({ model, state, actions, width }) {
   const rows = railRows(model, state);
-  return h(Bx, { flexDirection: 'column', width: '34%', bg: CLASSIC_THEME.panel, minHeight: 0 },
+  const railWidth = width != null ? Math.max(1, Math.floor(Number(width) || 0)) : undefined;
+  return h(Bx, {
+    flexDirection: 'column',
+    width: railWidth,
+    flexGrow: 0,
+    flexShrink: 0,
+    minWidth: 0,
+    minHeight: 0,
+    bg: CLASSIC_THEME.panel
+  },
     h(Box, { flexDirection: 'row' },
       h(RailSeg, { label: 'New', active: state.leftMode === 'new' }),
       h(RailSeg, { label: 'Jobs', active: state.leftMode === 'jobs' })
     ),
-    h(Bx, { flexDirection: 'column', flexGrow: 1 },
+    h(Bx, { flexDirection: 'column', flexGrow: 1, minHeight: 0, minWidth: 0 },
       rows.length
         ? rows.map((row, i) => h(Row, {
             key: row.id,
@@ -186,10 +193,12 @@ function LeftRail({ model, state, actions }) {
 }
 
 function PaneTab({ label, active }) {
-  // Content-hug tab (classic.html .pbtn is flex:none at 5.5rem): the board
-  // pane bar never stretches Job | People | Chat across the main pane.
+  const { color } = useTheme();
+  // Non-color active indicator: accent bg is gated on color, so add a dot
+  const marker = active && !color ? '●' : '';
+  const content = marker ? `${label}${marker}` : label;
   return h(Bx, { flexGrow: 0, flexShrink: 0, width: 10, bg: active ? CLASSIC_THEME.accent : undefined },
-    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, ` ${label} `));
+    h(Tx, { bold: true, color: active ? CLASSIC_THEME.ink : CLASSIC_THEME.muted, wrap: 'truncate-end' }, ` ${content} `));
 }
 
 function PaneBar({ model, state, actions }) {
@@ -201,10 +210,10 @@ function PaneBar({ model, state, actions }) {
 }
 
 function JobPane({ model, state, actions }) {
-  const job = selectedRow(model, state);
+  const job = selectedJob(model, state);
   const isNew = state.leftMode === 'new';
   if (!job) {
-    return h(Bx, { flexDirection: 'column', paddingX: 2, paddingY: 1 },
+    return h(Bx, { flexDirection: 'column', width: '100%', flexGrow: 1, flexShrink: 1, minWidth: 0, minHeight: 0, paddingX: 2, paddingY: 1 },
       h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, isEmptyModel(model)
         ? 'Welcome to JobOS. Start guided setup to add a profile and your first job.'
         : 'Pick a listing on the left.')
@@ -216,7 +225,7 @@ function JobPane({ model, state, actions }) {
     ? [job.company, job.location, 'already scored in discovery'].filter(Boolean).join(' · ')
     : [job.company, job.location, fit, actionChip(model, job)].filter(Boolean).join(' · ');
   const docs = isNew ? [] : selectedDocs(model);
-  return h(Bx, { flexDirection: 'column', paddingX: 2, paddingY: 1 },
+  return h(Bx, { flexDirection: 'column', width: '100%', flexGrow: 1, flexShrink: 1, minWidth: 0, minHeight: 0, paddingX: 2, paddingY: 1 },
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, String(stage).toUpperCase()),
     h(Tx, { bold: true, wrap: 'truncate-end' }, job.title || 'Untitled role'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, meta),
@@ -240,7 +249,7 @@ function JobPane({ model, state, actions }) {
 function PeoplePane({ model, state, actions }) {
   const job = selectedJob(model, state);
   const contacts = selectedContacts(model);
-  return h(Bx, { flexDirection: 'column', paddingX: 2, paddingY: 1 },
+  return h(Bx, { flexDirection: 'column', width: '100%', flexGrow: 1, flexShrink: 1, minWidth: 0, minHeight: 0, paddingX: 2, paddingY: 1 },
     h(Tx, { color: CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' }, 'PEOPLE · THIS JOB'),
     h(Tx, { bold: true, wrap: 'truncate-end' }, job?.company || 'People'),
     h(Tx, { color: CLASSIC_THEME.muted, wrap: 'truncate-end' }, 'This listing only. ↑/↓ choose · Enter opens the connection overlay.'),
@@ -281,6 +290,7 @@ function SlashMenu({ hits, index }) {
 }
 
 function ChatPane({ model, state, actions, scope }) {
+  // Pane content owns the full pane width without influencing board split.
   const job = selectedJob(model, state);
   const log = chatLog(state, scope, job?.id);
   const slashOpen = isComposerActive(state) && String(state.input || '').startsWith('/');
@@ -288,8 +298,8 @@ function ChatPane({ model, state, actions, scope }) {
   const placeholder = scope === 'workspace'
     ? 'Ask about the search…'
     : `Ask about ${job?.company || 'this job'}…`;
-  return h(Bx, { flexDirection: 'column', flexGrow: 1, minHeight: 0 },
-    h(Bx, { flexDirection: 'column', flexGrow: 1, paddingX: 2, paddingY: 1 },
+  return h(Bx, { flexDirection: 'column', flexGrow: 1, minHeight: 0, minWidth: 0, width: '100%' },
+    h(Bx, { flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, paddingX: 2, paddingY: 1 },
       log.length
         ? log.map((message, i) => h(Bx, { key: i, flexDirection: 'column', marginBottom: 1 },
             h(Tx, { color: message.kind === 'you' ? CLASSIC_THEME.muted : CLASSIC_THEME.accent, bold: true, wrap: 'truncate-end' },
@@ -338,6 +348,18 @@ function Main({ model, state, actions }) {
     return h(PeoplePane, { model, state, actions });
   }
   return h(JobPane, { model, state, actions });
+}
+
+/** Shared detail wrapper ensures pane content cannot alter board split. */
+function DetailWrapper({ children }) {
+  return h(Bx, {
+    flexDirection: 'column',
+    width: '100%',
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    minHeight: 0
+  }, children);
 }
 
 function StatusBar({ model, state }) {
@@ -1011,32 +1033,74 @@ function OverlaySurface({ overlay, model, state, actions }) {
 export function App({ model, state, actions, theme = CLASSIC_THEME, colorEnabled = false, interactive = false, width = null, height = null }) {
   const overlay = effectiveOverlay(model, state);
   const themeValue = { tokens: theme, color: Boolean(colorEnabled) };
+  const frameWidth = width ? Math.max(1, Math.floor(Number(width) || 0)) : null;
+  const frameHeight = height ? Math.max(1, Math.floor(Number(height) || 0)) : null;
+  const viewportWidth = frameWidth || 140;
+  const viewportHeight = frameHeight || 42;
+  const geo = boardGeometry({ width: viewportWidth, height: viewportHeight });
   const main = overlay
     ? h(OverlaySurface, { overlay, model, state, actions })
     : h(Main, { model, state, actions });
   let body;
   if (overlay) {
-    // Covering overlay: welcome/setup/etc. replaces the rail and the
-    // Job | People | Chat pane bar entirely (classic.html inset:0).
     body = main;
   } else if (state.headerMode === 'workspace') {
-    body = h(Box, { flexDirection: 'column', flexGrow: 1, minHeight: 0 }, main);
+    body = h(Box, {
+      flexDirection: 'column',
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      minHeight: 0,
+      width: '100%',
+      overflow: 'hidden'
+    }, main);
+  } else if (geo.mode !== 'split') {
+    // Compact: detail/composer clipped — render rail only so no off-screen pane tabs/composer appear
+    body = h(Box, {
+      flexDirection: 'column',
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      minHeight: 0,
+      width: '100%',
+      overflow: 'hidden'
+    },
+      h(LeftRail, { model, state, actions, width: geo.railWidth })
+    );
   } else {
-    body = h(Box, { flexDirection: 'row', flexGrow: 1, minHeight: 0 },
-      h(LeftRail, { model, state, actions }),
-      h(Box, { flexDirection: 'column', flexGrow: 1, minHeight: 0 },
-        h(PaneBar, { model, state, actions }),
-        main
-      )
+    const detail = h(Box, {
+      flexDirection: 'column',
+      width: geo.paneWidth,
+      flexGrow: 1,
+      flexShrink: 1,
+      flexBasis: 0,
+      minWidth: 0,
+      minHeight: 0,
+      overflow: 'hidden'
+    },
+      h(PaneBar, { model, state, actions }),
+      h(DetailWrapper, null, main)
+    );
+    body = h(Box, {
+      flexDirection: 'row',
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      minHeight: 0,
+      width: '100%',
+      overflow: 'hidden'
+    },
+      h(LeftRail, { model, state, actions, width: geo.railWidth }),
+      detail
     );
   }
-  const frameWidth = width ? Math.max(1, Math.floor(Number(width) || 0)) : null;
-  const frameHeight = height ? Math.max(1, Math.floor(Number(height) || 0)) : null;
   const tree = h(Box, {
     width: frameWidth || '100%',
     height: frameHeight || undefined,
     flexDirection: 'column',
-    minHeight: 0
+    minHeight: 0,
+    minWidth: 0,
+    overflow: 'hidden'
   },
     h(Header, { model, state, actions }),
     body,
