@@ -5,7 +5,7 @@ import { id, now, parseJson } from '../utils.js';
 import { writeYaml, writeMd } from '../workspace.js';
 import { resolvePerson } from './people.js';
 import { upsertContactPoint } from './contacts.js';
-import { nameFromEmailLocal, normalizeEmail } from './sources.js';
+import { emailLocal, nameFromEmailLocal, normalizeEmail } from './sources.js';
 import { runGraph } from './graph.js';
 import { listAdapters } from './adapters/index.js';
 import * as fs from 'node:fs';
@@ -359,7 +359,9 @@ export function createResearchRun(s, request) {
     const normalizedEmail = request.email ? normalizeEmail(request.email) : '';
     const resolved = resolvePerson(s, normalizedEmail ? {
       email: normalizedEmail,
-      name: nameFromEmailLocal(normalizedEmail) || normalizedEmail,
+      // Fall back to the local part (e.g. "jane") instead of persisting the
+      // whole address as a display name when no separator-derived name exists.
+      name: nameFromEmailLocal(normalizedEmail) || emailLocal(normalizedEmail) || normalizedEmail,
       sourceRecordId: `person-scope:email:${normalizedEmail}`
     } : {
       name: request.person.name,

@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import { openStore } from '../src/db.js';
 import { createProfile, verifyProof, listProofs } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
+import { appCreate } from '../src/tracking.js';
 import { score } from '../src/scoring.js';
 import { runPursuit } from '../src/workflows.js';
 import { ensureSampleOfflineSearch, runSavedSearch, sampleOfflineDiscoveryFixturePath } from '../src/discovery.js';
@@ -54,46 +55,53 @@ test('fitLabel never says unscored/unknown when a score contract exists without 
   }), /74\/100/);
 });
 
-test('dashboard FIT chip shows low evidence after score with overall=null', async t => {
+test('pipeline fit label shows low evidence after score with overall=null', async t => {
   const root = workspace(t);
   const store = await openStore({ workspace: root });
   const profile = createProfile(store, 'Alex Chen').profile;
   const resume = path.join(root, 'resume.md');
   writeFileSync(resume, readFileSync(path.join(process.cwd(), 'samples/resume-proof-points.md'), 'utf8'));
-  // Import via profile create path is heavy; score after job import with proofs verified if any.
   const jobFile = path.join(root, 'job.md');
   writeFileSync(jobFile, readFileSync(path.join(process.cwd(), 'samples/job-description.md'), 'utf8'));
   const job = importText(store, { profileId: profile.id, filePath: jobFile }).job;
   const fit = await score(store, job.id, profile.id);
   assert.equal(fit.contract, 'jobos.fit-score.v1');
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id });
-  const text = renderTui(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, {
+  const label = fitLabel(model.jobs.find(item => item.id === job.id).fit);
+  assert.match(label, /low evidence/i);
+  assert.doesNotMatch(label, /unscored|unknown/);
+  // The shell renders the same label on a pipeline row, never "FIT unscored".
+  appCreate(store, job.id, 'saved', '', { at: '2026-08-06T12:00:00.000Z' });
+  const pipelined = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id });
+  const text = renderTui(pipelined, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id }, {
     width: 140, height: 42, color: false
   });
-  assert.match(text, /FIT low evidence/i);
+  assert.match(text, /low evidence/i);
   assert.doesNotMatch(text, /FIT unscored|FIT unknown/);
 });
 
-test('opening docs after external CLI-like disk write reloads artifacts', async t => {
+test('refresh observes an external CLI-like disk write and the Files overlay reloads artifacts', async t => {
   const root = workspace(t);
   const store = await openStore({ workspace: root });
   const profile = createProfile(store, 'Alex Chen').profile;
   const jobFile = path.join(root, 'job.md');
   writeFileSync(jobFile, readFileSync(path.join(process.cwd(), 'samples/job-description.md'), 'utf8'));
   const job = importText(store, { profileId: profile.id, filePath: jobFile }).job;
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(), now: () => new Date('2026-08-06T12:00:00.000Z') });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id });
+  const tui = new JobosTui(store, { connectAgent: false, stdout: output(), profileId: profile.id, selectedJobId: job.id });
+  tui.refresh();
+  assert.equal((tui.model.selected?.docs || []).length, 0, 'no artifacts before the external write');
 
   // Simulate another process writing pursue artifacts into the same DB file.
   const writer = await openStore({ workspace: root });
   await runPursuit(writer, { jobId: job.id, profileId: profile.id });
-  // Without disk reload, in-memory store is stale.
-  tui.openDocuments();
-  const screen = tui.lastScreen || renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
-  assert.match(screen, /Tailored resume|Cover letter|YOUR DOCUMENTS/i);
-  assert.doesNotMatch(screen, /No documents for this job/);
+  tui.refresh(); // in-memory store reloads from disk
+  const docs = tui.model.selected?.docs || [];
+  assert.ok(docs.length >= 1, 'refresh observes the externally written artifacts');
+
+  tui.openOverlay('files');
+  const screen = renderTui(tui.model, tui.state, { width: 140, height: 42, color: false });
+  assert.match(screen, /resume\.md|Tailored/i, 'the Files overlay lists the reloaded drafts');
+  assert.doesNotMatch(screen, /No files yet/, 'drafts exist after reload');
 });
 
 test('sample offline discovery fixture imports jobs without network', async t => {

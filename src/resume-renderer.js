@@ -30,11 +30,14 @@ const ATS_GLYPH_MAP = {
   '\u2013': '-', '\u2014': '-',
   '\u00A0': ' ',
   '\u2026': '...',
-  '\u2022': '|', '\u00B7': '|',
   '\u2190': ' from ', '\u2191': ' ', '\u2192': ' to ', '\u2193': ' ',
   '\u200B': '', '\u200C': '', '\u200D': '', '\u2060': '', '\uFEFF': '',
 };
-const ATS_GLYPH_RE = /[\u2018\u2019\u201A\u201B\u201C\u201D\u201E\u201F\u2013\u2014\u00A0\u2026\u2022\u00B7\u2190\u2191\u2192\u2193\u200B\u200C\u200D\u2060\uFEFF]/g;
+// Bullets (•) and middots (·) are legitimate separators (the renderer itself
+// joins skills with ' • ') and are NOT flagged by ATS_HOSTILE_EXTRACT_RE, so
+// they must not be rewritten here — doing so would mutate user content and
+// undo the separator the same file emits.
+const ATS_GLYPH_RE = /[\u2018\u2019\u201A\u201B\u201C\u201D\u201E\u201F\u2013\u2014\u00A0\u2026\u2190\u2191\u2192\u2193\u200B\u200C\u200D\u2060\uFEFF]/g;
 function atsNormalize(value) {
   return text(value).replace(ATS_GLYPH_RE, character => ATS_GLYPH_MAP[character] ?? '');
 }
@@ -200,7 +203,15 @@ export function preflightPdfMetadata(profile, { pageCount, reportedSize, imageCo
   if (pageCount && pageInkCoverage.length === pageCount) {
     if (pageCount === 1) {
       const fill = pageInkCoverage[0];
-      if (fill < minFill) blockers.push(blocker('resume_page_underfilled', `Resume fills only ${Math.round(fill * 100)}% of the page; at least ${Math.round(minFill * 100)}% is required so it does not look too short.`, { fill, minFill }));
+      if (fill < minFill) {
+        // The gate is shared between resumes and cover letters; parameterize
+        // the blocker by document type so cover-letter diagnostics do not
+        // talk about a "Resume".
+        const isCoverLetter = String(profile.templateId || '').includes('cover-letter');
+        const code = isCoverLetter ? 'cover_letter_page_underfilled' : 'resume_page_underfilled';
+        const label = isCoverLetter ? 'Cover letter' : 'Resume';
+        blockers.push(blocker(code, `${label} fills only ${Math.round(fill * 100)}% of the page; at least ${Math.round(minFill * 100)}% is required so it does not look too short.`, { fill, minFill }));
+      }
     } else {
       const finalFill = pageInkCoverage[pageCount - 1];
       if (finalFill < minFinalPageFill) blockers.push(blocker('resume_page_nearly_empty', `Final page is nearly empty (${Math.round(finalFill * 100)}% filled); trim content or tighten layout so it does not end with an orphan page.`, { fill: finalFill, minFill: minFinalPageFill }));

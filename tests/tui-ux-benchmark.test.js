@@ -1,15 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import React from 'react';
+import { renderToString } from 'ink';
 import stringWidth from 'string-width';
-import { openStore, run } from '../src/db.js';
+import { openStore, run, save } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
+import { appCreate } from '../src/tracking.js';
 import { createArtifact } from '../src/artifacts.js';
 import { buildTuiModel } from '../src/tui-model.js';
-import { defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
+import { CLASSIC_THEME, defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
+import { SLASH_CATALOG, actionChip, newRows, jobRows, hitTestGrid, setupStepViews } from '../src/tui/model.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
 const SIZES = [
@@ -19,37 +24,23 @@ const SIZES = [
   { width: 160, height: 50, name: 'wide' }
 ];
 
-const RESUME_SOURCE_LABELS = ['Paste resume text', 'Browse this computer', 'Enter a file path'];
-const RESUME_SOURCE_FORMATS = ['TXT', 'Markdown', 'JSON', 'YAML', 'YML', 'PDF', 'DOCX'];
-
-function output(width = 120, height = 36) {
-  return {
-    columns: width,
-    rows: height,
-    isTTY: false,
-    writes: [],
-    write(chunk) { this.writes.push(String(chunk)); },
-    on() {},
-    off() {}
-  };
-}
-
-async function fixture(t, { withProfile = false, withJob = false } = {}) {
+async function fixture(t, { withJob = false, withApplication = false } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-tui-ux-benchmark-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const store = await openStore({ workspace: root });
-  const profile = withProfile || withJob ? createProfile(store, 'Product Leader').profile : null;
+  const profile = withJob ? createProfile(store, 'Product Leader').profile : null;
   let job = null;
   if (withJob) {
     const filePath = path.join(root, 'role.md');
     writeFileSync(filePath, [
       'Title: Senior Product Manager',
-      'Company: Northstar Learning',
+      'Company: Westbrook Learning',
       'Location: Remote',
       '',
       'Lead product discovery and launch improvements for educators.'
     ].join('\n'));
     job = importText(store, { profileId: profile.id, filePath }).job;
+    if (withApplication) appCreate(store, job.id, 'materials-ready', '', { at: AS_OF });
   }
   const model = buildTuiModel(store, {
     profileId: profile?.id || null,
@@ -59,606 +50,384 @@ async function fixture(t, { withProfile = false, withJob = false } = {}) {
   return { root, store, profile, job, model };
 }
 
+function makeTui(store, profileId, jobId) {
+  const tui = new JobosTui(store, {
+    ...streams(),
+    profileId,
+    selectedJobId: jobId || null,
+    connectAgent: false,
+    color: false
+  });
+  tui.refresh();
+  return tui;
+}
+
+function streams() {
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.rows = 36;
+  stdout.isTTY = false;
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+  return { stdin, stdout };
+}
+
 function render(model, state, width, height) {
   return renderTui(model, state, { width, height, color: false }).split('\n');
 }
 
 function assertFrame(lines, { width, height, name }) {
-  assert.equal(lines.length, height, `${name}: frame uses the full terminal height`);
+  assert.ok(lines.length > 0, `${name}: frame renders content`);
+  assert.ok(lines.length <= height, `${name}: frame never exceeds the terminal height`);
   assert.ok(lines.every(line => stringWidth(line) <= width), `${name}: no row exceeds terminal width`);
   assert.ok(lines.every(line => !line.includes('\u0000')), `${name}: no control-data leak enters visible copy`);
+  assert.ok(lines.every(line => !/\u0001|\u0002|\u0007/.test(line)), `${name}: no stray control bytes in visible copy`);
 }
 
-function panelRows(lines, title) {
-  const start = lines.findIndex(line => line.includes(`┌ ${title}`));
-  const end = start < 0 ? -1 : lines.findIndex((line, index) => index > start && line.startsWith('└'));
-  return start < 0 ? [] : lines.slice(start, end < 0 ? lines.length : end);
+const RETIRED_CHROME = [
+  /┌ JOBS/,
+  /SELECTED JOB/,
+  /┌ ASSISTANT/,
+  /\[today\]/,
+  /:answer add/,
+  /:packet create/,
+  /:story-verify/,
+  /:debrief/,
+  /JOBOS ·/,
+  /spike:ink/,
+  /Northstar Learning|Harbor Schools|Example Learning Co|Contoso Careers Lab|Lumen Labs/,
+  /\bFIT\s+\d+/
+];
+
+function assertNoRetiredChrome(text, name) {
+  for (const pattern of RETIRED_CHROME) {
+    assert.doesNotMatch(text, pattern, `${name}: retired chrome "${pattern}" must not be painted`);
+  }
 }
 
-/** Drive a full profile capture and assert the atomic save contract. */
-async function captureProfile(tui, stdout, name = 'Alex Chen') {
-  const stepIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'profile');
-  tui.state.overlay = 'setup';
-  tui.state.overlayIndex = stepIndex;
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-profile', 'profile step opens name capture');
-  tui.onKeypress(name, { name: 'paste' });
-  stdout.writes.length = 0; // frames from the save onward only
-  tui.onKeypress('', { name: 'return' });
-}
+test('UX-BENCH-01 the locked Classic red theme token set is exact', () => {
+  assert.equal(CLASSIC_THEME.name, 'classic-red');
+  assert.equal(CLASSIC_THEME.bg, '#111111');
+  assert.equal(CLASSIC_THEME.panel, '#161616');
+  assert.equal(CLASSIC_THEME.accent, '#ff6b6b');
+  assert.equal(CLASSIC_THEME.ink, '#111111');
+  assert.equal(CLASSIC_THEME.text, '#f5f5f5');
+  assert.equal(CLASSIC_THEME.muted, '#c8c8c8');
+  assert.equal(CLASSIC_THEME.mono, 'JetBrains Mono, Menlo, ui-monospace, monospace');
+  assert.deepEqual(CLASSIC_THEME.fontFamily, ['JetBrains Mono', 'Menlo', 'ui-monospace', 'monospace']);
+  assert.deepEqual(CLASSIC_THEME.wordmark, { job: '#f5f5f5', os: '#ff6b6b' });
+  // Not Charm green, not the Ink-spike cyan/purple theme.
+  assert.notEqual(CLASSIC_THEME.accent.toLowerCase(), '#50fa7b');
+  assert.notEqual(CLASSIC_THEME.accent.toLowerCase(), '#00d4ff');
+  assert.notEqual(CLASSIC_THEME.bg.toLowerCase(), '#282a36');
+});
 
-test('UX-BENCH-01 guided setup is stable at minimum, compact, standard, and wide sizes', async t => {
+test('UX-BENCH-02 the shell keeps every frame inside width x height at minimum, compact, standard, and wide sizes', async t => {
   const { model } = await fixture(t);
   for (const size of SIZES) {
-    const state = { ...defaultTuiState(), overlay: 'setup', overlayIndex: 1 };
-    const lines = render(model, state, size.width, size.height);
-    assertFrame(lines, size);
-    const text = lines.join('\n');
-    assert.match(text, /GUIDED SETUP/, `${size.name}: setup identity remains visible`);
-    assert.match(text, /About you/, `${size.name}: focused task remains visible`);
-    assert.match(text, /Enter continue/, `${size.name}: primary action remains visible`);
-    assert.match(text, /\? help/, `${size.name}: help remains visible`);
-    assert.ok(!text.includes('…'), `${size.name}: setup copy is never truncated with an ellipsis`);
-  }
-});
+    const welcome = render(model, { ...defaultTuiState(), overlay: 'welcome' }, size.width, size.height);
+    assertFrame(welcome, size);
+    assertNoRetiredChrome(welcome.join('\n'), `${size.name} welcome`);
 
-test('UX-BENCH-02 every resume-source choice and its format guidance survive compact rendering', async t => {
-  const { store } = await fixture(t);
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(60, 24), now: () => new Date(AS_OF) });
-  tui.beginSetupSource('resume');
-  const lines = render(tui.model, tui.state, 60, 24);
-  assertFrame(lines, { width: 60, height: 24, name: 'resume source at minimum' });
-  const text = lines.map(line => line.replaceAll('║', '').trim()).join(' ');
-  for (const label of RESUME_SOURCE_LABELS) assert.match(text, new RegExp(label), `source choice "${label}" survives compact rendering`);
-  for (const format of RESUME_SOURCE_FORMATS) assert.match(text, new RegExp(format), `format guidance "${format}" survives compact rendering`);
-});
-
-test('UX-BENCH-03 blocked setup help names both the reason and the recovery', async t => {
-  const { model } = await fixture(t);
-  const resumeIndex = model.onboarding.steps.findIndex(item => item.id === 'resume');
-  const state = {
-    ...defaultTuiState(),
-    overlay: 'help',
-    helpContextOverlay: 'setup',
-    helpContextIndex: resumeIndex
-  };
-  const text = render(model, state, 80, 24).join('\n');
-  assert.match(text, /Select a profile before importing a resume/);
-  assert.match(text, /Complete profile setup/);
-  assert.doesNotMatch(text, /This task is done/);
-});
-
-test('UX-BENCH-04 empty dashboard uses one centered welcome surface with a clear primary action', async t => {
-  const { model } = await fixture(t);
-  const lines = render(model, { ...defaultTuiState(), overlay: null }, 120, 36);
-  assertFrame(lines, { width: 120, height: 36, name: 'empty dashboard' });
-  const text = lines.join('\n');
-  assert.equal(lines.filter(line => line.includes('╔')).length, 1, 'welcome state has one visual container');
-  assert.doesNotMatch(text, /┌ JOBS|┌ SELECTED JOB|┌ AGENT/, 'empty state does not render three hollow dashboard panels');
-  assert.match(text, /WELCOME TO JOBOS/);
-  assert.match(text, /g  Start guided setup/);
-  assert.ok(text.indexOf('g  Start guided setup') < text.indexOf('jobos profile create'), 'human-first action precedes the CLI alternative');
-  const top = lines.findIndex(line => line.includes('╔'));
-  const bottom = lines.findIndex(line => line.includes('╚'));
-  assert.ok(top >= 6 && bottom <= 30, 'welcome surface is vertically centered with margin above and below');
-  assert.ok(model.recommendedAction?.label === 'Create profile', 'the empty workspace recommends the single first setup step');
-});
-
-test('UX-BENCH-05 populated dashboard presents decision summary before hidden technical detail', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
-  for (const size of SIZES.slice(1)) {
-    const lines = render(model, base, size.width, size.height);
-    assertFrame(lines, size);
-    const text = lines.join('\n');
-    assert.match(text, /▶ Import resume/, `${size.name}: priority strip names the action`);
-    assert.match(text, /Senior Product Manager/, `${size.name}: selected job stays visible`);
-    assert.match(text, /FIT /, `${size.name}: fit summary stays visible`);
-    assert.match(text, /READINESS /, `${size.name}: readiness state stays visible`);
-    const summaryIndex = text.indexOf('FIT ');
-    const detailsIndex = text.indexOf('TECHNICAL DETAILS');
-    assert.equal(detailsIndex, -1, `${size.name}: technical details are hidden by default`);
-    assert.ok(summaryIndex >= 0, `${size.name}: decision summary renders before any diagnostics`);
-  }
-
-  // The e key discloses the same diagnostics on demand and hides them again.
-  const tui = new JobosTui((await fixture(t, { withJob: true })).store, {
-    connectAgent: false,
-    stdout: output(120, 36),
-    now: () => new Date(AS_OF)
-  });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = model;
-  const hidden = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.doesNotMatch(hidden, /TECHNICAL DETAILS/, 'technical details hidden by default on the dashboard');
-  assert.match(hidden, /e details/, 'the disclosure affordance names the e key');
-  tui.onKeypress('e', { name: 'e' });
-  assert.equal(tui.state.detailsExpanded, true, 'e expands technical details');
-  const shown = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.match(shown, /TECHNICAL DETAILS/, 'expanded surface shows the technical details block');
-  assert.match(shown, /JOB ID /, 'expanded surface shows job identity diagnostics');
-  tui.onKeypress('e', { name: 'e' });
-  assert.equal(tui.state.detailsExpanded, false, 'e collapses technical details again');
-  assert.doesNotMatch(render(tui.model, tui.state, 120, 36).join('\n'), /TECHNICAL DETAILS/, 'details hidden again after collapse');
-});
-
-test('UX-BENCH-06 priority hierarchy navigates only actionable categories', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 140, 42);
-  const kinds = model.priority.map(item => item.kind);
-  assert.equal(kinds[0], 'action', 'recommended action leads the strip');
-  assert.ok(kinds.includes('new'), 'new jobs remain on the strip');
-  // Optional first-run CTAs (sample discovery / empty network) may appear when
-  // no searches exist yet; empty filler categories stay off the strip.
-  assert.ok(kinds.every(kind => ['action', 'new', 'discovery', 'network', 'interview', 'failure'].includes(kind)));
-  assert.doesNotMatch(kinds.join(','), /queue/i);
-  assert.match(lines[1], new RegExp(`NEXT UP  1 of ${model.priority.length}`));
-  assert.match(lines[2], /▶ Import resume  ·  Enter opens/);
-  assert.doesNotMatch(lines.slice(1, 3).join('\n'), /QUEUE|INTERVIEW|FAILURE/, 'filler and empty categories do not consume visual rows');
-  assert.ok(lines.slice(1, 3).every(line => !line.includes('┌') && !line.includes('┐')), 'priority hierarchy avoids card chrome');
-  const tui = new JobosTui((await fixture(t, { withJob: true })).store, { connectAgent: false, stdout: output(140, 42), now: () => new Date(AS_OF) });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = model;
-  const count = model.priority.length;
-  for (let index = 0; index < count; index++) tui.onKeypress('', { name: 'right' });
-  assert.equal(tui.state.stripIndex, 0, 'strip cycles through actionable cards and wraps to the start');
-  tui.onKeypress('', { name: 'right' });
-  assert.equal(tui.state.stripIndex, 1, 'strip continues to the second actionable card after wrap');
-});
-
-test('UX-BENCH-07 minimum-size navigation keeps action, dashboard, chat, setup, help, and quit reachable', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id };
-  const dashboard = render(model, base, 60, 20).join('\n');
-  assert.match(dashboard, /▶ NEXT/, 'minimum selected-job panel retains the recommended action');
-  assert.match(dashboard, /e details/, 'minimum selected-job panel retains technical disclosure');
-  for (const label of ['Tab chat', 'g setup', '? help', 'Q quit']) assert.match(dashboard, new RegExp(label.replace('?', '\\?')));
-  const chat = render(model, { ...base, focusTarget: 'agent' }, 60, 20).join('\n');
-  assert.match(chat, /ASSISTANT · FOCUSED/);
-  assert.match(chat, /Tab\/Esc dashboard/);
-});
-
-test('UX-BENCH-08 optional setup rows report honest readiness states', async t => {
-  const { model } = await fixture(t);
-  const text = render(model, { ...defaultTuiState(), overlay: 'setup', overlayIndex: 1 }, 120, 42).join('\n');
-  assert.match(text, /Job discovery  ·  optional/);
-  assert.match(text, /Your preferences  ·  optional/);
-  assert.match(text, /AI assistant  ·  unavailable/);
-  assert.match(text, /Connections  ·  optional/);
-  assert.doesNotMatch(text, /AI assistant  ·  ready/);
-});
-
-test('UX-BENCH-09 one recommended action is consistent across priority, selected, readiness, and setup', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const label = model.recommendedAction?.label;
-  assert.ok(label && label.length > 0, 'model exposes a single recommended action label');
-  const dash = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 120, 36).join('\n');
-  assert.match(dash, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'priority strip names the same action');
-  assert.match(dash, /▶ NEXT/, 'selected-job surface leads with a NEXT block');
-  const selectedRows = panelRows(dash.split('\n'), 'SELECTED JOB');
-  assert.ok(selectedRows.some(row => row.includes(label)), 'selected NEXT block names the same action');
-
-  const expanded = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, detailsExpanded: true, agentOn: false }, 140, 42).join('\n');
-  assert.match(expanded, new RegExp(`next ${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'readiness summary names the same action');
-
-  const setup = render(model, { ...defaultTuiState(), overlay: 'setup', overlayIndex: 0 }, 120, 36).join('\n');
-  assert.match(setup, new RegExp(`RECOMMENDED NEXT · ${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'setup progress names the same action');
-
-  const tui = new JobosTui((await fixture(t, { withJob: true })).store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = model;
-  tui.openHelp();
-  const help = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.match(help, /RECOMMENDED NEXT ACTION/, 'help surface leads with the recommended action');
-  assert.ok(help.includes(label), 'context help names the same recommended action');
-});
-
-test('UX-BENCH-10 panel geometry is aligned across breakpoints and surfaces', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
-  for (const size of SIZES.slice(1)) {
-    const lines = render(model, base, size.width, size.height);
-    assertFrame(lines, size);
-    const tops = lines.map((line, index) => (/┌/.test(line) ? index : -1)).filter(index => index >= 0);
-    const bottoms = lines.map((line, index) => (/└/.test(line) ? index : -1)).filter(index => index >= 0);
-    assert.equal(tops.length, bottoms.length, `${size.name}: every panel opens and closes in the same frame`);
-    assert.ok(tops.every((top, index) => top < bottoms[index]), `${size.name}: each panel opens before it closes`);
-    for (let index = 0; index < tops.length; index++) {
-      const top = lines[tops[index]];
-      const bottom = lines[bottoms[index]];
-      const topBorders = [...top].map((char, col) => (char === '┌' ? col : -1)).filter(col => col >= 0);
-      for (const col of topBorders) {
-        assert.ok(col < stringWidth(bottom), `${size.name}: panel ${index} left border ${col} exists in its close row`);
-        assert.equal(bottom[col] || bottom[col - 1], '└', `${size.name}: panel ${index} closes under its open border`);
-      }
-    }
-  }
-
-  const setup = render(model, { ...defaultTuiState(), overlay: 'setup', overlayIndex: 1 }, 80, 24);
-  assertFrame(setup, { width: 80, height: 24, name: 'setup at compact' });
-  const setupTop = setup.findIndex(line => line.includes('╔'));
-  const setupBottom = setup.findIndex(line => line.includes('╚'));
-  assert.ok(setupTop >= 1 && setupBottom <= 23, 'setup panel fits inside the workspace with vertical margin');
-  assert.ok(setupBottom - setupTop >= 10, 'setup panel is tall enough to present the step list');
-
-  const chat = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, focusTarget: 'agent', agentOn: true }, 120, 36);
-  assertFrame(chat, { width: 120, height: 36, name: 'chat focus' });
-});
-
-test('UX-BENCH-11 job list sheds duplicate workflow copy as width shrinks', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
-
-  for (const width of [160, 120]) {
-    const panel = panelRows(render(model, base, width, 42), 'JOBS');
-    const rows = panel.map(row => row.slice(0, Math.max(42, Math.floor(width * 0.44))));
-    assert.ok(rows.some(row => row.includes('Senior Product Manager')), `${width}: job card keeps the title`);
-    assert.ok(!rows.some(row => row.includes('Northstar Learning')), `${width}: company stays in the selected-role summary instead of being duplicated`);
-    assert.ok(rows.some(row => row.includes('FIT ')), `${width}: job card keeps fit`);
-    assert.ok(!rows.some(row => /\bSTAGE\b|\bNEXT\b/.test(row)), `${width}: job card does not duplicate stage or next-action copy`);
-  }
-
-  const compact = panelRows(render(model, base, 80, 24), 'JOBS');
-  assert.ok(compact.some(row => row.includes('Senior Product Manager')), '80: job card keeps the title');
-  assert.ok(compact.some(row => row.includes('FIT ')), '80: job card keeps fit');
-  assert.ok(!compact.some(row => row.includes('Northstar Learning')), '80: company line yields to fit and action context');
-  assert.ok(!compact.some(row => /\bSTAGE\b|\bNEXT\b/.test(row)), '80: duplicate workflow copy stays absent');
-
-  const minimum = panelRows(render(model, base, 60, 20), 'JOBS');
-  assert.ok(minimum.some(row => row.includes('Senior Product Manager')), '60: job card keeps the title');
-  assert.ok(minimum.some(row => row.includes('FIT ')), '60: job card keeps fit');
-  assert.ok(!minimum.some(row => row.includes('Northstar Learning')), '60: company line is dropped before the selected-role summary');
-});
-
-test('UX-BENCH-12 dashboard and setup copy stay compact without ellipsis truncation', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id };
-  for (const size of SIZES) {
-    const dashboard = render(model, base, size.width, size.height);
-    assertFrame(dashboard, size);
-    assert.ok(!dashboard.join('\n').includes('…'), `${size.name}: dashboard copy is wrapped, never truncated with an ellipsis`);
     const setup = render(model, { ...defaultTuiState(), overlay: 'setup', overlayIndex: 1 }, size.width, size.height);
     assertFrame(setup, size);
-    assert.ok(!setup.join('\n').includes('…'), `${size.name}: setup copy is wrapped, never truncated with an ellipsis`);
+    assertNoRetiredChrome(setup.join('\n'), `${size.name} setup`);
   }
 });
 
-test('UX-BENCH-13 clicking an actionable row dispatches the same Enter action, gates included', async t => {
-  const { store, model, profile, job } = await fixture(t, { withJob: true });
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = model;
-  const clickTerm = term => {
-    tui.render();
-    const lines = render(tui.model, tui.state, 120, 36);
-    const y = lines.findIndex(line => line.includes(term));
-    assert.ok(y >= 0, `row for "${term}" renders`);
-    const x = lines[y].indexOf(term);
-    tui.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
+test('UX-BENCH-03 header is Job + OS wordmark with Workspace | Jobs modes and company as context', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  const lines = render(tui.model, tui.state, 120, 36).join('\n');
+
+  assert.match(lines, /JobOS/, 'wordmark JobOS with no space');
+  assert.doesNotMatch(lines, /JOBOS ·/, 'retired JOBOS · header is gone');
+  assert.match(lines, /Workspace/, 'header mode Workspace is present');
+  assert.match(lines, /Jobs/, 'header mode Jobs is present');
+  assert.match(lines, /Westbrook Learning/, 'company is header context for the selected listing');
+
+  const workspace = render(tui.model, { ...tui.state, headerMode: 'workspace' }, 120, 36).join('\n');
+  assert.match(workspace, /JobOS/, 'workspace header keeps the wordmark');
+  assert.match(workspace, /Workspace/, 'workspace mode stays highlighted as the active mode');
+  assert.doesNotMatch(workspace, /Westbrook Learning/, 'company context is listing-scoped, not workspace-wide');
+});
+
+test('UX-BENCH-04 left rail is New | Jobs and job rows carry action chips, not numeric FIT', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.leftMode = 'new';
+  const newText = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(newText, /New/, 'New rail segment is present');
+  assert.match(newText, /Jobs/, 'Jobs rail segment is present');
+  assert.doesNotMatch(newText, /\b\d+\/100\b/, 'rail rows never show a numeric fit score');
+
+  // A pipeline job with an application shows a real action chip instead.
+  appCreate(store, job.id, 'saved', '', { at: AS_OF });
+  tui.refresh();
+  tui.state.leftMode = 'jobs';
+  const jobsText = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(jobsText, /Create files|Find people|Needs review|Due follow-up/, 'Jobs rows show an action chip');
+  assert.doesNotMatch(jobsText, /\bFIT\s+\d+/, 'numeric FIT is not the row action');
+});
+
+test('UX-BENCH-05 action chip precedence is deterministic and null when nothing is actionable', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true });
+  const chip = () => {
+    const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
+    return actionChip(model, model.jobs.find(item => item.id === job.id));
   };
+  assert.equal(chip(), 'Create files', 'no artifacts yet -> Create files');
 
-  // Clicking an overlay row runs the same handler Enter runs: the resume step
-  // opens its source chooser.
-  tui.state.overlay = 'setup';
-  tui.state.overlayIndex = model.onboarding.steps.findIndex(step => step.id === 'resume');
-  clickTerm('Your resume');
-  assert.equal(tui.state.overlay, 'setup-resume-source', 'click on the resume step opens the source chooser exactly like Enter');
-
-  // Consequential rows still pass through the confirmation gate.
-  tui.state.overlay = 'setup';
-  tui.state.overlayIndex = model.onboarding.steps.findIndex(step => step.id === 'decision');
-  tui.state.pendingConfirm = null;
-  clickTerm('Check the fit');
-  assert.equal(tui.state.pendingConfirm?.kind, 'setup-domain-action', 'click on a consequential action lands on the confirm gate, not the action');
-
-  // The profile picker applies its selection the same way Enter does.
-  tui.state.overlay = 'setup-profile-picker';
-  tui.state.overlayIndex = 0;
-  tui.state.pendingConfirm = null;
-  clickTerm('Product Leader');
-  assert.equal(tui.state.overlay, 'setup', 'click on a profile row selects it and returns to setup');
-  assert.match(tui.state.status, /Selection saved/, 'picker click reports the selection outcome');
-
-  // The file browser opens folders with one click, exactly like Enter.
-  tui.state.setupFilePurpose = 'resume';
-  tui.setupFiles(store.root, 'resume');
-  tui.state.overlay = 'setup-file-browser';
-  tui.state.overlayIndex = 0;
-  clickTerm(store.root.split('/').pop());
-  assert.equal(tui.state.setupBrowseCwd, store.root, 'clicking a folder entry opens it like Enter');
-
-  // Dashboard job rows remain selectors: click selects, Enter then jumps.
-  const dash = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  dash.state.profileId = profile.id;
-  dash.state.selectedJobId = null;
-  dash.model = buildTuiModel(store, { profileId: profile.id, selectedJobId: null, at: AS_OF });
-  dash.render();
-  const lines = render(dash.model, dash.state, 120, 36);
-  const y = lines.findIndex(line => line.includes('Senior Product Manager'));
-  const x = lines[y].indexOf('Senior Product Manager');
-  dash.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
-  assert.equal(dash.state.selectedJobId, job.id, 'click on a job row selects the job');
-  assert.equal(dash.state.overlay, null, 'job-row click does not dispatch a domain action');
-});
-
-test('UX-BENCH-14 file browser opens on Home and offers Home, Documents, Downloads, and working-directory shortcuts', async t => {
-  const { store, model } = await fixture(t);
-  // Deterministic HOME: the browser must open there and offer the standard
-  // quick rows even when the fixture workspace is elsewhere.
-  const fakeHome = mkdtempSync(path.join(tmpdir(), 'jobos-fake-home-'));
-  mkdirSync(path.join(fakeHome, 'Documents'));
-  mkdirSync(path.join(fakeHome, 'Downloads'));
-  const previousHome = process.env.HOME;
-  process.env.HOME = fakeHome;
-  t.after(() => {
-    process.env.HOME = previousHome;
-    rmSync(fakeHome, { recursive: true, force: true });
-  });
-
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui.model = model;
-  tui.state.setupFilePurpose = 'resume';
-
-  // A fresh browser session starts at the home directory, never at cwd.
-  const items = tui.setupFiles();
-  assert.equal(tui.state.setupBrowseCwd, fakeHome, 'fresh browser opens at the home directory');
-  const labels = items.filter(item => item.quick).map(item => item.label);
-  for (const label of ['Home', 'Documents', 'Downloads', 'Working directory']) {
-    assert.ok(labels.includes(label), `browser offers the "${label}" shortcut`);
-  }
-  assert.ok(labels.indexOf('Home') < labels.indexOf('Working directory'), 'Home and Working directory are always offered');
-
-  // Navigating elsewhere is remembered for the next open.
-  tui.setupFiles(store.root, 'resume');
-  assert.equal(tui.state.setupBrowseCwd, store.root, 'explicit navigation is remembered');
-  tui.setupFiles(undefined, 'resume');
-  assert.equal(tui.state.setupBrowseCwd, store.root, 'reopening the browser restores the remembered folder');
-
-  // Quick rows are visible in the rendered browser. tui.render() must run
-  // first so onMouseData resolves clicks against a fresh lastFrame.
-  tui.state.overlay = 'setup-file-browser';
-  tui.render();
-  const text = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.match(text, /Quick  Home/, 'browser renders the Home quick row');
-  assert.match(text, /Quick  Working directory/, 'browser renders the Working directory quick row');
-
-  // Clicking a quick row navigates there like Enter would.
-  const lines = render(tui.model, tui.state, 120, 36);
-  const y = lines.findIndex(line => line.includes('Quick  Home'));
-  assert.ok(y >= 0, 'Home quick row renders for clicking');
-  const x = lines[y].indexOf('Home');
-  tui.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
-  assert.equal(tui.state.setupBrowseCwd, fakeHome, 'click on Home quick row navigates home');
-});
-
-test('UX-BENCH-15 profile save, setup refresh, and resume-step advance are atomic', async t => {
-  const { store, model } = await fixture(t);
-  const stdout = output(120, 36);
-  const tui = new JobosTui(store, { connectAgent: false, stdout, now: () => new Date(AS_OF) });
-  tui.model = model;
-
-  await captureProfile(tui, stdout);
-  assert.equal(tui.state.overlay, 'setup', 'profile save returns to the setup workspace');
-  assert.ok(tui.state.profileId && tui.state.setupProfileId, 'profile save records the created profile');
-  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'resume', 'profile save advances focus to the next required step');
-  // The save must paint exactly one frame; inspect the actual painted screen
-  // (lastScreen) per line so a ▶ marker from one row can never leak onto an
-  // unselected row via a newline-less diff write.
-  assert.equal(stdout.writes.length, 1, 'profile save paints exactly one frame');
-  const frame = (tui.lastScreen || stdout.writes[0]).split('\n');
-  assert.ok(frame.some(line => line.includes('▶') && line.includes('Your resume')), 'the saved workspace renders the resume step as focused');
-  assert.ok(!frame.some(line => line.includes('▶') && line.includes('About you')), 'profile save never puts the focus marker on the completed step');
-  assert.match(stdout.writes[0], /RECOMMENDED NEXT/, 'the final painted frame is the updated setup workspace');
-
-  // r refresh rebuilds the projection in one frame and lands on the next task.
-  stdout.writes.length = 0;
-  tui.onKeypress('r', { name: 'r' });
-  assert.ok(stdout.writes.length <= 1, 'setup refresh paints at most one frame');
-  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'resume', 'refresh focuses the recommended task');
-  assert.match(tui.lastScreen, /Your resume/, 'refreshed screen shows the recommended task focused');
-
-  // Opening the resume task from the updated workspace advances directly
-  // into its source chooser without exposing an intermediate profile frame.
-  const tui2 = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui2.state.overlay = 'setup';
-  tui2.state.overlayIndex = tui2.model.onboarding.steps.findIndex(step => step.id === 'resume');
-  tui2.onKeypress('', { name: 'return' });
-  assert.equal(tui2.state.overlay, 'setup-resume-source', 'resume step advances into its source chooser');
-});
-
-test('UX-BENCH-16 artifact evidence stays hidden until the docs surface expands it', async t => {
-  const { store, model, profile, job } = await fixture(t, { withJob: true });
   createArtifact(store, {
-    profileId: profile.id,
     jobId: job.id,
+    profileId: profile.id,
     type: 'resume',
-    path: 'resume.md',
-    title: 'Resume draft',
-    content: '# Resume\n\nAlex Chen - product leader.',
-    evidence: ['proof_1'],
-    warnings: ['draft needs review']
+    path: `jobs/${job.id}/artifacts/resume.md`,
+    title: 'Tailored resume',
+    content: 'Draft.',
+    evidence: [],
+    warnings: []
   });
-  const withDocs = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = withDocs;
-  tui.openDocuments();
-  const hidden = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.doesNotMatch(hidden, /EVIDENCE/, 'artifact evidence is hidden by default');
-  assert.doesNotMatch(hidden, /WARNINGS/, 'artifact warnings are hidden by default');
-  tui.onKeypress('I', { name: 'i', shift: true });
-  assert.equal(tui.state.docsEvidenceExpanded, true, 'I expands the docs evidence surface');
-  const shown = render(tui.model, tui.state, 120, 36).join('\n');
-  assert.match(shown, /EVIDENCE/, 'expanded docs surface shows evidence');
-  assert.match(shown, /WARNINGS/, 'expanded docs surface shows warnings');
-  assert.doesNotMatch(shown, /TECHNICAL DETAILS/, 'docs evidence is a separate surface from dashboard technical details');
-});
+  assert.equal(chip(), 'Find people', 'artifacts exist but no outreach path -> Find people');
 
-test('UX-BENCH-17 standard dashboard is calm and shows the stored description when role details are unknown', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const lines = render(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, 120, 36);
-  const text = lines.join('\n');
-  assert.match(text, /ROLE DESCRIPTION/);
-  assert.match(text, /Lead product discovery and launch improvements for educators\./);
-  assert.doesNotMatch(text, /WORKSPACE PULSE|FILTER COUNTS|SELECTED SIGNALS|WORKFLOW STATUS|ACTIVE PRIORITIES/);
-  assert.doesNotMatch(text, /APPLICATION PATH|MATERIALS|○ .* · empty/);
-  assert.doesNotMatch(text, /\d+ open · \d+ due · \d+ drafts/, 'duplicated dashboard counts stay out of the default view');
-});
-
-test('UX-BENCH-18 Enter and click execute the recommended Import resume action', async t => {
-  const { store, model, profile, job } = await fixture(t, { withJob: true });
-  assert.equal(model.recommendedAction?.label, 'Import resume');
-  assert.equal(model.priority[0]?.actionId, 'import_resume');
-
-  const enterTui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  enterTui.state.profileId = profile.id;
-  enterTui.state.selectedJobId = job.id;
-  enterTui.model = model;
-  enterTui.onKeypress('', { name: 'return' });
-  assert.equal(enterTui.state.overlay, 'setup-resume-source', 'Enter opens the resume source chooser instead of reselecting the job');
-
-  const clickTui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  clickTui.state.profileId = profile.id;
-  clickTui.state.selectedJobId = job.id;
-  clickTui.model = model;
-  clickTui.render();
-  const lines = clickTui.lastScreen.split('\n');
-  const y = lines.findIndex(line => line.includes('▶ Import resume'));
-  const x = lines[y].indexOf('Import resume');
-  assert.ok(y >= 0 && x >= 0, 'recommended action is visible and clickable');
-  const jobBorderY = lines.findIndex(line => line.includes('┌ JOBS'));
-  clickTui.onMouseData(`\x1b[<0;2;${jobBorderY + 1}M`);
-  assert.equal(clickTui.state.overlay, null, 'the adjacent jobs panel border is outside the priority hitbox');
-  clickTui.onMouseData(`\x1b[<0;${x + 1};${y + 1}M`);
-  assert.equal(clickTui.state.overlay, 'setup-resume-source', 'click opens the same resume source chooser as Enter');
-});
-
-test('UX-BENCH-19 visible dashboard and technical headings always keep body text with them', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const headings = [
-    '▶ NEXT',
-    'ROLE DESCRIPTION',
-    'KEY REQUIREMENTS',
-    'TECHNICAL DETAILS',
-    'POSTING TEXT',
-    'POSTING REQUIREMENTS',
-    'POLICY',
-    'MATCHED PROOFS',
-    'ARTIFACTS',
-    'PURSUE STAGES'
-  ];
-  const assertAttached = (lines, name) => {
-    for (let row = 0; row < lines.length; row++) {
-      for (const heading of headings) {
-        const column = lines[row].indexOf(heading);
-        if (column < 0) continue;
-        const next = lines[row + 1] || '';
-        const boundary = next.indexOf('│', column);
-        const body = next.slice(column, boundary < 0 ? undefined : boundary).trim();
-        assert.ok(body && !headings.includes(body), `${name}: ${heading} has visible body text on the next row`);
-      }
-    }
-  };
-
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
-  for (const size of SIZES) {
-    assertAttached(render(model, base, size.width, size.height), `${size.name} dashboard`);
-    for (const detailsScroll of [0, 4, 8, 12, 16, 24, 32, 48]) {
-      assertAttached(
-        render(model, { ...base, detailsExpanded: true, detailsScroll }, size.width, size.height),
-        `${size.name} details row ${detailsScroll}`
-      );
-    }
-  }
-});
-
-test('UX-BENCH-20 focused technical details scroll without changing jobs and preserve full text', async t => {
-  const { root, store, profile, job } = await fixture(t, { withJob: true });
-  const tailMarker = 'reason_code_tail_marker_7f31';
-  for (let index = 0; index < 6; index++) {
-    createArtifact(store, {
-      profileId: profile.id,
-      jobId: job.id,
-      type: index % 2 ? 'cover_letter' : 'resume',
-      path: `artifact-${index}-${'evidence-'.repeat(8)}.md`,
-      title: `Draft ${index}`,
-      content: `Draft ${index}`,
-      evidence: [`proof_${index}`]
-    });
-  }
-  const secondPath = path.join(root, 'second-role.md');
-  writeFileSync(secondPath, 'Title: Staff Product Manager\nCompany: Southstar Labs\nLocation: Remote\n\nOwn the platform roadmap.');
-  const second = importText(store, { profileId: profile.id, filePath: secondPath }).job;
-  run(store, 'UPDATE jobs SET description=? WHERE id=?', [
-    `${'Source-backed posting detail '.repeat(30)}${tailMarker}`,
-    job.id
+  run(store, `INSERT INTO outreach_plans (id,job_id,profile_id,stakeholder_id,contact_point_id,goal,channel,path_strength,recommended,reasoning_json,warnings_json,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [
+    'plan_ux', job.id, profile.id, null, null, 'informational', 'email', 'strong', 1, '{}', '[]', AS_OF
   ]);
-  const refreshed = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
-  assert.match(refreshed.selected.postingText, new RegExp(tailMarker), 'model preserves posting text beyond the former 280-character cutoff');
-  const longModel = {
-    ...refreshed,
-    selected: {
-      ...refreshed.selected,
-      readiness: {
-        ...refreshed.selected.readiness,
-        blockers: [{
-          code: 'evidence_chain_incomplete',
-          reason: `${'source evidence must remain inspectable '.repeat(10)}${tailMarker}`
-        }]
-      }
-    }
-  };
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(120, 36), now: () => new Date(AS_OF) });
-  tui.state.profileId = profile.id;
-  tui.state.selectedJobId = job.id;
-  tui.model = longModel;
-  tui.render();
-  tui.onKeypress('e', { name: 'e' });
-  assert.equal(tui.state.focusTarget, 'details', 'opening disclosure explicitly focuses its scroll owner');
-  assert.match(tui.lastScreen, /SELECTED JOB · DETAILS · FOCUSED/, 'focused panel is visibly named');
-  const selectedBeforeScroll = tui.state.selectedJobId;
-  const pages = [tui.lastScreen];
-  for (let index = 0; index < 12; index++) {
-    tui.onKeypress('', { name: 'pagedown' });
-    pages.push(tui.lastScreen);
-  }
-  const technicalText = pages.join('\n');
-  assert.equal(tui.state.selectedJobId, selectedBeforeScroll, 'detail scrolling never changes the global job selection');
-  assert.match(technicalText, /ARTIFACTS/, 'scroll reaches artifacts below the initial viewport');
-  assert.match(technicalText, /PURSUE STAGES/, 'scroll reaches pursue stages below the initial viewport');
-  assert.match(technicalText, new RegExp(tailMarker), 'wrapped posting and readiness diagnostics retain their tail evidence');
-  assert.doesNotMatch(technicalText, /…/, 'expanded technical text wraps instead of using destructive ellipses');
+  save(store);
+  assert.equal(chip(), null, 'artifacts and a path exist -> nothing actionable');
 
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.focusTarget, 'shell', 'Escape visibly restores global navigation while leaving disclosure open');
-  assert.doesNotMatch(tui.lastScreen, /DETAILS · FOCUSED/, 'unfocused disclosure drops the focus marker');
-  const details = tui.lastFrame.sections.details;
-  tui.onMouseData(`\x1b[<0;${details.x + 2};${details.y + 2}M`);
-  assert.equal(tui.state.focusTarget, 'details', 'clicking the expanded panel gives it the same visible focus');
-  tui.onKeypress('', { name: 'escape' });
-  tui.onKeypress('', { name: 'down' });
-  assert.equal(tui.state.selectedJobId, second.id, 'job navigation resumes after details explicitly releases focus');
+  const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
+  const rows = jobRows(model);
+  assert.equal(rows.some(row => row.id === job.id), false, 'no application and no saved status -> not on the Jobs rail');
+  assert.equal(newRows(model).some(row => row.id === job.id), true, 'imported listing -> on the New rail');
 });
 
-test('UX-BENCH-21 dashboard panels fit their content and minimum layout preserves identity', async t => {
-  const { model, profile, job } = await fixture(t, { withJob: true });
-  const base = { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false };
+test('UX-BENCH-06 the right pane has equal Job | People | Chat tabs and the composer exists only on Chat and Workspace', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.jobTab = 'job';
+  const jobPane = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(jobPane, /Job/, 'Job tab present');
+  assert.match(jobPane, /People/, 'People tab present');
+  assert.match(jobPane, /Chat/, 'Chat tab present');
+  assert.doesNotMatch(jobPane, /Ask about /, 'no composer on the Job pane');
+  assert.doesNotMatch(jobPane, /❯/, 'no prompt glyph on the Job pane');
 
-  const standard = render(model, base, 120, 36);
-  const panelBottom = standard.findIndex(line => line.startsWith('└'));
-  assert.ok(panelBottom > 0 && panelBottom < 24, 'standard panels stop near their content instead of filling 29 rows');
-  assert.equal(standard.filter(line => line.includes('[today]')).length, 1, 'filters occupy one calm row');
-  assert.doesNotMatch(standard.join('\n'), /JOBS · today/, 'active filter is not duplicated in the panel title');
+  tui.state.jobTab = 'people';
+  const peoplePane = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(peoplePane, /PEOPLE · THIS JOB/, 'People pane is listing-scoped');
+  assert.doesNotMatch(peoplePane, /Network/, 'no Network button on the People pane');
+  assert.doesNotMatch(peoplePane, /Ask about /, 'no composer on the People pane');
 
-  const minimum = render(model, base, 60, 20).join('\n');
-  assert.match(minimum, /Northstar Learning · Remote/, 'minimum dashboard keeps company and location context');
-  assert.match(minimum, /Ready · local workspace/, 'status reads as a stable user-facing state');
-  assert.doesNotMatch(minimum, /starting JobOS host/, 'startup implementation detail stays out of the interface');
-  assert.match(minimum, /↑\/↓ jobs · ←\/→ next · Enter open · Tab chat/, 'minimum footer keeps primary navigation on one line');
-  assert.match(minimum, /i ask · p pursue · g setup · \? help · Q quit/, 'minimum footer progressively discloses secondary commands through help');
+  tui.state.jobTab = 'chat';
+  const chatPane = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(chatPane, /Ask about Westbrook Learning/, 'Chat pane owns the this-job composer');
+  assert.match(chatPane, /❯/, 'composer prompt is visible on Chat');
+
+  const workspace = render(tui.model, { ...tui.state, headerMode: 'workspace' }, 120, 36).join('\n');
+  assert.match(workspace, /Workspace — the whole search/, 'Workspace is whole-search chat');
+  assert.match(workspace, /Ask about the search/, 'workspace composer is present');
+  assert.doesNotMatch(workspace, /PEOPLE · THIS JOB/, 'workspace has no job-scoped panes');
+});
+
+test('UX-BENCH-07 the footer is a hint, not a launcher, and names Tab and the slash hint', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  const text = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(text, /\/ in Chat/, 'footer is a slash hint, not a launcher');
+  assert.match(text, /Tab/, 'Tab is advertised');
+  assert.match(text, /Job · People · Chat/, 'Tab cycles Job · People · Chat');
+  assert.match(text, /Esc/, 'Esc is advertised');
+  assert.doesNotMatch(text, /:packet|:answer|:prep/, 'no colon command bar in the footer');
+});
+
+test('UX-BENCH-08 every overlay in the family renders its locked identity without retired panes', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  const expectations = {
+    welcome: /WELCOME TO JOBOS/,
+    setup: /SET UP JOBOS/,
+    'setup-resume-source': /SETUP · YOUR RESUME/,
+    'setup-job-source': /SETUP · ADD A JOB YOU LIKE/,
+    files: /FILES · THIS JOB/,
+    tracker: /TRACKER · THIS JOB/,
+    review: /THIS MORNING/,
+    network: /NETWORK · PROFILE/,
+    memory: /CAREER MEMORY/
+  };
+  for (const [overlay, expected] of Object.entries(expectations)) {
+    const state = { ...tui.state, overlay };
+    const text = render(tui.model, state, 120, 38).join('\n');
+    assert.match(text, expected, `${overlay} overlay must render its locked identity`);
+    assertNoRetiredChrome(text, overlay);
+  }
+});
+
+test('UX-BENCH-09 first-run empty state is honest and never invents jobs, companies, or fit scores', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-ux-empty-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = await openStore({ workspace: root });
+  const tui = makeTui(store, null, null);
+  const text = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(text, /welcome to jobos/i, 'welcome overlay is first-run chrome');
+  assert.match(text, /Start guided setup/, 'welcome offers guided setup');
+  assert.match(text, /Skip for now/, 'welcome offers a skip path');
+  assert.doesNotMatch(text, /Westbrook Learning|Harbor Schools|Example Learning Co|Contoso Careers Lab|Lumen Labs/, 'empty workspace must not invent visualizer mock listings');
+  assert.doesNotMatch(text, /Acme|Contoso/, 'empty workspace must not invent companies');
+  assertNoRetiredChrome(text, 'empty first-run');
+  // The controller boundary keeps the empty flags honest on a genuinely empty store.
+  assert.equal(tui.model.empty.noProfile, true);
+  assert.equal(tui.model.empty.noJobs, true);
+});
+
+test('UX-BENCH-WELCOME-FOOTER effective welcome hides navigation structures and rail hints until dismissal', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'jobos-ux-welcome-footer-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = await openStore({ workspace: root });
+  const tui = makeTui(store, null, null);
+  const lines = state => render(tui.model, state, 140, 42);
+  const railHint = line => /\bn\s+New\b.*\bj\s+Jobs\b/.test(line);
+  const railTabs = line => /\bNew\b.*\bJobs\b/.test(line) && !railHint(line);
+  const paneTabs = line => /\bJob\b.*\bPeople\b.*\bChat\b/.test(line) && !/\bTab\b/.test(line);
+
+  const welcome = lines(tui.state);
+  assert.match(welcome.join('\n'), /WELCOME TO JOBOS|Welcome to JobOS/, 'effective first-run welcome is open');
+  assert.equal(welcome.some(railHint), false, 'welcome footer omits the n New / j Jobs hints');
+  assert.equal(welcome.some(railTabs), false, 'welcome covers the structural New | Jobs rail tabs');
+  assert.equal(welcome.some(paneTabs), false, 'welcome covers the structural Job | People | Chat pane tabs');
+
+  const dismissed = lines({ ...tui.state, welcomeDismissed: true });
+  assert.ok(dismissed.some(railHint), 'dismissed board restores the documented n New / j Jobs footer hints');
+  assert.ok(dismissed.some(railTabs), 'dismissed board restores the structural New | Jobs rail tabs');
+  assert.ok(dismissed.some(paneTabs), 'dismissed board restores the structural Job | People | Chat pane tabs');
+});
+
+test('UX-BENCH-10 working turns are visible in the header and the status line stays local', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.working = true;
+  const text = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(text, /working/, 'header shows working while a domain/ACP turn is busy');
+  tui.state.working = false;
+  const idle = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.doesNotMatch(idle, / working /, 'working badge clears when idle');
+  assert.match(idle, /Ready · local workspace/, 'status line states the local workspace');
+});
+
+test('UX-BENCH-11 renderTui bounds width and height defensively and never throws', async t => {
+  const { model } = await fixture(t);
+  for (const [width, height] of [[20, 5], [60, 20], [200, 100]]) {
+    const lines = renderTui(model, defaultTuiState(), { width, height, color: false }).split('\n');
+    assert.ok(lines.length > 0 && lines.length <= height, `height bounded at ${width}x${height}`);
+    assert.ok(lines.every(line => stringWidth(line) <= width), `width bounded at ${width}x${height}`);
+  }
+});
+
+test('UX-BENCH-12 the slash catalog is locked and every command routes to a live handler', async t => {
+  assert.deepEqual(SLASH_CATALOG.map(item => item.id), [
+    'create-files', 'find-people', 'network', 'tracker', 'review', 'daily', 'chat', 'jobs', 'workspace', 'memory', 'setup'
+  ]);
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  // Navigation and overlay routes are synchronous; the domain-heavy routes
+  // (create-files, find-people) are proven end-to-end in their own files.
+  for (const id of ['daily', 'chat', 'jobs', 'workspace', 'memory', 'setup', 'review', 'tracker', 'network']) {
+    assert.doesNotThrow(() => tui.runSlash(id), `runSlash(${id}) must route to a live handler`);
+  }
+  tui.runSlash('jobs');
+  assert.equal(tui.state.headerMode, 'jobs', '/jobs returns to the board');
+  tui.runSlash('workspace');
+  assert.equal(tui.state.headerMode, 'workspace', '/workspace opens whole-search chat');
+  tui.runSlash('tracker');
+  assert.equal(tui.state.overlay, 'tracker', '/tracker opens the tracker overlay');
+  // An unknown command is not a silent no-op.
+  tui.runSlash('not-a-command');
+  assert.match(tui.state.status, /No matching command/);
+});
+
+test('UX-BENCH-13 the production @inkjs/ui tree is mounted: ThemeProvider + INKUI_THEME + Spinner render real output', async t => {
+  // Facade exports must be the real mounted @inkjs/ui primitives, not theme constants or source text.
+  const { INKUI_THEME, ThemeProvider, Spinner } = await import('../src/tui.js');
+  assert.equal(typeof ThemeProvider, 'function', 'ThemeProvider is the real @inkjs/ui facade export');
+  assert.equal(typeof Spinner, 'function', 'Spinner is the real @inkjs/ui facade export');
+  assert.equal(INKUI_THEME.components.Badge.styles.container().backgroundColor, CLASSIC_THEME.accent, 'Badge inherits the Classic red accent');
+  assert.equal(INKUI_THEME.components.Spinner.styles.frame().color, CLASSIC_THEME.accent, 'Spinner inherits the Classic red accent');
+  assert.equal(INKUI_THEME.components.Spinner.styles.label().color, CLASSIC_THEME.accent, 'Spinner label inherits the Classic red accent');
+
+  // A real working snapshot: mount the exported facade components and paint output.
+  const widget = renderToString(
+    React.createElement(ThemeProvider, { theme: INKUI_THEME },
+      React.createElement(Spinner, { label: 'working' })),
+    { columns: 40 }
+  );
+  assert.match(String(widget), /working/, 'the mounted @inkjs/ui Spinner paints its label through the facade ThemeProvider');
+
+  // The product shell mounts the same widget in the header while a domain turn is busy.
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.working = true;
+  const header = render(tui.model, tui.state, 120, 36).join('\n');
+  assert.match(header, /working/, 'the App header mounts the @inkjs/ui Spinner while working');
+});
+
+test('UX-BENCH-14 the frozen 140x42 SGR hit-rects map to the actions the frame paints', async t => {
+  const { store, profile, job } = await fixture(t, { withJob: true, withApplication: true });
+  // Seed a second pipeline job so the rail paints a second row: the frozen
+  // rail-row cell (10,5) is visual index 1 and must map to a real row.
+  const secondFile = path.join(store.root, 'second-role.md');
+  writeFileSync(secondFile, [
+    'Title: Senior Product Manager II',
+    'Company: Westbrook Learning',
+    'Location: Remote',
+    '',
+    'Launch a second learning program for educators.'
+  ].join('\n'));
+  const second = importText(store, { profileId: profile.id, filePath: secondFile }).job;
+  appCreate(store, second.id, 'materials-ready', '', { at: AS_OF });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.state.welcomeDismissed = true;
+  tui.state.headerMode = 'jobs';
+  tui.state.leftMode = 'jobs';
+  tui.state.jobTab = 'job';
+  tui.refresh();
+  const frame = render(tui.model, tui.state, 140, 42);
+  const joint = frame.join('\n');
+  // The frame really paints the mode segs, rail segs, pane tabs, and rows the
+  // hit-test grid targets at the frozen coordinates.
+  assert.match(joint, /Workspace/, 'header paints Workspace mode');
+  assert.match(joint, /Jobs/, 'header paints Jobs mode');
+  const row2 = frame[1] || '';
+  assert.match(row2, /New/, 'row 2 paints the New rail seg');
+  assert.match(row2, /Job/, 'row 2 paints the Job pane tab');
+  assert.match(row2, /People/, 'row 2 paints the People pane tab');
+  assert.match(row2, /Chat/, 'row 2 paints the Chat pane tab');
+
+  const grid = { width: 140, height: 42 };
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 124, 1, grid), { action: 'setHeaderMode', value: 'workspace' }, 'header Workspace seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 137, 1, grid), { action: 'setHeaderMode', value: 'jobs' }, 'header Jobs seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 12, 2, grid), { action: 'setLeftMode', value: 'new' }, 'rail New seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 36, 2, grid), { action: 'setLeftMode', value: 'jobs' }, 'rail Jobs seg');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 53, 2, grid), { action: 'setJobTab', value: 'job' }, 'Job pane tab');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 63, 2, grid), { action: 'setJobTab', value: 'people' }, 'People pane tab');
+  assert.deepEqual(hitTestGrid(tui.model, tui.state, 73, 2, grid), { action: 'setJobTab', value: 'chat' }, 'Chat pane tab');
+
+  // The rail row click targets the visual row under the cursor (row 3 = first
+  // painted rail row, row 5 = second) regardless of fixture insertion order.
+  const railHit = hitTestGrid(tui.model, tui.state, 10, 5, grid);
+  assert.equal(railHit.action, 'selectRow', 'the second painted rail row is a selectRow hit');
+  assert.equal(railHit.index, 1, 'the second painted rail row carries visual index 1');
+
+  // Setup overlay: the centered step rows are clickable and map to overlayIndex.
+  const setupState = { ...tui.state, overlay: 'setup', overlayIndex: 0 };
+  const steps = setupStepViews(tui.model);
+  assert.ok(steps.length > 5, 'the setup overlay has enough steps to cover the frozen cell');
+  assert.deepEqual(hitTestGrid(tui.model, setupState, 60, 20, grid), { action: 'setOverlayIndex', index: 5 }, 'setup step row click maps to overlayIndex 5');
+
+  // Composer: the bottom row inside the main pane dispatches submitComposer.
+  const chatState = { ...tui.state, jobTab: 'chat', headerMode: 'jobs', input: 'send this grounded question' };
+  assert.deepEqual(hitTestGrid(tui.model, chatState, 135, 40, grid), { action: 'submitComposer' }, 'composer send click dispatches submitComposer');
+
+  // A miss stays a no-op: no action descriptor is invented for empty chrome.
+  assert.equal(hitTestGrid(tui.model, tui.state, 5, 8, grid), null, 'unmapped cells are a no-op');
 });

@@ -40,7 +40,13 @@ function isRepost(existing, entry, at){
   if((new Date(at).getTime()-new Date(firstSeen).getTime())>21*24*60*60*1000) return true;
   return existing?.status==='archived'&&existing?.last_seen_at ? (new Date(at).getTime()-new Date(existing.last_seen_at).getTime())>21*24*60*60*1000 : false;
 }
-function canMergeByKey(existing, dbUrl){ const a=publicUrl(existing?.url), b=publicUrl(dbUrl); return !a || !b || a===b; }
+function canMergeByKey(existing, dbUrl){
+  const a=publicUrl(existing?.url), b=publicUrl(dbUrl);
+  // Both are local text imports (jobos:text:...) — only merge if the underlying text-hash URL matches.
+  // Prevents distinct freeform pastes (both "Imported role / Unknown company") from collapsing to one job.
+  if (!a && !b) return String(existing?.url || '') === String(dbUrl || '');
+  return !a || !b || a===b;
+}
 function createPossibleDuplicateTask(s, job, candidates, at){
   if(!candidates.length) return null;
   const ids=candidates.map(c=>c.id).sort(), tid=id('task',`possible-duplicate:${job.id}:${ids.join(':')}`);

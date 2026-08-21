@@ -716,12 +716,23 @@ export function recordNetworkContact(s, { profileId, personId, contactPointId = 
   ].filter(Boolean).sort().at(-1) || null;
   const edgeId = existingEdges[0]?.id || id('edge', `profile:${profileId}:person:${personId}:direct_connection`);
   if (currentLastContactAt && iso <= currentLastContactAt) {
+    // Preserve the newer record. If the profile→person direct edge is missing
+    // (never created, deleted, or only recorded under another profile),
+    // materialize it with the preserved timestamp so derived views
+    // (health/opportunities/graph) still show the relationship.
+    if (!existingEdges.length) {
+      run(s, 'INSERT INTO relationship_edges (id,from_type,from_id,to_type,to_id,edge_type,evidence_json,confidence,created_at,last_contact_at,warmth) VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
+        edgeId, 'profile', profileId, 'person', personId, 'direct_connection',
+        JSON.stringify([{ label: 'Human-confirmed contact recorded', source: String(source || 'cli') }]),
+        'high', now(), currentLastContactAt, warmthFromLastContact(currentLastContactAt)
+      ]);
+    }
     return {
       profileId,
       personId,
       contactPointId: contactPointId || null,
       occurredAt: iso,
-      warmth: warmthFromLastContact(currentLastContactAt, new Date()),
+      warmth: warmthFromLastContact(currentLastContactAt),
       lastContactAt: currentLastContactAt,
       updatedEdge: edgeId,
       updatedContactPoints: [],
@@ -731,7 +742,10 @@ export function recordNetworkContact(s, { profileId, personId, contactPointId = 
     };
   }
 
-  const warmthValue = warmth == null || warmth === '' ? warmthFromLastContact(iso, at) : normalizeWarmth(warmth);
+  // Auto warmth is derived from the latest contact at asOf (now), so a
+  // backfilled record decays like every derived read view; an explicit warmth
+  // argument is always honored verbatim.
+  const warmthValue = warmth == null || warmth === '' ? warmthFromLastContact(iso) : normalizeWarmth(warmth);
   if (existingEdges.length) {
     run(s, `UPDATE relationship_edges SET last_contact_at=?, warmth=?
       WHERE edge_type='direct_connection'

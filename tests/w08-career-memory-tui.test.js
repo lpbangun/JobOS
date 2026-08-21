@@ -5,7 +5,12 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { all, one, openStore, run, save } from '../src/db.js';
+import { all, guardedWrite, one, openStore, run, save } from '../src/db.js';
+import { callDomainTool } from '../src/domain-tools.js';
+import { updateJobStatus } from '../src/jobs.js';
+import { recordJobFeedback } from '../src/career-memory-observations.js';
+import { createMemoryProposal, transitionMemoryProposal } from '../src/career-memory-proposals.js';
+import { mcpToolNames } from '../src/mcp.js';
 import { buildTuiModel } from '../src/tui-model.js';
 import { JobosTui, renderTui } from '../src/tui.js';
 
@@ -30,36 +35,69 @@ function streams() {
   return { stdin, stdout };
 }
 
+// Seed a genuinely eligible proposal through the real observation + proposal
+// APIs (job feedback -> observations -> createMemoryProposal), so accept can
+// validate real evidence, gates, and hashes instead of a hand-written row.
 function seedProposal(store, profileId, suffix, status = 'proposed') {
-  const proposalId = `memory_proposal_${suffix}`;
-  run(store, `INSERT INTO career_memory_proposals (
-    id,profile_id,domain,scope,rule_type,value_json,rule_key,conflict_key,
-    rationale,confidence_milli,confidence_band,conflict_state,evidence_hash,
-    evidence_fresh_until,created_at,actor,source,proposal_hash
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
-    proposalId, profileId, 'search', 'search', 'role_family',
-    JSON.stringify({ match: 'exact', polarity: 'prefer', value: `${profileId} product` }),
-    `rule-${suffix}`, `conflict-${suffix}`, `${profileId} visible rationale`,
-    800, 'medium', 'none', `evidence-${suffix}`, '2027-01-20T12:00:00.000Z',
-    '2026-07-24T12:00:00.000Z', 'fixture-user', 'cli', `proposal-${suffix}`,
-  ]);
-  run(store, `INSERT INTO career_memory_proposal_transitions (
-    id,proposal_id,profile_id,sequence,from_status,to_status,reason,reference_id,
-    actor,source,occurred_at,transition_hash
-  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [
-    `memory_transition_${suffix}_1`, proposalId, profileId, 1, null, 'proposed', '',
-    `seed-${suffix}`, 'fixture-user', 'cli', '2026-07-24T12:00:00.000Z', `transition-${suffix}-1`,
-  ]);
-  if (status === 'accepted') {
-    run(store, `INSERT INTO career_memory_proposal_transitions (
-      id,proposal_id,profile_id,sequence,from_status,to_status,reason,reference_id,
-      actor,source,occurred_at,transition_hash
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [
-      `memory_transition_${suffix}_2`, proposalId, profileId, 2, 'proposed', 'accepted', '',
-      `accept-${suffix}`, 'fixture-user', 'cli', '2026-07-24T12:30:00.000Z', `transition-${suffix}-2`,
-    ]);
+  const value = `${profileId}-${suffix}`;
+  const baseJob = one(store, 'SELECT * FROM jobs WHERE profile_id=? AND status=? ORDER BY id LIMIT 1', [profileId, 'saved']);
+  assert.ok(baseJob, `the schema-14 fixture has a saved job for ${profileId}`);
+  const observations = [];
+  for (let index = 0; index < 3; index += 1) {
+    const row = {
+      ...baseJob,
+      id: `job_tui_${profileId}_${suffix}_${index}`,
+      url: `jobos:test:${profileId}:${suffix}:${index}`,
+      description: `${baseJob.description}\n${value}`,
+      status: 'new',
+      dedupe_key: `tui-${profileId}-${suffix}-${index}`,
+    };
+    const columns = Object.keys(row);
+    guardedWrite(store, () => run(store, `INSERT INTO jobs (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`, columns.map(column => row[column])));
+    updateJobStatus(store, row.id, 'saved');
+    observations.push(recordJobFeedback(store, {
+      profileId,
+      jobId: row.id,
+      input: {
+        schema: 'jobos.job-feedback-input.v1',
+        decision: 'save',
+        reasonCodes: ['role_fit'],
+        signals: [{ field: 'mission', polarity: 'prefer', value, match: 'token' }],
+        publicExplanation: '',
+        privateNote: '',
+        referenceId: `tui-obs-${profileId}-${suffix}-${index}`,
+        occurredAt: `2026-07-${20 + index}T12:00:00.000Z`,
+      },
+      actor: 'user',
+      source: 'cli',
+    }));
   }
-  return proposalId;
+  const proposal = createMemoryProposal(store, {
+    schema: 'jobos.memory-proposal-input.v1',
+    domain: 'search',
+    scope: 'search',
+    ruleType: 'mission',
+    value: { polarity: 'prefer', value, match: 'token' },
+    rationale: 'Repeated direct search feedback supports guidance.',
+    evidence: observations.map(item => ({ observationSchema: 'jobos.career-memory-observation.v1', observationId: item.id, polarity: 'support' })),
+    referenceId: `tui-proposal-${profileId}-${suffix}`,
+    createdAt: AS_OF,
+  });
+  if (status === 'accepted') {
+    // The seed accept is a CLI action (fixture setup); the TUI actions below
+    // must record their own actor/source on transition.
+    transitionMemoryProposal(store, {
+      profileId,
+      proposalId: proposal.id,
+      action: 'accept',
+      reason: '',
+      referenceId: `tui-seed-accept-${profileId}-${suffix}`,
+      actor: 'user',
+      source: 'cli',
+      nowDate: new Date(AS_OF),
+    });
+  }
+  return proposal.id;
 }
 
 function makeTui(store, profileId) {
@@ -67,10 +105,9 @@ function makeTui(store, profileId) {
     ...streams(),
     profileId,
     connectAgent: false,
-    color: false,
-    now: () => new Date(AS_OF),
+    color: false
   });
-  tui.refresh({ disk: false });
+  tui.refresh();
   return tui;
 }
 
@@ -79,7 +116,7 @@ function transitions(store) {
     actor,source FROM career_memory_proposal_transitions ORDER BY rowid`);
 }
 
-test('W08-TUI-01 Career Memory model and four-view workspace are deterministic and profile-safe', async t => {
+test('W08-TUI-01 Career Memory projection is deterministic, profile-safe, and private', async t => {
   const store = await openStore({ workspace: workspace(t) });
   const alphaProposal = seedProposal(store, 'alpha', 'alpha');
   const betaProposal = seedProposal(store, 'beta', 'beta');
@@ -95,74 +132,115 @@ test('W08-TUI-01 Career Memory model and four-view workspace are deterministic a
   assert.equal(first.memory.careerBrief.profileId, 'alpha');
   assert.equal(first.memory.voiceGuide.profileId, 'alpha');
   assert.equal(JSON.stringify(first.memory).includes('privateNote'), false);
-
-  const tui = makeTui(store, 'alpha');
-  tui.onKeypress('m', { name: 'm' });
-  assert.equal(tui.state.overlay, 'memory');
-  for (const [key, view, heading] of [
-    ['1', 'observations', 'OBSERVATIONS'],
-    ['2', 'proposals', 'PROPOSALS'],
-    ['3', 'career-brief', 'CAREER BRIEF'],
-    ['4', 'voice-guide', 'VOICE GUIDE'],
-  ]) {
-    tui.onKeypress(key, { name: key });
-    assert.equal(tui.state.memoryView, view);
-    const screen = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
-    assert.match(screen, new RegExp(`CAREER MEMORY · ${heading}`));
-    assert.doesNotMatch(screen, new RegExp(betaProposal));
-    assert.equal(screen, renderTui(tui.model, tui.state, { width: 120, height: 40, color: false }));
-  }
-
-  tui.state.profileId = 'beta';
-  tui.state.selectedJobId = null;
-  tui.refresh({ disk: false });
-  assert.equal(tui.model.memory.profileId, 'beta');
-  assert.equal(tui.model.memory.proposals.some(item => item.id === betaProposal), true);
-  assert.equal(tui.model.memory.proposals.some(item => item.id === alphaProposal), false);
 });
 
-test('W08-TUI-02 human-only memory actions are reachable from TUI commands, profile-bound, and inert in the agent pane', async t => {
+test('W08-TUI-01b the memory overlay renders real proposals and never leaks another profile', async t => {
   const store = await openStore({ workspace: workspace(t) });
-  const alphaProposal = seedProposal(store, 'alpha', 'human-action');
-  const betaProposal = seedProposal(store, 'beta', 'cross-profile');
+  const alphaProposal = seedProposal(store, 'alpha', 'alpha');
+  const betaProposal = seedProposal(store, 'beta', 'beta');
   save(store);
   const tui = makeTui(store, 'alpha');
-
-  tui.executeCommand('memory');
+  tui.runSlash('memory');
   assert.equal(tui.state.overlay, 'memory');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 40, color: false });
+  assert.match(screen, /CAREER MEMORY/, 'memory overlay identity');
+  assert.match(screen, new RegExp(alphaProposal), 'the alpha proposal is listed');
+  assert.doesNotMatch(screen, new RegExp(betaProposal), 'the beta proposal never leaks into the alpha profile');
+  assert.doesNotMatch(screen, /privateNote/, 'private notes never render');
+  assert.equal(screen, renderTui(tui.model, tui.state, { width: 120, height: 40, color: false }), 'memory overlay rendering is deterministic');
+});
 
-  const beforeCrossProfile = transitions(store);
-  tui.executeCommand(`memory reject ${betaProposal} | not mine`);
-  assert.deepEqual(transitions(store), beforeCrossProfile);
-  assert.match(tui.state.status, /failed|unknown/i);
+test('W08-TUI-02 accept/reject/revoke transitions are human TUI actions with persisted state', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const acceptId = seedProposal(store, 'alpha', 'accept');
+  const rejectId = seedProposal(store, 'alpha', 'reject');
+  const revokeId = seedProposal(store, 'alpha', 'revoke', 'accepted');
+  save(store);
+  const tui = makeTui(store, 'alpha');
+  tui.runSlash('memory');
 
-  tui.executeCommand(`memory reject ${alphaProposal} | not representative`);
+  // Accept is immediate and requires a proposed proposal.
+  const acceptIndex = tui.model.memory.proposals.findIndex(item => item.id === acceptId);
+  tui.state.overlayIndex = acceptIndex;
+  tui.handleKey('a', { name: 'a' });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const accepted = transitions(store).at(-1);
+  assert.deepEqual(accepted, {
+    proposalId: acceptId,
+    profileId: 'alpha',
+    toStatus: 'accepted',
+    actor: 'user',
+    source: 'tui',
+  });
+
+  // Reject requires a typed reason.
+  const rejectIndex = tui.model.memory.proposals.findIndex(item => item.id === rejectId);
+  tui.state.overlayIndex = rejectIndex;
+  tui.handleKey('r', { name: 'r' });
+  assert.ok(tui.state.memoryReason, 'reject asks for a reason');
+  tui.handleKey('', { name: 'return' });
+  assert.ok(tui.state.memoryReason, 'an empty reason keeps the editor open');
+  assert.match(tui.state.status, /reason is required/);
+  for (const char of 'not representative') tui.handleKey(char, { name: char });
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 60));
   const rejected = transitions(store).at(-1);
-  const rejectedTransitionId = one(store, `SELECT id FROM career_memory_proposal_transitions
-    WHERE proposal_id=? ORDER BY sequence DESC LIMIT 1`, [alphaProposal]).id;
   assert.deepEqual(rejected, {
-    proposalId: alphaProposal,
+    proposalId: rejectId,
     profileId: 'alpha',
     toStatus: 'rejected',
     actor: 'user',
     source: 'tui',
   });
-  assert.match(tui.state.status, /rejected/i);
+  assert.equal(one(store, "SELECT reason FROM career_memory_proposal_transitions WHERE proposal_id=? AND to_status='rejected'", [rejectId]).reason, 'not representative');
 
-  const beforeAgent = transitions(store);
-  let prompt = '';
-  tui.client = {
-    state: 'ready',
-    prompt: async text => {
-      prompt = text;
-      return { stopReason: 'end_turn' };
-    },
-  };
-  await tui.promptAgent(`:memory undo ${rejected.proposalId} | bypass human gate`);
-  assert.match(prompt, /^:memory undo/);
-  assert.deepEqual(transitions(store), beforeAgent, 'agent text must not dispatch trusted TUI memory commands');
-
-  tui.executeCommand(`memory undo ${rejectedTransitionId} | restore proposal`);
-  assert.equal(transitions(store).at(-1).toStatus, 'proposed');
+  // Revoke applies to accepted proposals only and lands in the frozen
+  // 'revoked' terminal status.
+  const revokeIndex = tui.model.memory.proposals.findIndex(item => item.id === revokeId);
+  tui.state.overlayIndex = revokeIndex;
+  tui.handleKey('v', { name: 'v' });
+  for (const char of 'no longer accurate') tui.handleKey(char, { name: char });
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(transitions(store).at(-1).toStatus, 'revoked', 'revoke moves the accepted proposal to revoked');
   assert.equal(transitions(store).at(-1).source, 'tui');
+});
+
+test('W08-TUI-02b memory actions are profile-bound and cross-profile targets are refused', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const alphaProposal = seedProposal(store, 'alpha', 'owned');
+  const betaProposal = seedProposal(store, 'beta', 'other');
+  save(store);
+  const tui = makeTui(store, 'alpha');
+  tui.runSlash('memory');
+  const before = transitions(store);
+  const betaIndex = tui.model.memory.proposals.findIndex(item => item.id === betaProposal);
+  assert.equal(betaIndex, -1, 'the beta proposal is not visible to the alpha profile');
+  // Attempt a direct transition on the beta proposal through the trusted gate.
+  await tui.transitionProposal(betaProposal, 'reject', 'not mine');
+  assert.deepEqual(transitions(store), before, 'cross-profile transitions write nothing');
+  assert.ok(tui.state.error, 'the refusal is surfaced as an error');
+  assert.ok(tui.model.memory.proposals.some(item => item.id === alphaProposal));
+});
+
+test('W08-TUI-03 memory lifecycle mutations stay human-only and out of the agent catalog', async t => {
+  const store = await openStore({ workspace: workspace(t) });
+  const proposalId = seedProposal(store, 'alpha', 'gated');
+  save(store);
+  const mcp = new Set(mcpToolNames());
+  for (const tool of ['accept_memory_proposal', 'reject_memory_proposal', 'revoke_memory_proposal', 'undo_memory_transition']) {
+    assert.equal(mcp.has(tool), false, `${tool} must not be advertised to agents`);
+  }
+  await assert.rejects(
+    callDomainTool(store, 'accept_memory_proposal', { profileId: 'alpha', proposalId, referenceId: 'acp-attempt', reason: '' }, { source: 'acp' }),
+    error => error.code === 'human_memory_input_required',
+    'ACP cannot transition memory'
+  );
+  await assert.rejects(
+    callDomainTool(store, 'reject_memory_proposal', { profileId: 'alpha', proposalId, referenceId: 'mcp-attempt', reason: 'x' }, { source: 'mcp' }),
+    error => error.code === 'human_memory_input_required',
+    'MCP cannot transition memory'
+  );
+  const ok = await callDomainTool(store, 'accept_memory_proposal', { profileId: 'alpha', proposalId, referenceId: 'tui-attempt', reason: '' }, { source: 'tui' });
+  assert.ok(ok, 'the trusted TUI source can transition memory');
 });

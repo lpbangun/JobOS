@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { openStore, run, save } from '../src/db.js';
+import { PassThrough } from 'node:stream';
+import { openStore, one, run, save } from '../src/db.js';
 import { addProof, createProfile } from '../src/profiles.js';
 import { importText } from '../src/jobs.js';
 import { tailor } from '../src/tailoring.js';
 import { buildTuiModel, fitUnlockGuidance } from '../src/tui-model.js';
-import { defaultTuiState, JobosTui, renderTui } from '../src/tui.js';
+import { JobosTui, renderTui } from '../src/tui.js';
+import { fitLabel } from '../src/tui/model.js';
 import { createCompleteResumeFixture } from './fixtures/resume.js';
 
 const AS_OF = '2026-08-07T12:00:00.000Z';
@@ -19,16 +21,20 @@ function workspace(t) {
   return root;
 }
 
-function output(width = 140, height = 42) {
-  return {
-    columns: width,
-    rows: height,
-    isTTY: false,
-    writes: [],
-    write(chunk) { this.writes.push(String(chunk)); },
-    on() {},
-    off() {}
-  };
+function streams() {
+  const stdout = new PassThrough();
+  stdout.columns = 140;
+  stdout.rows = 42;
+  stdout.isTTY = false;
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+  return { stdin, stdout };
+}
+
+function makeTui(store, profileId, jobId) {
+  const tui = new JobosTui(store, { ...streams(), profileId, selectedJobId: jobId, connectAgent: false, color: false });
+  tui.refresh();
+  return tui;
 }
 
 async function fixture(t) {
@@ -91,14 +97,6 @@ async function deterministic(fn) {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 30_000) {
-  const started = Date.now();
-  while (!predicate()) {
-    if (Date.now() - started > timeoutMs) throw new Error('Timed out waiting for TUI workflow');
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-}
-
 test('P0 identity and cover quality use canonical resume identity with proof-safe prose', async t => {
   const { store, profile, firstProof, secondProof, job } = await fixture(t);
   const cover = await deterministic(() => tailor(store, job.id, profile.id, 'cover'));
@@ -116,7 +114,7 @@ test('P0 identity and cover quality use canonical resume identity with proof-saf
   assert.match(cover.content, /did not send email, submit forms, or contact anyone/);
 });
 
-test('P0 insufficient FIT names concrete preferences in selected job, priority, help, and routes to calibration', async t => {
+test('P0 insufficient FIT names concrete preferences in the model and routes to setup', async t => {
   const { store, profile, job } = await fixture(t);
   const fit = {
     contract: 'jobos.fit-score.v1',
@@ -138,87 +136,75 @@ test('P0 insufficient FIT names concrete preferences in selected job, priority, 
   const model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
   const guidance = fitUnlockGuidance(model.selected.fit);
   assert.match(guidance, /target roles.*location\/work model.*compensation.*mission/i);
-  assert.match(guidance, /Setup.*Your preferences \(g\)/);
-  const dashboard = renderTui(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, agentOn: false }, { width: 150, height: 46, color: false });
-  assert.match(dashboard, /Unlock FIT: add target roles, location\/work model, compensation, and mission/);
+  assert.match(fitLabel(model.selected.fit), /low evidence · 40%/, 'the fit chip names the evidence gap, not unscored');
+  assert.doesNotMatch(fitLabel(model.selected.fit), /unscored|unknown/);
   const unlockIndex = model.priority.findIndex(item => item.actionId === 'unlock_fit');
   assert.ok(unlockIndex >= 0, JSON.stringify(model.priority));
   assert.match(model.priority[unlockIndex].text, /Your preferences/);
-  const help = renderTui(model, { ...defaultTuiState(), profileId: profile.id, selectedJobId: job.id, overlay: 'help', helpContextOverlay: 'dashboard', agentOn: false }, { width: 120, height: 38, color: false });
-  assert.match(help, /Press g, choose Your preferences/);
 
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(), profileId: profile.id, selectedJobId: job.id, now: () => new Date(AS_OF) });
-  tui.state.stripIndex = tui.model.priority.findIndex(item => item.actionId === 'unlock_fit');
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'setup');
-  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'calibration');
+  const tui = makeTui(store, profile.id, job.id);
+  tui.runSlash('setup');
+  assert.equal(tui.state.overlay, 'setup', '/setup opens guided setup');
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(screen, /Your preferences/, 'the calibration step is reachable from setup');
+  assert.doesNotMatch(screen, /┌ JOBS|SELECTED JOB/, 'no retired dashboard chrome');
 });
 
-test('P0/P1 in-process pursue exposes drafts and dashboard Enter opens exact review revisions', async t => {
+test('P0/P1 in-process create-files exposes drafts and review opens the exact Files revision', async t => {
   const { store, profile, job } = await fixture(t);
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(), profileId: profile.id, selectedJobId: job.id, now: () => new Date(AS_OF) });
+  const tui = makeTui(store, profile.id, job.id);
+  tui.runSlash('create-files');
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.equal(tui.state.overlay, 'files', '/create-files lands in the Files overlay');
+  assert.deepEqual(new Set(tui.model.selected.docs.map(doc => doc.type)), new Set(['resume']), 'the resume artifact is written');
+  assert.ok(tui.model.review.length >= 1, 'the draft joins the review queue');
+  const filesText = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(filesText, /resume\.md/, 'the Files overlay names the exact draft');
+  assert.match(filesText, /questions\.md/, 'the questions reference copy is present');
+  assert.doesNotMatch(filesText, /No documents for this job/, 'drafts exist');
 
-  await deterministic(async () => {
-    tui.onKeypress('p', { name: 'p' });
-    await waitFor(() => !tui.state.busy);
-  });
-
-  assert.deepEqual(new Set(tui.model.selected.docs.map(doc => doc.type)), new Set(['resume', 'cover_letter']));
-  assert.ok(tui.model.review.length >= 2);
-  assert.equal(tui.model.recommendedAction.id, 'review_materials');
-  assert.equal(tui.model.recommendedAction.label, 'Review exact revisions');
-  assert.equal(tui.model.priority[0].actionId, 'review_materials');
-  assert.equal(tui.model.onboarding.steps.find(step => step.id === 'materials').actions[0].id, 'review_materials');
-
-  tui.openDocuments();
-  assert.equal(tui.state.overlay, 'docs');
-  assert.equal(tui.model.selected.docs.length, 2);
-  tui.state.overlay = null;
-  tui.onKeypress('r', { name: 'r' });
+  // The review brief opens the exact revision.
+  tui.runSlash('review');
   assert.equal(tui.state.overlay, 'review');
-  assert.ok(tui.model.review.some(item => item.jobId === job.id));
-  tui.state.overlay = null;
-  tui.state.stripIndex = 0;
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'review');
-
-  tui.state.overlay = null;
-  tui.openOverlay('build-network');
-  assert.equal(tui.state.networkDraft.targetCompanies, 'Acme Learning');
-  tui.state.overlay = 'network';
-  const network = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.equal(tui.model.selected.contacts.length, 0);
-  assert.match(network, /No source-backed contacts were found.*did not invent contacts or paths/s);
+  const draftIndex = tui.model.review.findIndex(item => item.jobId === job.id);
+  assert.ok(draftIndex >= 0);
+  tui.state.overlayIndex = draftIndex;
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.overlay, 'files', 'Enter on the brief draft opens the Files overlay');
 });
 
-test('P1 setup and discovery create company-watch searches and expose failed daily sources', async t => {
+test('P1 setup source actions exist and the sample search persists; /network invents nothing', async t => {
   const { store, profile, job } = await fixture(t);
-  let model = buildTuiModel(store, { profileId: profile.id, selectedJobId: job.id, at: AS_OF });
-  const source = model.onboarding.steps.find(step => step.id === 'source');
-  const companyWatch = source.actions.find(action => action.id === 'create_source_custom');
+  const tui = makeTui(store, profile.id, job.id);
+  const sourceStep = tui.model.onboarding.steps.find(step => step.id === 'source');
+  const companyWatch = sourceStep.actions.find(action => action.id === 'create_source_custom');
   assert.match(companyWatch.label, /Greenhouse company board/);
   assert.match(companyWatch.command, /--board-token <board-token>/);
 
-  const tui = new JobosTui(store, { connectAgent: false, stdout: output(), profileId: profile.id, selectedJobId: job.id, now: () => new Date(AS_OF) });
-  tui.openOverlay('discovery');
-  tui.onKeypress('w', { name: 'w' });
-  assert.equal(tui.state.mode, 'setup-discovery');
-  tui.setInput('Acme Learning | greenhouse | acme-learning');
-  tui.onKeypress('', { name: 'return' });
-  const saved = tui.model.discovery.searches.find(search => search.config?.preset === 'company-watch');
-  assert.ok(saved, JSON.stringify(tui.model.discovery.searches));
-  assert.equal(saved.config.boardToken, 'acme-learning');
+  tui.runSlash('network');
+  assert.equal(tui.state.overlay, 'network');
+  const network = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
+  assert.match(network, /No stored relationships yet/, 'an empty graph says so');
+  assert.doesNotMatch(network, /Ada Lovelace|Alumni Via|Example Learning|Contoso/, 'no invented contacts or paths');
 
-  run(store, `INSERT INTO automation_runs (id,trigger_name,inputs_json,outputs_json,status,external_side_effects,created_at,action_id,trigger_type,started_at,finished_at,duration_ms,error,counts_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
-    'daily-failure-p0-p1', 'daily', JSON.stringify({ profileId: profile.id }), '{}', 'failed', 'none', AS_OF,
-    'daily_discovery', 'manual', AS_OF, AS_OF, 1, 'Greenhouse board token was rejected', '{}'
-  ]);
-  save(store);
-  tui.refresh({ disk: false, render: false });
-  tui.state.overlay = 'discovery';
-  const discovery = renderTui(tui.model, tui.state, { width: 120, height: 38, color: false });
-  assert.match(discovery, /RECENT DAILY FAILURES/);
-  assert.match(discovery, /FAILED.*Greenhouse board token was rejected/);
-  assert.match(discovery, /w company watch.*board-token/);
+  const sourceIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'source');
+  tui.state.overlayIndex = sourceIndex;
+  tui.state.overlay = 'setup';
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.ok(one(store, 'SELECT * FROM saved_searches WHERE profile_id=?', [profile.id]), 'the sample offline search persists');
+  assert.equal(tui.model.discovery.searches.length, 1, 'the discovery model exposes the saved search');
+});
+
+test('P0/P1 first-run welcome is honest and skip never invents state', async t => {
+  const root = workspace(t);
+  const store = await openStore({ workspace: root });
+  const tui = makeTui(store, null, null);
+  const screen = renderTui(tui.model, tui.state, { width: 120, height: 34, color: false });
+  assert.match(screen, /welcome to jobos/i, 'welcome overlay is first-run chrome');
+  assert.doesNotMatch(screen, /Example Learning|Harbor Schools|Contoso Careers Lab|Lumen Labs/, 'no invented listings');
+  tui.handleKey('', { escape: true });
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM profiles').n, 0, 'skip creates no profile');
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM jobs').n, 0, 'skip creates no jobs');
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM proof_points').n, 0, 'skip creates no proofs');
 });

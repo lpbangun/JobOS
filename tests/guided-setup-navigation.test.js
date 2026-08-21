@@ -1,22 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
-import stringWidth from 'string-width';
-import { openStore } from '../src/db.js';
+import { openStore, one, all } from '../src/db.js';
 import { createProfile } from '../src/profiles.js';
 import { llmConfig } from '../src/llm.js';
 import {
   JobosTui,
-  TUI_HANDLED_KEYS,
-  TUI_KEYMAP,
-  expandKeymapBinding,
   renderTui,
-  splitRawInput
+  SETUP_STEP_LABELS,
+  RESUME_SOURCE_CHOICES,
+  JOB_SOURCE_CHOICES
 } from '../src/tui.js';
+import { SLASH_CATALOG } from '../src/tui/model.js';
 
 const AS_OF = '2026-08-02T12:00:00.000Z';
 
@@ -31,39 +29,35 @@ function workspace() {
   return mkdtempSync(path.join(tmpdir(), 'jobos-setup-navigation-'));
 }
 
-function output(width = 120, height = 36) {
-  return {
-    columns: width,
-    rows: height,
-    isTTY: false,
-    writes: [],
-    write(chunk) { this.writes.push(String(chunk)); },
-    on() {},
-    off() {}
-  };
+function streams() {
+  const stdout = new PassThrough();
+  stdout.columns = 120;
+  stdout.rows = 36;
+  stdout.isTTY = false;
+  const stdin = new PassThrough();
+  stdin.isTTY = false;
+  return { stdin, stdout };
 }
 
-async function emptyTui({ width = 120, height = 36 } = {}) {
+async function emptyTui() {
   const store = await openStore({ workspace: workspace() });
-  const stdout = output(width, height);
-  const tui = new JobosTui(store, {
-    stdout,
-    connectAgent: false,
-    now: () => new Date(AS_OF)
-  });
-  return { store, stdout, tui };
+  const tui = new JobosTui(store, { ...streams(), connectAgent: false, color: false });
+  tui.refresh();
+  return { store, tui };
 }
 
 function screenOf(tui, width = 120, height = 36) {
-  return renderTui(tui.model, tui.state, { width, height, color: false }).split('\n');
-}
-
-function typeText(tui, text) {
-  tui.onKeypress(text, { name: 'paste' });
+  return renderTui(tui.model, tui.state, { width, height, color: false }).split('\n').join('\n');
 }
 
 function enter(tui) {
-  tui.onKeypress('', { name: 'return' });
+  tui.handleKey('', { name: 'return' });
+}
+
+const esc = () => tui => tui.handleKey('', { escape: true });
+
+function typeText(tui, text) {
+  tui.handleKey(text, { name: 'paste' });
 }
 
 // Resume text that parses with a verified identity and produces two
@@ -79,505 +73,359 @@ const RESUME_TEXT = [
   '- Led the migration of the deployment pipeline to cut release time in half'
 ].join('\n');
 
-test('first-run setup is an isolated screen at 120x36 and 80x24 with the profile as the first actionable step and no dashboard bleed', async () => {
-  for (const { width, height } of [{ width: 120, height: 36 }, { width: 80, height: 24 }]) {
-    const { tui } = await emptyTui({ width, height });
-    assert.equal(tui.state.overlay, 'setup', 'fresh store opens the guided setup workspace');
-    assert.equal(
-      tui.model.onboarding.steps[tui.state.overlayIndex].id,
-      'profile',
-      'setup starts focused on the first actionable blocker'
-    );
+const JOB_TEXT = [
+  'Title: Senior Product Manager',
+  'Company: Acme Learning',
+  'Location: Remote',
+  '',
+  'Lead educator discovery and launch a learning platform.',
+  'Coordinate product and engineering teams to ship reliable workflows.',
+  '',
+  '## Requirements',
+  '- Lead the migration of the deployment pipeline to cut release time in half',
+  '- Coordinate product and engineering teams to ship reliable customer workflows',
+  '- Preferred: experience with user research'
+].join('\n');
 
-    const lines = screenOf(tui, width, height);
-    assert.equal(lines.length, height, 'setup workspace fills the terminal exactly');
-    assert.ok(lines.every(line => stringWidth(line) <= width), 'no line overflows the terminal width');
-    assert.ok(lines.some(line => line.includes('JOBOS  /  GUIDED SETUP')), 'setup header is present');
-    assert.ok(lines.every(line => !line.includes('JOBS ·')), 'dashboard job list never bleeds into setup');
-    assert.ok(lines.every(line => !line.includes('SELECTED JOB')), 'dashboard selected-job panel never bleeds into setup');
-  }
-});
-
-test('arrows, j/k, tab, number jumps, and mouse clicks select setup steps and the resume-source picker', async () => {
-  const { tui } = await emptyTui();
-  const focusedId = () => tui.model.onboarding.steps[tui.state.overlayIndex]?.id;
-
-  // Every advertised setup binding routes to a live handler.
-  for (const [binding] of TUI_KEYMAP.setup) {
-    for (const token of expandKeymapBinding(binding)) {
-      assert.ok(TUI_HANDLED_KEYS.setup.includes(token), `${binding} expands to routed setup token ${token}`);
-    }
-  }
-
-  tui.onKeypress('', { name: 'down' });
-  assert.equal(focusedId(), 'resume');
-  tui.onKeypress('', { name: 'up' });
-  assert.equal(focusedId(), 'profile');
-  tui.onKeypress('', { name: 'up' });
-  assert.equal(focusedId(), 'workspace');
-  tui.onKeypress('j', { name: 'j' });
-  assert.equal(focusedId(), 'profile');
-  tui.onKeypress('k', { name: 'k' });
-  assert.equal(focusedId(), 'workspace');
-  tui.onKeypress('', { name: 'tab' });
-  assert.equal(focusedId(), 'profile');
-  tui.onKeypress('', { name: 'tab', shift: true });
-  assert.equal(focusedId(), 'workspace');
-  tui.onKeypress('3', { name: '3' });
-  assert.equal(focusedId(), 'resume', '1–7 jumps to the numbered required step');
-  tui.onKeypress('1', { name: '1' });
-  assert.equal(focusedId(), 'workspace');
-
-  // Mouse click on a setup row selects that step.
-  tui.render();
-  const lines = screenOf(tui);
-  const clickRow = term => {
-    const y = lines.findIndex(line => line.includes(term));
-    assert.ok(y >= 0, `row for ${term} renders`);
-    const x = lines[y].indexOf(term);
-    return `\x1b[<0;${x + 1};${y + 1}M`;
-  };
-  tui.onMouseData(clickRow('About you'));
-  assert.equal(focusedId(), 'profile', 'mouse press selects the clicked setup step');
-  tui.onMouseData(clickRow('Workspace ready'));
-  assert.equal(focusedId(), 'workspace');
-
-  // The resume-source picker uses the same arrows and tabs.
-  tui.beginSetupSource('resume');
-  assert.equal(tui.state.overlay, 'setup-resume-source');
-  tui.onKeypress('', { name: 'down' });
-  assert.equal(tui.state.overlayIndex, 1);
-  tui.onKeypress('', { name: 'tab' });
-  assert.equal(tui.state.overlayIndex, 2);
-  tui.onKeypress('k', { name: 'k' });
-  assert.equal(tui.state.overlayIndex, 1);
-  tui.onKeypress('', { name: 'tab', shift: true });
-  assert.equal(tui.state.overlayIndex, 0);
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'setup');
-});
-
-test('profile creation auto-advances to resume and the resume source lists paste, browse, and path', async () => {
+test('SETUP-01 welcome is first-run chrome and continues into guided setup; Skip invents nothing', async t => {
   const { store, tui } = await emptyTui();
+  assert.equal(tui.state.overlay, null, 'welcome is derived, not stored');
+  assert.equal(tui.model.empty.noProfile, true);
+  const welcome = screenOf(tui);
+  assert.match(welcome, /welcome to jobos/i, 'welcome overlay renders on first run');
+  assert.match(welcome, /Start guided setup/, 'welcome offers guided setup');
+  assert.match(welcome, /Skip for now/, 'welcome offers skip');
 
-  tui.onKeypress('3', { name: '3' });
-  assert.equal(tui.state.overlayIndex, 2, '1–7 reaches resume while profile is missing');
-  tui.onKeypress('1', { name: '1' });
-  tui.onKeypress('', { name: 'down' });
-  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'profile');
+  // Skip / Esc must not invent a profile, proofs, jobs, or contacts.
+  esc()(tui);
+  assert.equal(tui.state.welcomeDismissed, true);
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM profiles').n, 0);
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM proof_points').n, 0);
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM jobs').n, 0);
+  assert.equal(one(store, 'SELECT COUNT(*) AS n FROM contact_points').n, 0);
+  assert.equal(tui.model.empty.noProfile, true);
 
+  // Enter continues into guided setup.
+  const tui2 = (await emptyTui()).tui;
+  tui2.handleKey('', { name: 'return' });
+  assert.equal(tui2.state.overlay, 'setup', 'Enter on welcome opens guided setup');
+  assert.equal(tui2.state.welcomeDismissed, true);
+});
+
+test('SETUP-02 step ids and labels match SETUP_STEP_LABELS and the onboarding projection', async t => {
+  const { tui } = await emptyTui();
+  const required = tui.model.onboarding.steps.filter(step => step.required).map(step => step.id);
+  assert.deepEqual(required, ['workspace', 'profile', 'resume', 'proofs', 'intake', 'decision', 'materials']);
+  const optional = tui.model.onboarding.steps.filter(step => !step.required).map(step => step.id);
+  assert.deepEqual(optional, ['source', 'calibration', 'provider', 'browser', 'network']);
+  for (const step of tui.model.onboarding.steps) {
+    assert.equal(SETUP_STEP_LABELS[step.id], {
+      workspace: 'Workspace ready',
+      profile: 'About you',
+      resume: 'Your resume',
+      proofs: 'Validate experience highlights',
+      intake: 'Add a job you like',
+      decision: 'Check the fit',
+      materials: 'Application drafts',
+      source: 'Job discovery',
+      calibration: 'Your preferences',
+      provider: 'AI assistant',
+      browser: 'Web applications',
+      network: 'Connections'
+    }[step.id], `label for ${step.id}`);
+  }
+  tui.openOverlay('setup');
+  const screen = screenOf(tui);
+  assert.match(screen, /SET UP JOBOS — \d\/7 ESSENTIAL/, 'setup header counts essential steps with the current copy');
+  assert.doesNotMatch(screen, /JOBOS ·/, 'the retired JOBOS · header token is never painted');
+  assert.match(screen, /About you/, 'profile label renders');
+  assert.match(screen, /Validate experience highlights/, 'proofs label renders');
+  assert.match(screen, /Job discovery/, 'optional source label renders');
+  assert.match(screen, /AI assistant/, 'optional provider label renders');
+});
+
+test('SETUP-03 the profile step creates the real profile and advances to resume', async t => {
+  const { store, tui } = await emptyTui();
+  tui.handleKey('', { name: 'return' }); // welcome -> setup
+  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'profile', 'setup starts on About you');
   enter(tui);
-  assert.equal(tui.state.mode, 'setup-profile', 'Enter on the profile step opens name capture');
+  assert.equal(tui.state.setupMode, 'profile-name', 'Enter opens name capture');
   typeText(tui, 'Alex Chen');
   enter(tui);
-
-  assert.equal(tui.state.mode, 'normal');
-  assert.equal(tui.state.overlay, 'setup', 'profile creation returns to setup');
-  const profile = createProfile(store, 'Alex Chen');
-  assert.equal(tui.state.profileId, profile.profile.id, 'created profile becomes the workspace profile');
-  assert.equal(tui.state.setupProfileId, profile.profile.id);
+  const profile = one(store, 'SELECT * FROM profiles WHERE name=?', ['Alex Chen']);
+  assert.ok(profile, 'the profile row is persisted');
+  assert.equal(tui.model.profileId, profile.id, 'the created profile becomes the workspace profile');
   const profileStep = tui.model.onboarding.steps.find(step => step.id === 'profile');
-  assert.equal(profileStep.status, 'complete', 'profile step is complete after creation');
-  assert.equal(
-    tui.model.onboarding.steps[tui.state.overlayIndex].id,
-    'resume',
-    'focus auto-advances to the resume step'
-  );
-
-  enter(tui);
-  assert.equal(tui.state.overlay, 'setup-resume-source', 'Enter on resume opens the source chooser');
-
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-paste', 'first source choice is paste');
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'setup-resume-source');
-
-  tui.onKeypress('j', { name: 'j' });
-  enter(tui);
-  assert.equal(tui.state.overlay, 'setup-file-browser', 'second source choice browses the computer');
-  assert.equal(tui.state.setupFilePurpose, 'resume');
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'setup-resume-source');
-
-  tui.onKeypress('j', { name: 'j' });
-  tui.onKeypress('j', { name: 'j' });
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-path', 'third source choice enters a file path');
+  assert.equal(profileStep.status, 'complete', 'About you completes after creation');
+  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'resume', 'focus auto-advances to the resume step');
 });
 
-test('resume paste and path preview, supported-format guidance, import, and immediate proof review with verify/reject/add', async () => {
-  const { store, stdout, tui } = await emptyTui();
-  const focusedId = () => tui.model.onboarding.steps[tui.state.overlayIndex]?.id;
+test('SETUP-04 the resume-source picker stays an overlay under setup with the locked choices', async t => {
+  const { tui } = await emptyTui();
+  tui.handleKey('', { name: 'return' });
+  enter(tui); // profile name capture is skipped: drive the resume step directly
+  tui.state.setupMode = null;
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  enter(tui);
+  assert.equal(tui.state.overlay, 'setup-resume-source', 'Enter on resume opens the source chooser overlay');
+  const screen = screenOf(tui);
+  for (const choice of RESUME_SOURCE_CHOICES) {
+    assert.match(screen, new RegExp(choice.label), `choice ${choice.id} renders`);
+  }
+  tui.handleKey('', { escape: true });
+  assert.equal(tui.state.overlay, 'setup', 'Esc returns to setup');
+});
+
+test('SETUP-05 resume paste imports the canonical revision and lands in proof review', async t => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.refresh();
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  enter(tui);
+  enter(tui); // first source choice: paste
+  assert.equal(tui.state.setupMode, 'resume-paste', 'paste is the first source choice');
+  typeText(tui, RESUME_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(tui.state.overlay, 'setup-proof-review', 'paste import lands in proof review');
+  const revision = one(store, 'SELECT * FROM profile_resume_revisions WHERE profile_id=? AND is_current=1', [profile.id]);
+  assert.ok(revision, 'a canonical current resume revision is persisted');
+  assert.ok(revision.document_json.includes('Alex Chen'), 'the revision stores the parsed identity');
+  const staged = tui.state.setupProofRows;
+  assert.ok(staged.length >= 2, 'imported claims are staged for human review');
+  assert.ok(all(store, 'SELECT * FROM proof_points WHERE profile_id=?', [profile.id]).length >= 2, 'proof candidates persist in SQLite');
+});
+
+test('SETUP-06 proof review verifies, adds, and drops through the real proof lifecycle', async t => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.refresh();
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  enter(tui);
+  enter(tui);
+  typeText(tui, RESUME_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(tui.state.overlay, 'setup-proof-review');
+
+  // v verifies the highlighted claim.
+  tui.handleKey('v', { name: 'v' });
+  const verifiedCount = one(store, "SELECT COUNT(*) AS n FROM proof_points WHERE profile_id=? AND verification_status='verified'", [profile.id]).n;
+  assert.ok(verifiedCount >= 1, 'verify persists verification_status=verified');
+
+  // a adds a claim in the user's own words.
+  tui.handleKey('a', { name: 'a' });
+  assert.equal(tui.state.setupMode, 'proof-add');
+  typeText(tui, 'Led quarterly planning');
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.ok(one(store, "SELECT * FROM proof_points WHERE profile_id=? AND summary='Led quarterly planning'", [profile.id]), 'added claim persists');
+
+  // d drops a claim with a reason (move the cursor onto the added claim first).
+  const addedIndex = tui.state.setupProofRows.findIndex(row => row.summary === 'Led quarterly planning');
+  assert.ok(addedIndex >= 0, 'the added claim is in the review list');
+  tui.state.overlayIndex = addedIndex;
+  tui.handleKey('d', { name: 'd' });
+  assert.equal(tui.state.setupMode, 'proof-drop');
+  typeText(tui, 'Not representative');
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(one(store, "SELECT status,retirement_reason FROM proof_points WHERE summary='Led quarterly planning'").status, 'retired');
+
+  // Esc returns to setup and advances toward intake.
+  tui.handleKey('', { escape: true });
+  assert.equal(tui.state.overlay, 'setup');
+  const proofsStep = tui.model.onboarding.steps.find(step => step.id === 'proofs');
+  assert.equal(proofsStep.status, 'complete', 'one verified active proof completes the step');
+});
+
+test('SETUP-07 the job-source picker and paste import persist the listing', async t => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.refresh();
+  const intakeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'intake');
+  tui.state.overlayIndex = intakeIndex;
+  enter(tui);
+  assert.equal(tui.state.overlay, 'setup-job-source', 'Enter on intake opens the job-source overlay');
+  const screen = screenOf(tui);
+  for (const choice of JOB_SOURCE_CHOICES) {
+    assert.match(screen, new RegExp(choice.label), `job choice ${choice.id} renders`);
+  }
+  enter(tui); // first choice: paste a job description
+  assert.equal(tui.state.setupMode, 'job-paste');
+  typeText(tui, JOB_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const job = one(store, 'SELECT * FROM jobs WHERE profile_id=? AND title=?', [profile.id, 'Senior Product Manager']);
+  assert.ok(job, 'the listing is persisted');
+  assert.equal(tui.state.overlay, 'setup', 'import returns to setup');
+  const intakeStep = tui.model.onboarding.steps.find(step => step.id === 'intake');
+  assert.equal(intakeStep.status, 'complete', 'intake completes with a saved listing');
+});
+
+test('SETUP-08 decision scores the imported job and materials create real files', async t => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.refresh();
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  enter(tui);
+  enter(tui);
+  typeText(tui, RESUME_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  tui.handleKey('v', { name: 'v' });
+  tui.handleKey('', { escape: true }); // leave proof review back onto setup
+  const intakeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'intake');
+  tui.state.overlayIndex = intakeIndex;
+  enter(tui);
+  enter(tui);
+  typeText(tui, JOB_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 80));
+
+  const decisionIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'decision');
+  tui.state.overlayIndex = decisionIndex;
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const job = one(store, 'SELECT * FROM jobs WHERE profile_id=? AND title=?', [profile.id, 'Senior Product Manager']);
+  assert.ok(job.fit_score !== null || job.score_json, 'the fit decision is persisted');
+  assert.match(tui.state.status, /Fit scored/, 'the score lands in the status line');
+
+  const materialsIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'materials');
+  tui.state.overlayIndex = materialsIndex;
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.match(tui.state.status, /Application drafts created/, 'materials creates the drafts');
+  assert.ok(one(store, "SELECT * FROM artifacts WHERE job_id=? AND type='resume'", [job.id]), 'a resume artifact persists');
+  const questionsPath = path.join(store.p.ws, 'jobs', job.id, 'artifacts', 'application-questions.md');
+  assert.equal(existsSync(questionsPath), true, 'questions.md is written to the workspace');
+});
+
+test('SETUP-09 optional steps configure real state: source, network intent, provider off copy', async t => {
+  const { store, tui } = await emptyTui();
+  const profile = createProfile(store, 'Alex Chen').profile;
+  tui.refresh();
+
+  const sourceIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'source');
+  tui.state.overlayIndex = sourceIndex;
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.ok(one(store, 'SELECT * FROM saved_searches WHERE profile_id=?', [profile.id]), 'the sample offline search is saved');
+
+  const networkIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'network');
+  tui.state.overlayIndex = networkIndex;
+  enter(tui);
+  assert.equal(tui.state.setupMode, 'network-intent');
+  typeText(tui, 'Acme Learning, EduCo');
+  enter(tui);
+  const prefs = JSON.parse(one(store, 'SELECT preferences_json FROM profiles WHERE id=?', [profile.id]).preferences_json);
+  assert.ok(prefs.networkIntent?.completedAt, 'network intent persists with a completion timestamp');
+  assert.deepEqual(prefs.networkIntent.targetCompanies, ['Acme Learning', 'EduCo']);
+
+  const providerIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'provider');
+  tui.state.overlayIndex = providerIndex;
+  enter(tui);
+  assert.match(tui.state.status, /Assistant is off/, 'provider step reports the assistant off truthfully with --agent off');
+});
+
+test('SETUP-10 setup navigation and Escape are zero-write', async t => {
+  const { store, tui } = await emptyTui();
+  tui.openOverlay('setup');
+  const dbPath = path.join(store.root, '.jobos', 'jobos.sqlite');
+  const before = readFileSync(dbPath);
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'upArrow' });
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { escape: true });
+  assert.equal(tui.state.overlay, null, 'Esc returns to the board');
+  assert.deepEqual(readFileSync(dbPath), before, 'pure navigation writes nothing');
+});
+
+test('SETUP-11 unsupported resume paths keep the input and show guidance', async t => {
+  const { tui } = await emptyTui();
+  const profile = createProfile(tui.store, 'Alex Chen').profile;
+  tui.refresh();
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  enter(tui);
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'downArrow' });
+  enter(tui); // third choice: enter a file path
+  assert.equal(tui.state.setupMode, 'resume-path');
+  typeText(tui, path.join(workspace(), 'resume.rtf'));
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(tui.state.setupMode, 'resume-path', 'invalid path keeps the path input open');
+  assert.match(tui.state.error, /not supported/i, 'unsupported format guidance is shown');
+});
+
+test('SETUP-12 the full required journey completes end-to-end and every step persists', async t => {
+  const { store, tui } = await emptyTui();
+  const stepId = () => tui.model.onboarding.steps[tui.state.overlayIndex]?.id;
   const stepTo = id => {
-    while (focusedId() !== id) tui.onKeypress('j', { name: 'j' });
+    const index = tui.model.onboarding.steps.findIndex(step => step.id === id);
+    assert.ok(index >= 0, `step ${id} exists`);
+    tui.state.overlayIndex = index;
   };
 
-  // Create the profile, then open the resume source chooser.
+  tui.handleKey('', { name: 'return' }); // welcome -> setup
   stepTo('profile');
   enter(tui);
   typeText(tui, 'Alex Chen');
   enter(tui);
+
   stepTo('resume');
   enter(tui);
-
-  // Paste a resume and preview the extraction.
   enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-paste');
   typeText(tui, RESUME_TEXT);
   enter(tui);
-  assert.equal(tui.state.overlay, 'setup-resume-preview');
-  assert.equal(tui.state.setupResumePreview.document.identity.name, 'Alex Chen');
-  assert.equal(tui.state.setupResumePreview.validation.valid, true);
-  assert.ok(tui.state.setupResumePreview.claims.length >= 2, 'preview extracts achievement-style claims');
-  tui.onKeypress('', { name: 'escape' });
-
-  // Unsupported file types are rejected with guidance and the path input stays open.
-  tui.onKeypress('j', { name: 'j' });
-  tui.onKeypress('j', { name: 'j' });
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-path');
-  typeText(tui, path.join(workspace(), 'resume.rtf'));
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-path', 'invalid path keeps the path input open');
-  assert.ok(tui.state.error && /not supported/i.test(tui.state.error), 'unsupported format guidance is shown');
-  assert.equal(tui.state.overlay, 'setup-resume-source');
-  tui.onKeypress('', { name: 'escape' });
-
-  // A supported path previews the same extraction.
-  const resumeFile = path.join(store.root, 'resume.txt');
-  writeFileSync(resumeFile, RESUME_TEXT, 'utf8');
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-path');
-  typeText(tui, resumeFile);
-  enter(tui);
-  assert.equal(tui.state.overlay, 'setup-resume-preview');
-  assert.equal(tui.state.setupResumePreview.document.identity.name, 'Alex Chen', 'path source previews the resume');
-
-  // Confirming the import jumps straight into proof review with the extracted claims.
-  stdout.writes.length = 0;
-  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(tui.state.overlay, 'setup-proof-review');
-  assert.ok(tui.state.setupProofItems.length >= 2, 'imported claims are queued for human review');
-  const persistedResume = store.db.exec("SELECT verification_status,reviewed_at,document_json FROM profile_resume_revisions WHERE is_current=1")[0].values[0];
-  assert.equal(persistedResume[0], 'verified', 'confirming the extraction records the trusted resume review');
-  assert.ok(persistedResume[1], 'the trusted resume review has a timestamp');
-  assert.doesNotMatch(persistedResume[2], /needs_verification/, 'confirmed extracted fields no longer dead-end later artifact approval');
-  assert.equal(stdout.writes.length, 1, 'resume import paints only the populated proof-review frame');
-  assert.doesNotMatch(stdout.writes[0], /No extracted claims remain/, 'atomic import never paints the empty proof state');
-  const rejectedBefore = tui.state.setupProofItems.length;
+  tui.handleKey('v', { name: 'v' });
+  tui.handleKey('', { escape: true }); // leave proof review back onto setup
 
-  // Verify the first claim.
+  stepTo('intake');
   enter(tui);
-  assert.equal(tui.state.setupProofItems[0].verification_status, 'verified', 'Enter verifies the selected highlight');
-
-  // Reject the next claim and it leaves the review list.
-  tui.onKeypress('j', { name: 'j' });
-  tui.onKeypress('R', { name: 'r', shift: true });
-  assert.equal(tui.state.setupProofItems.length, rejectedBefore - 1, 'rejected highlights are excluded');
-
-  // Add a claim in the user's own words.
-  tui.onKeypress('A', { name: 'a', shift: true });
-  assert.equal(tui.state.mode, 'setup-proof');
-  typeText(tui, 'Led quarterly planning | board deck');
   enter(tui);
-  assert.equal(tui.state.overlay, 'setup-proof-review');
-  assert.ok(
-    tui.state.setupProofItems.some(item => item.summary === 'Led quarterly planning'),
-    'added highlight appears in the review list'
-  );
-  stdout.writes.length = 0;
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'setup');
-  assert.equal(focusedId(), 'intake', 'leaving proof review advances directly to job intake');
-  assert.equal(stdout.writes.length, 1, 'proof-review exit paints only the final focused setup frame');
-  assert.doesNotMatch(stdout.writes[0], /NEXT TASK · Workspace ready/, 'transition never exposes an intermediate workspace focus');
+  typeText(tui, JOB_TEXT);
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 80));
+
+  stepTo('decision');
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const job = one(store, 'SELECT * FROM jobs WHERE profile_id=? AND title=?', [tui.model.profileId, 'Senior Product Manager']);
+  assert.ok(job, 'the job is persisted');
+
+  stepTo('materials');
+  enter(tui);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.match(tui.state.status, /Application drafts created/);
+
+  // Approve the exact draft in the Files overlay to finish materials.
+  tui.openOverlay('files');
+  await tui.approveSelectedArtifact();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const materials = tui.model.onboarding.steps.find(step => step.id === 'materials');
+  assert.equal(materials.status, 'complete', 'materials completes after human approval');
+  assert.equal(tui.model.onboarding.completedRequired, 7, 'all seven essential steps complete');
+  assert.equal(tui.model.onboarding.state, 'complete');
 });
 
-test('validating the final experience highlight advances directly to the first-job step without Escape', async () => {
-  const { store, tui } = await emptyTui();
-  const profile = createProfile(store, 'Alex Chen').profile;
-  tui.state.setupProfileId = profile.id;
-  tui.state.profileId = profile.id;
-  tui.previewSetupResume({ sourceText: RESUME_TEXT });
-  enter(tui);
-
-  assert.equal(tui.state.overlay, 'setup-proof-review');
-  while (tui.state.overlay === 'setup-proof-review') enter(tui);
-
-  assert.equal(tui.state.overlay, 'setup', 'the last validation returns to the forward setup journey');
-  assert.equal(
-    tui.model.onboarding.steps[tui.state.overlayIndex]?.id,
-    'intake',
-    'the next focused task is adding a preference-setting first job'
-  );
-  assert.match(tui.state.status, /next: add a job you like/i);
-});
-
-test('first-job setup copy explains that a liked role teaches JobOS the user preferences', async () => {
-  const { store, tui } = await emptyTui();
-  const profile = createProfile(store, 'Alex Chen').profile;
-  tui.state.setupProfileId = profile.id;
-  tui.state.profileId = profile.id;
-  tui.refresh({ disk: false, render: false });
-  tui.state.overlay = 'setup';
-  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'intake');
-
-  const setup = screenOf(tui).join('\n');
-  assert.match(setup, /Add a job you like/);
-  enter(tui);
-  const source = screenOf(tui).join('\n');
-  assert.match(source, /role you like or would seriously consider/i);
-  assert.match(source, /first job helps JobOS/i);
-  assert.match(source, /work you prefer/i);
-});
-
-test('input fields support cursor movement, Delete, Home/End, Shift selection, and replacement paste', async () => {
+test('SETUP-13 /setup reopens guided setup from anywhere and no profile switcher exists', async t => {
   const { tui } = await emptyTui();
-  tui.state.mode = 'setup-profile';
-
-  typeText(tui, 'abcde');
-  assert.equal(tui.state.input, 'abcde');
-  assert.equal(tui.state.inputCursor, 5);
-
-  tui.onKeypress('', { name: 'left' });
-  tui.onKeypress('', { name: 'left' });
-  assert.equal(tui.state.inputCursor, 3);
-  tui.onKeypress('', { name: 'backspace' });
-  assert.equal(tui.state.input, 'abde', 'backspace removes the char before the cursor');
-  assert.equal(tui.state.inputCursor, 2);
-  tui.onKeypress('', { name: 'delete' });
-  assert.equal(tui.state.input, 'abe', 'Delete removes the char at the cursor');
-
-  tui.onKeypress('', { name: 'home' });
-  assert.equal(tui.state.inputCursor, 0);
-  tui.onKeypress('', { name: 'end' });
-  assert.equal(tui.state.inputCursor, 3);
-
-  tui.onKeypress('', { name: 'left', shift: true });
-  tui.onKeypress('', { name: 'left', shift: true });
-  assert.equal(tui.state.inputAnchor, 3, 'Shift movement establishes a selection anchor');
-  assert.equal(tui.state.inputCursor, 1);
-  typeText(tui, 'X');
-  assert.equal(tui.state.input, 'aX', 'typing replaces the shift-selected range');
-  assert.equal(tui.state.inputAnchor, null, 'replacement clears the selection');
-
-  tui.onKeypress('a', { name: 'a', ctrl: true });
-  assert.equal(tui.state.inputAnchor, 0);
-  assert.equal(tui.state.inputCursor, 2);
-  typeText(tui, 'YZ');
-  assert.equal(tui.state.input, 'YZ', 'select-all followed by typing replaces the whole field');
-  typeText(tui, '123');
-  assert.equal(tui.state.input, 'YZ123', 'pasted text is inserted at the cursor');
-  assert.equal(tui.state.inputCursor, 5);
-});
-
-test('contextual help opens first and render writes zero output for unchanged frames, line updates for changes', async () => {
-  const { tui } = await emptyTui();
-
-  // Contextual help is reachable from setup and returns to the same surface.
-  tui.onKeypress('?', { name: '?' });
-  assert.equal(tui.state.overlay, 'help');
-  assert.equal(tui.state.helpContextOverlay, 'setup', 'help is contextual to the setup workspace');
-  tui.onKeypress('', { name: 'escape' });
-  assert.equal(tui.state.overlay, 'setup', 'closing help returns to setup');
-
-  const stdout = { columns: 120, rows: 36, isTTY: false, buffer: '', write(chunk) { this.buffer += chunk; }, on() {}, off() {} };
-  const { store } = await emptyTui();
-  const tui2 = new JobosTui(store, { stdout, connectAgent: false, now: () => new Date(AS_OF) });
-
-  assert.equal(tui2.render(), true, 'first frame is a full paint');
-  assert.ok(stdout.buffer.includes('\x1b[2J'), 'first frame clears the terminal');
-  stdout.buffer = '';
-
-  assert.equal(tui2.render(), false, 'unchanged frame renders nothing');
-  assert.equal(stdout.buffer, '', 'unchanged frame writes zero bytes');
-
-  tui2.onKeypress('j', { name: 'j' });
-  assert.match(stdout.buffer, /\x1b\[\d+;1H\x1b\[2K/, 'changed frame emits line-level updates');
-  assert.ok(!stdout.buffer.includes('\x1b[2J'), 'changed frame never full-clears');
-  assert.ok(!stdout.buffer.includes('\x1b[H'), 'changed frame never re-homes the cursor');
-  stdout.buffer = '';
-
-  assert.equal(tui2.render(), false, 'post-update unchanged frame stays silent');
-  assert.equal(stdout.buffer, '', 'no bytes written for a settled screen');
-});
-
-test('raw mouse reports are isolated from numeric setup shortcuts', async () => {
-  const { tui, stdout } = await emptyTui();
-  tui.render();
-  stdout.writes.length = 0;
-  const lines = screenOf(tui);
-  const row = lines.findIndex(line => line.includes('About you'));
-  const column = lines[row].indexOf('About you');
-  const report = `\x1b[<0;${column + 1};${row + 1}M`;
-  const forwarded = [];
-  tui.keypressInput = { write(value) { forwarded.push(String(value)); } };
-
-  tui.onRawInput(report);
-
-  assert.equal(tui.model.onboarding.steps[tui.state.overlayIndex].id, 'profile', 'one click selects only its row');
-  assert.deepEqual(forwarded, [], 'mouse coordinates never reach readline as number keys');
-  assert.deepEqual(splitRawInput(`j${report}k`).segments.map(item => [item.type, item.value]), [
-    ['key', 'j'],
-    ['mouse', report],
-    ['key', 'k']
-  ], 'keyboard bytes around a mouse report preserve their order');
-});
-
-test('raw Esc is released promptly and does not swallow later onboarding keys or Q', async () => {
-  const { tui } = await emptyTui();
-  const input = new PassThrough();
-  readline.emitKeypressEvents(input);
-  input.on('keypress', tui.boundKeypress);
-  tui.keypressInput = input;
-
-  tui.state.overlay = 'setup-proof-review';
-  tui.state.mode = 'setup-proof';
-  tui.state.setupReturnOverlay = 'setup-proof-review';
-  tui.setInput('Draft highlight');
-
-  tui.onRawInput('\x1b');
-  assert.equal(tui.state.mode, 'setup-proof', 'a possible control-sequence prefix waits briefly');
-  tui.flushRawInputBuffer();
-  assert.equal(tui.state.mode, 'normal', 'a lone Esc reaches the active onboarding editor');
-  assert.equal(tui.state.overlay, 'setup-proof-review', 'Esc returns to the experience review');
-
-  let quit = false;
-  tui.stop = () => { quit = true; };
-  tui.onRawInput('Q');
-  assert.equal(quit, true, 'Q still quits after Esc instead of being swallowed by stale input');
-  input.destroy();
-});
-
-test('split arrow-key bytes are reassembled before onboarding navigation', async () => {
-  const { tui } = await emptyTui();
-  const input = new PassThrough();
-  readline.emitKeypressEvents(input);
-  input.on('keypress', tui.boundKeypress);
-  tui.keypressInput = input;
-
-  const before = tui.state.overlayIndex;
-  tui.onRawInput('\x1b[');
-  assert.equal(tui.state.overlayIndex, before, 'an incomplete arrow sequence waits for its final byte');
-  tui.onRawInput('B');
-  assert.equal(tui.state.overlayIndex, before + 1, 'the completed down-arrow sequence moves setup focus');
-  input.destroy();
-});
-
-test('real bracketed multiline paste stays in the resume field until the user presses Enter', async () => {
-  const { store, tui } = await emptyTui();
-  const profile = createProfile(store, 'Alex Chen');
-  tui.state.setupProfileId = profile.profile.id;
-  tui.beginSetupSource('resume');
-  enter(tui);
-
-  const midpoint = Math.floor(RESUME_TEXT.length / 2);
-  tui.onRawInput(`\x1b[200~${RESUME_TEXT.slice(0, midpoint)}`);
-  assert.equal(tui.state.input, '', 'an incomplete bracketed paste is buffered');
-  tui.onRawInput(`${RESUME_TEXT.slice(midpoint)}\x1b[201~`);
-
-  assert.equal(tui.state.mode, 'setup-resume-paste');
-  assert.equal(tui.state.overlay, 'setup-resume-source');
-  assert.equal(tui.state.input, RESUME_TEXT, 'embedded newlines are inserted instead of submitted');
-  enter(tui);
-  assert.equal(tui.state.overlay, 'setup-resume-preview');
-  assert.equal(tui.state.setupResumePreview.document.identity.email, 'alex@example.com');
-});
-
-test('resume preview shows and corrects a missing parsed email without discarding the import', async () => {
-  const { store, tui } = await emptyTui();
-  const profile = createProfile(store, 'Alex Chen');
-  tui.state.setupProfileId = profile.profile.id;
-  const withoutEmail = RESUME_TEXT.replace('alex@example.com\n', '');
-
-  tui.previewSetupResume({ sourceText: withoutEmail });
-  assert.equal(tui.state.setupResumePreview.validation.valid, false);
-  assert.match(screenOf(tui).join('\n'), /Email: not found/);
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-edit');
-  assert.equal(tui.state.setupResumeEditField, 'email');
-  typeText(tui, 'alex@example.com');
-  enter(tui);
-
-  assert.equal(tui.state.mode, 'normal');
-  assert.equal(tui.state.setupResumePreview.document.identity.email, 'alex@example.com');
-  assert.equal(tui.state.setupResumePreview.validation.valid, true);
-});
-
-test('resume preview lets the user correct extracted text and re-runs auto-fill for an ambiguous role', async () => {
-  const { store, tui } = await emptyTui();
-  const profile = createProfile(store, 'Alex Chen');
-  tui.state.setupProfileId = profile.profile.id;
-  const ambiguous = [
-    'Alex Chen',
-    'alex@example.com',
-    '+1 555 0100',
-    'EXPERIENCE',
-    'Independent consultant',
-    'Built a distributed scheduler that handles one million events daily'
-  ].join('\n');
-
-  tui.previewSetupResume({ sourceText: ambiguous });
-  assert.equal(tui.state.setupResumePreview.validation.valid, false);
-  enter(tui);
-  assert.equal(tui.state.mode, 'setup-resume-text', 'a non-contact parsing blocker opens the extracted text editor');
-
-  tui.state.input = ambiguous.replace('Independent consultant', 'Consultant | Independent');
-  enter(tui);
-
-  assert.equal(tui.state.mode, 'normal');
-  assert.equal(tui.state.setupResumePreview.validation.valid, true);
-  assert.equal(tui.state.setupResumePreview.document.experience[0].title, 'Consultant');
-  assert.equal(tui.state.setupResumePreview.document.experience[0].employer, 'Independent');
-  assert.equal(tui.state.setupResumePreview.extraction.correctedInOnboarding, true);
-});
-
-test('file browser keeps a long-list selection visible at compact height', async () => {
-  const { store, tui } = await emptyTui({ width: 80, height: 24 });
-  for (let index = 0; index < 36; index++) {
-    writeFileSync(path.join(store.root, `resume-${String(index).padStart(2, '0')}.txt`), `Resume ${index}`, 'utf8');
-  }
-  tui.state.setupFilePurpose = 'resume';
-  const items = tui.setupFiles(store.root, 'resume');
-  tui.state.overlay = 'setup-file-browser';
-  for (let index = 0; index < items.length + 5; index++) tui.onKeypress('', { name: 'down' });
-
-  const selected = items.at(-1);
-  const screen = screenOf(tui, 80, 24).join('\n');
-  assert.equal(tui.state.overlayIndex, items.length - 1, 'selection clamps at the final entry');
-  assert.match(screen, new RegExp(`▶ File  ${selected.label}`), 'the highlighted final entry scrolls into view');
-  assert.match(screen, new RegExp(`Showing \\d+–${items.length} of ${items.length}`), 'visible range communicates scroll position');
-});
-
-test('context help explains blocked prerequisites instead of calling them complete', async () => {
-  const { tui } = await emptyTui({ width: 80, height: 24 });
-  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(item => item.id === 'resume');
-  tui.openHelp();
-  const screen = screenOf(tui, 80, 24).join('\n');
-
-  assert.match(screen, /Select a profile before importing a resume/);
-  assert.match(screen, /Next: Complete profile setup/);
-  assert.doesNotMatch(screen, /This task is done/);
-});
-
-test('the setup review-materials action opens the actionable review queue', async () => {
-  const { tui } = await emptyTui();
-  tui.state.overlay = 'setup';
-  tui.openSetupAction({ id: 'materials', actions: [{ id: 'review_materials', label: 'Review exact revisions' }] });
-  assert.equal(tui.state.overlay, 'review');
-});
-
-test('short setup dialogs are centered and explanatory copy wraps at minimum width', async () => {
-  const { tui } = await emptyTui();
-  tui.beginSetupSource('resume');
-  const wide = screenOf(tui, 120, 36);
-  const border = wide.find(line => line.includes('ADD YOUR RESUME'));
-  assert.ok(border.indexOf('╔') >= 18, 'short dialog does not consume the full wide terminal');
-  assert.ok(stringWidth(border.trim()) <= 82, 'short dialog uses a compact reading width');
-
-  const compact = screenOf(tui, 60, 24);
-  assert.ok(compact.every(line => stringWidth(line) <= 60), 'compact dialog never overflows');
-  const compactText = compact.map(line => line.replaceAll('║', '').trim()).join(' ');
-  assert.match(compactText, /Supported locally: PDF, DOCX/);
-  assert.match(compact.join('\n'), /\? help  ·  Q quit/, 'compact footer keeps help and quit visible');
+  const profile = createProfile(tui.store, 'Alex Chen').profile;
+  const second = createProfile(tui.store, 'Other Profile').profile;
+  tui.refresh();
+  assert.equal(tui.model.profileId, profile.id, 'the first profile is the workspace profile');
+  tui.runSlash('setup');
+  assert.equal(tui.state.overlay, 'setup', '/setup opens guided setup');
+  const screen = screenOf(tui);
+  assert.doesNotMatch(screen, /profile-switch|switch profile/i, 'no profile-switcher chrome');
+  assert.equal(tui.model.onboarding.profileId, profile.id, 'one person, one profile in the TUI');
+  assert.ok(second, 'the CLI may still hold other profiles');
 });

@@ -134,14 +134,31 @@ export async function agentBackendCatalog({ root = process.cwd(), env = process.
     codexPath ? runProbe(codexPath, ['--version'], { cwd: root, env: probeEnv }) : Promise.resolve(null)
   ]);
   const ompAvailable = Boolean(ompPath && (ompHelp?.ok || ompVersion?.ok));
+  // When JOBOS_ACP_COMMAND=omp the embedded backend IS omp, so the primary
+  // hermes-acp entry must reflect that backend's install state rather than
+  // report Hermes as missing (which would make onboarding/doctor misdiagnose
+  // a healthy setup as unavailable).
+  const primaryBackend = hermesCommand === 'omp'
+    ? {
+        path: ompPath,
+        version: ompVersion?.ok ? ompVersion.output : (ompHelp?.ok ? ompHelp.output.split('\n')[0] : null),
+        available: ompAvailable,
+        readiness: ompAvailable ? 'ok · configured as the embedded TUI backend (omp)' : (ompHelp?.error || 'missing')
+      }
+    : {
+        path: hermesPath,
+        version: hermesVersion?.ok ? hermesVersion.output : null,
+        available: Boolean(hermesPath && hermesCheck?.ok),
+        readiness: hermesCheck?.ok ? hermesCheck.output : (hermesCheck?.error || 'missing')
+      };
   return [
     {
       id: 'hermes-acp',
       name: 'Hermes ACP',
-      path: hermesCommand === 'omp' ? null : hermesPath,
-      version: hermesVersion?.ok ? hermesVersion.output : null,
-      available: Boolean(hermesPath && hermesCommand !== 'omp' && hermesCheck?.ok),
-      readiness: hermesCheck?.ok ? hermesCheck.output : (hermesCheck?.error || 'missing'),
+      path: primaryBackend.path,
+      version: primaryBackend.version,
+      available: primaryBackend.available,
+      readiness: primaryBackend.readiness,
       protocol: 'acp-v1',
       transport: 'stdio-jsonl',
       multiTurn: true,
@@ -155,7 +172,7 @@ export async function agentBackendCatalog({ root = process.cwd(), env = process.
       path: ompPath,
       version: ompVersion?.ok ? ompVersion.output : (ompHelp?.ok ? ompHelp.output.split('\n')[0] : null),
       available: ompAvailable,
-      readiness: ompAvailable ? 'installed; set JOBOS_ACP_COMMAND=omp for embedded TUI guest' : 'missing',
+      readiness: ompAvailable ? (hermesCommand === 'omp' ? 'installed; active as the embedded TUI backend' : 'installed; set JOBOS_ACP_COMMAND=omp for embedded TUI guest') : 'missing',
       protocol: 'acp-v1',
       transport: 'stdio-jsonl',
       multiTurn: true,

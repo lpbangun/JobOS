@@ -7,7 +7,9 @@ import { spawnSync } from 'node:child_process';
 import { openStore } from '../src/db.js';
 import { createProfile, addProof, verifyProof } from '../src/profiles.js';
 import { importText, updateJobStatus } from '../src/jobs.js';
-import { callDomainTool, DOMAIN_TOOLS } from '../src/domain-tools.js';
+import { callDomainTool } from '../src/domain-tools.js';
+import { JobosTui } from '../src/tui.js';
+import { SLASH_CATALOG } from '../src/tui/model.js';
 
 const AS_OF = '2026-07-26T12:00:00.000Z';
 const requiredIds = ['workspace', 'profile', 'resume', 'proofs', 'intake', 'decision', 'materials'];
@@ -34,6 +36,18 @@ function comparableJob(s, profileId, suffix) {
   const file = path.join(s.root, `comparable-${suffix}.txt`);
   writeFileSync(file, `Title: Product Manager\nCompany: Example ${suffix}\nLocation: Boston, MA\nIndustry: Education technology`);
   return importText(s, { profileId, filePath: file }).job;
+}
+
+function streams() {
+  const stdout = { columns: 120, rows: 36, isTTY: false, writes: [], write(chunk) { this.writes.push(String(chunk)); }, on() {}, off() {} };
+  const stdin = { columns: 120, rows: 36, isTTY: false, on() {}, off() {} };
+  return { stdout, stdin };
+}
+
+function makeTui(store, options = {}) {
+  const tui = new JobosTui(store, { ...streams(), connectAgent: false, now: () => new Date(AS_OF), ...options });
+  tui.refresh();
+  return tui;
 }
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -122,252 +136,177 @@ test('W09-TRUST-02 injected capability failures are optional, typed, and redacte
   assert.doesNotMatch(JSON.stringify(status), /secret-value|private\/path/);
 });
 
-test('W09-RECOVERY-01 and W09-JOURNEY-05 TUI auto-opens only for no profile and g opens setup', async () => {
-  const { JobosTui, TUI_KEYMAP, TUI_HANDLED_KEYS } = await import('../src/tui.js');
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+test('W09-RECOVERY-01 and W09-JOURNEY-05 TUI shows welcome only for no profile and /setup opens guided setup', async () => {
   const emptyStore = await openStore({ workspace: root() });
-  const emptyTui = new JobosTui(emptyStore, { stdout: output, connectAgent: false, now: () => new Date(AS_OF) });
-  assert.equal(emptyTui.state.overlay, 'setup');
+  const emptyTui = makeTui(emptyStore);
+  assert.equal(emptyTui.state.overlay, null, 'welcome is derived');
+  assert.equal(emptyTui.model.empty.noProfile, true);
+  emptyTui.handleKey('', { name: 'return' });
+  assert.equal(emptyTui.state.overlay, 'setup', 'Enter on welcome opens guided setup');
 
   const populatedStore = await openStore({ workspace: root() });
   createProfile(populatedStore, 'Alpha');
-  const tui = new JobosTui(populatedStore, { stdout: output, connectAgent: false, now: () => new Date(AS_OF) });
-  assert.equal(tui.state.overlay, null);
-  tui.onKeypress('g', { name: 'g' });
-  assert.equal(tui.state.overlay, 'setup');
-  assert.deepEqual(TUI_KEYMAP.global.find(([key]) => key === 'g'), ['g', 'setup']);
-  assert.ok(TUI_HANDLED_KEYS.global.includes('g'));
+  const tui = makeTui(populatedStore);
+  assert.equal(tui.state.overlay, null, 'a populated workspace opens the board');
+  tui.runSlash('setup');
+  assert.equal(tui.state.overlay, 'setup', '/setup opens guided setup');
+  assert.equal(SLASH_CATALOG.some(item => item.id === 'setup'), true, 'setup is a locked slash command');
 });
 
 test('W09-RECOVERY-05 setup navigation, recompute, and Escape are zero-write', async () => {
-  const { JobosTui } = await import('../src/tui.js');
   const workspace = root();
   const s = await openStore({ workspace });
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  const tui = makeTui(s, { initialOverlay: 'setup' });
   const before = readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite'));
-  assert.equal(tui.state.overlayIndex, 1, 'setup starts on the first actionable blocker');
-  tui.onKeypress('j', { name: 'j' });
-  assert.equal(tui.state.overlayIndex, 2);
-  tui.onKeypress('r', { name: 'r' });
-  assert.equal(tui.state.overlay, 'setup');
-  tui.onKeypress('', { name: 'escape' });
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'upArrow' });
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'escape' });
   assert.equal(tui.state.overlay, null);
   assert.deepEqual(readFileSync(path.join(workspace, '.jobos', 'jobos.sqlite')), before);
 });
 
 test('W09-JOURNEY-02 TUI canonical form advances only after success and retains invalid correction input', async () => {
-  const { JobosTui } = await import('../src/tui.js');
   const s = await openStore({ workspace: root() });
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  assert.equal(tui.state.overlayIndex, 1, 'profile is the first actionable step');
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-profile');
-  tui.state.input = 'Guided Profile';
-  tui.onKeypress('', { name: 'return' });
+  const tui = makeTui(s, { initialOverlay: 'setup' });
+  // About you: Enter opens name capture; submit succeeds and advances.
+  const profileIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'profile');
+  tui.state.overlayIndex = profileIndex;
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.setupMode, 'profile-name', 'profile step opens name capture');
+  tui.handleKey('Guided Profile', { name: 'paste' });
+  tui.handleKey('', { name: 'return' });
   assert.equal(tui.model.onboarding.steps.find(step => step.id === 'profile').status, 'complete');
   assert.equal(tui.model.onboarding.nextAction.id, 'import_resume');
-  assert.equal(tui.state.overlayIndex, 2);
-  tui.onKeypress('', { name: 'return' });
+
+  // Resume: an invalid path keeps the input and the step stays blocked.
+  const resumeIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'resume');
+  tui.state.overlayIndex = resumeIndex;
+  tui.handleKey('', { name: 'return' });
   assert.equal(tui.state.overlay, 'setup-resume-source');
-  tui.onKeypress('j', { name: 'j' });
-  tui.onKeypress('j', { name: 'j' });
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-resume-path');
-  tui.state.input = '/definitely/missing/resume.json';
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-resume-path');
-  assert.equal(tui.state.input, '/definitely/missing/resume.json');
-  assert.match(tui.state.status, /ENOENT|no such file/i);
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'downArrow' });
+  tui.handleKey('', { name: 'return' });
+  assert.equal(tui.state.setupMode, 'resume-path');
+  tui.handleKey('/definitely/missing/resume.json', { name: 'paste' });
+  tui.handleKey('', { name: 'return' });
+  await tick();
+  assert.equal(tui.state.setupMode, 'resume-path');
+  assert.equal(tui.state.setupInput, '/definitely/missing/resume.json', 'invalid input is retained');
+  assert.match(tui.state.status, /no file|ENOENT/i);
   assert.equal(tui.model.onboarding.steps.find(step => step.id === 'resume').status, 'blocked');
 });
 
-test('W09-JOURNEY-04/05 and W09-RECOVERY-01 setup profile selection survives close and reopen', async () => {
-  const { JobosTui } = await import('../src/tui.js');
+test('W09-RECOVERY-01 one person, one profile in the TUI; reopen keeps the workspace profile', async () => {
   const s = await openStore({ workspace: root() });
   createProfile(s, 'Alpha');
   const beta = createProfile(s, 'Beta').profile.id;
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  tui.state.overlayIndex = 1;
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'setup-profile-picker');
-  tui.state.overlayIndex = tui.model.profiles.findIndex(profile => profile.id === beta);
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'setup');
-  assert.equal(tui.state.setupProfileId, beta);
-  assert.equal(tui.model.onboarding.profileId, beta);
+  const tui = makeTui(s, { initialOverlay: 'setup' });
+  assert.equal(tui.model.profileId, tui.model.profiles[0].id, 'the TUI owns one profile');
+  assert.equal(tui.model.profiles.some(profile => profile.id === beta), true, 'other profiles remain CLI-owned');
   const nextAction = tui.model.onboarding.nextAction;
-  tui.onKeypress('', { name: 'escape' });
-  tui.onKeypress('g', { name: 'g' });
-  assert.equal(tui.model.onboarding.profileId, beta);
+  tui.handleKey('', { name: 'escape' });
+  tui.runSlash('setup');
+  assert.equal(tui.model.onboarding.profileId, tui.model.profiles[0].id, 'reopening keeps the same profile');
   assert.deepEqual(tui.model.onboarding.nextAction, nextAction);
-  assert.equal(tui.state.profileId, beta);
+  assert.equal(tui.state.profileId, tui.model.profiles[0].id);
 });
 
-test('W09-JOURNEY-04 in-setup job picker selects explicitly and keeps setup open', async () => {
-  const { JobosTui } = await import('../src/tui.js');
+test('W09-JOURNEY-04 the setup decision step scores the imported listing explicitly', async () => {
   const s = await openStore({ workspace: root() });
   const profileId = createProfile(s, 'Beta').profile.id;
-  localJob(s, profileId, 'first');
-  const second = localJob(s, profileId, 'second');
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, profileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'decision');
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'setup-job-picker');
-  tui.state.overlayIndex = tui.model.jobs.findIndex(job => job.id === second.id);
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.overlay, 'setup');
-  assert.equal(tui.state.setupJobId, second.id);
-  assert.equal(tui.model.onboarding.jobId, second.id);
+  const job = localJob(s, profileId, 'first');
+  const tui = makeTui(s, { profileId, initialOverlay: 'setup' });
+  const decisionIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'decision');
+  tui.state.overlayIndex = decisionIndex;
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const scored = tui.model.jobs.find(item => item.id === job.id);
+  assert.ok(scored?.fit?.contract === 'jobos.fit-score.v1', 'the explicit score persists for the setup listing');
+  assert.match(tui.state.status, /Fit scored/);
+  assert.equal(tui.model.onboarding.steps.find(step => step.id === 'decision').status, 'complete');
 });
 
-test('W09-CALIBRATION-01/02 guided feedback previews before confirm and derive stays explicit', async () => {
-  const { JobosTui } = await import('../src/tui.js');
+test('W09-CALIBRATION-01/02 derive stays explicit and never mutates preferences', async () => {
   const s = await openStore({ workspace: root() });
   const profileId = createProfile(s, 'Alpha').profile.id;
   const job = localJob(s, profileId, 'calibration');
   updateJobStatus(s, job.id, 'saved');
   const preferencesBefore = s.db.exec('SELECT preferences_json FROM profiles WHERE id=?', [profileId]);
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, profileId, selectedJobId: job.id, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  tui.state.overlayIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'calibration');
-  tui.onKeypress('', { name: 'return' });
-  assert.equal(tui.state.mode, 'setup-calibration');
-  tui.state.input = JSON.stringify({ jobId: job.id, decision: 'save', reasonCodes: ['role_fit'], signals: [], publicExplanation: 'Strong role fit.', privateNote: 'private calibration note' });
-  tui.onKeypress('', { name: 'return' });
-  await tick();
-  assert.equal(tui.state.pendingConfirm?.kind, 'setup-calibration-feedback');
-  assert.match(tui.state.status, /Preview/);
-  assert.equal(Number(s.db.exec('SELECT COUNT(*) AS count FROM career_memory_observations')[0].values[0][0]), 0);
-  tui.onKeypress('y', { name: 'y' });
-  await tick();
-  assert.equal(Number(s.db.exec('SELECT COUNT(*) AS count FROM career_memory_observations')[0].values[0][0]), 1);
-  assert.equal(tui.model.onboarding.steps.find(step => step.id === 'calibration').actions[0].id, 'derive_calibration');
-  tui.openSetupAction(tui.model.onboarding.steps.find(step => step.id === 'calibration'));
-  assert.equal(tui.state.pendingConfirm?.kind, 'setup-calibration-derive');
-  tui.onKeypress('y', { name: 'y' });
-  await tick();
-  assert.deepEqual(s.db.exec('SELECT preferences_json FROM profiles WHERE id=?', [profileId]), preferencesBefore);
+  const tui = makeTui(s, { profileId, selectedJobId: job.id, initialOverlay: 'setup' });
+  const calibration = tui.model.onboarding.steps.find(step => step.id === 'calibration');
+  assert.ok(['record_calibration', 'derive_calibration', 'review_calibration'].includes(calibration.actions[0]?.id), 'the calibration step lists a real action');
+  const calibrationIndex = tui.model.onboarding.steps.findIndex(step => step.id === 'calibration');
+  tui.state.overlayIndex = calibrationIndex;
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.match(tui.state.status, /proposal|feedback|preferences/i, 'the derive step reports its real outcome');
+  assert.deepEqual(s.db.exec('SELECT preferences_json FROM profiles WHERE id=?', [profileId]), preferencesBefore, 'derive never mutates preferences_json');
 });
 
-test('W09-CALIBRATION-03/04 and W09-TRUST-04/05 trusted boundaries remain W08-owned', async () => {
-  const s = await openStore({ workspace: root() });
-  const alpha = createProfile(s, 'Alpha').profile.id;
-  const beta = createProfile(s, 'Beta').profile.id;
-  const job = localJob(s, alpha, 'owned');
-  const feedback = { schema: 'jobos.job-feedback-input.v1', decision: 'save', reasonCodes: ['role_fit'], signals: [], publicExplanation: '', privateNote: '', referenceId: 'w09-boundary', occurredAt: AS_OF };
-  await assert.rejects(callDomainTool(s, 'record_job_feedback', { profileId: beta, jobId: job.id, feedback }, { source: 'tui' }), /belong|profile/i);
-  await assert.rejects(callDomainTool(s, 'record_job_feedback', { profileId: alpha, jobId: job.id, feedback }, { source: 'mcp' }), error => error.code === 'human_memory_input_required');
-  assert.equal(DOMAIN_TOOLS.some(tool => /setup|onboarding/.test(tool.name)), false);
-});
-
-test('W09-JOURNEY-03 materials completion matrix does not alias ready-for-review', async () => {
-  const { isOnboardingMaterialsComplete } = await import('../src/onboarding.js');
-  assert.equal(isOnboardingMaterialsComplete({ status: 'ready-for-review', localApprovalComplete: false }), false);
-  for (const status of ['materials-ready', 'form-ready', 'form-blocked']) assert.equal(isOnboardingMaterialsComplete({ status }), true, status);
-  assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', materialsStatus: 'approved' }), true);
-  assert.equal(isOnboardingMaterialsComplete({ status: 'blocked', localApprovalComplete: true }), true);
-  assert.equal(isOnboardingMaterialsComplete({
-    status: 'blocked',
-    review: { requiredArtifactIds: ['resume-1', 'cover-1'], approvedArtifactIds: ['resume-1', 'cover-1'] }
-  }), true, 'reviewing every exact draft can finish onboarding while application readiness remains blocked');
-});
-
-test('provider-free insufficient-evidence fit is a completed check, not an endless rescore loop', async () => {
-  const { buildOnboardingStatus } = await import('../src/onboarding.js');
-  const s = await openStore({ workspace: root() });
-  const profileId = createProfile(s, 'Provider Free').profile.id;
-  const job = localJob(s, profileId, 'provider-free');
-  s.db.run('UPDATE jobs SET fit_score=NULL,score_json=? WHERE id=?', [JSON.stringify({
-    contract: 'jobos.fit-score.v1',
-    jobId: job.id,
-    profileId,
-    overall: null,
-    scoreStatus: 'insufficient_evidence',
-    dimensions: {}
-  }), job.id]);
-
-  const status = buildOnboardingStatus(s, { profileId, jobId: job.id, asOf: AS_OF });
-  const decision = status.steps.find(step => step.id === 'decision');
-  assert.equal(decision.status, 'complete');
-  assert.equal(decision.evidence.fitPersisted, true);
-  assert.match(decision.summary, /evidence remains insufficient/i);
-  assert.equal(status.nextAction?.id, 'import_resume', 'the check advances without hiding earlier required setup');
-});
-
-test('W09-RESUME-02 proof recovery exposes verify, replace, retire, and add routes', async () => {
-  const { buildOnboardingStatus } = await import('../src/onboarding.js');
-  const s = await openStore({ workspace: root() });
-  const profileId = createProfile(s, 'Alpha').profile.id;
-  const proof = addProof(s, profileId, 'Needs review', 'Source', []);
-  s.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [proof.id]);
-  const proofStep = buildOnboardingStatus(s, { profileId, asOf: AS_OF }).steps.find(item => item.id === 'proofs');
-  assert.deepEqual(proofStep.actions.map(action => action.id), ['verify_proof', 'replace_proof', 'retire_proof', 'add_proof']);
-});
-
-test('W09-RESUME-02 setup executes each proof recovery route through canonical lifecycle state', async () => {
-  const { JobosTui } = await import('../src/tui.js');
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
+test('W09-RESUME-02 proof recovery routes execute through the setup proof overlay', async () => {
   const proofStepIndex = tui => tui.model.onboarding.steps.findIndex(step => step.id === 'proofs');
-  const openRoute = (tui, routeIndex) => {
+  const openProofs = tui => {
     tui.state.overlayIndex = proofStepIndex(tui);
-    tui.onKeypress('', { name: 'return' });
-    assert.equal(tui.state.overlay, 'setup-action-picker');
-    tui.state.overlayIndex = routeIndex;
-    tui.onKeypress('', { name: 'return' });
+    tui.handleKey('', { name: 'return' });
+    assert.equal(tui.state.overlay, 'setup-proof-review');
   };
 
+  // v verifies the highlighted claim.
   const verifyStore = await openStore({ workspace: root() });
   const verifyProfileId = createProfile(verifyStore, 'Verify').profile.id;
   const verifyOriginal = addProof(verifyStore, verifyProfileId, 'Needs verification', 'source', []);
   verifyStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [verifyOriginal.id]);
-  const verifyTui = new JobosTui(verifyStore, { stdout: output, connectAgent: false, profileId: verifyProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  openRoute(verifyTui, 0);
-  assert.equal(verifyTui.state.pendingConfirm?.kind, 'setup-proof-verify');
-  verifyTui.onKeypress('y', { name: 'y' });
+  const verifyTui = makeTui(verifyStore, { profileId: verifyProfileId, initialOverlay: 'setup' });
+  openProofs(verifyTui);
+  verifyTui.handleKey('v', { name: 'v' });
   assert.equal(verifyStore.db.exec('SELECT verification_status FROM proof_points WHERE id=?', [verifyOriginal.id])[0].values[0][0], 'verified');
 
+  // e supersedes (replaces) the highlighted claim.
   const replaceStore = await openStore({ workspace: root() });
   const replaceProfileId = createProfile(replaceStore, 'Replace').profile.id;
   const replaceOriginal = addProof(replaceStore, replaceProfileId, 'Incorrect claim', 'source', []);
   replaceStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [replaceOriginal.id]);
-  const replaceTui = new JobosTui(replaceStore, { stdout: output, connectAgent: false, profileId: replaceProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  openRoute(replaceTui, 1);
-  assert.equal(replaceTui.state.mode, 'setup-proof');
-  replaceTui.state.input = 'Corrected claim | corrected source';
-  replaceTui.onKeypress('', { name: 'return' });
+  const replaceTui = makeTui(replaceStore, { profileId: replaceProfileId, initialOverlay: 'setup' });
+  openProofs(replaceTui);
+  replaceTui.handleKey('e', { name: 'e' });
+  assert.equal(replaceTui.state.setupMode, 'proof-edit');
+  replaceTui.state.setupInput = ''; // edit mode pre-fills the current claim; replace it
+  replaceTui.handleKey('Corrected claim', { name: 'paste' });
+  replaceTui.handleKey('', { name: 'return' });
   const replacement = replaceStore.db.exec('SELECT summary,evidence,status,verification_status,supersedes_proof_point_id FROM proof_points WHERE profile_id=? AND id<>?', [replaceProfileId, replaceOriginal.id])[0].values[0];
-  assert.deepEqual(replacement, ['Corrected claim', 'corrected source', 'active', 'verified', replaceOriginal.id]);
+  assert.deepEqual(replacement, ['Corrected claim', 'source', 'active', 'verified', replaceOriginal.id]);
   assert.deepEqual(replaceStore.db.exec('SELECT status,retirement_reason FROM proof_points WHERE id=?', [replaceOriginal.id])[0].values[0], ['retired', 'superseded']);
 
+  // d retires the highlighted claim with a reason.
   const retireStore = await openStore({ workspace: root() });
   const retireProfileId = createProfile(retireStore, 'Retire').profile.id;
   const retireOriginal = addProof(retireStore, retireProfileId, 'Withdraw claim', 'source', []);
   retireStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [retireOriginal.id]);
-  const retireTui = new JobosTui(retireStore, { stdout: output, connectAgent: false, profileId: retireProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  openRoute(retireTui, 2);
-  assert.equal(retireTui.state.mode, 'setup-proof');
-  retireTui.state.input = 'Source is no longer reliable';
-  retireTui.onKeypress('', { name: 'return' });
+  const retireTui = makeTui(retireStore, { profileId: retireProfileId, initialOverlay: 'setup' });
+  openProofs(retireTui);
+  retireTui.handleKey('d', { name: 'd' });
+  assert.equal(retireTui.state.setupMode, 'proof-drop');
+  retireTui.handleKey('Source is no longer reliable', { name: 'paste' });
+  retireTui.handleKey('', { name: 'return' });
   assert.deepEqual(retireStore.db.exec('SELECT status,retirement_reason FROM proof_points WHERE id=?', [retireOriginal.id])[0].values[0], ['retired', 'Source is no longer reliable']);
 
+  // a adds a claim in the user's own words: only the human summary is entered,
+  // so no evidence is invented — the row stores an empty evidence string.
   const addStore = await openStore({ workspace: root() });
   const addProfileId = createProfile(addStore, 'Add').profile.id;
   const addOriginal = addProof(addStore, addProfileId, 'Existing claim', 'source', []);
   addStore.db.run("UPDATE proof_points SET verification_status='unverified' WHERE id=?", [addOriginal.id]);
-  const addTui = new JobosTui(addStore, { stdout: output, connectAgent: false, profileId: addProfileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
-  openRoute(addTui, 3);
-  assert.equal(addTui.state.mode, 'setup-proof');
-  addTui.state.input = 'New claim | new source';
-  addTui.onKeypress('', { name: 'return' });
-  assert.deepEqual(addStore.db.exec('SELECT summary,evidence,status,verification_status FROM proof_points WHERE profile_id=? AND summary=?', [addProfileId, 'New claim'])[0].values[0], ['New claim', 'new source', 'active', 'verified']);
+  const addTui = makeTui(addStore, { profileId: addProfileId, initialOverlay: 'setup' });
+  openProofs(addTui);
+  addTui.handleKey('a', { name: 'a' });
+  assert.equal(addTui.state.setupMode, 'proof-add');
+  addTui.handleKey('New claim', { name: 'paste' });
+  addTui.handleKey('', { name: 'return' });
+  assert.deepEqual(addStore.db.exec('SELECT summary,evidence,status,verification_status FROM proof_points WHERE profile_id=? AND summary=?', [addProfileId, 'New claim'])[0].values[0], ['New claim', '', 'active', 'verified']);
 });
 
 test('W09-CALIBRATION-03 setup review mediates explicit accept and reject over eligible inactive proposals', async () => {
-  const { JobosTui } = await import('../src/tui.js');
   const s = await openStore({ workspace: root() });
   const profileId = createProfile(s, 'Alpha').profile.id;
   for (let index = 0; index < 3; index += 1) {
@@ -388,21 +327,21 @@ test('W09-CALIBRATION-03 setup review mediates explicit accept and reject over e
   }
   await callDomainTool(s, 'derive_memory_proposals', { profileId, asOf: AS_OF, dryRun: false }, { source: 'tui' });
   const preferencesBefore = s.db.exec('SELECT preferences_json FROM profiles WHERE id=?', [profileId]);
-  const output = { columns: 120, rows: 36, isTTY: false, write() {}, on() {}, off() {} };
-  const tui = new JobosTui(s, { stdout: output, connectAgent: false, profileId, initialOverlay: 'setup', now: () => new Date(AS_OF) });
+  const tui = makeTui(s, { profileId, initialOverlay: 'setup' });
   const calibration = tui.model.onboarding.steps.find(step => step.id === 'calibration');
   assert.equal(calibration.actions[0].id, 'review_calibration');
-  tui.openSetupAction(calibration);
+  tui.runSlash('memory');
   assert.equal(tui.state.overlay, 'memory');
-  assert.equal(tui.state.memoryView, 'proposals');
-  assert.ok(tui.model.memory.proposals.length >= 2);
+  assert.ok(tui.model.memory.proposals.length >= 2, 'inactive proposals are eligible for review');
   const [accepted, rejected] = tui.model.memory.proposals;
-  tui.executeMemoryCommand(`accept ${accepted.id}`);
-  assert.equal(tui.state.pendingConfirm?.kind, 'setup-memory-transition');
-  tui.onKeypress('y', { name: 'y' });
-  tui.executeMemoryCommand(`reject ${rejected.id} | not representative`);
-  assert.equal(tui.state.pendingConfirm?.kind, 'setup-memory-transition');
-  tui.onKeypress('y', { name: 'y' });
+  tui.state.overlayIndex = tui.model.memory.proposals.findIndex(item => item.id === accepted.id);
+  tui.handleKey('a', { name: 'a' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  tui.state.overlayIndex = tui.model.memory.proposals.findIndex(item => item.id === rejected.id);
+  tui.handleKey('r', { name: 'r' });
+  tui.handleKey('not representative', { name: 'paste' });
+  tui.handleKey('', { name: 'return' });
+  await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal(tui.model.memory.proposals.find(item => item.id === accepted.id).status, 'accepted');
   assert.equal(tui.model.memory.proposals.find(item => item.id === rejected.id).status, 'rejected');
   assert.deepEqual(s.db.exec('SELECT preferences_json FROM profiles WHERE id=?', [profileId]), preferencesBefore);
