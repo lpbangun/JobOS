@@ -83,7 +83,7 @@ export async function runAutomation(s, idOrAutomation, { trigger = 'manual', now
     const result = await executeAction(s, automation, { nowDate });
     outputs = result?.outputs || result || {};
     counts = result?.counts || {};
-    if (['succeeded', 'partial', 'failed'].includes(result?.derivedStatus)) status = result.derivedStatus;
+    if (['succeeded', 'partial', 'failed', 'skipped'].includes(result?.derivedStatus)) status = result.derivedStatus;
     if (status === 'failed') error = result?.error || 'Automation action reported failure';
   } catch (e) {
     status = 'failed';

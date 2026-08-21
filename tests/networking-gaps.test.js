@@ -69,7 +69,9 @@ test('B02/B03/B04 warmth derives deterministically and trusted recording updates
     occurredAt: '2025-01-01T00:00:00.000Z',
     source: 'cli',
   });
-  assert.equal(recorded.warmth, 'hot');
+  // Auto warmth decays from the contact event to asOf (now), matching the
+  // replay path and every derived read view (see recordNetworkContact).
+  assert.equal(recorded.warmth, warmthFromLastContact(recorded.occurredAt));
   const auditCount = all(store, 'SELECT id FROM audit_log').length;
   const replay = recordNetworkContact(store, {
     profileId: profile.id,

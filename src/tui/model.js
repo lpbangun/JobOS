@@ -382,9 +382,13 @@ function hitTestOverlay(overlay, model, state, c, r, width, height) {
   const count = Math.max(1, steps.length);
   // Centered modal: kicker(1) + title(1) + progress(1) then 2 rows per step,
   // then detail/buttons/hint. Height = 7 + 2*count matches the rendered frame.
+  // While an inline entry line is rendered (profile-name / network-intent
+  // modes) the modal grows by 2 rows (margin + caret row) and re-centers one
+  // row higher — mirror that so click targets stay aligned with the paint.
+  const entryActive = state.setupMode === 'profile-name' || state.setupMode === 'network-intent';
   const bodyTop = 2;
   const bodyHeight = height - 3;
-  const modalHeight = 7 + 2 * count;
+  const modalHeight = 7 + 2 * count + (entryActive ? 2 : 0);
   const modalTop = bodyTop + Math.floor((bodyHeight - modalHeight) / 2);
   const stepStart = modalTop + 4;
   const modalLeft = Math.floor((width - 52) / 2);
@@ -634,12 +638,6 @@ export function filesRows(model, state) {
     hasText: Boolean(state?.questionsText)
   });
   return rows;
-}
-
-/** The Files overlay row under the cursor. */
-export function selectedFileRow(model, state) {
-  const rows = filesRows(model, state);
-  return rows[state?.overlayIndex || 0] || rows[0] || null;
 }
 
 /**

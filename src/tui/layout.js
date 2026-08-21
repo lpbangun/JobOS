@@ -121,7 +121,7 @@ export function boardGeometry(viewport) {
     railWidth = width;
     paneWidth = 0;
   }
-  const headerWorkspace = { left: width - 19, right: width - 8, top: 1, bottom: 1 };
+  const headerWorkspace = { left: width - 19, right: width - 19 + HEADER_WORKSPACE_WIDTH - 1, top: 1, bottom: 1 };
   const headerJobs = { left: width - 7, right: width, top: 1, bottom: 1 };
   const bodyTop = 2;
   const bodyBottom = Math.max(1, height - 2);

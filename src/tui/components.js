@@ -10,7 +10,6 @@ import { ThemeProvider, Spinner } from '@inkjs/ui';
 import { CLASSIC_THEME, OVERLAY_BACKDROP, INKUI_THEME } from './theme.js';
 import { MODAL_WIDTH, MODAL_PADDING_X, boardGeometry } from './layout.js';
 import {
-  ACTIVE_APPLICATION_STATUSES,
   SETUP_STEP_LABELS,
   SETUP_SUB_OVERLAYS,
   RESUME_SOURCE_CHOICES,
@@ -19,7 +18,6 @@ import {
   actionChip,
   stageLabel,
   selectedJob,
-  selectedRow,
   selectedDocs,
   selectedContacts,
   effectiveOverlay,
@@ -35,14 +33,12 @@ import {
   isEmptyModel,
   filesRows,
   trackerRows,
-  TRACKER_DIRECT_STAGES,
   TRACKER_CHIP_STAGES,
   reviewRows,
   peopleReviewRows,
   networkPeople,
   connectionPerson,
-  outreachDraftRows,
-  selectedMemoryProposal
+  outreachDraftRows
 } from './model.js';
 
 const h = React.createElement;
@@ -536,6 +532,9 @@ function SetupSourceOverlay({ model, state, actions, kind }) {
   const entryActive = kind === 'resume'
     ? mode === 'resume-paste' || mode === 'resume-path'
     : mode === 'job-paste' || mode === 'job-path' || mode === 'job-url';
+  // Clamp the cursor so the highlight always sits on a real row; Enter then
+  // acts on that same row (pickSetupSource clamps the same way).
+  const index = Math.min(state.overlayIndex || 0, Math.max(0, choices.length - 1));
   return h(Modal, {
     kicker: `Setup · ${SETUP_STEP_LABELS[stepId]}`,
     hint: entryActive
@@ -547,7 +546,7 @@ function SetupSourceOverlay({ model, state, actions, kind }) {
       key: choice.id,
       label: choice.label,
       detail: choice.detail,
-      selected: i === (state.overlayIndex || 0)
+      selected: i === index
     })),
     entryActive
       ? h(InlineEntry, { state, placeholder: kind === 'job' && mode === 'job-url' ? 'https://…' : `Paste ${kind === 'resume' ? 'resume' : 'posting'} text` })

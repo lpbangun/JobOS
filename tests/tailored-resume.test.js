@@ -520,7 +520,7 @@ test('cover letter PDF render blocks underfilled stub and passes a full letter',
   const stub = { ...document, opening: 'Hi.', paragraphs: '', closing: 'Bye.' };
   const stubManifest = renderCoverLetterPdf({ statePath, workspacePath, jobId: 'job_cover_stub', artifact: { contentHash: 'abc' }, document: stub, layoutProfile: { pageSize: 'letter', pageLimit: 1 } });
   assert.equal(stubManifest.status, 'blocked');
-  assert.ok(stubManifest.blockers.some(blocker => blocker.code === 'resume_page_underfilled'));
+  assert.ok(stubManifest.blockers.some(blocker => blocker.code === 'cover_letter_page_underfilled'));
   assert.equal(existsSync(path.join(workspacePath, 'jobs', 'job_cover_stub', 'artifacts', 'cover-letter.pdf')), false);
 });
 

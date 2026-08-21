@@ -238,13 +238,19 @@ async function buildFileRegistration(clientName, definition, { cliPath, workspac
 
 async function applyFileRegistration(registration, { dryRun = false } = {}) {
   if (dryRun) return { ok: true, output: 'dry-run' };
-  const dir = path.dirname(registration.absolutePath);
-  await mkdir(dir, {
-    recursive: true,
-    mode: registration.configPath.startsWith('.omp/') ? 0o700 : undefined
-  });
-  await writeFile(registration.absolutePath, `${JSON.stringify(registration.content, null, 2)}\n`, 'utf8');
-  return { ok: true, output: `wrote ${registration.configPath}` };
+  try {
+    const dir = path.dirname(registration.absolutePath);
+    await mkdir(dir, {
+      recursive: true,
+      mode: registration.configPath.startsWith('.omp/') ? 0o700 : undefined
+    });
+    await writeFile(registration.absolutePath, `${JSON.stringify(registration.content, null, 2)}\n`, 'utf8');
+    return { ok: true, output: `wrote ${registration.configPath}` };
+  } catch (error) {
+    // Return a structured failure so connectAgentClient's existing
+    // agent_registration_failed path (instead of a raw fs error) fires.
+    return { ok: false, output: '', error: error?.message || String(error) };
+  }
 }
 
 function displayCommand(command, args) {
@@ -295,9 +301,13 @@ async function probeClient(client, executable, options) {
   return cliProbe;
 }
 
-function connectVerificationOk(client, { listProbe, fileProbe, enableProbe } = {}) {
+function connectVerificationOk(client, { listProbe, fileProbe } = {}) {
   if (listProbe?.ok) return true;
-  if (client === 'cursor') return Boolean(fileProbe?.ok && enableProbe?.ok);
+  // File-registration clients are verified by reading back the config we just
+  // wrote; requiring `agent mcp enable` to succeed too would fail a connect
+  // that already registered (headless/CI where the CLI enable step exits
+  // non-zero but the .cursor/mcp.json write is intact and re-readable).
+  if (client === 'cursor') return Boolean(fileProbe?.ok);
   if (client === 'pi') return Boolean(fileProbe?.ok);
   return false;
 }
@@ -400,7 +410,8 @@ export async function connectAgentClient(name, {
       throw new AgentSetupError('agent_registration_failed', `Could not register JobOS with ${client.name}`, {
         client: client.name,
         command: registration.display,
-        output: applied.output
+        output: applied.output,
+        error: applied.error
       });
     }
     if (client.name === 'cursor') {

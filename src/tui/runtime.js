@@ -302,7 +302,22 @@ export class JobosTui {
       // Headless mode for tests/controllers: no Ink mount, no ACP child unless
       // the host enabled the assistant — then connect deterministically.
       this._exitPromise = Promise.resolve();
-      if (this.options.connectAgent !== false) await this.ensureAgent();
+      if (this.options.connectAgent !== false) {
+        try {
+          await this.ensureAgent();
+        } finally {
+          // Nothing in headless mode can use the backend once start() resolves,
+          // and a spawned ACP child keeps the parent process alive through its
+          // stdio pipes — tear it down so `jobos tui` / `jobos setup` with a
+          // piped stdin return their exit code instead of hanging. A later
+          // sendChat/ensureAgent reconnects on demand.
+          const client = this.client;
+          this.client = null;
+          if (client) {
+            try { await client.stop(); } catch {}
+          }
+        }
+      }
       return this._exitPromise;
     }
     this._exitPromise = new Promise(resolve => {
@@ -2124,7 +2139,10 @@ export class JobosTui {
    */
   pickSetupSource(kind) {
     const choices = kind === 'job' ? JOB_SOURCE_CHOICES : RESUME_SOURCE_CHOICES;
-    const choice = choices[this.state.overlayIndex || 0] || choices[0];
+    // Clamp so Enter after scrolling past the last choice acts on the
+    // highlighted last row instead of silently falling back to the first one.
+    const index = Math.min(this.state.overlayIndex || 0, Math.max(0, choices.length - 1));
+    const choice = choices[index] || choices[0];
     if (!choice) return;
     if (kind === 'job') this.state.setupJobSource = choice.id;
     else this.state.setupResumeSource = choice.id;
@@ -2737,17 +2755,23 @@ export class JobosTui {
     const companies = String(value || '').split(',').map(item => item.trim()).filter(Boolean);
     const profileId = this.model?.profileId;
     if (!profileId) return this.setError('No profile yet.');
+    // Editing intent from the TUI is a merge with the persisted intent:
+    // target roles, personas, exclusions, and source consents are configured
+    // elsewhere (jobos profile network-intent --file) and must survive an
+    // edit of the target companies.
+    const profile = one(this.store, 'SELECT preferences_json FROM profiles WHERE id=?', [profileId]);
+    const existing = parseJson(profile?.preferences_json, {}).networkIntent || {};
     try {
       setNetworkIntent(this.store, {
         profileId,
         intent: {
           version: 1,
           targetCompanies: companies,
-          targetRoles: [],
-          preferredPersonas: [],
-          comfortableRelationshipTypes: [],
-          exclusions: [],
-          allowedSources: {}
+          targetRoles: existing.targetRoles || [],
+          preferredPersonas: existing.preferredPersonas || [],
+          comfortableRelationshipTypes: existing.comfortableRelationshipTypes || [],
+          exclusions: existing.exclusions || [],
+          allowedSources: existing.allowedSources || {}
         }
       });
       this.state.setupMode = null;
@@ -2912,7 +2936,6 @@ export class JobosTui {
     if (input === 'g' || input === 'G') {
       return this.setHeaderMode(this.state.headerMode === 'workspace' ? 'jobs' : 'workspace');
     }
-    if (key.tab) return this.cycleJobTab(key.shiftTab ? -1 : 1);
     if (this.state.jobTab === 'people') {
       const contacts = this.model?.selected?.contacts || [];
       if (key.upArrow) {

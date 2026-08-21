@@ -309,16 +309,22 @@ async function profileNetworkResearch(s, automation, { nowDate = new Date() } = 
     }
   }
   const attempted = results.filter(result => result.status !== 'skipped');
-  const failed = attempted.filter(result => result.status === 'failed').length;
-  const partial = attempted.filter(result => result.status === 'partial').length;
-  const derivedStatus = attempted.length > 0 && failed === attempted.length
-    ? 'failed'
-    : failed > 0 || partial > 0
-      ? 'partial'
-      : 'succeeded';
+  const skipped = results.filter(result => result.status === 'skipped').length;
+  // Any terminal state other than 'succeeded' (failed, partial,
+  // paused_retryable, cancelled) means the attempted research did not fully
+  // complete; report it as partial so the automation record is honest.
+  const nonSucceeded = attempted.filter(result => result.status !== 'succeeded');
+  const failed = nonSucceeded.filter(result => result.status === 'failed').length;
+  const derivedStatus = attempted.length === 0
+    ? 'skipped'
+    : failed === attempted.length
+      ? 'failed'
+      : nonSucceeded.length > 0
+        ? 'partial'
+        : 'succeeded';
   return {
     outputs: { research: results },
-    counts: { profiles: results.length, runs: results.filter(r => r.runId).length, failed, skipped: results.filter(r => r.status === 'skipped').length },
+    counts: { profiles: results.length, runs: results.filter(r => r.runId).length, failed, skipped },
     derivedStatus,
     ...(derivedStatus === 'failed' ? { error: 'Profile network research failed for every attempted profile.' } : {}),
   };
