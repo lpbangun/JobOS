@@ -3,15 +3,15 @@
 A local-first, agent-native operating system for job discovery, fit decisions, tailored materials, applications, networking, and follow-up.
 
 <p align="center">
-  <img src="docs/jobos-tui.svg" alt="JobOS dashboard with priority strip, job list, FIT score, and next action" width="100%" />
+  <img src="docs/jobos-tui.png" alt="JobOS board: Classic-red terminal with a Workspace | Jobs header, a New | Jobs rail with action chips, and the Job | People | Chat detail pane" width="100%" />
 </p>
 
-JobOS is a terminal application backed by your own local data. The TUI combines a job pipeline, selected-job evidence, review queues, guided setup, and a focused agent conversation—without a cloud account or required API key.
+JobOS is a terminal application backed by your own local data. The TUI is a keyboard-first Classic-red Ink app: a header mode bar (`Workspace` and `Jobs`), a `New | Jobs` pipeline rail with action chips (`Needs review`, `Create files`, `Find people`, `Due follow-up`), a `Job | People | Chat` detail pane, slash commands in the prompt, and a covering overlay family for setup, files, tracker, review, people, network, and memory—with no cloud account or required API key.
 
 <p align="center">
-  <img src="docs/jobos-setup.svg" alt="JobOS guided setup with seven essential steps" width="48%" />
+  <img src="docs/jobos-setup.png" alt="JobOS guided setup overlay with the seven essential steps and real progress, dimming the board behind it" width="48%" />
   &nbsp;
-  <img src="docs/jobos-chat.svg" alt="JobOS focused Hermes chat beside selected-job context" width="48%" />
+  <img src="docs/jobos-chat.png" alt="JobOS Chat pane with the slash menu open above the prompt" width="48%" />
 </p>
 
 ## What you can do
@@ -19,8 +19,9 @@ JobOS is a terminal application backed by your own local data. The TUI combines 
 - Build a reusable profile from a resume (paste or local PDF/DOCX/TXT/Markdown/JSON/YAML) and verified experience highlights.
 - Discover or import roles, then score fit with explicit evidence, gaps, and unlock guidance when preferences are thin.
 - Draft role-specific resumes, cover letters, research, and outreach from stored proof points—never invented claims.
-- Review exact artifact revisions before they become application-ready; Enter jumps to the recommended next task.
+- Review exact artifact revisions before they become application-ready: the Files overlay shows `resume.md` + `questions.md` with Approve / Reject, and `Enter` on a rail row opens its tracker.
 - Track applications, interviews, contacts, tasks, and weekly progress.
+- Drive the board with keyboard-first chrome: `n` / `j` switch the `New | Jobs` rail, `Tab` / `Shift+Tab` cycle the `Job | People | Chat` pane, `/` opens slash commands in the prompt, and `g` toggles Workspace and Jobs. Mouse clicks route to the same surfaces on real terminals.
 - Use Hermes inside JobOS (ACP) or connect Hermes, Codex, or Claude Code through MCP.
 - Keep SQLite as the source of truth with readable Markdown, YAML, and JSONL mirrors.
 
@@ -67,11 +68,11 @@ Guided setup opens as a focused full-screen workspace and starts on the first ta
 6. Check the fit and choose whether to pursue the job.
 7. Generate and review application materials.
 
-Optional later steps cover discovery sources, preference calibration (roles, location/work model, compensation, mission), the AI assistant, and web applications. Successful actions move directly to the next task. Press `g` later to return to setup.
+Optional later steps cover discovery sources, preference calibration (roles, location/work model, compensation, mission), the AI assistant, and web applications. Successful actions move directly to the next task. Press `/` and pick `/setup` later to return to guided setup.
 
-Use `↑`/`↓` on setup and other selectable lists; `j`/`k` remain optional alternatives. `Tab`/`Shift+Tab` also move within setup, and `1`–`7` jumps to an essential step. `Enter` opens the selected action, `c` changes completed information, `r` refreshes the setup view, and `Esc` returns to the dashboard. In the document viewer, the document names form a vertical list: `↑`/`↓` or `j`/`k` changes documents, while `PgUp`/`PgDn` scrolls the open document.
+Setup is a covering overlay: `↑` / `↓` move between steps, `Enter` continues the selected step, and `Esc` returns to the board. The progress list shows real state (complete / blocked / later), and the nested pickers—resume source, experience-highlight review, job source—call the same domain actions as the rest of the app, so nothing on screen is a fake checklist.
 
-Every text field supports `Left`/`Right`, `Home`/`End`, `Backspace`, `Delete`, and `Shift`+arrow selection. Pasted text is inserted at the cursor and replaces the current selection. Press `?` for controls and the recommended action on the current screen; press `?` again for the complete shortcut reference.
+Text fields support `Left` / `Right` and `Backspace` cursor editing; pasted text is inserted at the cursor. The footer always shows the shortcuts available on the current screen (for example `/ in Chat · Tab Job · People · Chat · n New · j Jobs · G Workspace · Esc closes`), so there is no separate help-mode key to discover.
 
 Resume extraction stays local. JobOS preserves an imported PDF or DOCX under private `.jobos/` state, stores the reviewed structured revision in SQLite, and writes readable `current.md`, `current-source.md`, and YAML projections under `jobos-workspace/profiles/<profile-id>/resume/`. The Markdown files are projections; use JobOS to make reviewed changes so revision history remains intact.
 
@@ -79,33 +80,38 @@ Primary controls:
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` or `j` / `k` | Move through jobs or the active list |
-| `←` / `→` | Cycle the priority strip |
-| `Enter` | Open the selected / recommended action |
-| `Tab` | Focus chat; press again to restore the dashboard |
-| `i` | Type an agent prompt |
-| `p` | Run the pursue workflow |
-| `d` | Run discovery |
-| `r` | Open review |
-| `o` | Open documents |
-| `n` / `b` | Network paths / build network map |
-| `g` | Resume guided setup |
-| `?` | Show contextual help; press again for all shortcuts |
-| `Q` | Quit cleanly |
+| `↑` / `↓` | Move through rail rows or the active overlay list |
+| `Enter` | Open the selected / recommended action (or continue setup) |
+| `Tab` / `Shift+Tab` | Cycle the detail pane: Job → People → Chat |
+| `n` / `j` | Switch the left rail: New (daily) / Jobs (pipeline) |
+| `g` | Toggle Workspace (whole-search chat) and Jobs (board) |
+| `/` | Open the slash menu in the prompt; type to filter, `↑`/`↓` + `Enter` to run |
+| `Esc` | Close the overlay / clear `/` |
+| `q` | Quit cleanly |
 
-Use optional mouse support to select visible jobs, filters, setup choices, and overlay rows, or to focus chat from the agent pane or footer:
+Slash commands run in the prompt: `/create-files`, `/find-people`, `/network`, `/tracker`, `/review`, `/daily`, `/chat`, `/jobs`, `/workspace`, `/memory`, `/setup`. A bare `Enter` on a just-typed `/` never runs a command you did not select; it clears the prompt instead.
 
-```bash
-jobos --mouse
-# or: export JOBOS_TUI_MOUSE=1
-```
+Overlays add their own keys, shown in the footer of each surface:
+
+| Overlay | Keys |
+| --- | --- |
+| Files (`/create-files`) | `a` approve · `r` reject with a reason |
+| Tracker (`/tracker`) | `1`–`4` saved / researching / applied / waiting · `f` freeze packet · `t` attest submission |
+| Morning brief (`/review`) | `w` run this week's review |
+| Keep/skip people (`/find-people`) | `k` keep · `x` skip |
+| Network (`/network`) | `i` edit intent · `g` refresh the graph |
+| Connection | `d` draft outreach · `a` approve contact · `r` record contact · `s` mark sent |
+| Career memory (`/memory`) | `a` accept · `r` reject · `v` revoke |
+
+On a real terminal, SGR mouse support is on automatically (snapshot and CI output stay byte-clean). Click header modes, rail segments and rows, the `Job | People | Chat` tabs, overlay rows, and the composer send target; pointer bytes never leak into the prompt. Keyboard stays the primary path.
 
 ### Responsive behavior
 
-- **Wide terminals:** dashboard by default; focused chat uses roughly 75–80% of the width and keeps selected-job context beside it.
-- **Medium terminals:** panels stack without hiding the agent conversation.
-- **Compact terminals:** `Tab` switches between a dashboard page and a full-width chat page instead of crushing three panes together.
-- **Minimum:** `60×20`. Below that, JobOS shows one explicit resize message and does not mutate state.
+The shell fills the terminal you give it: live runs use the full stdout width and height and reflow on resize, and `--width` / `--height` override it for scripting and snapshots (default `140×42`).
+
+- The board splits into a left rail and a `Job | People | Chat` detail pane whenever there is room (width ≥ 46 and height ≥ 6); the rail takes about a third, and the pane tabs keep fixed, compact spacing instead of stretching across the pane.
+- Narrow or very short terminals fall back to a compact board (full-width rail) rather than crushing the pane tabs beside the rail.
+- Overlays (welcome, setup, files, tracker, review, keep/skip people, network, connection, memory) cover the whole frame, hide the rail and pane tabs, and dim the shell behind them.
 
 ## Connect your agent
 
@@ -175,9 +181,9 @@ hermes acp --check
 jobos
 ```
 
-Press `Tab` for the expanded chat, `i` to compose, `↑`/`↓` or `j`/`k` for scrollback, and `Esc` to return to the dashboard. Each turn receives bounded JobOS context for the active profile and selected job, including a secret-safe summary of the current resume upload and verified experience highlights. Raw resume text and contact details are excluded from this host context; Hermes can use the mediated JobOS tools for current domain state.
+Press `/` and choose `/chat` (or `Tab` to the Chat pane) to compose; `Esc` clears the prompt and returns to the board. Each turn receives bounded JobOS context for the active profile and selected job, including a secret-safe summary of the current resume upload and verified experience highlights. Raw resume text and contact details are excluded from this host context; Hermes can use the mediated JobOS tools for current domain state.
 
-In chat command mode (`:`), `:resume` lists persisted Hermes ACP sessions for the workspace; `:resume <profile-id>` reconnects the agent pane to that profile's saved session.
+While a prompt is working, `Esc` cancels the turn in place and quarantines the cancelled session. Hermes ACP sessions persist under `.jobos/acp-sessions.json`, and the next launch resumes the saved session automatically, so conversation context survives restarts.
 
 ## How it works
 
@@ -246,6 +252,7 @@ By default, JobOS stores runtime state under the current directory:
 
 ```text
 .jobos/jobos.sqlite              canonical database
+.jobos/acp-sessions.json         persisted Hermes ACP session ids (resume across launches)
 jobos-workspace/profiles/*/      profile, network health, opportunity, and graph mirrors
 jobos-workspace/jobs/*/          scores, research, artifacts, outreach
 jobos-workspace/automations/     scheduler projections
@@ -300,9 +307,16 @@ Deterministic noninteractive TUI frames (useful for docs and debugging):
 jobos tui --snapshot --width 120 --height 36
 ```
 
+Regenerate the README screenshots from real TUI frames:
+
+```bash
+FORCE_COLOR=3 node scripts/readme-shots.mjs
+# writes docs/jobos-tui.png, docs/jobos-chat.png, docs/jobos-setup.png
+```
+
 ## Status
 
-JobOS is an early local-first release. The deterministic pipeline, responsive TUI, guided setup, ACP/MCP paths, workspace mirrors, review gates, and core pursue workflow are implemented. Recent product surfaces include honest FIT/unlock guidance, exact material review as the primary next action when drafts exist, resume identity correction, document-viewer navigation, and Hermes session resume via `:resume`. Optional websites and authenticated browser flows can change independently; JobOS reports those failures rather than fabricating success.
+JobOS is an early local-first release. The deterministic pipeline, guided setup, ACP/MCP paths, workspace mirrors, review gates, and core pursue workflow are implemented. The TUI is a Classic-red Ink app rebuilt around the locked information architecture: a `Workspace | Jobs` header, a `New | Jobs` rail with action chips, a `Job | People | Chat` detail pane, slash commands in the prompt, a covering overlay family, automatic SGR mouse support, and live ACP sessions with in-pane cancel and cross-launch resume. The shell fills any terminal (falling back to compact chrome on narrow frames), and `--snapshot` stays deterministic for docs and CI. Optional websites and authenticated browser flows can change independently; JobOS reports those failures rather than fabricating success.
 
 ## License
 
