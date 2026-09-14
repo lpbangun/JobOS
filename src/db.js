@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
-import { id, now, paths, workspaceRoot } from './utils.js';
+import { findNearbyWorkspaces, id, now, paths, resolveWorkspace } from './utils.js';
 import { mkdirs } from './workspace.js';
 import { seedDefaultAutomations } from './scheduler/store.js';
 
@@ -1231,7 +1231,7 @@ function flushPostCommit(s) {
 }
 
 export async function openStore(flags={}) {
-  const r=workspaceRoot(flags), p=paths(r); mkdirs(p);
+  const resolution=resolveWorkspace(flags), r=resolution.root, p=paths(r); mkdirs(p);
   if(!SQL) SQL=await initSqlJs({ locateFile: f => path.join(path.dirname(require.resolve('sql.js')), f) });
   const existed = fs.existsSync(p.db);
   const db=existed ? new SQL.Database(fs.readFileSync(p.db)) : new SQL.Database();
@@ -1246,7 +1246,21 @@ export async function openStore(flags={}) {
   migratePeopleBackfill(db);
   db.run('PRAGMA foreign_keys=ON');
   db.run('INSERT OR REPLACE INTO meta VALUES (?,?)',['schema_version','16']);
-  const store={db,p,root:r,baseRevision,postCommitProjections:[]};
+  const nearbyWorkspaces=findNearbyWorkspaces({
+    root:r,
+    cwd:flags.cwd || process.cwd(),
+    includeCwd:!resolution.pinned
+  });
+  const workspaceWarnings=nearbyWorkspaces.length > 1 ? [{
+    code:'multiple_workspaces_detected',
+    message:'Multiple nearby JobOS workspaces were detected. Confirm the intended workspace before writing.',
+    workspaces:nearbyWorkspaces
+  }] : [];
+  const store={
+    db,p,root:r,baseRevision,postCommitProjections:[],
+    workspaceResolution:{...resolution,databaseExisted:existed,nearbyWorkspaces},
+    workspaceWarnings
+  };
   const { backfillLifecycleActions } = await import('./lifecycle.js');
   const affectedJobIds = backfillLifecycleActions(store);
   seedDefaultAutomations(store);

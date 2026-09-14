@@ -123,7 +123,46 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
   const jid = job?.id || null;
   const steps = [];
 
-  steps.push(step('workspace', 'canonical', true, 'complete', 'Local SQLite workspace is open.', [], [], { storeRevision: s.revision || null }));
+  const workspace = s.workspaceResolution || {
+    root: s.root,
+    source: 'explicit',
+    pinned: true,
+    databaseExisted: true,
+    configFile: null,
+    defaultRoot: s.root,
+    cwd: s.root,
+    nearbyWorkspaces: []
+  };
+  const workspaceStatus = workspace.pinned ? 'complete' : 'blocked';
+  const workspaceBlockers = workspace.pinned ? [] : [
+    blocker(
+      'workspace_choice_required',
+      `Confirm where JobOS should store data. The currently resolved path is ${s.root}.`,
+      'Choose the stable default, a custom path, or the current directory with an explicit --workspace value.'
+    )
+  ];
+  const workspaceActions = workspace.pinned ? [] : [
+    action('use_default_workspace', 'Use stable default', `jobos init --workspace ${JSON.stringify(workspace.defaultRoot)} --json`),
+    action('use_custom_workspace', 'Choose custom path', 'jobos init --workspace <path> --json'),
+    action('use_current_directory', 'Use current directory (split-data risk)', `jobos init --workspace ${JSON.stringify(workspace.cwd)} --json`)
+  ];
+  steps.push(step(
+    'workspace',
+    'canonical',
+    true,
+    workspaceStatus,
+    workspace.pinned ? `Workspace is pinned at ${s.root}.` : `Storage choice required; currently resolved to ${s.root}.`,
+    workspaceBlockers,
+    workspaceActions,
+    {
+      root: s.root,
+      source: workspace.source,
+      pinned: Boolean(workspace.pinned),
+      configFile: workspace.configFile || null,
+      stableDefault: workspace.defaultRoot,
+      storeRevision: s.revision || null
+    }
+  ));
 
   const profileBlockers = !profile
     ? [profiles.length === 0
@@ -231,7 +270,15 @@ export function buildOnboardingStatus(s, { profileId = null, jobId = null, asOf 
   const coreReady = completedRequired === REQUIRED_IDS.length;
   const status = {
     schema: ONBOARDING_SCHEMA,
-    workspace: { root: s.root, status: 'open' },
+    workspace: {
+      root: s.root,
+      status: workspace.pinned ? 'open' : 'needs_choice',
+      source: workspace.source,
+      pinned: Boolean(workspace.pinned),
+      databaseExisted: Boolean(workspace.databaseExisted),
+      configFile: workspace.configFile || null,
+      nearbyWorkspaces: workspace.nearbyWorkspaces || []
+    },
     profileId: pid,
     jobId: jid,
     asOf: canonicalAsOf,

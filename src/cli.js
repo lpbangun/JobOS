@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { all, audit, one, openStore, reload, save } from './db.js';
-import { id, parseJson, paths, slug, splitCsv, workspaceRoot } from './utils.js';
+import { id, parseJson, paths, persistWorkspaceConfig, slug, splitCsv, workspaceRoot } from './utils.js';
 import { createProfile, addProof, retireProof, setNetworkIntent, supersedeProof, verifyProof } from './profiles.js';
 import { getResume, importResume, readResumeFileAsync, replaceResume, validateResumeDocument } from './resumes.js';
 import { buildRequirementCoverage, inventoryForJob } from './requirements.js';
@@ -407,8 +407,12 @@ jobos browser status --json
 }
 
 function emitBootstrapNotice(s, flags) {
-  if (!s.bootstrapCreated || s.bootstrapNoticeEmitted || flags.quiet || s.suppressBootstrapNotice) return;
-  console.error(`jobos: initialized workspace at ${s.root}`);
+  if (s.bootstrapNoticeEmitted || flags.quiet || s.suppressBootstrapNotice) return;
+  if (s.bootstrapCreated) console.error(`jobos: initialized workspace at ${s.root}`);
+  for (const warning of s.workspaceWarnings || []) {
+    console.error(`jobos: warning: ${warning.message}`);
+    for (const workspace of warning.workspaces) console.error(`  - ${workspace}`);
+  }
   s.bootstrapNoticeEmitted = true;
 }
 
@@ -666,7 +670,24 @@ export async function main(argv = process.argv.slice(2)) {
   const text = value => printText(value, flags, s);
 
   if (group === 'init') {
-    out({ ok: true, root: s.root, database: s.p.db, workspace: s.p.ws, policy: { externalActions: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' } });
+    const config = flags.workspace ? persistWorkspaceConfig(s.root) : null;
+    if (config) {
+      s.workspaceResolution = {
+        ...s.workspaceResolution,
+        pinned: true,
+        configFile: config.file,
+        configPersisted: true
+      };
+    }
+    out({
+      ok: true,
+      root: s.root,
+      database: s.p.db,
+      workspace: s.p.ws,
+      workspaceResolution: s.workspaceResolution,
+      warnings: s.workspaceWarnings,
+      policy: { externalActions: 'user_configured', autoApply: 'disabled', autoSend: 'disabled' }
+    });
     return;
   }
   if (group === 'agent-guide') {
