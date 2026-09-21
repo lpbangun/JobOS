@@ -48,6 +48,14 @@ const REQUIRED_INDEXES = Object.freeze([
   'interview_question_sources_root_reference_idx',
 ]);
 
+// The CLI subprocess and domain-tool transports exercised by W07-CLI-01 and
+// W07-DOMAIN-01 do not accept an injected clock, so debriefs recorded through
+// those transports must be timestamped relative to now: `occurredAt` is what the
+// `--since <days>` observation window filters on, and a hardcoded date silently
+// expires out of that window 30 days after the fixture was written.
+const ROUTED_DEBRIEF_OCCURRED_AT = new Date(Date.now() - 5 * 86_400_000).toISOString();
+const ROUTED_CORRECTION_OCCURRED_AT = new Date(Date.now() - 5 * 86_400_000 + 900_000).toISOString();
+
 function workspaceFromFixture(t) {
   const root = mkdtempSync(path.join(tmpdir(), 'jobos-w07-schema13-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -3064,6 +3072,7 @@ test('W07-CLI-01 exact registry and subprocess routes preserve usage, ownership,
     applicationId: 'application_w07_beta',
     debriefId: 'spoofed-debrief',
     source: 'mcp',
+    occurredAt: ROUTED_DEBRIEF_OCCURRED_AT,
   });
   const recorded = cliJson(root, [
     'interview', 'debrief', 'record', '--profile', 'profile_w07_alpha',
@@ -3084,6 +3093,7 @@ test('W07-CLI-01 exact registry and subprocess routes preserve usage, ownership,
     targetRevision: 99,
     reason: 'Spoofed file reason.',
     source: 'acp',
+    occurredAt: ROUTED_CORRECTION_OCCURRED_AT,
   });
   const corrected = cliJson(root, [
     'interview', 'debrief', 'correct', recorded.id, '--profile', 'profile_w07_alpha',
@@ -3199,12 +3209,13 @@ test('W07-DOMAIN-01 exact tools route through interview APIs with explicit trust
   assert.equal(prep.pack.audience, 'executive');
   const recorded = await callDomainTool(store, 'record_interview_debrief', debriefInput(verified, {
     source: 'mcp',
+    occurredAt: ROUTED_DEBRIEF_OCCURRED_AT,
   }), { source: 'cli' });
   assert.equal(recorded.currentRevision.source, 'cli');
   const corrected = await callDomainTool(store, 'correct_interview_debrief', correctionInput(
     verified,
     recorded,
-    { source: 'acp' },
+    { source: 'acp', occurredAt: ROUTED_CORRECTION_OCCURRED_AT },
   ), { source: 'cli' });
   assert.equal(corrected.currentRevision.source, 'cli');
   const debriefs = await callDomainTool(store, 'list_interview_debriefs', {
