@@ -139,6 +139,14 @@ test('stale application scheduler reconciles one profile current action includin
   JSON.parse(cli(root, ['applications', 'create', '--job', otherJob.id, '--status', 'applied', '--json']));
 
   const s = await openStore({ workspace: root });
+  // `stale_application_check` measures application activity (status changes, owned
+  // tasks, application row) against the scheduled `nowDate`, while these fixtures
+  // come from the CLI and carry real-clock timestamps. `nowDate` is therefore
+  // intentionally future-dated relative to the wall clock, so the application stays
+  // older than `staleDays` forever instead of expiring when the wall clock passes a
+  // hardcoded date. Avoid asserting near-now timestamps (`due_at`, `last_run_at`)
+  // after this run without revisiting this pin.
+  const nowDate = new Date(Date.now() + 20 * 86_400_000);
   createAutomation(s, {
     name: 'stale_a',
     actionId: 'stale_application_check',
@@ -147,7 +155,7 @@ test('stale application scheduler reconciles one profile current action includin
     enabled: true,
     config: { staleDays: 14 }
   });
-  const runRecord = await runAutomationByName(s, 'stale_a', { nowDate: new Date('2026-09-30T09:00:00.000Z') });
+  const runRecord = await runAutomationByName(s, 'stale_a', { nowDate });
   assert.equal(runRecord.status, 'succeeded');
   assert.equal(runRecord.counts.checked, 1);
   assert.equal(runRecord.counts.reviewTasksCreated, 0);
