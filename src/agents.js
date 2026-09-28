@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { acquireWriteLock } from './db.js';
+import { workspaceRoot } from './utils.js';
 
 export const AGENT_PROTOCOL_VERSION = 1;
 export const DEFAULT_AGENT_TIMEOUT_MS = 120_000;
@@ -103,12 +104,9 @@ function validateManifest(value, { includeName }) {
   return { ...(includeName ? { name } : {}), command, args: [...args], transport };
 }
 
-function resolveWorkspace({ workspace, env = process.env } = {}) {
-  return path.resolve(workspace || env.JOBOS_HOME || env.JOBOS_WORKSPACE || process.cwd());
-}
 
 export function agentRegistryPath(options = {}) {
-  return path.join(resolveWorkspace(options), '.jobos', 'agents.json');
+  return path.join(workspaceRoot(options), '.jobos', 'agents.json');
 }
 
 async function readRegistry(options = {}) {
@@ -206,7 +204,7 @@ function publicManifest(manifest, { builtin, executablePath }) {
 
 async function resolveAgent(name, options = {}) {
   const normalizedName = validateName(name);
-  const root = resolveWorkspace(options);
+  const root = workspaceRoot(options);
   const env = options.env || process.env;
   const registry = await readRegistry({ ...options, workspace: root, env });
   const builtin = BUILTINS[normalizedName];
@@ -230,7 +228,7 @@ export async function addAgent(name, manifest, options = {}) {
     throw new AgentError('agent_reserved_name', `Agent name "${normalizedName}" is reserved for a built-in manifest`, { name: normalizedName });
   }
   const normalizedManifest = { name: normalizedName, ...validateManifest(manifest, { includeName: false }) };
-  const root = resolveWorkspace(options);
+  const root = workspaceRoot(options);
   const release = acquireWriteLock({ p: { state: path.join(root, '.jobos') } });
   try {
     const registry = await readRegistry(options);
@@ -246,7 +244,7 @@ export async function addAgent(name, manifest, options = {}) {
 }
 
 export async function listAgents(options = {}) {
-  const root = resolveWorkspace(options);
+  const root = workspaceRoot(options);
   const env = options.env || process.env;
   const registry = await readRegistry({ ...options, workspace: root, env });
   const manifests = [

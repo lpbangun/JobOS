@@ -248,7 +248,7 @@ Successful one-shot commands support `--json` where practical. Validation failur
 
 ## Local data
 
-By default, JobOS stores runtime state under the current directory:
+By default, JobOS uses the stable `~/jobos-data` root; an existing `.jobos` in the current directory remains compatible until you pin a workspace.
 
 ```text
 .jobos/jobos.sqlite              canonical database
@@ -262,7 +262,7 @@ jobos-workspace/audit.log.jsonl  local audit trail
 
 Agent-readable mirrors redact contact values and expose only contact counts, types, and evidence tiers. Full values remain in the canonical local database and are revealed only by trusted CLI/TUI contact surfaces.
 
-Choose another workspace with either form:
+Select a workspace for one command with `--workspace`, use `JOBOS_HOME`, or persist the choice by running `jobos init --workspace <dir>`:
 
 ```bash
 jobos --workspace ~/career-data
